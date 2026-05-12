@@ -46,6 +46,8 @@ export LARK_AGENT_BRIDGE_BOT_NAME="My Feishu CLI Bot"
 export LARK_AGENT_BRIDGE_OMLX_API_KEY="your-local-api-key"
 ```
 
+Detailed configuration guidance, environment variables, and `launchd` injection examples are in [docs/configuration.md](docs/configuration.md).
+
 Reply behavior:
 
 - `p2p` private chat: send a direct message back to the user
