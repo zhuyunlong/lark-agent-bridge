@@ -1,0 +1,13 @@
+{
+  "type": "im.message.receive_v1",
+  "event_id": "evt_sample_file",
+  "chat_id": "oc_sample",
+  "chat_type": "group",
+  "message_id": "om_sample_file",
+  "sender_id": "ou_sample",
+  "message_type": "text",
+  "content": "@bot 调查 SIGNAL_X3D_LD_NORMAL_OVER_ALL_DATA，日志见附件 file_sample_001",
+  "create_time": "1770000000000",
+  "timestamp": "1770000000000"
+}
+

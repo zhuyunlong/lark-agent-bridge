@@ -1,0 +1,12 @@
+{
+  "type": "im.message.receive_v1",
+  "event_id": "evt_basic_chat_001",
+  "chat_id": "oc_sample",
+  "chat_type": "group",
+  "message_id": "om_basic_chat_001",
+  "sender_id": "ou_sample",
+  "message_type": "text",
+  "content": "@bot 你是谁",
+  "create_time": "1770000000000",
+  "timestamp": "1770000000000"
+}

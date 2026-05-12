@@ -1,0 +1,10 @@
+{
+  "type": "im.message.receive_v1",
+  "event_id": "evt_omlx_chat_001",
+  "chat_id": "oc_sample",
+  "chat_type": "group",
+  "message_id": "om_omlx_chat_001",
+  "sender_id": "ou_sample",
+  "message_type": "text",
+  "content": "@bot 帮我解释一下什么是 token？"
+}

@@ -1,0 +1,13 @@
+{
+  "type": "im.message.receive_v1",
+  "event_id": "evt_sample_url",
+  "chat_id": "oc_sample",
+  "chat_type": "group",
+  "message_id": "om_sample_url",
+  "sender_id": "ou_sample",
+  "message_type": "text",
+  "content": "@bot /signal 132002 日志 https://example.com/log.zip",
+  "create_time": "1770000000000",
+  "timestamp": "1770000000000"
+}
+

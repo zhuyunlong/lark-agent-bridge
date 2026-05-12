@@ -1,0 +1,10 @@
+{
+  "type": "im.message.receive_v1",
+  "event_id": "evt_p2p_plain_chat_001",
+  "chat_id": "ou_chat_sample",
+  "chat_type": "p2p",
+  "message_id": "om_p2p_plain_chat_001",
+  "sender_id": "ou_sample",
+  "message_type": "text",
+  "content": "讲个笑话"
+}

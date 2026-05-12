@@ -1,0 +1,10 @@
+{
+  "type": "im.message.receive_v1",
+  "event_id": "evt_claude_skill_001",
+  "chat_id": "oc_sample",
+  "chat_type": "group",
+  "message_id": "om_claude_skill_001",
+  "sender_id": "ou_sample",
+  "message_type": "text",
+  "content": "@bot /skill 分析 tools/lark-agent-bridge 当前支持哪些安全边界"
+}

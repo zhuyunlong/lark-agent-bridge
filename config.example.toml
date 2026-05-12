@@ -1,0 +1,71 @@
+dry_run = true
+workspace_root = "../.."
+guideengine_repo = "../../xp/guideengine/.worktrees/os6_xpdev"
+data_dir = "data"
+
+allowed_chats = []
+allowed_users = []
+command_prefixes = ["/signal"]
+
+[signal_aliases]
+"LD normal" = "SIGNAL_X3D_LD_NORMAL_OVER_ALL_DATA"
+"normal over all" = "SIGNAL_X3D_LD_NORMAL_OVER_ALL_DATA"
+"LD tile" = "SIGNAL_X3D_LD_TILE_OVER_ALL_DATA"
+"tile over all" = "SIGNAL_X3D_LD_TILE_OVER_ALL_DATA"
+"SD over all" = "SIGNAL_X3D_SD_OVER_ALL_DATA"
+
+[download]
+max_bytes = 5368709120
+timeout_seconds = 60
+
+[job_retention]
+enabled = true
+max_age_hours = 6
+purge_all_on_listen_start = true
+cleanup_interval_seconds = 60
+
+[lark]
+reply_in_thread = false
+mention_sender_in_group = true
+# Optional: prefer environment variables for identifiers in shared repos.
+#   export LARK_AGENT_BRIDGE_BOT_OPEN_ID="ou_xxx"
+#   export LARK_AGENT_BRIDGE_BOT_NAME="My Feishu CLI Bot"
+bot_open_id = ""
+bot_name = ""
+
+[claude_agent]
+enabled = true
+command = "claude"
+trigger_prefixes = ["/skill", "/claude"]
+working_dir = "../.."
+add_dirs = ["../.."]
+allowed_tools = ["Read", "Grep", "Glob", "LS"]
+permission_mode = "dontAsk"
+timeout_seconds = 1800
+max_prompt_chars = 12000
+upload_result_file = true
+
+[bug_analysis]
+enabled = true
+provider = "codex"
+command = "codex"
+working_dir = "../.."
+timeout_seconds = 5400
+max_prompt_chars = 16000
+upload_result_files = true
+default_prompt = "调查3D启动时序"
+
+[omlx_chat]
+enabled = true
+base_url = "http://127.0.0.1:8000/v1"
+model = "gemma-4-26b-a4b-it-4bit"
+# Prefer environment variables for secrets in real deployments.
+#   export LARK_AGENT_BRIDGE_OMLX_API_KEY="your-local-api-key"
+api_key = ""
+timeout_seconds = 120
+max_prompt_chars = 2000
+max_tokens = 1024
+temperature = 0.3
+
+[runner]
+timeout_seconds = 900

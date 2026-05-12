@@ -1,0 +1,5 @@
+[project]
+name = "lark-agent-bridge"
+version = "0.1.0"
+description = "Local Feishu Bot bridge for controlled AI agent tasks."
+requires-python = ">=3.11"

@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.local.lark-agent-bridge</string>
+
+  <key>WorkingDirectory</key>
+  <string>/path/to/workspace/tools/lark-agent-bridge</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>-m</string>
+    <string>lark_agent_bridge</string>
+    <string>listen</string>
+    <string>--config</string>
+    <string>/path/to/workspace/tools/lark-agent-bridge/config.toml</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/path/to/workspace/tools/lark-agent-bridge/data/logs/bridge.out.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/path/to/workspace/tools/lark-agent-bridge/data/logs/bridge.err.log</string>
+</dict>
+</plist>

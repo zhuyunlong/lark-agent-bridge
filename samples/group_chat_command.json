@@ -1,0 +1,10 @@
+{
+  "type": "im.message.receive_v1",
+  "event_id": "evt_group_chat_command_001",
+  "chat_id": "oc_sample",
+  "chat_type": "group",
+  "message_id": "om_group_chat_command_001",
+  "sender_id": "ou_sample",
+  "message_type": "text",
+  "content": "@Test Bot /chat 讲个笑话"
+}

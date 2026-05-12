@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+.DS_Store
+
+config.toml
+data/
+
+.pytest_cache/
+.mypy_cache/
