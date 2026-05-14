@@ -1,0 +1,25 @@
+lark_agent_bridge/lark_client.py
+  be544bc72b29100f 8,11-13,18-21,42-54,56-57,59,189,192-267,269-270,274,276-281,283-291,293,295-303,306-320,322-444
+lark_agent_bridge/app.py
+  be544bc72b29100f 99-105,387-390
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.18",
+  "base_commit_sha": "e0cf5228a797c614b5da78d17464dfd4583e2bd2",
+  "prompts": {
+    "be544bc72b29100f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e275a-df23-78f1-bdd9-dafbac9787a1",
+        "model": "gpt-5.4"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 283,
+      "overriden_lines": 0
+    }
+  }
+}
