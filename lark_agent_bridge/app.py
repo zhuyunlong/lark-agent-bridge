@@ -21,6 +21,7 @@ from .agents import (
 )
 from .cards import build_result_card, build_status_card, card_to_json
 from .downloader import LogDownloader
+from .health import HealthMonitor, ProcessWatchdog
 from .lark_client import LarkClient
 from .models import BridgeConfig, DownloadResource, IntentDecision, LarkEvent, SignalRequest, TaskResult, create_job_context
 from .parser import (
@@ -72,8 +73,12 @@ class BridgeApp:
         )
         self.activity_store = activity_store or AgentActivityStore(config.data_dir / "state" / "agent_activity.json")
         self.progress_callback = progress_callback
+        self.process_watchdog = ProcessWatchdog()
+        self.health_monitor = HealthMonitor(data_dir=config.data_dir, process_watchdog=self.process_watchdog)
         self.report_publisher = report_publisher or HtmlReportPublisher(config)
-        self.report_http_server = report_http_server or ReportHttpServer(config, activity_store=self.activity_store)
+        self.report_http_server = report_http_server or ReportHttpServer(
+            config, activity_store=self.activity_store, health_monitor=self.health_monitor,
+        )
         runner = SignalChainRunner(config)
         downloader = LogDownloader(config, self.lark_client)
         self.handler = handler or SignalLifecycleHandler(config, downloader, runner)
@@ -85,6 +90,7 @@ class BridgeApp:
         self.intent_runner = intent_runner or IntentAnalysisRunner(config)
 
     def check(self) -> dict[str, object]:
+        health = self.health_monitor.check_health()
         return {
             "dry_run": self.config.dry_run,
             "data_dir": str(self.config.data_dir),
@@ -108,6 +114,7 @@ class BridgeApp:
                 "provider": self.config.intent_analysis.provider or self.config.bug_analysis.provider,
                 "command": self.config.intent_analysis.command or self.config.bug_analysis.command,
             },
+            "health": health.to_dict(),
         }
 
     def handle_event_payload(self, payload: dict[str, object]) -> TaskResult:
@@ -115,6 +122,7 @@ class BridgeApp:
 
     def handle_event(self, event: LarkEvent) -> TaskResult:
         self.activity_store.record_event(event)
+        self.health_monitor.record_event_processed()
         try:
             result = self._handle_event(event)
         except Exception as exc:

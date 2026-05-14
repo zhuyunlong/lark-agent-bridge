@@ -220,9 +220,10 @@ class HtmlReportPublisher:
 
 
 class ReportHttpServer:
-    def __init__(self, config: BridgeConfig, *, activity_store: AgentActivityStore | None = None) -> None:
+    def __init__(self, config: BridgeConfig, *, activity_store: AgentActivityStore | None = None, health_monitor: object | None = None) -> None:
         self.config = config
         self.activity_store = activity_store
+        self.health_monitor = health_monitor
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
 
@@ -232,7 +233,7 @@ class ReportHttpServer:
         root_dir = self.config.data_dir / "published_reports"
         root_dir.mkdir(parents=True, exist_ok=True)
         prefix = _url_prefix(resolve_public_base_url(self.config.report_server.public_base_url, port=self.config.report_server.port))
-        handler = _build_handler(root_dir, prefix, self.activity_store)
+        handler = _build_handler(root_dir, prefix, self.activity_store, self.health_monitor)
         self._server = ThreadingHTTPServer(
             (resolve_bind_host(self.config.report_server.bind_host), self.config.report_server.port),
             handler,
@@ -270,7 +271,7 @@ class _HtmlTextExtractor(HTMLParser):
         return "\n".join(self._parts)
 
 
-def _build_handler(root_dir: Path, prefix: str, activity_store: AgentActivityStore | None = None):
+def _build_handler(root_dir: Path, prefix: str, activity_store: AgentActivityStore | None = None, health_monitor: object | None = None):
     class _ReportHandler(SimpleHTTPRequestHandler):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, directory=str(root_dir), **kwargs)
@@ -291,6 +292,9 @@ def _build_handler(root_dir: Path, prefix: str, activity_store: AgentActivitySto
                 return
             if request_path == "/api/daemon":
                 self._send_json({"daemon": self._get_daemon_status()})
+                return
+            if request_path == "/api/health":
+                self._send_json(self._get_health())
                 return
             if request_path.startswith("/api/sessions/"):
                 session_id = request_path.removeprefix("/api/sessions/").strip("/")
@@ -313,7 +317,7 @@ def _build_handler(root_dir: Path, prefix: str, activity_store: AgentActivitySto
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.end_headers()
                 return
-            if request_path == "/api/sessions" or request_path.startswith("/api/sessions/") or request_path == "/api/daemon":
+            if request_path == "/api/sessions" or request_path.startswith("/api/sessions/") or request_path == "/api/daemon" or request_path == "/api/health":
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.end_headers()
@@ -353,6 +357,18 @@ def _build_handler(root_dir: Path, prefix: str, activity_store: AgentActivitySto
             if activity_store is None:
                 return {}
             return activity_store.get_daemon_status()
+
+        def _get_health(self) -> dict[str, object]:
+            if health_monitor is None:
+                return {"healthy": True, "note": "health monitor not configured"}
+            check_method = getattr(health_monitor, "check_health", None)
+            if check_method is None:
+                return {"healthy": True, "note": "health monitor has no check_health method"}
+            status = check_method()
+            to_dict = getattr(status, "to_dict", None)
+            if to_dict is not None:
+                return to_dict()
+            return {"healthy": True}
 
         def _send_html(self, html: str) -> None:
             body = html.encode("utf-8")
