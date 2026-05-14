@@ -23,6 +23,12 @@ from .approval import ApprovalStore, build_operation_request
 from .cards import build_confirmation_card, build_result_card, build_status_card, card_to_json
 from .case_store import CaseStore
 from .downloader import LogDownloader
+from .escalation import (
+    EscalationChecker,
+    NotificationHistory,
+    build_report_ready_notification,
+    build_status_change_notification,
+)
 from .health import HealthMonitor, ProcessWatchdog
 from .lark_client import LarkClient
 from .models import BridgeConfig, DownloadResource, IntentDecision, LarkEvent, SignalRequest, TaskResult, create_job_context
@@ -81,6 +87,8 @@ class BridgeApp:
         self.case_store = CaseStore(config.data_dir / "state" / "cases.json")
         self.approval_store = ApprovalStore(config.data_dir / "state" / "approvals.json")
         self.version_store = ReportVersionStore(config.data_dir / "state" / "report_versions.json")
+        self.escalation_checker = EscalationChecker()
+        self.notification_history = NotificationHistory()
         self.report_publisher = report_publisher or HtmlReportPublisher(config)
         self.report_http_server = report_http_server or ReportHttpServer(
             config, activity_store=self.activity_store, health_monitor=self.health_monitor,
