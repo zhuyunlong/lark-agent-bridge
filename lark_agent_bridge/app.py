@@ -19,6 +19,7 @@ from .agents import (
     OmlxChatClient,
     PerceptionSummaryRunner,
 )
+from .cards import build_result_card, build_status_card, card_to_json
 from .downloader import LogDownloader
 from .lark_client import LarkClient
 from .models import BridgeConfig, DownloadResource, IntentDecision, LarkEvent, SignalRequest, TaskResult, create_job_context
@@ -94,6 +95,13 @@ class BridgeApp:
                 "bind_host": resolve_bind_host(self.config.report_server.bind_host),
                 "port": self.config.report_server.port,
                 "public_base_url": self.report_publisher.public_base_url,
+            },
+            "event_consumer": {
+                "event_key": self.config.event_consumer.event_key,
+                "ready_timeout_seconds": self.config.event_consumer.ready_timeout_seconds,
+                "restart_on_failure": self.config.event_consumer.restart_on_failure,
+                "max_restarts": self.config.event_consumer.max_restarts,
+                "status": self.activity_store.get_daemon_status(),
             },
             "intent_analysis": {
                 "enabled": self.intent_runner.is_enabled(),
@@ -218,6 +226,13 @@ class BridgeApp:
                 prompt=bug_request.prompt,
                 raw_text=bug_request.raw_text,
             )
+            self.send_status_card(
+                event,
+                title="Bug 分析",
+                status="analyzing",
+                details={"Bug 链接": bug_request.bug_url[:60], "分析提示": bug_request.prompt or "默认"},
+                note="分析进行中，请稍候…",
+            )
             result = self.bug_runner.run_bug_analysis(
                 bug_request,
                 event=event,
@@ -236,6 +251,13 @@ class BridgeApp:
                 prompt=direct_analysis_request.prompt,
                 raw_text=direct_analysis_request.raw_text,
                 resources=[item.value for item in direct_analysis_request.resources],
+            )
+            self.send_status_card(
+                event,
+                title="文件分析",
+                status="analyzing",
+                details={"文件数": str(len(direct_analysis_request.resources))},
+                note="分析进行中，请稍候…",
             )
             result = self.bug_runner.run_direct_analysis(
                 direct_analysis_request,
@@ -362,6 +384,11 @@ class BridgeApp:
     def stop_report_server(self) -> None:
         self.report_http_server.stop()
 
+    def record_daemon_status(self, payload: dict[str, object]) -> None:
+        self.activity_store.record_daemon_status(payload)
+        if self.progress_callback is not None:
+            self.progress_callback(payload)
+
     def _deliver_result(
         self,
         event: LarkEvent,
@@ -381,19 +408,25 @@ class BridgeApp:
             return
         delivery = str(result.details.get("delivery", "")).strip() or "send"
         session_id = str(result.details.get("conversation_root_message_id") or "").strip() or None
-        self._notify_progress(
-            "reply_sending",
-            "发送文字回复",
-            event=event,
-            session_id=session_id,
-            success=result.success,
-            mode=result.details.get("mode", ""),
-            delivery=delivery,
-        )
-        if delivery == "reply" and event.message_id:
-            self.lark_client.reply(event.message_id, self._reply_payload(event, result.message))
-        else:
-            self.lark_client.send_response(event, result.message)
+
+        # Try sending a structured card for results that have a report
+        card_sent = self._try_send_result_card(event, result, delivery=delivery, session_id=session_id)
+
+        if not card_sent:
+            self._notify_progress(
+                "reply_sending",
+                "发送文字回复",
+                event=event,
+                session_id=session_id,
+                success=result.success,
+                mode=result.details.get("mode", ""),
+                delivery=delivery,
+            )
+            if delivery == "reply" and event.message_id:
+                self.lark_client.reply(event.message_id, self._reply_payload(event, result.message))
+            else:
+                self.lark_client.send_response(event, result.message)
+
         if not result.success:
             return
         for path in result.details.get("files_to_send", []):
@@ -428,6 +461,75 @@ class BridgeApp:
                     session_id=session_id,
                     path=str(path),
                 )
+
+    def _try_send_result_card(
+        self,
+        event: LarkEvent,
+        result: TaskResult,
+        *,
+        delivery: str,
+        session_id: str | None,
+    ) -> bool:
+        """Attempt to send a result card. Returns True if card was sent."""
+        report_url = str(result.details.get("published_report_url", "")).strip()
+        mode = str(result.details.get("mode", ""))
+        # Only send cards for analysis results with published reports
+        if not report_url:
+            return False
+
+        mode_labels = {
+            "bug_analysis": "Bug 分析",
+            "bug_reanalysis": "Bug 重新分析",
+            "bug_agent_followup": "Bug 追问",
+            "direct_analysis": "直传文件分析",
+            "perception_summary": "感知数据总结",
+            "signal_lifecycle": "信号生命周期",
+            "claude_skill": "Claude Code 分析",
+        }
+        title = mode_labels.get(mode, mode or "分析结果")
+
+        metadata: dict[str, str] = {}
+        if mode:
+            metadata["分析类型"] = title
+        if result.job_id:
+            metadata["任务ID"] = result.job_id[:20]
+
+        card = build_result_card(
+            title=title,
+            success=result.success,
+            summary=result.message,
+            report_url=report_url or None,
+            metadata=metadata if metadata else None,
+            job_id=result.job_id,
+            duration_seconds=result.duration_seconds,
+        )
+        card_json_str = card_to_json(card)
+
+        self._notify_progress(
+            "reply_sending_card",
+            "发送结果卡片",
+            event=event,
+            session_id=session_id,
+            success=result.success,
+            mode=mode,
+            delivery=delivery,
+        )
+
+        if delivery == "reply" and event.message_id:
+            send_result = self.lark_client.reply_card(event.message_id, card_json_str)
+        else:
+            send_result = self.lark_client.send_card_response(event, card_json_str)
+
+        if send_result.returncode != 0:
+            self._notify_progress(
+                "card_send_failed",
+                "卡片发送失败，回退文字回复",
+                event=event,
+                session_id=session_id,
+                stderr=(send_result.stderr or "")[:300],
+            )
+            return False
+        return True
 
     def _omlx_prompt(self, event: LarkEvent, content: str | None = None) -> str | None:
         if not self.config.omlx_chat.enabled:
@@ -524,6 +626,24 @@ class BridgeApp:
             self._notify_progress(stage, message, event=event, session_id=session_id, **details)
 
         return _callback
+
+    def send_status_card(
+        self,
+        event: LarkEvent,
+        *,
+        title: str,
+        status: str,
+        details: dict[str, str] | None = None,
+        note: str | None = None,
+    ) -> None:
+        """Send a status progress card to the user during long operations."""
+        if self.config.dry_run:
+            return
+        if event.chat_type not in {"group", "p2p"}:
+            return
+        card = build_status_card(title=title, status=status, details=details, note=note)
+        card_json_str = card_to_json(card)
+        self.lark_client.send_card_response(event, card_json_str)
 
     def _notify_progress(
         self,

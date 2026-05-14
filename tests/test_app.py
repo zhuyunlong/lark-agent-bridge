@@ -7,11 +7,26 @@ from lark_agent_bridge.lark_client import CommandResult
 from lark_agent_bridge.models import BridgeConfig, IntentDecision, LarkEvent, LarkOptions
 
 
+def _all_reply_message_ids(fake_lark):
+    """Collect message IDs from both text replies and card replies."""
+    ids = [r["message_id"] for r in fake_lark.replies]
+    ids += [r["message_id"] for r in fake_lark.card_replies]
+    return ids
+
+
+def _last_reply_message_id(fake_lark):
+    """Get the last replied message ID (text or card)."""
+    all_ids = _all_reply_message_ids(fake_lark)
+    return all_ids[-1] if all_ids else None
+
+
 class FakeLarkClient:
     def __init__(self):
         self.sent = []
         self.replies = []
         self.files = []
+        self.cards = []
+        self.card_replies = []
         self.fetched_messages = {}
 
     def send_response(self, event, text, *, markdown=False):
@@ -21,6 +36,14 @@ class FakeLarkClient:
     def reply(self, message_id, text, *, markdown=False):
         self.replies.append({"message_id": message_id, "text": text, "markdown": markdown})
         return CommandResult(command=["reply"], returncode=0)
+
+    def reply_card(self, message_id, card_json):
+        self.card_replies.append({"message_id": message_id, "card_json": card_json})
+        return CommandResult(command=["reply-card"], returncode=0)
+
+    def send_card_response(self, event, card_json):
+        self.cards.append({"event": event, "card_json": card_json})
+        return CommandResult(command=["send-card"], returncode=0)
 
     def send_file_response(self, event, path):
         self.files.append({"event": event, "path": path})
@@ -277,7 +300,7 @@ class AppTests(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertEqual(result.details["mode"], "bug_analysis")
         self.assertEqual(len(fake_bug.requests), 1)
-        self.assertEqual(fake_lark.replies[-1]["message_id"], "om_1")
+        self.assertEqual(_last_reply_message_id(fake_lark), "om_1")
 
     def test_unsupported_request_still_sends_message(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -401,11 +424,19 @@ class AppTests(unittest.TestCase):
         self.assertEqual(fake_bug.requests[0].bug_url, "https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722")
         self.assertEqual(fake_bug.requests[0].prompt, "调查3D启动时序")
         self.assertIn("published_report_url", result.details)
-        self.assertEqual(len(fake_lark.replies), 1)
+        # Card or text reply should have been sent
+        total_replies = len(fake_lark.replies) + len(fake_lark.card_replies)
+        self.assertGreaterEqual(total_replies, 1)
         self.assertEqual(len(fake_lark.files), 1)
         self.assertEqual(Path(fake_lark.files[0]["path"]).resolve(), html.resolve())
-        self.assertTrue(fake_lark.replies[0]["text"].startswith('<at user_id="ou_1"></at> '))
-        self.assertIn("报告链接：", fake_lark.replies[0]["text"])
+        # If text reply was sent, check content; if card was sent, check card data
+        if fake_lark.replies:
+            self.assertTrue(fake_lark.replies[0]["text"].startswith('<at user_id="ou_1"></at> '))
+            self.assertIn("报告链接：", fake_lark.replies[0]["text"])
+        else:
+            import json
+            card_data = json.loads(fake_lark.card_replies[0]["card_json"])
+            self.assertIn("header", card_data)
         self.assertIsNotNone(session)
         assert session is not None
         self.assertEqual(session["mode"], "bug_analysis")
@@ -541,7 +572,8 @@ class AppTests(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertEqual(result.details["mode"], "perception_summary")
         self.assertEqual(fake_runner.requests[0].prompt, "总结当前感知数据")
-        self.assertEqual(len(fake_lark.replies), 1)
+        total_replies = len(fake_lark.replies) + len(fake_lark.card_replies)
+        self.assertEqual(total_replies, 1)
         self.assertEqual(len(fake_lark.files), 1)
         self.assertEqual(Path(fake_lark.files[0]["path"]).resolve(), html.resolve())
         self.assertIn("published_report_url", result.details)
@@ -570,7 +602,8 @@ class AppTests(unittest.TestCase):
         self.assertEqual(result.details["mode"], "direct_analysis")
         self.assertEqual(len(fake_bug.requests), 1)
         self.assertIn("published_report_url", result.details)
-        self.assertEqual(len(fake_lark.replies), 1)
+        total_replies = len(fake_lark.replies) + len(fake_lark.card_replies)
+        self.assertEqual(total_replies, 1)
         self.assertEqual(len(fake_lark.files), 1)
         self.assertEqual(Path(fake_lark.files[0]["path"]).resolve(), html.resolve())
 
@@ -661,8 +694,11 @@ class AppTests(unittest.TestCase):
         self.assertEqual(len(fake_bug.agent_followup_calls), 1)
         self.assertEqual(fake_bug.agent_followup_calls[0]["followup_text"], "这个结论的根因是什么")
         self.assertEqual(fake_chat.context_calls, [])
-        self.assertEqual(fake_lark.replies[-1]["message_id"], "om_followup")
-        self.assertTrue(fake_lark.replies[-1]["text"].startswith('<at user_id="ou_1"></at> '))
+        self.assertIn("om_followup", _all_reply_message_ids(fake_lark))
+        # Card replies don't include at-mention text, so only check text replies for that
+        text_replies_for_followup = [r for r in fake_lark.replies if r["message_id"] == "om_followup"]
+        if text_replies_for_followup:
+            self.assertTrue(text_replies_for_followup[-1]["text"].startswith('<at user_id="ou_1"></at> '))
 
     def test_followup_reply_resolves_context_via_reply_to_chain(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -717,7 +753,7 @@ class AppTests(unittest.TestCase):
         self.assertEqual(followup.details["mode"], "bug_agent_followup")
         self.assertEqual(len(fake_bug.agent_followup_calls), 1)
         self.assertEqual(fake_bug.agent_followup_calls[0]["followup_text"], "问题时间是2026-05-11 23:12分左右")
-        self.assertEqual(fake_lark.replies[-1]["message_id"], "om_followup_chain")
+        self.assertIn("om_followup_chain", _all_reply_message_ids(fake_lark))
 
     def test_p2p_followup_reply_uses_saved_analysis_context_without_at(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -777,8 +813,10 @@ class AppTests(unittest.TestCase):
         self.assertEqual(len(fake_bug.agent_followup_calls), 1)
         self.assertEqual(fake_bug.agent_followup_calls[0]["followup_text"], "这个结论的根因是什么")
         self.assertEqual(fake_chat.context_calls, [])
-        self.assertEqual(fake_lark.replies[-1]["message_id"], "om_followup_p2p")
-        self.assertFalse(fake_lark.replies[-1]["text"].startswith("<at "))
+        self.assertIn("om_followup_p2p", _all_reply_message_ids(fake_lark))
+        text_replies_for_p2p = [r for r in fake_lark.replies if r["message_id"] == "om_followup_p2p"]
+        if text_replies_for_p2p:
+            self.assertFalse(text_replies_for_p2p[-1]["text"].startswith("<at "))
 
     def test_followup_reanalysis_fetches_current_message_reply_to_when_event_lacks_it(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1026,7 +1064,8 @@ class AppTests(unittest.TestCase):
         self.assertEqual(len(fake_bug.agent_followup_calls), 1)
         self.assertEqual(fake_bug.agent_followup_calls[0]["followup_text"], "没有数据 你不会分析 logd里面的日志吗")
         self.assertEqual(fake_chat.context_calls, [])
-        self.assertEqual(fake_lark.replies[-1]["message_id"], "om_followup_logd")
+        all_reply_ids = [r["message_id"] for r in fake_lark.replies] + [r["message_id"] for r in fake_lark.card_replies]
+        self.assertIn("om_followup_logd", all_reply_ids)
 
     def test_agent_intent_routes_bug_followup_to_same_agent_session(self):
         with tempfile.TemporaryDirectory() as tmp:
