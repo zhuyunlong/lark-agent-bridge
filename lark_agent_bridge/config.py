@@ -13,6 +13,7 @@ from .models import (
     BridgeConfig,
     ClaudeAgentOptions,
     DownloadConfig,
+    EventConsumerOptions,
     IntentAnalysisOptions,
     JobRetentionOptions,
     LarkOptions,
@@ -47,6 +48,7 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
 
     download_data = data.get("download") or {}
     retention_data = data.get("job_retention") or {}
+    event_consumer_data = data.get("event_consumer") or {}
     lark_data = data.get("lark") or {}
     runner_data = data.get("runner") or {}
     claude_data = data.get("claude_agent") or {}
@@ -80,6 +82,28 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
             max_age_hours=int(retention_data.get("max_age_hours", 6)),
             purge_all_on_listen_start=bool(retention_data.get("purge_all_on_listen_start", True)),
             cleanup_interval_seconds=int(retention_data.get("cleanup_interval_seconds", 60)),
+        ),
+        event_consumer=EventConsumerOptions(
+            event_key=str(event_consumer_data.get("event_key", EventConsumerOptions().event_key)),
+            ready_timeout_seconds=float(
+                event_consumer_data.get("ready_timeout_seconds", EventConsumerOptions().ready_timeout_seconds)
+            ),
+            restart_on_failure=bool(
+                event_consumer_data.get("restart_on_failure", EventConsumerOptions().restart_on_failure)
+            ),
+            max_restarts=int(event_consumer_data.get("max_restarts", EventConsumerOptions().max_restarts)),
+            restart_initial_delay_seconds=float(
+                event_consumer_data.get(
+                    "restart_initial_delay_seconds",
+                    EventConsumerOptions().restart_initial_delay_seconds,
+                )
+            ),
+            restart_max_delay_seconds=float(
+                event_consumer_data.get(
+                    "restart_max_delay_seconds",
+                    EventConsumerOptions().restart_max_delay_seconds,
+                )
+            ),
         ),
         lark=LarkOptions(
             reply_in_thread=bool(lark_data.get("reply_in_thread", False)),

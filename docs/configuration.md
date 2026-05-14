@@ -163,7 +163,31 @@ Notes:
 - published pages are stored under `data/published_reports/`
 - reply-context state for follow-up questions is stored under `data/state/conversation_contexts.json`
 - the same listener serves the local session console at `/sessions` and JSON APIs under `/api/sessions`
+- listener daemon health is exposed in `check` output and at `/api/daemon`
 - agent timeline state for the console is stored under `data/state/agent_activity.json`
+
+## Event consumer health
+
+`listen` runs `lark-cli event consume` as a managed subprocess. Configure it with `[event_consumer]`:
+
+```toml
+[event_consumer]
+event_key = "im.message.receive_v1"
+ready_timeout_seconds = 30
+restart_on_failure = true
+max_restarts = 0
+restart_initial_delay_seconds = 1
+restart_max_delay_seconds = 60
+```
+
+Behavior:
+
+- the bridge waits for the official stderr ready marker `[event] ready event_key=...` before treating the listener as healthy
+- stdin is kept open with a Python pipe so `lark-cli event consume` does not exit immediately from stdin EOF under supervisors
+- exit code `0` is treated as graceful completion and is not restarted
+- non-zero startup/runtime failure is restarted when `restart_on_failure = true`
+- `max_restarts = 0` means unlimited restarts with exponential backoff capped by `restart_max_delay_seconds`
+- the latest daemon status is stored in `data/state/agent_activity.json`
 
 ## Intent routing
 

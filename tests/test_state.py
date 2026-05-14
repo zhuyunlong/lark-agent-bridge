@@ -56,6 +56,27 @@ class AgentActivityStoreTests(unittest.TestCase):
         self.assertEqual(detail["report_url"], "http://10.0.0.1:8765/reports/job_1/")
         self.assertEqual(detail["progress"][0]["stage"], "bug_fetch_data")
 
+    def test_records_daemon_status_separately_from_sessions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "activity.json"
+            store = AgentActivityStore(path)
+
+            store.record_daemon_status(
+                {
+                    "stage": "event_consumer_ready",
+                    "event_key": "im.message.receive_v1",
+                    "ready": True,
+                    "process_id": 12345,
+                }
+            )
+            reloaded = AgentActivityStore(path)
+            status = reloaded.get_daemon_status()
+
+        self.assertEqual(reloaded.list_sessions(), [])
+        self.assertEqual(status["stage"], "event_consumer_ready")
+        self.assertEqual(status["event_key"], "im.message.receive_v1")
+        self.assertTrue(status["ready"])
+
 
 if __name__ == "__main__":
     unittest.main()

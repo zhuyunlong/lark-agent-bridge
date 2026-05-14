@@ -22,6 +22,7 @@ Real deployments usually keep these values in local `config.toml` or environment
 - intent routing: when `[intent_analysis]` is enabled, a local `codex` / `claude` first classifies each addressed message as ordinary chat, a fresh analysis request, or a follow-up; for bug follow-up messages it also decides whether to continue the existing Bug agent session directly or trigger a reanalysis on the same saved job/log context
 - bug follow-up: when the user replies to the previous result and `@`s the bot, the bridge continues with the saved analysis context and routes generic bug follow-up questions back into the configured Bug agent (`codex` / `claude`) instead of only doing context-chat replies; time-correction requests still reuse the previous prepared logs and job output instead of repeating fetch/download/decrypt steps, rerun only the affected analyzers, and then continue in the same agent session when the provider supports resume
 - session console: the report HTTP service also serves `http://<bridge-lan-ip>:8765/sessions` for Bot conversations, report links, job IDs, and backend agent progress stages
+- listener health: `listen` waits for the official `[event] ready event_key=...` marker, keeps the consumer stdin open to avoid EOF shutdown, records daemon health in `data/state/agent_activity.json`, and exposes it through `check` plus `http://<bridge-lan-ip>:8765/api/daemon`
 
 ## Default Agent and fallback
 
@@ -154,6 +155,7 @@ Restart after config changes by unloading and loading the plist again.
 - Session console state: `data/state/agent_activity.json`
 - launchd stdout/stderr in the example plist: `data/logs/bridge.out.log` and `data/logs/bridge.err.log`
 - Retention policy: `[job_retention] max_age_hours = 6`, `purge_all_on_listen_start = true`, `cleanup_interval_seconds = 60`
+- Event consumer restart policy: `[event_consumer] restart_on_failure = true`, `max_restarts = 0`, `restart_initial_delay_seconds = 1`, `restart_max_delay_seconds = 60`
 
 ## Common errors
 
@@ -166,3 +168,4 @@ Restart after config changes by unloading and loading the plist again.
 - Claude Code analysis fails to start: run `claude --help` in the same user session and verify `config.toml [claude_agent].command`.
 - Bug analysis fails to start: verify `config.toml [bug_analysis]`, local `claude` or `codex` availability, and Meegle auth state (`meegle auth status`).
 - omlx chat returns unavailable: start omlx with `omlx serve --api-key <local-key>` or the equivalent `brew services` setup, and verify `curl http://127.0.0.1:8000/v1/models`.
+- Listener starts and exits immediately: check `/api/daemon` or `data/state/agent_activity.json`; if stderr reports `reason: signal`, the parent likely closed stdin. The bridge now starts `lark-cli event consume` with stdin held open, so this usually means an external supervisor stopped the bridge itself.

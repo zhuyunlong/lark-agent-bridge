@@ -1,10 +1,13 @@
 from pathlib import Path
+import io
+import json
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
 
-from lark_agent_bridge.lark_client import LarkClient
-from lark_agent_bridge.models import BridgeConfig, LarkEvent, LarkOptions
+from lark_agent_bridge.lark_client import EventConsumerError, LarkClient
+from lark_agent_bridge.models import BridgeConfig, EventConsumerOptions, LarkEvent, LarkOptions
 
 
 def event(**overrides):
@@ -22,6 +25,125 @@ def event(**overrides):
 
 
 class LarkClientTests(unittest.TestCase):
+    def test_consume_events_waits_for_ready_marker_and_keeps_stdin_open(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(
+                dry_run=False,
+                data_dir=Path(tmp),
+                event_consumer=EventConsumerOptions(restart_on_failure=False, ready_timeout_seconds=1),
+            )
+            client = LarkClient(config)
+            process = FakeProcess(
+                stdout_lines=[
+                    json.dumps(
+                        {
+                            "event_id": "evt_1",
+                            "message_id": "om_1",
+                            "chat_id": "oc_1",
+                            "chat_type": "group",
+                            "sender_id": "ou_1",
+                            "message_type": "text",
+                            "content": "@bot 你是谁",
+                        }
+                    )
+                    + "\n"
+                ],
+                stderr_lines=[
+                    "[event] ready event_key=im.message.receive_v1\n",
+                    "[event] exited — received 1 event(s) in 0.1s (reason: signal)\n",
+                ],
+                returncode=0,
+            )
+            statuses = []
+
+            with mock.patch("lark_agent_bridge.lark_client.subprocess.Popen", return_value=process) as popen:
+                events = list(client.consume_events(status_callback=statuses.append))
+
+        self.assertEqual(events[0].event_id, "evt_1")
+        popen.assert_called_once()
+        self.assertEqual(popen.call_args.kwargs["stdin"], subprocess.PIPE)
+        self.assertEqual(statuses[0]["stage"], "event_consumer_starting")
+        self.assertIn("event_consumer_ready", [item["stage"] for item in statuses])
+
+    def test_consume_events_raises_when_ready_marker_never_arrives(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(
+                dry_run=False,
+                data_dir=Path(tmp),
+                event_consumer=EventConsumerOptions(
+                    restart_on_failure=False,
+                    ready_timeout_seconds=0.01,
+                ),
+            )
+            client = LarkClient(config)
+            process = FakeProcess(
+                stdout_lines=[],
+                stderr_lines=["Error: missing event permission\n"],
+                returncode=2,
+            )
+            statuses = []
+
+            with mock.patch("lark_agent_bridge.lark_client.subprocess.Popen", return_value=process):
+                with self.assertRaises(EventConsumerError):
+                    list(client.consume_events(status_callback=statuses.append))
+
+        self.assertIn("event_consumer_startup_failed", [item["stage"] for item in statuses])
+
+    def test_consume_events_restarts_after_unexpected_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(
+                dry_run=False,
+                data_dir=Path(tmp),
+                event_consumer=EventConsumerOptions(
+                    restart_on_failure=True,
+                    max_restarts=1,
+                    restart_initial_delay_seconds=0,
+                    restart_max_delay_seconds=0,
+                    ready_timeout_seconds=1,
+                ),
+            )
+            client = LarkClient(config)
+            failed = FakeProcess(
+                stdout_lines=[],
+                stderr_lines=[
+                    "[event] ready event_key=im.message.receive_v1\n",
+                    "Error: bus crashed\n",
+                ],
+                returncode=1,
+            )
+            recovered = FakeProcess(
+                stdout_lines=[
+                    json.dumps(
+                        {
+                            "event_id": "evt_after_restart",
+                            "message_id": "om_2",
+                            "chat_id": "oc_1",
+                            "chat_type": "group",
+                            "sender_id": "ou_1",
+                            "message_type": "text",
+                            "content": "@bot 你是谁",
+                        }
+                    )
+                    + "\n"
+                ],
+                stderr_lines=[
+                    "[event] ready event_key=im.message.receive_v1\n",
+                    "[event] exited — received 1 event(s) in 0.1s (reason: signal)\n",
+                ],
+                returncode=0,
+            )
+            statuses = []
+
+            with mock.patch(
+                "lark_agent_bridge.lark_client.subprocess.Popen",
+                side_effect=[failed, recovered],
+            ) as popen:
+                events = list(client.consume_events(status_callback=statuses.append))
+
+        self.assertEqual([event.event_id for event in events], ["evt_after_restart"])
+        self.assertEqual(popen.call_count, 2)
+        self.assertIn("event_consumer_restarting", [item["stage"] for item in statuses])
+
     def test_reply_uses_message_reply_and_thread_flag(self):
         with tempfile.TemporaryDirectory() as tmp:
             client = LarkClient(
@@ -126,6 +248,25 @@ class LarkClientTests(unittest.TestCase):
             ],
         )
         self.assertEqual(Path(cwd).resolve(), html_path.parent.resolve())
+
+
+class FakeProcess:
+    def __init__(self, *, stdout_lines: list[str], stderr_lines: list[str], returncode: int) -> None:
+        self.stdout = io.StringIO("".join(stdout_lines))
+        self.stderr = io.StringIO("".join(stderr_lines))
+        self.stdin = io.StringIO()
+        self.pid = 12345
+        self.returncode = returncode
+        self.terminated = False
+
+    def poll(self):
+        return self.returncode
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+    def terminate(self):
+        self.terminated = True
 
 
 if __name__ == "__main__":

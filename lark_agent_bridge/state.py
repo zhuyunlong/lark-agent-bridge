@@ -233,6 +233,7 @@ class AgentActivityStore:
         self.max_progress_events = max(1, int(max_progress_events))
         self._lock = threading.RLock()
         self._sessions = self._load_sessions()
+        self._daemon_status = self._load_daemon_status()
 
     def record_event(self, event: LarkEvent, *, content: str | None = None) -> None:
         key = self._session_key(event)
@@ -395,10 +396,25 @@ class AgentActivityStore:
                 return None
             return _public_session(session, include_progress=True)
 
+    def record_daemon_status(self, payload: dict[str, object]) -> None:
+        with self._lock:
+            status = _jsonable_limited(payload)
+            if not isinstance(status, dict):
+                return
+            status["updated_at"] = _now_iso()
+            self._daemon_status = status
+            self._save()
+
+    def get_daemon_status(self) -> dict[str, Any]:
+        with self._lock:
+            status = _jsonable_limited(self._daemon_status, max_text=4000)
+            return status if isinstance(status, dict) else {}
+
     def clear(self) -> int:
         with self._lock:
             count = len(self._sessions)
             self._sessions = {}
+            self._daemon_status = {}
             try:
                 self.state_file.unlink()
             except FileNotFoundError:
@@ -461,9 +477,21 @@ class AgentActivityStore:
                 sessions[key] = value
         return sessions
 
+    def _load_daemon_status(self) -> dict[str, Any]:
+        if not self.state_file.exists():
+            return {}
+        try:
+            payload = json.loads(self.state_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        if not isinstance(payload, dict):
+            return {}
+        daemon = payload.get("daemon")
+        return daemon if isinstance(daemon, dict) else {}
+
     def _save(self) -> None:
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"sessions": self._sessions}
+        payload = {"sessions": self._sessions, "daemon": self._daemon_status}
         self.state_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 

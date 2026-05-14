@@ -24,6 +24,19 @@ max_age_hours = 6
 purge_all_on_listen_start = true
 cleanup_interval_seconds = 60
 
+[event_consumer]
+# The bridge listens to one EventKey per lark-cli subprocess.
+event_key = "im.message.receive_v1"
+# `lark-cli event consume` must emit `[event] ready event_key=...` on stderr
+# before the bridge starts treating the listener as healthy.
+ready_timeout_seconds = 30
+# Restart only non-zero / startup failures. Graceful exit code 0 is not restarted.
+restart_on_failure = true
+# 0 means unlimited restarts with backoff.
+max_restarts = 0
+restart_initial_delay_seconds = 1
+restart_max_delay_seconds = 60
+
 [lark]
 reply_in_thread = false
 mention_sender_in_group = true

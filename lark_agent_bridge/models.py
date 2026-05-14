@@ -25,6 +25,16 @@ class JobRetentionOptions:
 
 
 @dataclass(slots=True)
+class EventConsumerOptions:
+    event_key: str = "im.message.receive_v1"
+    ready_timeout_seconds: float = 30
+    restart_on_failure: bool = True
+    max_restarts: int = 0
+    restart_initial_delay_seconds: float = 1
+    restart_max_delay_seconds: float = 60
+
+
+@dataclass(slots=True)
 class LarkOptions:
     reply_in_thread: bool = False
     mention_sender_in_group: bool = True
@@ -128,6 +138,7 @@ class BridgeConfig:
     signal_aliases: dict[str, str] = field(default_factory=dict)
     download: DownloadConfig = field(default_factory=DownloadConfig)
     job_retention: JobRetentionOptions = field(default_factory=JobRetentionOptions)
+    event_consumer: EventConsumerOptions = field(default_factory=EventConsumerOptions)
     lark: LarkOptions = field(default_factory=LarkOptions)
     claude_agent: ClaudeAgentOptions = field(default_factory=ClaudeAgentOptions)
     bug_analysis: BugAnalysisOptions = field(default_factory=BugAnalysisOptions)

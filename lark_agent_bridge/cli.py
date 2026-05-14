@@ -61,7 +61,7 @@ def main(argv: list[str] | None = None) -> int:
             app.start_report_server()
             stop_cleanup = _start_cleanup_loop(app)
             try:
-                for event in app.lark_client.consume_events():
+                for event in app.lark_client.consume_events(status_callback=app.record_daemon_status):
                     _print_json(app.handle_event(event).to_dict())
             finally:
                 app.stop_report_server()

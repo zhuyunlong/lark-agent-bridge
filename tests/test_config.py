@@ -112,6 +112,31 @@ cleanup_interval_seconds = 30
         self.assertFalse(config.job_retention.purge_all_on_listen_start)
         self.assertEqual(config.job_retention.cleanup_interval_seconds, 30)
 
+    def test_load_event_consumer_options(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text(
+                """
+[event_consumer]
+event_key = "im.message.receive_v1"
+ready_timeout_seconds = 5
+restart_on_failure = true
+max_restarts = 2
+restart_initial_delay_seconds = 0.5
+restart_max_delay_seconds = 8
+""",
+                encoding="utf-8",
+            )
+
+            config = load_config(config_path)
+
+        self.assertEqual(config.event_consumer.event_key, "im.message.receive_v1")
+        self.assertEqual(config.event_consumer.ready_timeout_seconds, 5)
+        self.assertTrue(config.event_consumer.restart_on_failure)
+        self.assertEqual(config.event_consumer.max_restarts, 2)
+        self.assertEqual(config.event_consumer.restart_initial_delay_seconds, 0.5)
+        self.assertEqual(config.event_consumer.restart_max_delay_seconds, 8)
+
     def test_load_bug_analysis_options(self):
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "config.toml"

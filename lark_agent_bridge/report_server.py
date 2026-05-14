@@ -289,6 +289,9 @@ def _build_handler(root_dir: Path, prefix: str, activity_store: AgentActivitySto
             if request_path == "/api/sessions":
                 self._send_json({"sessions": self._list_sessions()})
                 return
+            if request_path == "/api/daemon":
+                self._send_json({"daemon": self._get_daemon_status()})
+                return
             if request_path.startswith("/api/sessions/"):
                 session_id = request_path.removeprefix("/api/sessions/").strip("/")
                 session = self._get_session(unquote(session_id))
@@ -310,7 +313,7 @@ def _build_handler(root_dir: Path, prefix: str, activity_store: AgentActivitySto
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.end_headers()
                 return
-            if request_path == "/api/sessions" or request_path.startswith("/api/sessions/"):
+            if request_path == "/api/sessions" or request_path.startswith("/api/sessions/") or request_path == "/api/daemon":
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.end_headers()
@@ -346,6 +349,11 @@ def _build_handler(root_dir: Path, prefix: str, activity_store: AgentActivitySto
                 return None
             return activity_store.get_session(session_id)
 
+        def _get_daemon_status(self) -> dict[str, object]:
+            if activity_store is None:
+                return {}
+            return activity_store.get_daemon_status()
+
         def _send_html(self, html: str) -> None:
             body = html.encode("utf-8")
             self.send_response(200)
@@ -380,6 +388,7 @@ def _render_sessions_page() -> str:
     button { border: 0; border-radius: 8px; padding: 8px 12px; background: #2563eb; color: #fff; cursor: pointer; }
     main { display: grid; grid-template-columns: minmax(320px, 420px) 1fr; gap: 16px; padding: 16px; }
     .panel { background: #fff; border-radius: 14px; box-shadow: 0 8px 28px rgba(15, 23, 42, 0.08); overflow: hidden; }
+    .status { grid-column: 1 / -1; padding: 14px 18px; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px; align-items: center; }
     .list { max-height: calc(100vh - 104px); overflow: auto; }
     .item { display: block; width: 100%; text-align: left; color: #172033; background: #fff; border: 0; border-bottom: 1px solid #e5eaf3; border-radius: 0; padding: 14px 16px; }
     .item:hover, .item.active { background: #eff6ff; }
@@ -408,11 +417,13 @@ def _render_sessions_page() -> str:
     <button id="refresh">刷新</button>
   </header>
   <main>
+    <section class="panel status" id="daemon"><span class="muted">正在读取 listener 状态...</span></section>
     <section class="panel list" id="sessions"></section>
     <section class="panel detail" id="detail"><p class="muted">选择左侧会话查看后台 agent 过程。</p></section>
   </main>
   <script>
     let selected = "";
+    const daemonEl = document.getElementById("daemon");
     const sessionsEl = document.getElementById("sessions");
     const detailEl = document.getElementById("detail");
     const refreshButton = document.getElementById("refresh");
@@ -457,6 +468,21 @@ def _render_sessions_page() -> str:
         button.appendChild(meta);
         sessionsEl.appendChild(button);
       }
+    }
+
+    function renderDaemon(status) {
+      daemonEl.textContent = "";
+      const title = document.createElement("strong");
+      title.textContent = "Listener: " + text(status.stage || "unknown");
+      const meta = document.createElement("span");
+      meta.className = "muted";
+      meta.textContent = [
+        "event_key=" + text(status.event_key),
+        "pid=" + text(status.process_id),
+        "updated=" + text(status.updated_at)
+      ].join(" · ");
+      daemonEl.appendChild(title);
+      daemonEl.appendChild(meta);
     }
 
     function kv(label, value) {
@@ -552,6 +578,7 @@ def _render_sessions_page() -> str:
     }
 
     async function loadSessions() {
+      await loadDaemon();
       const response = await fetch("/api/sessions", { cache: "no-store" });
       const data = await response.json();
       renderSessions(data.sessions || []);
@@ -560,6 +587,16 @@ def _render_sessions_page() -> str:
       } else if (selected) {
         await loadDetail(selected);
       }
+    }
+
+    async function loadDaemon() {
+      const response = await fetch("/api/daemon", { cache: "no-store" });
+      if (!response.ok) {
+        renderDaemon({});
+        return;
+      }
+      const data = await response.json();
+      renderDaemon(data.daemon || {});
     }
 
     async function loadDetail(id) {

@@ -62,6 +62,9 @@ class ReportServerTests(unittest.TestCase):
                     details={"mode": "bug_analysis", "published_report_url": "http://127.0.0.1:8765/reports/job_1/"},
                 ),
             )
+            activity_store.record_daemon_status(
+                {"stage": "event_consumer_ready", "event_key": "im.message.receive_v1", "ready": True}
+            )
             config = BridgeConfig(
                 dry_run=False,
                 data_dir=data_dir,
@@ -83,6 +86,8 @@ class ReportServerTests(unittest.TestCase):
                     sessions = json.loads(response.read().decode("utf-8"))
                 with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/sessions/om_1", timeout=5) as response:
                     detail = json.loads(response.read().decode("utf-8"))
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/daemon", timeout=5) as response:
+                    daemon = json.loads(response.read().decode("utf-8"))
                 with urllib.request.urlopen(f"http://127.0.0.1:{port}/reports/job_1/", timeout=5) as response:
                     report = response.read().decode("utf-8")
             finally:
@@ -91,6 +96,7 @@ class ReportServerTests(unittest.TestCase):
         self.assertIn("会话控制台", html)
         self.assertEqual(sessions["sessions"][0]["session_id"], "om_1")
         self.assertEqual(detail["session"]["progress"][0]["stage"], "agent_running")
+        self.assertEqual(daemon["daemon"]["stage"], "event_consumer_ready")
         self.assertIn("report ok", report)
 
 
