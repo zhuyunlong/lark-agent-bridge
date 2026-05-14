@@ -47,6 +47,11 @@ upload_result_file = true
 
 [bug_analysis]
 enabled = true
+# Default Bug agent:
+# - provider = "codex"  -> prefer local Codex first
+# - provider = "claude" -> prefer local Claude Code first
+# If the preferred provider cannot start or fails during the final summary step,
+# the bridge automatically falls back to the other one.
 provider = "codex"
 command = "codex"
 working_dir = "../.."
@@ -54,6 +59,19 @@ timeout_seconds = 5400
 max_prompt_chars = 16000
 upload_result_files = true
 default_prompt = "调查3D启动时序"
+
+[intent_analysis]
+enabled = false
+# Leave provider/command empty to reuse [bug_analysis].
+# When enabled:
+# - the preferred provider is chosen by provider/command here
+# - if left empty, it reuses [bug_analysis]
+# - if the preferred provider is unavailable, the bridge tries the other one
+provider = ""
+command = ""
+working_dir = "../.."
+timeout_seconds = 180
+max_prompt_chars = 12000
 
 [omlx_chat]
 enabled = true
@@ -64,8 +82,20 @@ model = "gemma-4-26b-a4b-it-4bit"
 api_key = ""
 timeout_seconds = 120
 max_prompt_chars = 2000
+followup_max_context_chars = 12000
+followup_max_history_turns = 6
 max_tokens = 1024
 temperature = 0.3
+
+[report_server]
+enabled = true
+bind_host = "0.0.0.0"
+port = 8765
+# Optional: override with an externally reachable URL when running behind a reverse proxy.
+#   export LARK_AGENT_BRIDGE_REPORT_PUBLIC_BASE_URL="https://bridge.example.com/reports"
+# Leave empty to auto-publish the current LAN IP, for example `http://10.x.x.x:8765/reports`.
+# The same HTTP listener also serves the local session console at `/sessions`.
+public_base_url = ""
 
 [runner]
 timeout_seconds = 900

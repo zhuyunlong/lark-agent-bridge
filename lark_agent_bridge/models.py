@@ -67,6 +67,21 @@ class BugAnalysisOptions:
 
 
 @dataclass(slots=True)
+class IntentAnalysisOptions:
+    enabled: bool = False
+    provider: str = ""
+    command: str = ""
+    working_dir: Path | None = None
+    timeout_seconds: int = 180
+    max_prompt_chars: int = 12000
+    system_prompt: str = (
+        "你是 Lark Agent Bridge 的意图路由器。"
+        "你只能根据输入消息和给定上下文判断路由，不要调用工具，不要假装读取文件。"
+        "你必须只输出一个 JSON 对象，不要输出 Markdown、解释或代码块。"
+    )
+
+
+@dataclass(slots=True)
 class OmlxChatOptions:
     enabled: bool = True
     base_url: str = "http://127.0.0.1:8000/v1"
@@ -82,6 +97,23 @@ class OmlxChatOptions:
         "只回答普通聊天问题；如果用户要求日志分析、仓库分析、执行命令或访问文件，"
         "请提醒用户改用 /skill 或 /signal。"
     )
+    followup_max_context_chars: int = 12000
+    followup_max_history_turns: int = 6
+    followup_system_prompt: str = (
+        "你是一个飞书里的分析结果讲解助手。"
+        "你只能基于当前提供的分析摘要、报告摘录和历史追问继续回答，"
+        "不要假装读取新文件、重新跑脚本或访问外部链接。"
+        "如果上下文里没有足够信息，就明确说明缺少证据。"
+        "输出中文，结论先行。"
+    )
+
+
+@dataclass(slots=True)
+class ReportServerOptions:
+    enabled: bool = True
+    bind_host: str = "127.0.0.1"
+    port: int = 8765
+    public_base_url: str = "http://127.0.0.1:8765/reports"
 
 
 @dataclass(slots=True)
@@ -99,8 +131,20 @@ class BridgeConfig:
     lark: LarkOptions = field(default_factory=LarkOptions)
     claude_agent: ClaudeAgentOptions = field(default_factory=ClaudeAgentOptions)
     bug_analysis: BugAnalysisOptions = field(default_factory=BugAnalysisOptions)
+    intent_analysis: IntentAnalysisOptions = field(default_factory=IntentAnalysisOptions)
     omlx_chat: OmlxChatOptions = field(default_factory=OmlxChatOptions)
+    report_server: ReportServerOptions = field(default_factory=ReportServerOptions)
     runner_timeout_seconds: int = 900
+
+
+@dataclass(slots=True)
+class IntentDecision:
+    route: str
+    reason: str = ""
+    confidence: str = ""
+    followup_action: str = ""
+    context_source: str = ""
+    raw_response: str = ""
 
 
 @dataclass(slots=True)
@@ -114,6 +158,10 @@ class LarkEvent:
     content: str
     create_time: str = ""
     timestamp: str = ""
+    reply_to: str = ""
+    parent_id: str = ""
+    root_id: str = ""
+    thread_id: str = ""
     raw: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -141,10 +189,14 @@ class LarkEvent:
             chat_id=str(payload.get("chat_id") or message.get("chat_id") or ""),
             chat_type=str(payload.get("chat_type") or message.get("chat_type") or ""),
             sender_id=str(sender_id),
-            message_type=str(payload.get("message_type") or message.get("message_type") or ""),
+            message_type=str(payload.get("message_type") or message.get("message_type") or message.get("msg_type") or ""),
             content=_coerce_message_content(payload.get("content") or message.get("content") or ""),
             create_time=str(payload.get("create_time") or message.get("create_time") or ""),
             timestamp=str(payload.get("timestamp") or header.get("create_time") or ""),
+            reply_to=str(payload.get("reply_to") or message.get("reply_to") or ""),
+            parent_id=str(payload.get("parent_id") or message.get("parent_id") or ""),
+            root_id=str(payload.get("root_id") or message.get("root_id") or ""),
+            thread_id=str(payload.get("thread_id") or message.get("thread_id") or ""),
             raw=payload,
         )
 
@@ -170,6 +222,7 @@ def _coerce_message_content(content: Any) -> str:
 class DownloadResource:
     kind: str
     value: str
+    source_message_id: str = ""
 
     @property
     def resource_type(self) -> str:

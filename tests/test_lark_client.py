@@ -22,6 +22,34 @@ def event(**overrides):
 
 
 class LarkClientTests(unittest.TestCase):
+    def test_reply_uses_message_reply_and_thread_flag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client = LarkClient(
+                BridgeConfig(
+                    dry_run=True,
+                    data_dir=Path(tmp),
+                    lark=LarkOptions(reply_in_thread=True),
+                )
+            )
+
+            result = client.reply("om_1", "处理完成")
+
+        self.assertEqual(
+            result.command,
+            [
+                "lark-cli",
+                "im",
+                "+messages-reply",
+                "--as",
+                "bot",
+                "--message-id",
+                "om_1",
+                "--text",
+                "处理完成",
+                "--reply-in-thread",
+            ],
+        )
+
     def test_group_response_uses_send_and_mentions_sender(self):
         with tempfile.TemporaryDirectory() as tmp:
             client = LarkClient(

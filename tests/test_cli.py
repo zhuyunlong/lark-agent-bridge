@@ -127,6 +127,34 @@ class CliTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         fake_app.purge_all_jobs.assert_called_once()
 
+    def test_listen_passes_progress_callback_to_app(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config.toml"
+            config.write_text(f'dry_run = false\ndata_dir = "{tmp}/data"\n', encoding="utf-8")
+
+            with mock.patch("lark_agent_bridge.cli.BridgeApp") as bridge_app:
+                fake_app = mock.Mock()
+                fake_app.lark_client.consume_events.return_value = iter(())
+                bridge_app.return_value = fake_app
+                exit_code = main(["listen", "--config", str(config)])
+
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(callable(bridge_app.call_args.kwargs["progress_callback"]))
+
+    def test_listen_starts_and_stops_report_server(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config.toml"
+            config.write_text(f'dry_run = false\ndata_dir = "{tmp}/data"\n', encoding="utf-8")
+            fake_app = mock.Mock()
+            fake_app.lark_client.consume_events.return_value = iter(())
+
+            with mock.patch("lark_agent_bridge.cli.BridgeApp", return_value=fake_app):
+                exit_code = main(["listen", "--config", str(config)])
+
+        self.assertEqual(exit_code, 0)
+        fake_app.start_report_server.assert_called_once()
+        fake_app.stop_report_server.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

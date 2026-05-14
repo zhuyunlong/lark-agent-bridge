@@ -81,11 +81,12 @@ class LogDownloader:
         context: JobContext,
         message_id: str,
     ) -> DownloadedResource:
-        if not message_id:
+        effective_message_id = resource.source_message_id.strip() or message_id
+        if not effective_message_id:
             raise DownloadError("message_id is required for Feishu resource downloads")
         target = context.input_dir / safe_filename(resource.value)
         result = self.lark_client.download_resource(
-            message_id=message_id,
+            message_id=effective_message_id,
             file_key=resource.value,
             resource_type=resource.resource_type,
             output=target,
@@ -104,4 +105,3 @@ def safe_filename_from_url(url: str) -> str:
 def safe_filename(value: str) -> str:
     safe = re.sub(r"[^A-Za-z0-9._-]+", "_", value).strip("._")
     return safe or "download"
-

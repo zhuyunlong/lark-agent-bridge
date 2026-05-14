@@ -40,7 +40,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         config = with_cli_overrides(load_config(args.config), dry_run=args.dry_run)
-        app = BridgeApp(config)
+        progress_callback = _print_progress if args.command == "listen" and not config.dry_run else None
+        app = BridgeApp(config, progress_callback=progress_callback)
         if args.command == "check":
             _print_json(app.check())
             return 0
@@ -57,11 +58,13 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
             if config.job_retention.purge_all_on_listen_start:
                 app.purge_all_jobs()
+            app.start_report_server()
             stop_cleanup = _start_cleanup_loop(app)
             try:
                 for event in app.lark_client.consume_events():
                     _print_json(app.handle_event(event).to_dict())
             finally:
+                app.stop_report_server()
                 if stop_cleanup is not None:
                     stop_cleanup.set()
             return 0
@@ -79,6 +82,10 @@ def _add_common_options(parser: argparse.ArgumentParser) -> None:
 
 def _print_json(value: object) -> None:
     print(json.dumps(value, ensure_ascii=False, indent=2))
+
+
+def _print_progress(value: dict[str, object]) -> None:
+    print(json.dumps(value, ensure_ascii=False), flush=True)
 
 
 def _start_cleanup_loop(app: BridgeApp) -> threading.Event | None:

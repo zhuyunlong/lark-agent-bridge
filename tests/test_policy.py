@@ -65,6 +65,19 @@ class PolicyTests(unittest.TestCase):
 
         self.assertTrue(decision.allowed)
 
+    def test_allowed_user_bypasses_group_allowlist(self):
+        decision = evaluate_event_policy(
+            BridgeConfig(
+                dry_run=False,
+                allowed_chats=["oc_allowed"],
+                allowed_users=["ou_super"],
+            ),
+            event(chat_type="group", chat_id="oc_other", sender_id="ou_super"),
+        )
+
+        self.assertTrue(decision.allowed)
+        self.assertEqual(decision.reason, "allowed_user_bypass")
+
     def test_state_skips_duplicate_event_id(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = EventStateStore(Path(tmp) / "seen.jsonl")

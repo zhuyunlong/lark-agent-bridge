@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>Lark Agent Bridge 架构总览</title>
+  <style>
+* { box-sizing: border-box; }
+body { font-family: -apple-system, "Helvetica Neue", "PingFang SC", "Microsoft YaHei", sans-serif;
+       margin: 0; background: #f5f7fb; color: #1f2937; }
+.container { max-width: 1280px; margin: 0 auto; padding: 24px; }
+h1 { margin: 0 0 8px; font-size: 26px; }
+.sub { color: #6b7280; margin-bottom: 24px; font-size: 13px; line-height: 1.6; }
+.verdict { padding: 20px 24px; border-radius: 12px; color: #fff; font-size: 18px; font-weight: 600;
+           box-shadow: 0 4px 14px rgba(0,0,0,.08); margin-bottom: 24px; line-height: 1.55; }
+.v-red { background: linear-gradient(135deg, #ef4444, #b91c1c); }
+.v-yellow { background: linear-gradient(135deg, #f59e0b, #b45309); }
+.v-green { background: linear-gradient(135deg, #10b981, #047857); }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; margin-bottom: 24px; }
+.card { background: #fff; border-radius: 10px; padding: 16px 18px; box-shadow: 0 1px 4px rgba(0,0,0,.05); }
+.card .lbl { font-size: 12px; color: #6b7280; }
+.card .val { font-size: 22px; font-weight: 700; margin-top: 4px; word-break: break-word; }
+.card .desc { color: #6b7280; font-size: 12px; line-height: 1.55; margin-top: 6px; }
+.card.red .val { color: #dc2626; }
+.card.yellow .val { color: #d97706; }
+.card.green .val { color: #059669; }
+.section { background: #fff; border-radius: 10px; padding: 20px 24px; margin-bottom: 18px;
+           box-shadow: 0 1px 4px rgba(0,0,0,.05); }
+.section h2 { margin: 0 0 14px; font-size: 18px; border-left: 4px solid #2563eb; padding-left: 10px; }
+.section h3 { margin: 18px 0 10px; font-size: 15px; }
+.issue { padding: 10px 14px; border-radius: 6px; margin-bottom: 8px; border-left: 4px solid #999; background: #f9fafb; }
+.issue.red { border-color: #dc2626; background: #fef2f2; }
+.issue.yellow { border-color: #d97706; background: #fffbeb; }
+.issue.green { border-color: #059669; background: #ecfdf5; }
+.issue .t { font-weight: 600; }
+.issue .d { color: #6b7280; font-size: 12px; margin-top: 4px; line-height: 1.55; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { padding: 6px 10px; border-bottom: 1px solid #eef0f3; text-align: left; vertical-align: top; }
+th { background: #f3f4f6; font-weight: 600; }
+.tag { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; color: #fff; white-space: nowrap; }
+.tag.red { background: #dc2626; } .tag.yellow { background: #d97706; } .tag.green { background: #059669; }
+details { margin-top: 8px; }
+summary { cursor: pointer; color: #2563eb; font-size: 13px; }
+code { background: #f3f4f6; padding: 1px 6px; border-radius: 4px; font-size: 12px; }
+pre { background: #f3f4f6; padding: 10px; border-radius: 6px; font-size: 12px; line-height: 1.55;
+      white-space: pre-wrap; word-break: break-word; overflow-x: auto; }
+.row { display: flex; gap: 18px; flex-wrap: wrap; }
+.row .col { flex: 1; min-width: 280px; }
+.muted { color: #9ca3af; }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 14px; }
+.chip { display: inline-block; padding: 4px 10px; border-radius: 999px; background: #eff6ff; color: #2563eb;
+        border: 1px solid #dbeafe; font-size: 12px; }
+.nav { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.nav a { display: inline-block; padding: 4px 10px; border-radius: 999px; background: #eff6ff; color: #2563eb;
+         text-decoration: none; font-size: 12px; border: 1px solid #dbeafe; }
+.session-header { display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; align-items: flex-start; }
+.session-meta { color: #6b7280; line-height: 1.7; font-size: 13px; }
+.timeline-phases { display: grid; gap: 14px; margin-top: 18px; }
+.chain { display: flex; flex-direction: column; align-items: stretch; gap: 0; }
+.chain-node { display: flex; align-items: stretch; background: #fff; border-radius: 10px;
+              border-left: 6px solid #999; box-shadow: 0 1px 4px rgba(0,0,0,.06); overflow: hidden; }
+.chain-node.chain-red { border-color: #dc2626; }
+.chain-node.chain-yellow { border-color: #d97706; }
+.chain-node.chain-green { border-color: #059669; }
+.chain-step { width: 40px; min-width: 40px; display: flex; align-items: center; justify-content: center;
+              font-size: 16px; font-weight: 700; color: #fff; background: #6b7280; }
+.chain-red .chain-step { background: #dc2626; }
+.chain-yellow .chain-step { background: #d97706; }
+.chain-green .chain-step { background: #059669; }
+.chain-body { padding: 12px 16px; flex: 1; }
+.chain-title { font-weight: 700; font-size: 15px; margin-bottom: 4px; }
+.chain-evi, .chain-down { font-size: 13px; color: #4b5563; line-height: 1.55; margin-top: 2px; }
+.chain-arrow { text-align: center; font-size: 22px; color: #9ca3af; line-height: 1.1; padding: 4px 0; font-weight: 700; }
+.phase { border: 1px solid #eef0f3; border-radius: 10px; overflow: hidden; margin-top: 12px; }
+.phase-header { padding: 10px 14px; background: #f3f4f6; font-weight: 700; }
+.phase-body { padding: 12px; display: grid; gap: 8px; }
+.event { display: grid; grid-template-columns: 190px 1fr; gap: 12px; padding: 10px 12px; border-radius: 8px;
+         background: #f9fafb; border-left: 4px solid #059669; }
+.event.missing { border-left-color: #dc2626; background: #fef2f2; }
+.event-time { color: #6b7280; font-size: 12px; line-height: 1.5; white-space: nowrap; }
+.event-title { font-weight: 700; margin-bottom: 3px; }
+.event-source { color: #2563eb; font-size: 12px; margin-bottom: 4px; }
+.event-message { color: #4b5563; font-size: 13px; line-height: 1.55; word-break: break-word; }
+.event-meta { color: #9ca3af; font-size: 12px; margin-top: 5px; }
+.repeat { margin-left: 6px; color: #d97706; font-size: 12px; font-weight: 600; }
+@media (max-width: 880px) { .event { grid-template-columns: 1fr; } .container { padding: 14px; } }
+
+.diagram-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; margin-top: 10px; }
+.diagram-box { background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 10px; padding: 14px; }
+.diagram-box h3 { margin: 0 0 8px; font-size: 15px; }
+.diagram-box p { margin: 6px 0 0; color: #4b5563; line-height: 1.6; font-size: 13px; }
+.flow-line { display: flex; align-items: stretch; gap: 10px; flex-wrap: wrap; margin: 14px 0; }
+.flow-node { flex: 1; min-width: 180px; background: #eff6ff; border: 1px solid #dbeafe; color: #1d4ed8; border-radius: 10px; padding: 14px; font-weight: 600; text-align: center; }
+.flow-arrow { align-self: center; color: #9ca3af; font-weight: 700; }
+.seq { display: grid; gap: 10px; margin-top: 12px; }
+.seq-step { display: grid; grid-template-columns: 78px 160px 1fr; gap: 10px; align-items: start; background: #f9fafb; border-radius: 8px; padding: 10px 12px; border-left: 4px solid #2563eb; }
+.seq-step .idx { font-weight: 700; color: #2563eb; }
+.seq-step .actor { font-weight: 600; }
+.seq-step .act { color: #4b5563; line-height: 1.6; }
+.matrix { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; }
+.matrix-card { background: #fff; border: 1px solid #eef0f3; border-radius: 10px; padding: 16px; }
+.matrix-card h3 { margin: 0 0 10px; font-size: 16px; }
+.matrix-card ul { margin: 0; padding-left: 18px; color: #4b5563; }
+.matrix-card li { margin: 6px 0; line-height: 1.55; }
+.small-note { color: #6b7280; font-size: 12px; line-height: 1.6; margin-top: 8px; }
+</style>
+</head>
+<body>
+<div class="container"><h1>📡 Lark Agent Bridge 架构总览</h1><div class="sub">面向当前 <code>tools/lark-agent-bridge</code> 实现的中文整体总结。重点覆盖消息入口、权限模型、路由层、执行层、状态层和 HTML 发布链路。</div><div class="verdict v-green">🎯 这是一个“飞书消息入口 + 本地分析执行 + HTML 报告发布 + reply 续聊复用”的受控桥接层。它不是通用命令机器人，重分析主要靠本地脚本，Agent 负责路由、总结和续聊复用。</div><div class="cards"><div class="card green"><div class="lbl">核心能力</div><div class="val">7 类</div><div class="desc">signal / bug / 直传分析 / 感知总结 / skill / 聊天 / 续聊</div></div><div class="card yellow"><div class="lbl">权限层次</div><div class="val">4 层</div><div class="desc">p2p、已授权群、超级用户、外部群日志分析例外</div></div><div class="card green"><div class="lbl">核心状态</div><div class="val">3 类</div><div class="desc">事件去重、会话上下文、Agent 活动流</div></div><div class="card green"><div class="lbl">入口命令</div><div class="val">4 个</div><div class="desc">check / handle-event / run-signal / listen</div></div><div class="card yellow"><div class="lbl">执行策略</div><div class="val">脚本优先</div><div class="desc">重分析走本地脚本，Agent 负责路由/总结/续聊</div></div><div class="card green"><div class="lbl">报告出口</div><div class="val">/reports + /sessions</div><div class="desc">HTML 发布与会话控制台统一走内置 HTTP 服务</div></div></div><div class="section"><h2>A. 设计重点</h2><div class="issue green"><div class="t">BridgeApp 是唯一总调度入口</div><div class="d">统一处理 mention、权限、续聊、资源补抓、执行、发布和回包。</div></div><div class="issue green"><div class="t">日志分析与普通聊天已明显分层</div><div class="d">signal / bug / direct / perception 走本地分析器，普通聊天走 OMLX。</div></div><div class="issue yellow"><div class="t">intent_analysis 是可选前置层</div><div class="d">开启后先由本地 agent 判断 route；关闭时按 parser 的确定性规则直接路由。</div></div><div class="issue yellow"><div class="t">外部群已支持受限日志分析</div><div class="d">非授权群的普通成员不能随便聊天，但可以用 bug 链接、reply 文件、signal、perception 这类日志分析入口。</div></div><div class="issue yellow"><div class="t">仍有一个与本次架构无关的本地测试问题</div><div class="d">report_server 的端口绑定测试在当前环境下会报 PermissionError。</div></div></div><div class="section"><h2>🧠 端到端主链路</h2><p class="muted">从飞书消息进入，到本地执行、HTML 发布和上下文沉淀的完整主流程。</p><div class="chain"><div class="chain-node chain-green"><div class="chain-step">1</div><div class="chain-body"><div class="chain-title">消息进入</div><div class="chain-evi"><b>证据：</b>lark-cli event consume im.message.receive_v1 -&gt; LarkEvent</div><div class="chain-down"><b>下游影响：</b>进入 BridgeApp，先记活动流，再做 mention 与权限判断。</div></div></div><div class="chain-arrow">↓</div><div class="chain-node chain-green"><div class="chain-step">2</div><div class="chain-body"><div class="chain-title">入口判定</div><div class="chain-evi"><b>证据：</b>群聊必须显式 @bot，或 reply 到已有分析消息；私聊直接进入</div><div class="chain-down"><b>下游影响：</b>决定是普通新请求、reply 续聊，还是 not_addressed 跳过。</div></div></div><div class="chain-arrow">↓</div><div class="chain-node chain-yellow"><div class="chain-step">3</div><div class="chain-body"><div class="chain-title">权限与资源补抓</div><div class="chain-evi"><b>证据：</b>policy + reply_to/root_id 文件资源补抓 + 外部群日志分析例外</div><div class="chain-down"><b>下游影响：</b>把能不能进和有没有日志资源补齐，再决定具体 route。</div></div></div><div class="chain-arrow">↓</div><div class="chain-node chain-green"><div class="chain-step">4</div><div class="chain-body"><div class="chain-title">执行层</div><div class="chain-evi"><b>证据：</b>signal / bug / direct / perception / skill / chat / followup</div><div class="chain-down"><b>下游影响：</b>本地脚本负责重分析，agent 负责路由、总结和续聊。</div></div></div><div class="chain-arrow">↓</div><div class="chain-node chain-green"><div class="chain-step">5</div><div class="chain-body"><div class="chain-title">发布与回包</div><div class="chain-evi"><b>证据：</b>HtmlReportPublisher + LarkClient.reply/send_file_response</div><div class="chain-down"><b>下游影响：</b>统一发布 HTML 链接，必要时附带 HTML 文件。</div></div></div><div class="chain-arrow">↓</div><div class="chain-node chain-green"><div class="chain-step">6</div><div class="chain-body"><div class="chain-title">上下文沉淀</div><div class="chain-evi"><b>证据：</b>ConversationContextStore + AgentActivityStore</div><div class="chain-down"><b>下游影响：</b>支撑 reply 续聊、复分析复用和 /sessions 控制台展示。</div></div></div></div></div><div class="section"><h2>B. 总体流程图</h2><div class="flow-line"><div class="flow-node">Lark 消息进入</div><div class="flow-arrow">→</div><div class="flow-node">BridgeApp 识别 @bot / reply</div><div class="flow-arrow">→</div><div class="flow-node">Policy 判断 + 资源补抓</div><div class="flow-arrow">→</div><div class="flow-node">Intent/Parser 路由</div><div class="flow-arrow">→</div><div class="flow-node">本地脚本 / Agent / OMLX 执行</div><div class="flow-arrow">→</div><div class="flow-node">发布 HTML + 飞书回包 + 持久化状态</div></div><p class="small-note">主流程是：消息进入 → mention/reply 识别 → policy → 资源补抓 → 路由 → 执行 → 发布 → 回包 → 状态沉淀。</p></div><div class="section"><h2>C. 核心模块分层</h2><table><thead><tr><th>模块</th><th>职责</th><th>当前实现重点</th></tr></thead><tbody><tr><td>cli.py</td><td>命令行入口</td><td>check / handle-event / run-signal / listen</td></tr><tr><td>app.py</td><td>总调度器</td><td>消息进入后的主流程编排</td></tr><tr><td>parser.py</td><td>文本解析</td><td>把文本拆成 signal / bug / direct / perception / skill / chat 请求</td></tr><tr><td>policy.py</td><td>权限闸门</td><td>已授权群、超级用户、外部群日志分析例外</td></tr><tr><td>agents.py</td><td>执行层</td><td>OMLX、intent agent、bug runner、skill runner、perception runner</td></tr><tr><td>downloader.py</td><td>资源下载</td><td>URL、飞书 file/image、本地路径</td></tr><tr><td>state.py</td><td>状态层</td><td>seen_events、conversation_contexts、agent_activity</td></tr><tr><td>report_server.py</td><td>报告发布层</td><td>发布 HTML、服务 /reports 与 /sessions</td></tr><tr><td>lark_client.py</td><td>飞书接口包装</td><td>consume / reply / send / fetch_message / download_resource</td></tr></tbody></table></div><div class="section"><h2>D. 能力路由图</h2><table><thead><tr><th>Route</th><th>典型触发</th><th>执行器 / 结果</th></tr></thead><tbody><tr><td>signal_lifecycle</td><td>@bot /signal 132002 ...</td><td>signal-chain-analyzer</td></tr><tr><td>bug_analysis</td><td>@bot bug链接 + 描述</td><td>feishu-bug-fetcher + startup/stuck/crash/signal/perception</td></tr><tr><td>direct_analysis</td><td>@bot 分析启动和卡顿 file_xxx 或 reply 文件消息</td><td>基于飞书资源直传日志分析</td></tr><tr><td>perception_summary</td><td>@bot /perception-summary ...</td><td>perception-data-summary</td></tr><tr><td>claude_skill</td><td>@bot /skill ...</td><td>只读 Claude / Codex 分析</td></tr><tr><td>omlx_chat</td><td>p2p 普通提问 或 @bot /chat ...</td><td>本地 OMLX OpenAI-compatible API</td></tr><tr><td>analysis_followup</td><td>reply 历史分析消息</td><td>bug 续聊 / 重分析 / 上下文问答</td></tr></tbody></table></div><div class="section"><h2>E. 权限框架设计图</h2><table><thead><tr><th>层级</th><th>放行条件</th><th>能力范围</th></tr></thead><tbody><tr><td>p2p</td><td>默认允许</td><td>全能力</td></tr><tr><td>allowed_users</td><td>超级权限用户</td><td>跨群 bypass；任何群里 @bot 都能进完整能力</td></tr><tr><td>allowed_chats</td><td>已授权群</td><td>完整能力</td></tr><tr><td>外部群普通成员</td><td>有限放行</td><td>仅日志分析类：bug / direct / signal / perception / 已有分析 followup</td></tr></tbody></table></div><div class="section"><h2>F. 场景框架设计图</h2><div class="matrix"><div class="matrix-card"><h3>私聊 P2P</h3><ul><li>默认允许</li><li>支持聊天、日志分析、skill、续聊</li><li>续聊必须 reply 某条历史分析消息</li></ul></div><div class="matrix-card"><h3>已授权群</h3><ul><li>chat_id 在 allowed_chats</li><li>完整能力开放</li><li>群聊续聊必须 reply + @bot</li></ul></div><div class="matrix-card"><h3>未授权群普通成员</h3><ul><li>只开放日志分析类</li><li>bug 链接 / reply 文件 / signal / perception / 已有分析 followup</li><li>不开放通用聊天</li></ul></div><div class="matrix-card"><h3>超级用户</h3><ul><li>sender_id 在 allowed_users</li><li>跨群 bypass allowlist</li><li>任何群里 @bot 都可进入完整能力</li></ul></div></div></div><div class="section"><h2>G. 触发矩阵</h2><table><thead><tr><th>场景</th><th>触发方式</th><th>需要 @bot</th><th>需要 reply</th></tr></thead><tbody><tr><td>bug链接分析</td><td>@bot bug链接 + 描述</td><td>是</td><td>否</td></tr><tr><td>reply 文件分析</td><td>reply 文件消息，再 @bot 说分析内容</td><td>是</td><td>是</td></tr><tr><td>signal</td><td>@bot /signal ...</td><td>是</td><td>否</td></tr><tr><td>perception</td><td>@bot /perception-summary ...</td><td>是</td><td>可选</td></tr><tr><td>普通聊天</td><td>p2p 直接问 / 群里 @bot /chat</td><td>按权限</td><td>否</td></tr><tr><td>续聊/复分析</td><td>reply 历史分析消息</td><td>是</td><td>是</td></tr></tbody></table></div><div class="section"><h2>H1. 时序图：已授权群 bug 链接分析</h2><div class="seq"><div class="seq-step"><div class="idx">1</div><div class="actor">用户 → 飞书</div><div class="act">在已授权群内 @bot 并发送 bug 链接与问题描述。</div></div><div class="seq-step"><div class="idx">2</div><div class="actor">LarkClient → BridgeApp</div><div class="act">消费事件，完成 @bot 识别、policy 校验和 bug route 识别。</div></div><div class="seq-step"><div class="idx">3</div><div class="actor">BugAnalysisRunner</div><div class="act">调用 feishu-bug-fetcher / meegle 获取 bug 字段和附件，再执行 startup / stuck / crash / signal / perception 分析脚本。</div></div><div class="seq-step"><div class="idx">4</div><div class="actor">HtmlReportPublisher</div><div class="act">发布 HTML 到 /reports/job_id/，返回 LAN 可访问链接。</div></div><div class="seq-step"><div class="idx">5</div><div class="actor">BridgeApp → 飞书</div><div class="act">reply 文字摘要和报告链接，群里需要时附带 HTML 文件。</div></div></div></div><div class="section"><h2>H2. 时序图：回复文件消息触发直传分析</h2><div class="seq"><div class="seq-step"><div class="idx">1</div><div class="actor">用户 → 飞书</div><div class="act">先上传日志文件，再回复这条文件消息并 @bot 说“分析启动和卡顿”。</div></div><div class="seq-step"><div class="idx">2</div><div class="actor">BridgeApp</div><div class="act">在当前消息文本里看不到 file_key 时，沿着 reply_to / parent_id / root_id 抓被回复消息。</div></div><div class="seq-step"><div class="idx">3</div><div class="actor">LarkClient</div><div class="act">fetch_message(源文件消息) 取回 message payload，并抽取 file_key / image_key。</div></div><div class="seq-step"><div class="idx">4</div><div class="actor">LogDownloader</div><div class="act">下载时使用源文件消息的 message_id，而不是当前追问消息的 message_id。</div></div><div class="seq-step"><div class="idx">5</div><div class="actor">BugAnalysisRunner</div><div class="act">把这类请求按 direct_analysis 处理，后续流程与普通日志分析一致。</div></div></div></div><div class="section"><h2>H3. 时序图：超级用户跨群 @bot</h2><div class="seq"><div class="seq-step"><div class="idx">1</div><div class="actor">超级用户</div><div class="act">在任意群里 @bot，不受 allowed_chats 限制。</div></div><div class="seq-step"><div class="idx">2</div><div class="actor">Policy</div><div class="act">命中 allowed_user_bypass，放行完整能力。</div></div><div class="seq-step"><div class="idx">3</div><div class="actor">IntentAnalysisRunner</div><div class="act">如果已启用，就先由本地 agent 判断是聊天、分析还是续聊。</div></div><div class="seq-step"><div class="idx">4</div><div class="actor">执行层</div><div class="act">根据 route 进入 OMLX、bug runner、signal、perception 或 skill runner。</div></div></div></div><div class="section"><h2>H4. 时序图：reply 续聊 / 复分析</h2><div class="seq"><div class="seq-step"><div class="idx">1</div><div class="actor">用户</div><div class="act">reply 某条历史分析消息。群聊必须同时 @bot；私聊不要求 @。</div></div><div class="seq-step"><div class="idx">2</div><div class="actor">ConversationContextStore</div><div class="act">通过 reply_to / root_id / parent_id 找到根上下文，不再走同群最近一次兜底。</div></div><div class="seq-step"><div class="idx">3</div><div class="actor">AgentActivityStore</div><div class="act">读取上次会话的 job_id、report_url、progress 和 bug agent session_id。</div></div><div class="seq-step"><div class="idx">4</div><div class="actor">执行层</div><div class="act">bug 续聊走 run_bug_agent_followup；时间修正类走 run_bug_reanalysis；普通上下文追问走 OMLX reply_with_context。</div></div><div class="seq-step"><div class="idx">5</div><div class="actor">BridgeApp</div><div class="act">写回 append_exchange，延长同一 root_message_id 的上下文历史。</div></div></div></div><div class="section"><h2>I. 当前边界与限制</h2><div class="issue yellow"><div class="t">intent_analysis 不是默认必开</div><div class="d">不开启时，直接按 parser 的确定性规则路由。</div></div><div class="issue yellow"><div class="t">不是所有能力都由 Agent 全权执行</div><div class="d">bug / signal / perception 的重活仍由本地脚本负责。</div></div><div class="issue yellow"><div class="t">外部群普通成员仍不开放通用聊天</div><div class="d">当前只允许日志分析类能力进入。</div></div><div class="issue yellow"><div class="t">report_server 有一个本地测试环境问题</div><div class="d">tests/test_report_server.py 在当前环境下端口绑定会报 PermissionError。</div></div></div></div>
+</body>
+</html>

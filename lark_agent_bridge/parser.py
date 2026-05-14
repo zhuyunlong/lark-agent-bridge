@@ -332,15 +332,25 @@ def _find_signal(text: str, aliases: dict[str, str]) -> str | None:
     return None
 
 
-def _find_resources(text: str) -> list[DownloadResource]:
+def find_resources(text: str, *, source_message_id: str = "") -> list[DownloadResource]:
     resources: list[DownloadResource] = []
     for match in URL_RE.findall(text):
-        resources.append(DownloadResource(kind="url", value=match.rstrip(TRAILING_URL_PUNCTUATION)))
+        resources.append(
+            DownloadResource(
+                kind="url",
+                value=match.rstrip(TRAILING_URL_PUNCTUATION),
+                source_message_id=source_message_id,
+            )
+        )
     for match in FILE_KEY_RE.findall(text):
-        resources.append(DownloadResource(kind="file", value=match))
+        resources.append(DownloadResource(kind="file", value=match, source_message_id=source_message_id))
     for match in IMAGE_KEY_RE.findall(text):
-        resources.append(DownloadResource(kind="image", value=match))
+        resources.append(DownloadResource(kind="image", value=match, source_message_id=source_message_id))
     return resources
+
+
+def _find_resources(text: str) -> list[DownloadResource]:
+    return find_resources(text)
 
 
 def _find_since(text: str) -> str | None:

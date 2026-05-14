@@ -13,9 +13,11 @@ from .models import (
     BridgeConfig,
     ClaudeAgentOptions,
     DownloadConfig,
+    IntentAnalysisOptions,
     JobRetentionOptions,
     LarkOptions,
     OmlxChatOptions,
+    ReportServerOptions,
 )
 
 
@@ -49,7 +51,9 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
     runner_data = data.get("runner") or {}
     claude_data = data.get("claude_agent") or {}
     bug_data = data.get("bug_analysis") or {}
+    intent_data = data.get("intent_analysis") or {}
     omlx_data = data.get("omlx_chat") or {}
+    report_server_data = data.get("report_server") or {}
 
     return BridgeConfig(
         dry_run=_bool_value(os.environ.get("LARK_AGENT_BRIDGE_DRY_RUN"), bool(data.get("dry_run", True))),
@@ -116,6 +120,15 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
             upload_result_files=bool(bug_data.get("upload_result_files", True)),
             default_prompt=str(bug_data.get("default_prompt", BugAnalysisOptions().default_prompt)),
         ),
+        intent_analysis=IntentAnalysisOptions(
+            enabled=bool(intent_data.get("enabled", False)),
+            provider=str(intent_data.get("provider", "")),
+            command=str(intent_data.get("command", "")),
+            working_dir=_optional_path(intent_data.get("working_dir"), base_dir),
+            timeout_seconds=int(intent_data.get("timeout_seconds", 180)),
+            max_prompt_chars=int(intent_data.get("max_prompt_chars", IntentAnalysisOptions().max_prompt_chars)),
+            system_prompt=str(intent_data.get("system_prompt", IntentAnalysisOptions().system_prompt)),
+        ),
         omlx_chat=OmlxChatOptions(
             enabled=bool(omlx_data.get("enabled", True)),
             base_url=str(
@@ -132,6 +145,24 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
             max_tokens=int(omlx_data.get("max_tokens", 1024)),
             temperature=float(omlx_data.get("temperature", 0.3)),
             system_prompt=str(omlx_data.get("system_prompt", OmlxChatOptions().system_prompt)),
+            followup_max_context_chars=int(
+                omlx_data.get("followup_max_context_chars", OmlxChatOptions().followup_max_context_chars)
+            ),
+            followup_max_history_turns=int(
+                omlx_data.get("followup_max_history_turns", OmlxChatOptions().followup_max_history_turns)
+            ),
+            followup_system_prompt=str(
+                omlx_data.get("followup_system_prompt", OmlxChatOptions().followup_system_prompt)
+            ),
+        ),
+        report_server=ReportServerOptions(
+            enabled=bool(report_server_data.get("enabled", True)),
+            bind_host=str(report_server_data.get("bind_host", "127.0.0.1")),
+            port=int(report_server_data.get("port", 8765)),
+            public_base_url=str(
+                os.environ.get("LARK_AGENT_BRIDGE_REPORT_PUBLIC_BASE_URL")
+                or report_server_data.get("public_base_url", ReportServerOptions().public_base_url)
+            ),
         ),
         runner_timeout_seconds=int(runner_data.get("timeout_seconds", 900)),
     )

@@ -2,14 +2,14 @@
 
 Local Feishu Bot bridge for controlled AI agent tasks. The current version supports five kinds of replies:
 
-1. Signal lifecycle investigation: a Feishu message mentions the bot with a signal code/name/alias plus a log URL or attachment, then the bridge prepares the log input, calls the guideengine `signal-chain-analyzer`, and replies with report paths.
+1. Signal lifecycle investigation: a Feishu message mentions the bot with a signal code/name/alias plus a log URL or attachment, then the bridge prepares the log input, calls the guideengine `signal-chain-analyzer`, publishes the generated HTML, and replies with a report link.
 2. Claude Code skill analysis: a Feishu message uses `skill` / `/skill` or `claude` / `/claude` as the first keyword, then the bridge calls the local `claude` CLI in a read-only analysis profile and uploads the Markdown result file back to the chat.
 3. Bug investigation: a Feishu message mentions the bot and includes a `project.feishu.cn/.../buglo/detail/...` link plus a short description, then the bridge deterministically runs the local `feishu-bug-fetcher` pipeline and routes the Bug to one of these analysis types:
    - `unity-startup-lifecycle-check`: startup timing, first-frame, `UnityReady`, `displayChanged`, `startRender`
    - `3d-stuck-investigate`: 3D jank, freeze, black-screen, dropped-frame, ANR, render-not-refreshing
    - `3d-stuck-investigate` crash mode: crash, `tombstone`, `FATAL EXCEPTION`, native crash, app exit
    - `signal-chain-analyzer`: signal chain / data-not-reaching-Unity when the prompt or Bug text includes a concrete signal code or enum
-   The bridge uploads `bug_metadata.md` plus the main HTML report back to the chat.
+   The bridge publishes a single HTML result page back to the chat instead of uploading local HTML/JSON artifacts.
 4. Local omlx chat: short ordinary questions are sent to the local OpenAI-compatible omlx endpoint with model `gemma-4-26b-a4b-it-4bit` and a locally configured API key. This path has no local tool, file, shell, or Feishu permissions.
 5. Basic bridge replies: identity and help prompts such as `你是谁`、`帮助`.
 
@@ -52,9 +52,10 @@ Reply behavior:
 
 - `p2p` private chat: send a direct message back to the user
 - `group` chat without a leading mention to this bot: silently skip, no reply
-- `group` chat addressed to this bot: send a normal group message and `@` the sender
+- `group` chat addressed to this bot: ordinary chat still sends a normal group message and `@` the sender
 - Claude Code skill analysis: send a text excerpt first, then upload `claude_skill_result.md` as a file
-- Bug startup investigation: send a text summary first, then upload `bug_metadata.md` and the HTML report as files
+- HTML-producing analysis (`/signal`, Bug 链接分析, 附件直传分析, 感知总结): reply to the triggering message with `@` the sender, publish one LAN-accessible HTML link, and in group chats also upload the HTML report; no JSON uploads
+- when a user replies to the previous HTML result and `@` this bot, the bridge continues the conversation with the stored analysis context; if the user corrects the problem time and asks to re-analyse, the bridge reuses the previous Bug job and prepared log input instead of fetching/downloading/decrypting again, refreshes only the affected reports, and then lets the configured Bug agent (`codex` / `claude`) continue the same summary session when the provider supports resume
 - rejected requests: still send back a clear error message
 - addressed but unsupported requests: reply `not a handled request`
 - job retention: `listen` startup purges old `data/jobs/*`; while the service keeps running, a background cleanup loop removes job directories older than 6 hours by default
@@ -75,11 +76,12 @@ Bug analysis routing is URL-based, and the short description controls the route:
 @My Feishu CLI Bot https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722 调查3D卡顿黑屏
 @My Feishu CLI Bot https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722 调查闪退和tombstone
 @My Feishu CLI Bot https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722 分析132002为什么没到Unity
+@My Feishu CLI Bot https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722 分析3D启动卡顿
 ```
 
 The default Claude Code tool allowlist is read-only: `Read`, `Grep`, `Glob`, `LS`. It does not grant edit or shell execution permissions unless you change `config.toml`.
 
-Bug analysis uses `[bug_analysis]` for timeout, working directory, and upload behavior. The current implementation does not depend on a local agent to complete the heavy bug-fetch/decode/report pipeline; it executes the local scripts directly for better stability.
+Bug analysis uses `[bug_analysis]` for timeout and working directory, `[intent_analysis]` for optional agent-based message routing, and `[report_server]` for HTML publication. The current implementation does not depend on a local agent to complete the heavy bug-fetch/decode/report pipeline; it executes the local scripts directly for better stability, then hands the final conclusion to the configured Bug agent (`codex` / `claude`) when available. When intent routing is enabled, a local agent first decides whether an addressed message is ordinary chat, a fresh analysis request, or a follow-up that should continue the same saved Bug agent session.
 
 Current Bug routing rules:
 
@@ -89,6 +91,10 @@ Current Bug routing rules:
 - stuck route:
   - trigger words such as `卡顿` `卡住` `卡死` `掉帧` `黑屏` `ANR` `不刷新`
   - output files: `bug_3d_stuck_report.html` and `.json`
+- startup + stuck combined route:
+  - when the prompt matches both startup and stuck, the bridge still runs both underlying analyses
+  - publishes one merged report page backed by `bug_startup_stuck_report.html`
+  - the per-skill reports remain in the job directory and published bundle for drill-down
 - crash route:
   - trigger words such as `闪退` `crash` `tombstone` `FATAL EXCEPTION` `异常退出` `SIGSEGV`
   - current implementation reuses `3d-stuck-investigate` as the execution engine and exports `bug_crash_report.html` and `.json`
@@ -115,6 +121,8 @@ model = "gemma-4-26b-a4b-it-4bit"
 api_key = ""
 ```
 
+HTML links are served by the built-in report server. If `[report_server].public_base_url` is empty, or still points at loopback, the bridge will automatically switch to the current LAN IP. `listen` starts the local HTTP server in the background. The same server also exposes the local session console at `/sessions`, with JSON APIs under `/api/sessions`, so you can inspect Bot conversations, job IDs, report links, and agent progress stages from a browser.
+
 To avoid cross-bot conflicts in busy groups, set `[lark].bot_name` or `[lark].bot_open_id` for this bot. Only that bot's leading mention should trigger group handling; messages that do not mention this bot are ignored.
 
 Sensitive or machine-specific settings should stay out of Git:
@@ -131,6 +139,7 @@ Sensitive or machine-specific settings should stay out of Git:
   - `LARK_AGENT_BRIDGE_OMLX_BASE_URL`
   - `LARK_AGENT_BRIDGE_OMLX_MODEL`
   - `LARK_AGENT_BRIDGE_OMLX_API_KEY`
+  - `LARK_AGENT_BRIDGE_REPORT_PUBLIC_BASE_URL`
 
 Job retention is controlled by `[job_retention]`. The default local policy is:
 
@@ -197,6 +206,8 @@ Real mode requires a working `lark-cli` bot login and Feishu app scopes for mess
 ```bash
 python3.11 -m lark_agent_bridge listen --config config.toml
 ```
+
+After `listen` starts, open `http://<bridge-lan-ip>:8765/sessions` to view the local conversation and agent-progress console. The page polls the local API and uses the same retention policy as jobs/reports.
 
 Do not expose this bridge as a generic shell executor. The supported behaviors are `signal_lifecycle`, read-only `claude_skill`, local `omlx_chat`, and a small set of bridge help replies.
 

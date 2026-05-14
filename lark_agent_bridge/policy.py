@@ -18,6 +18,8 @@ def evaluate_event_policy(config: BridgeConfig, event: LarkEvent) -> PolicyDecis
         return PolicyDecision(False, f"unsupported_chat_type:{event.chat_type or 'unknown'}")
     if event.chat_type == "p2p":
         return PolicyDecision(True, "p2p_allowed")
+    if config.allowed_users and event.sender_id in config.allowed_users:
+        return PolicyDecision(True, "allowed_user_bypass")
     if config.allowed_chats and event.chat_id not in config.allowed_chats:
         return PolicyDecision(False, "chat_not_allowed")
     return PolicyDecision(True)
