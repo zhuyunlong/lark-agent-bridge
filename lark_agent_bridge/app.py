@@ -20,6 +20,7 @@ from .agents import (
     PerceptionSummaryRunner,
 )
 from .cards import build_result_card, build_status_card, card_to_json
+from .case_store import CaseStore
 from .downloader import LogDownloader
 from .health import HealthMonitor, ProcessWatchdog
 from .lark_client import LarkClient
@@ -75,6 +76,7 @@ class BridgeApp:
         self.progress_callback = progress_callback
         self.process_watchdog = ProcessWatchdog()
         self.health_monitor = HealthMonitor(data_dir=config.data_dir, process_watchdog=self.process_watchdog)
+        self.case_store = CaseStore(config.data_dir / "state" / "cases.json")
         self.report_publisher = report_publisher or HtmlReportPublisher(config)
         self.report_http_server = report_http_server or ReportHttpServer(
             config, activity_store=self.activity_store, health_monitor=self.health_monitor,
@@ -719,6 +721,12 @@ class BridgeApp:
             summary_text=summary_text,
             report_url=published.url,
             report_excerpt=published.context_excerpt,
+        )
+        # Auto-archive as a case for the case library
+        self.case_store.save_from_result(
+            result,
+            event=event,
+            request_text=request_text,
         )
         return result
 
