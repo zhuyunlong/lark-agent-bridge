@@ -31,6 +31,7 @@ from .escalation import (
 )
 from .health import HealthMonitor, ProcessWatchdog
 from .lark_client import LarkClient
+from .lifecycle import AnalysisType, LifecycleStore, mode_to_analysis_type
 from .models import BridgeConfig, DownloadResource, IntentDecision, LarkEvent, SignalRequest, TaskResult, create_job_context
 from .parser import (
     build_basic_chat_reply,
@@ -89,6 +90,7 @@ class BridgeApp:
         self.version_store = ReportVersionStore(config.data_dir / "state" / "report_versions.json")
         self.escalation_checker = EscalationChecker()
         self.notification_history = NotificationHistory()
+        self.lifecycle_store = LifecycleStore()
         self.report_publisher = report_publisher or HtmlReportPublisher(config)
         self.report_http_server = report_http_server or ReportHttpServer(
             config, activity_store=self.activity_store, health_monitor=self.health_monitor,
