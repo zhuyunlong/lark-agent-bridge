@@ -19,7 +19,8 @@ from .agents import (
     OmlxChatClient,
     PerceptionSummaryRunner,
 )
-from .cards import build_result_card, build_status_card, card_to_json
+from .approval import ApprovalStore, build_operation_request
+from .cards import build_confirmation_card, build_result_card, build_status_card, card_to_json
 from .case_store import CaseStore
 from .downloader import LogDownloader
 from .health import HealthMonitor, ProcessWatchdog
@@ -77,6 +78,7 @@ class BridgeApp:
         self.process_watchdog = ProcessWatchdog()
         self.health_monitor = HealthMonitor(data_dir=config.data_dir, process_watchdog=self.process_watchdog)
         self.case_store = CaseStore(config.data_dir / "state" / "cases.json")
+        self.approval_store = ApprovalStore(config.data_dir / "state" / "approvals.json")
         self.report_publisher = report_publisher or HtmlReportPublisher(config)
         self.report_http_server = report_http_server or ReportHttpServer(
             config, activity_store=self.activity_store, health_monitor=self.health_monitor,
@@ -654,6 +656,48 @@ class BridgeApp:
         card = build_status_card(title=title, status=status, details=details, note=note)
         card_json_str = card_to_json(card)
         self.lark_client.send_card_response(event, card_json_str)
+
+    def check_approval(
+        self,
+        event: LarkEvent,
+        operation_type: str,
+        description: str,
+        **hints: object,
+    ) -> tuple[bool, str]:
+        """Check if an operation is approved to proceed.
+
+        Returns ``(can_proceed, request_id)``.  If the operation needs
+        confirmation, sends a confirmation card and returns ``False``.
+        """
+        op = build_operation_request(
+            operation_type,
+            description,
+            requester_id=event.sender_id,
+            chat_id=event.chat_id,
+            **hints,
+        )
+        decision = self.approval_store.evaluate(op)
+        if decision.can_proceed:
+            return True, decision.request_id
+
+        # Send confirmation card to the user
+        if not self.config.dry_run and event.chat_type in {"group", "p2p"}:
+            card = build_confirmation_card(
+                title=f"操作确认：{description}",
+                description=f"即将执行 **{description}**，该操作风险等级为 **{op.risk_level.value}**。请确认是否继续。",
+                risk_level=op.risk_level.value,
+                action_id=decision.request_id,
+                metadata={"操作类型": operation_type, **{k: str(v) for k, v in hints.items()}},
+            )
+            card_json_str = card_to_json(card)
+            self.lark_client.send_card_response(event, card_json_str)
+
+        return False, decision.request_id
+
+    def resolve_approval(self, request_id: str, *, approved: bool) -> bool:
+        """Resolve a pending approval. Returns whether it was approved."""
+        decision = self.approval_store.resolve(request_id, approved=approved)
+        return decision.can_proceed
 
     def _notify_progress(
         self,
