@@ -39,6 +39,7 @@ from .parser import (
 )
 from .policy import PolicyDecision, build_policy_rejection_message, evaluate_event_policy
 from .report_server import HtmlReportPublisher, ReportHttpServer, resolve_bind_host
+from .report_version import ReportVersionStore, derive_group_key
 from .runner import SignalChainRunner
 from .state import AgentActivityStore, ConversationContextStore, EventStateStore
 from .handlers.signal_lifecycle import SignalLifecycleHandler
@@ -79,6 +80,7 @@ class BridgeApp:
         self.health_monitor = HealthMonitor(data_dir=config.data_dir, process_watchdog=self.process_watchdog)
         self.case_store = CaseStore(config.data_dir / "state" / "cases.json")
         self.approval_store = ApprovalStore(config.data_dir / "state" / "approvals.json")
+        self.version_store = ReportVersionStore(config.data_dir / "state" / "report_versions.json")
         self.report_publisher = report_publisher or HtmlReportPublisher(config)
         self.report_http_server = report_http_server or ReportHttpServer(
             config, activity_store=self.activity_store, health_monitor=self.health_monitor,
@@ -772,6 +774,26 @@ class BridgeApp:
             event=event,
             request_text=request_text,
         )
+        # Track report version
+        bug_url = str(details.get("bug_url", ""))
+        group_key = derive_group_key(
+            bug_url=bug_url,
+            case_id=result.job_id or "",
+            root_message_id=context_root_message_id,
+        )
+        version = self.version_store.add_version(
+            group_key,
+            job_id=result.job_id or "",
+            report_url=published.url,
+            summary=summary_text,
+            provider=str(details.get("provider", "")),
+            mode=str(details.get("mode", "")),
+            duration_seconds=result.duration_seconds or 0.0,
+            label=request_text[:80] if request_text else "",
+        )
+        details["report_version"] = version.version
+        details["report_group_key"] = group_key
+        result.details = details
         return result
 
     def _handle_intent_routed_event(
