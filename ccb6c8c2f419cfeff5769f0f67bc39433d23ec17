@@ -1,0 +1,49 @@
+lark_agent_bridge/report_server.py
+  be544bc72b29100f 292-294,316,352-355,391,420,426,473-485,581,592-599
+tests/test_cli.py
+  be544bc72b29100f 158-177
+tests/test_config.py
+  be544bc72b29100f 115-139
+lark_agent_bridge/cli.py
+  be544bc72b29100f 64
+lark_agent_bridge/models.py
+  be544bc72b29100f 28-36,141
+tests/test_report_server.py
+  be544bc72b29100f 65-67,89-90,99
+docs/configuration.md
+  be544bc72b29100f 166,169-190
+lark_agent_bridge/state.py
+  be544bc72b29100f 236,399-412,417,480-490,494
+tests/test_lark_client.py
+  be544bc72b29100f 2-4,9-10,28-146,253-269
+config.example.toml
+  be544bc72b29100f 27-39
+tests/test_state.py
+  be544bc72b29100f 59-79
+README.md
+  be544bc72b29100f 126-127
+docs/operations.md
+  be544bc72b29100f 25,158,171
+lark_agent_bridge/config.py
+  be544bc72b29100f 16,51,86-106
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.18",
+  "base_commit_sha": "ccb6c8c2f419cfeff5769f0f67bc39433d23ec17",
+  "prompts": {
+    "be544bc72b29100f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e275a-df23-78f1-bdd9-dafbac9787a1",
+        "model": "gpt-5.4"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 645,
+      "total_deletions": 17,
+      "accepted_lines": 643,
+      "overriden_lines": 0
+    }
+  }
+}
