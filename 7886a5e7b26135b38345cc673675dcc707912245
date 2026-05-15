@@ -1,0 +1,57 @@
+tests/test_app.py
+  a1b50083a96604c6 2,4,9-12,15-18,21-23,240-431,433-674
+lark_agent_bridge/app.py
+  a1b50083a96604c6 22-23,36-45,63,99,103,105,111,114-115,117-121,123,151-167,170-173,178-206,314-318,321,323-325,331,333-338,340-342,456-465,475-477,481-484,486-491,502,566-583,624,811-1089,1133,1166-1169,1188-1200,1203-1244,1656-1660,1663,1665-1667,1681-1686,1688,1690-1692,1737-1747,1756
+lark_agent_bridge/models.py
+  a1b50083a96604c6 130-169,189-192,260-312,475-498
+lark_agent_bridge/config.py
+  a1b50083a96604c6 14,17,22,25,63-66,199-218
+tests/test_cli.py
+  a1b50083a96604c6 122,137,149,164,169
+tests/test_report_server.py
+  a1b50083a96604c6 79-82
+tests/test_workflow_archive.py
+  a1b50083a96604c6 1-88
+lark_agent_bridge/cli.py
+  a1b50083a96604c6 50,64-65,106
+README.md
+  a1b50083a96604c6 128-129
+lark_agent_bridge/cards.py
+  a1b50083a96604c6 178,229-236,239-246,296-305
+docs/configuration.md
+  a1b50083a96604c6 192-257
+lark_agent_bridge/lark_client.py
+  a1b50083a96604c6 189-247,252-253,259,288-290
+tests/test_config.py
+  a1b50083a96604c6 140-182
+lark_agent_bridge/workflow_archive.py
+  a1b50083a96604c6 1-239
+tests/test_lifecycle.py
+  a1b50083a96604c6 6,18,36,96,105,173,183-186
+config.example.toml
+  a1b50083a96604c6 113-150
+tests/test_card_actions.py
+  a1b50083a96604c6 1-119
+tests/test_lark_client.py
+  a1b50083a96604c6 68-96
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.18",
+  "base_commit_sha": "7886a5e7b26135b38345cc673675dcc707912245",
+  "prompts": {
+    "a1b50083a96604c6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e299e-f532-77c2-b920-26faaf927612",
+        "model": "gpt-5.5"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 1875,
+      "total_deletions": 106,
+      "accepted_lines": 1860,
+      "overriden_lines": 0
+    }
+  }
+}
