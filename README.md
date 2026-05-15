@@ -208,7 +208,13 @@ python3.11 -m lark_agent_bridge run-signal \
 Real mode requires a working `lark-cli` bot login and Feishu app scopes for message events, message reads, attachment downloads, and replies. `python3.11 -m lark_agent_bridge check --config config.toml` will show the current `userOpenId` from `lark-cli auth status`.
 
 ```bash
-python3.11 -m lark_agent_bridge listen --config config.toml
+scripts/run-listener.sh
+```
+
+For diagnostics without starting the listener:
+
+```bash
+scripts/run-listener.sh check
 ```
 
 After `listen` starts, open `http://<bridge-lan-ip>:8765/sessions` to view the local conversation and agent-progress console. The page polls the local API and uses the same retention policy as jobs/reports.
