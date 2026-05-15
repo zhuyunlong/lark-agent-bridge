@@ -112,8 +112,9 @@ public_base_url = ""
 
 [approval]
 # Medium/high-risk operations such as bug analysis, direct file analysis and reanalysis
-# pause on an interactive confirmation card before execution.
-enabled = true
+# pause on an interactive confirmation card before execution. Keep this disabled
+# unless the deployment has a real card callback ingress wired into the bridge.
+enabled = false
 
 [workflow_archive]
 # Best-effort Base/Doc/Drive archival. Leave disabled until the target Base table

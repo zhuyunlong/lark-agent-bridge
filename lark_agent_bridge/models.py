@@ -128,7 +128,7 @@ class ReportServerOptions:
 
 @dataclass(slots=True)
 class ApprovalOptions:
-    enabled: bool = True
+    enabled: bool = False
 
 
 @dataclass(slots=True)

@@ -125,7 +125,7 @@ HTML links are served by the built-in report server. If `[report_server].public_
 
 `listen` also manages `lark-cli event consume` as a daemon-style subprocess: it waits for the official `[event] ready event_key=...` stderr marker, keeps stdin open so the consumer does not exit from EOF under supervisors, records the latest listener health in `data/state/agent_activity.json`, exposes it in `check` and `/api/daemon`, and restarts non-zero consumer failures with configurable backoff.
 
-Interactive result and approval cards are supported. With `[approval].enabled = true`, medium/high-risk paths such as bug analysis, direct file analysis, and reanalysis wait for approve/reject card callbacks before running. Successful reports can also be archived into Feishu Doc, Drive, and Base by enabling `[workflow_archive]`, and optional `[notifications]` / `[dual_agent]` switches add report-ready pushes and primary-vs-secondary conclusion arbitration.
+Interactive result cards are supported. Approval cards are available only when the deployment has a real card callback ingress wired into the bridge; keep `[approval].enabled = false` for the default `listen` path, otherwise medium/high-risk analysis requests will wait on `approval_pending` until they expire. Successful reports can also be archived into Feishu Doc, Drive, and Base by enabling `[workflow_archive]`, and optional `[notifications]` / `[dual_agent]` switches add report-ready pushes and primary-vs-secondary conclusion arbitration.
 
 To avoid cross-bot conflicts in busy groups, set `[lark].bot_name` or `[lark].bot_open_id` for this bot. Only that bot's leading mention should trigger group handling; messages that do not mention this bot are ignored.
 

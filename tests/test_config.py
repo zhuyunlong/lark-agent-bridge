@@ -14,6 +14,7 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("LD normal", config.signal_aliases)
         self.assertEqual(config.download.timeout_seconds, 60)
         self.assertTrue(config.report_server.enabled)
+        self.assertFalse(config.approval.enabled)
 
     def test_toml_overrides_are_resolved_relative_to_config(self):
         with tempfile.TemporaryDirectory() as tmp:

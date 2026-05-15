@@ -195,10 +195,10 @@ Behavior:
 
 ```toml
 [approval]
-enabled = true
+enabled = false
 ```
 
-When enabled, bug analysis, direct file analysis, and reanalysis create an interactive confirmation card first. The original event payload and route text are persisted in `data/state/approvals.json`; approve/reject card callbacks resume or cancel the pending operation.
+Keep approval disabled unless the deployment has a real card callback ingress wired into the bridge. The default `listen` path consumes `im.message.receive_v1`, so enabling approval without callback ingress will leave bug analysis, direct file analysis, and reanalysis waiting on `approval_pending` until the request expires. When enabled with callback ingress, the original event payload and route text are persisted in `data/state/approvals.json`; approve/reject card callbacks resume or cancel the pending operation.
 
 ## Workflow archive
 
