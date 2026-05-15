@@ -186,16 +186,77 @@ class LarkClient:
             stderr=f"unsupported chat type: {event.chat_type}",
         )
 
-    def consume_events(self, *, status_callback: StatusCallback | None = None) -> Iterator[LarkEvent]:
+    def create_doc(self, *, content: str, parent_token: str = "") -> CommandResult:
+        command = [
+            "lark-cli",
+            "docs",
+            "+create",
+            "--api-version",
+            "v2",
+            "--as",
+            "bot",
+            "--content",
+            content,
+        ]
+        if parent_token.strip():
+            command.extend(["--parent-token", parent_token.strip()])
+        return self._run_or_plan(command)
+
+    def upload_drive_file(self, *, path: str | Path, folder_token: str = "", name: str = "") -> CommandResult:
+        file_path = Path(path).expanduser().resolve()
+        command = [
+            "lark-cli",
+            "drive",
+            "+upload",
+            "--as",
+            "bot",
+            "--file",
+            str(file_path),
+        ]
+        if folder_token.strip():
+            command.extend(["--folder-token", folder_token.strip()])
+        if name.strip():
+            command.extend(["--name", name.strip()])
+        return self._run_or_plan(command)
+
+    def upsert_base_record(
+        self,
+        *,
+        base_token: str,
+        table_id: str,
+        fields: dict[str, object],
+        record_id: str = "",
+    ) -> CommandResult:
+        command = [
+            "lark-cli",
+            "base",
+            "+record-upsert",
+            "--as",
+            "bot",
+            "--base-token",
+            base_token,
+            "--table-id",
+            table_id,
+            "--json",
+            json.dumps(fields, ensure_ascii=False, separators=(",", ":")),
+        ]
+        if record_id.strip():
+            command.extend(["--record-id", record_id.strip()])
+        return self._run_or_plan(command)
+
+    def consume_payloads(self, *, status_callback: StatusCallback | None = None) -> Iterator[dict[str, object]]:
         if self.config.dry_run:
             return iter(())
         return self._consume_events_with_restart(status_callback=status_callback)
+
+    def consume_events(self, *, status_callback: StatusCallback | None = None) -> Iterator[LarkEvent]:
+        return (LarkEvent.from_dict(payload) for payload in self.consume_payloads(status_callback=status_callback))
 
     def _consume_events_with_restart(
         self,
         *,
         status_callback: StatusCallback | None = None,
-    ) -> Iterator[LarkEvent]:
+    ) -> Iterator[dict[str, object]]:
         restart_count = 0
         while True:
             run = self._start_event_consumer(status_callback=status_callback, restart_count=restart_count)
@@ -224,7 +285,9 @@ class LarkClient:
                     if not line:
                         continue
                     event_count += 1
-                    yield LarkEvent.from_dict(json.loads(line))
+                    parsed = json.loads(line)
+                    if isinstance(parsed, dict):
+                        yield parsed
             finally:
                 self._terminate_consumer(run.process)
 

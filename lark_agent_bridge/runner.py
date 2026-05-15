@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import time
 
+from .health import ProcessWatchdog, run_tracked_process
 from .models import BridgeConfig, TaskResult
 
 
@@ -13,8 +14,9 @@ SCRIPT_PATH = ".github/skills/signal-chain-analyzer/scripts/analyze_signal_chain
 
 
 class SignalChainRunner:
-    def __init__(self, config: BridgeConfig) -> None:
+    def __init__(self, config: BridgeConfig, process_watchdog: ProcessWatchdog | None = None) -> None:
         self.config = config
+        self.process_watchdog = process_watchdog
 
     def build_command(
         self,
@@ -71,8 +73,10 @@ class SignalChainRunner:
 
         started = time.monotonic()
         try:
-            completed = subprocess.run(
+            completed = run_tracked_process(
                 command,
+                watchdog=self.process_watchdog,
+                name="signal-chain-analyzer",
                 cwd=self.config.guideengine_repo,
                 capture_output=True,
                 text=True,
@@ -137,4 +141,3 @@ class SignalChainRunner:
             stdout=completed.stdout,
             stderr=completed.stderr,
         )
-

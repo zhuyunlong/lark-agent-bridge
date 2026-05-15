@@ -175,6 +175,7 @@ def build_result_card(
     metadata: dict[str, str] | None = None,
     show_actions: bool = True,
     job_id: str | None = None,
+    root_message_id: str | None = None,
     duration_seconds: float | None = None,
 ) -> dict[str, Any]:
     """Build a final analysis result card.
@@ -225,10 +226,24 @@ def build_result_card(
             buttons.append(_button("📄 打开报告", url=report_url, button_type="primary"))
         if job_id:
             buttons.append(
-                _button("🔄 重新分析", value={"action": "reanalyze", "job_id": job_id})
+                _button(
+                    "🔄 重新分析",
+                    value={
+                        "action": "reanalyze",
+                        "job_id": job_id,
+                        "root_message_id": root_message_id or "",
+                    },
+                )
             )
         buttons.append(
-            _button("🆘 升级人工", value={"action": "escalate", "job_id": job_id or ""})
+            _button(
+                "🆘 升级人工",
+                value={
+                    "action": "escalate",
+                    "job_id": job_id or "",
+                    "root_message_id": root_message_id or "",
+                },
+            )
         )
         if buttons:
             elements.append(_action_block(buttons))
@@ -278,8 +293,16 @@ def build_confirmation_card(
     elements.append(_divider())
     elements.append(
         _action_block([
-            _button("✅ 确认执行", value={"action": "approve", "action_id": action_id}, button_type="primary"),
-            _button("❌ 取消", value={"action": "reject", "action_id": action_id}, button_type="danger"),
+            _button(
+                "✅ 确认执行",
+                value={"action": "approve", "request_id": action_id, "action_id": action_id},
+                button_type="primary",
+            ),
+            _button(
+                "❌ 取消",
+                value={"action": "reject", "request_id": action_id, "action_id": action_id},
+                button_type="danger",
+            ),
         ])
     )
 

@@ -1,10 +1,26 @@
 from pathlib import Path
+import os
 import tempfile
+import time
 import unittest
 
 from lark_agent_bridge.app import BridgeApp
 from lark_agent_bridge.lark_client import CommandResult
-from lark_agent_bridge.models import BridgeConfig, IntentDecision, LarkEvent, LarkOptions
+from lark_agent_bridge.models import (
+    ApprovalOptions,
+    BridgeConfig as RealBridgeConfig,
+    DualAgentOptions,
+    IntentDecision,
+    LarkEvent,
+    LarkOptions,
+    NotificationOptions,
+    WorkflowArchiveOptions,
+)
+
+
+def BridgeConfig(*args, **kwargs):
+    kwargs.setdefault("approval", ApprovalOptions(enabled=False))
+    return RealBridgeConfig(*args, **kwargs)
 
 
 def _all_reply_message_ids(fake_lark):
@@ -221,6 +237,441 @@ def event(**overrides):
 
 
 class AppTests(unittest.TestCase):
+    def test_record_daemon_status_updates_health_monitor_pid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = BridgeApp(BridgeConfig(data_dir=Path(tmp)))
+
+            app.record_daemon_status({"stage": "event_consumer_ready", "process_id": os.getpid()})
+
+            health = app.check()["health"]
+        self.assertEqual(health["components"]["event_consumer"]["pid"], os.getpid())
+        self.assertTrue(health["components"]["event_consumer"]["alive"])
+
+    def test_health_monitor_restores_daemon_pid_from_saved_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(data_dir=Path(tmp))
+            app = BridgeApp(config)
+            app.record_daemon_status({"stage": "event_consumer_ready", "process_id": os.getpid()})
+
+            restored = BridgeApp(config)
+            health = restored.check()["health"]
+
+        self.assertEqual(health["components"]["event_consumer"]["pid"], os.getpid())
+        self.assertTrue(health["components"]["event_consumer"]["alive"])
+
+    def test_health_maintenance_records_stuck_process_cleanup(self):
+        class FakeWatchdog:
+            def terminate_stuck(self):
+                return [{"pid": 123, "name": "agent", "terminated": True, "idle_seconds": 99}]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app = BridgeApp(BridgeConfig(data_dir=Path(tmp)))
+            app.process_watchdog = FakeWatchdog()
+
+            cleaned = app.run_health_maintenance()
+            session = app.activity_store.get_session("daemon")
+
+        self.assertEqual(cleaned[0]["pid"], 123)
+        self.assertEqual(session["progress"][0]["stage"], "stuck_process_cleanup")
+
+    def test_default_runners_share_process_watchdog(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = BridgeApp(BridgeConfig(data_dir=Path(tmp)))
+
+            self.assertIs(app.claude_runner.process_watchdog, app.process_watchdog)
+            self.assertIs(app.bug_runner.process_watchdog, app.process_watchdog)
+            self.assertIs(app.perception_runner.process_watchdog, app.process_watchdog)
+            self.assertIs(app.intent_runner.process_watchdog, app.process_watchdog)
+            self.assertIs(app.handler.runner.process_watchdog, app.process_watchdog)
+
+    def test_reanalysis_keeps_same_bug_report_version_group(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = Path(tmp) / "bug_metadata.md"
+            html = Path(tmp) / "bug_report.html"
+            metadata.write_text("bug", encoding="utf-8")
+            html.write_text("<html></html>", encoding="utf-8")
+            fake_lark = FakeLarkClient()
+            fake_bug = FakeBugRunner(metadata, html)
+            app = BridgeApp(
+                BridgeConfig(dry_run=False, data_dir=Path(tmp), allowed_chats=["oc_denied"]),
+                lark_client=fake_lark,
+                bug_runner=fake_bug,
+            )
+            bug_url = "https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722"
+
+            first = app.handle_event(event(content=f"@bot {bug_url} 调查3D启动和卡顿"))
+            followup = app.handle_event(
+                event(
+                    event_id="evt_reanalysis_version",
+                    message_id="om_reanalysis_version",
+                    content="@bot 重新分析，故障时间改成 11:30",
+                    reply_to=first.details["conversation_root_message_id"],
+                )
+            )
+
+        self.assertEqual(first.details["report_group_key"], f"bug:{bug_url}")
+        self.assertEqual(followup.details["report_group_key"], f"bug:{bug_url}")
+        self.assertEqual(followup.details["report_version"], 2)
+
+    def test_report_ready_notification_pushes_when_enabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = Path(tmp) / "bug_metadata.md"
+            html = Path(tmp) / "bug_report.html"
+            metadata.write_text("bug", encoding="utf-8")
+            html.write_text("<html></html>", encoding="utf-8")
+            fake_lark = FakeLarkClient()
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    allowed_chats=["oc_denied"],
+                    notifications=NotificationOptions(enabled=True),
+                ),
+                lark_client=fake_lark,
+                bug_runner=FakeBugRunner(metadata, html),
+            )
+
+            result = app.handle_event(
+                event(content="@bot https://project.feishu.cn/xpfailuremgmt/buglo/detail/1 调查3D启动")
+            )
+
+        self.assertTrue(result.success)
+        self.assertTrue(any("分析报告已生成" in item["text"] for item in fake_lark.sent))
+
+    def test_report_ready_notification_dedup_survives_restart(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = Path(tmp) / "bug_metadata.md"
+            html = Path(tmp) / "bug_report.html"
+            metadata.write_text("bug", encoding="utf-8")
+            html.write_text("<html></html>", encoding="utf-8")
+            config = BridgeConfig(
+                dry_run=False,
+                data_dir=Path(tmp) / "data",
+                allowed_chats=["oc_denied"],
+                notifications=NotificationOptions(enabled=True),
+            )
+
+            first_lark = FakeLarkClient()
+            first_app = BridgeApp(config, lark_client=first_lark, bug_runner=FakeBugRunner(metadata, html))
+            first_app.handle_event(
+                event(content="@bot https://project.feishu.cn/xpfailuremgmt/buglo/detail/1 调查3D启动")
+            )
+
+            second_lark = FakeLarkClient()
+            second_app = BridgeApp(config, lark_client=second_lark, bug_runner=FakeBugRunner(metadata, html))
+            second_app.handle_event(
+                event(
+                    event_id="evt_restart_notification",
+                    message_id="om_restart_notification",
+                    content="@bot https://project.feishu.cn/xpfailuremgmt/buglo/detail/1 调查3D启动",
+                )
+            )
+
+        self.assertTrue(any("分析报告已生成" in item["text"] for item in first_lark.sent))
+        self.assertFalse(any("分析报告已生成" in item["text"] for item in second_lark.sent))
+
+    def test_dual_agent_arbitration_is_added_when_secondary_summary_exists(self):
+        class DualFakeBugRunner(FakeBugRunner):
+            def run_bug_analysis(self, request, *, event=None, progress_callback=None):
+                result = super().run_bug_analysis(request, event=event, progress_callback=progress_callback)
+                result.message = "根因：网络超时"
+                result.details["agent_summary_provider"] = "codex"
+                result.details["secondary_agent_summary"] = "根因：内存泄漏"
+                result.details["secondary_agent_provider"] = "claude"
+                return result
+
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = Path(tmp) / "bug_metadata.md"
+            html = Path(tmp) / "bug_report.html"
+            metadata.write_text("bug", encoding="utf-8")
+            html.write_text("<html></html>", encoding="utf-8")
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    allowed_chats=["oc_denied"],
+                    dual_agent=DualAgentOptions(enabled=True),
+                ),
+                lark_client=FakeLarkClient(),
+                bug_runner=DualFakeBugRunner(metadata, html),
+            )
+
+            result = app.handle_event(
+                event(content="@bot https://project.feishu.cn/xpfailuremgmt/buglo/detail/1 调查3D启动")
+            )
+
+        self.assertIn("arbitration", result.details)
+        self.assertIn("双 Agent 裁决", result.message)
+
+    def test_bug_request_waits_for_card_approval_then_runs_after_approve_action(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = Path(tmp) / "bug_metadata.md"
+            html = Path(tmp) / "bug_report.html"
+            metadata.write_text("bug", encoding="utf-8")
+            html.write_text("<html></html>", encoding="utf-8")
+            fake_lark = FakeLarkClient()
+            fake_bug = FakeBugRunner(metadata, html)
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    allowed_chats=["oc_denied"],
+                    approval=ApprovalOptions(enabled=True),
+                ),
+                lark_client=fake_lark,
+                bug_runner=fake_bug,
+            )
+
+            pending = app.handle_event(
+                event(
+                    content="@bot https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722 调查3D启动和卡顿"
+                )
+            )
+            self.assertFalse(pending.success)
+            self.assertEqual(pending.error_code, "approval_pending")
+            self.assertEqual(app.activity_store.get_session("om_1")["status"], "pending")
+            self.assertEqual(len(fake_bug.requests), 0)
+            self.assertEqual(len(fake_lark.cards), 1)
+
+            import json
+            card = json.loads(fake_lark.cards[0]["card_json"])
+            request_id = card["elements"][-1]["actions"][0]["value"]["request_id"]
+            approved = app.handle_card_action_payload(
+                {
+                    "event": {
+                        "operator": {"operator_id": {"open_id": "ou_1"}},
+                        "action": {"value": {"action": "approve", "request_id": request_id}},
+                    }
+                }
+            )
+
+        self.assertTrue(approved.success)
+        self.assertEqual(approved.details["mode"], "bug_analysis")
+        self.assertEqual(len(fake_bug.requests), 1)
+
+    def test_expired_approval_action_does_not_run_operation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = Path(tmp) / "bug_metadata.md"
+            html = Path(tmp) / "bug_report.html"
+            metadata.write_text("bug", encoding="utf-8")
+            html.write_text("<html></html>", encoding="utf-8")
+            fake_bug = FakeBugRunner(metadata, html)
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    allowed_chats=["oc_denied"],
+                    approval=ApprovalOptions(enabled=True),
+                ),
+                lark_client=FakeLarkClient(),
+                bug_runner=fake_bug,
+            )
+            app.approval_store.default_ttl_seconds = 0.01
+            pending = app.handle_event(
+                event(content="@bot https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722 调查3D启动")
+            )
+            time.sleep(0.02)
+
+            approved = app.handle_card_action_payload(
+                {
+                    "event": {
+                        "action": {
+                            "value": {
+                                "action": "approve",
+                                "request_id": pending.details["approval_request_id"],
+                            }
+                        }
+                    }
+                }
+            )
+
+        self.assertFalse(approved.success)
+        self.assertEqual(approved.error_code, "approval_not_available")
+        self.assertEqual(len(fake_bug.requests), 0)
+
+    def test_reject_card_action_does_not_run_pending_operation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = Path(tmp) / "bug_metadata.md"
+            html = Path(tmp) / "bug_report.html"
+            metadata.write_text("bug", encoding="utf-8")
+            html.write_text("<html></html>", encoding="utf-8")
+            fake_lark = FakeLarkClient()
+            fake_bug = FakeBugRunner(metadata, html)
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    allowed_chats=["oc_denied"],
+                    approval=ApprovalOptions(enabled=True),
+                ),
+                lark_client=fake_lark,
+                bug_runner=fake_bug,
+            )
+            pending = app.handle_event(
+                event(
+                    content="@bot https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722 调查3D启动时序"
+                )
+            )
+            request_id = pending.details["approval_request_id"]
+
+            rejected = app.handle_card_action_payload(
+                {"event": {"action": {"value": {"action": "reject", "request_id": request_id}}}}
+            )
+
+        self.assertFalse(rejected.success)
+        self.assertEqual(rejected.error_code, "approval_rejected")
+        self.assertEqual(len(fake_bug.requests), 0)
+
+    def test_direct_analysis_waits_for_approval_then_runs_after_approve_action(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = Path(tmp) / "bug_metadata.md"
+            html = Path(tmp) / "bug_report.html"
+            metadata.write_text("bug", encoding="utf-8")
+            html.write_text("<html></html>", encoding="utf-8")
+            fake_lark = FakeLarkClient()
+            fake_bug = FakeBugRunner(metadata, html)
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    allowed_chats=["oc_denied"],
+                    approval=ApprovalOptions(enabled=True),
+                ),
+                lark_client=fake_lark,
+                bug_runner=fake_bug,
+            )
+
+            pending = app.handle_event(event(content="@bot 分析启动和卡顿 file_log_123"))
+            self.assertFalse(pending.success)
+            self.assertEqual(pending.error_code, "approval_pending")
+            self.assertEqual(len(fake_bug.requests), 0)
+
+            approved = app.handle_card_action_payload(
+                {
+                    "event": {
+                        "action": {
+                            "value": {
+                                "action": "approve",
+                                "request_id": pending.details["approval_request_id"],
+                            }
+                        }
+                    }
+                }
+            )
+
+        self.assertTrue(approved.success)
+        self.assertEqual(approved.details["mode"], "direct_analysis")
+        self.assertEqual(len(fake_bug.requests), 1)
+
+    def test_followup_reanalysis_waits_for_approval_then_runs_after_approve_action(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = Path(tmp) / "bug_metadata.md"
+            html = Path(tmp) / "bug_report.html"
+            metadata.write_text("bug", encoding="utf-8")
+            html.write_text("<html></html>", encoding="utf-8")
+            fake_lark = FakeLarkClient()
+            fake_bug = FakeBugRunner(metadata, html)
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    allowed_chats=["oc_denied"],
+                    approval=ApprovalOptions(enabled=True),
+                ),
+                lark_client=fake_lark,
+                bug_runner=fake_bug,
+            )
+            app.conversation_store.remember(
+                root_message_id="om_root",
+                chat_id="oc_denied",
+                mode="bug_analysis",
+                request_text="原始 bug 分析",
+                summary_text="原始结论",
+                report_url="http://report",
+                report_excerpt="报告摘录",
+            )
+
+            pending = app.handle_event(
+                event(
+                    event_id="evt_reanalysis_pending",
+                    message_id="om_followup",
+                    reply_to="om_root",
+                    content="@bot 重新分析",
+                )
+            )
+            self.assertFalse(pending.success)
+            self.assertEqual(pending.error_code, "approval_pending")
+            self.assertEqual(len(fake_bug.reanalysis_calls), 0)
+
+            approved = app.handle_card_action_payload(
+                {
+                    "event": {
+                        "action": {
+                            "value": {
+                                "action": "approve",
+                                "request_id": pending.details["approval_request_id"],
+                            }
+                        }
+                    }
+                }
+            )
+
+        self.assertTrue(approved.success)
+        self.assertEqual(approved.details["mode"], "bug_reanalysis")
+        self.assertEqual(len(fake_bug.reanalysis_calls), 1)
+
+    def test_card_reanalysis_rejects_missing_chat_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = BridgeApp(BridgeConfig(data_dir=Path(tmp)))
+
+            result = app.handle_card_action_payload(
+                {
+                    "event": {
+                        "context": {"open_message_id": "om_card"},
+                        "action": {
+                            "value": {
+                                "action": "reanalyze",
+                                "root_message_id": "om_root",
+                            }
+                        },
+                    }
+                }
+            )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, "invalid_card_action_context")
+
+    def test_workflow_archive_failure_does_not_block_delivery(self):
+        class FailingArchiver:
+            def archive(self, *args, **kwargs):
+                raise RuntimeError("archive permission denied")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = Path(tmp) / "bug_metadata.md"
+            html = Path(tmp) / "bug_report.html"
+            metadata.write_text("bug", encoding="utf-8")
+            html.write_text("<html></html>", encoding="utf-8")
+            fake_lark = FakeLarkClient()
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    allowed_chats=["oc_denied"],
+                    workflow_archive=WorkflowArchiveOptions(enabled=True),
+                ),
+                lark_client=fake_lark,
+                bug_runner=FakeBugRunner(metadata, html),
+            )
+            app.workflow_archiver = FailingArchiver()
+
+            result = app.handle_event(
+                event(content="@bot https://project.feishu.cn/xpfailuremgmt/buglo/detail/1 调查3D启动")
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.details["workflow_archive"]["error_type"], "RuntimeError")
+        self.assertTrue(fake_lark.replies or fake_lark.card_replies)
+
     def test_bug_request_emits_progress_events(self):
         with tempfile.TemporaryDirectory() as tmp:
             metadata = Path(tmp) / "bug_metadata.md"

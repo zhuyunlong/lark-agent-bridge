@@ -76,7 +76,10 @@ class ReportServerTests(unittest.TestCase):
                 ),
             )
             server = ReportHttpServer(config, activity_store=activity_store)
-            server.start()
+            try:
+                server.start()
+            except PermissionError as exc:
+                self.skipTest(f"local HTTP bind is not permitted in this environment: {exc}")
             assert server._server is not None
             port = server._server.server_address[1]
             try:

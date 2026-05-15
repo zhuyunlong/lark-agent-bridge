@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import time
+import tempfile
+import unittest
+from pathlib import Path
 
 from lark_agent_bridge.escalation import (
     EscalationChecker,
@@ -18,7 +21,7 @@ from lark_agent_bridge.escalation import (
 )
 
 
-class TestEscalationChecker:
+class TestEscalationChecker(unittest.TestCase):
     def test_no_timeout_below_threshold(self):
         checker = EscalationChecker()
         notifications = checker.check_timeout(elapsed_seconds=60)
@@ -75,7 +78,7 @@ class TestEscalationChecker:
             assert n.target_chat_id == "oc_1"
 
 
-class TestNotificationBuilders:
+class TestNotificationBuilders(unittest.TestCase):
     def test_status_change(self):
         n = build_status_change_notification(
             old_status="analyzing",
@@ -113,7 +116,7 @@ class TestNotificationBuilders:
         assert n.level == EscalationLevel.CRITICAL
 
 
-class TestNotificationHistory:
+class TestNotificationHistory(unittest.TestCase):
     def test_record_and_count(self):
         history = NotificationHistory()
         n = PushNotification(
@@ -140,6 +143,25 @@ class TestNotificationHistory:
         assert history.should_send(n) is True
         history.record(n)
         assert history.should_send(n) is False
+
+    def test_dedup_history_persists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "notification_history.json"
+            n = PushNotification(
+                reason=PushReason.REPORT_READY,
+                level=EscalationLevel.INFO,
+                title="test",
+                message="test",
+                target_chat_id="oc_1",
+                metadata={"job_id": "j1"},
+                created_at=time.time(),
+            )
+
+            history = NotificationHistory(path, dedup_window_seconds=60)
+            history.record(n)
+            restored = NotificationHistory(path, dedup_window_seconds=60)
+
+        assert restored.should_send(n) is False
 
     def test_dedup_allows_different_job(self):
         history = NotificationHistory(dedup_window_seconds=60)

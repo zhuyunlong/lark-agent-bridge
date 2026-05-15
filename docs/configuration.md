@@ -189,6 +189,72 @@ Behavior:
 - `max_restarts = 0` means unlimited restarts with exponential backoff capped by `restart_max_delay_seconds`
 - the latest daemon status is stored in `data/state/agent_activity.json`
 
+## Approval cards
+
+`[approval]` controls the operation gate for high-impact paths:
+
+```toml
+[approval]
+enabled = true
+```
+
+When enabled, bug analysis, direct file analysis, and reanalysis create an interactive confirmation card first. The original event payload and route text are persisted in `data/state/approvals.json`; approve/reject card callbacks resume or cancel the pending operation.
+
+## Workflow archive
+
+`[workflow_archive]` is a best-effort Base/Doc/Drive sink for successful analysis results:
+
+```toml
+[workflow_archive]
+enabled = false
+base_token = ""
+table_id = ""
+drive_folder_token = ""
+doc_parent_token = ""
+
+[workflow_archive.base_field_map]
+job_id = "任务ID"
+mode = "分析类型"
+status = "状态"
+summary = "结论摘要"
+report_url = "报告链接"
+bug_url = "Bug链接"
+provider = "Agent"
+duration_seconds = "耗时秒"
+chat_id = "群ID"
+sender_id = "发起人"
+doc_url = "Doc链接"
+report_version = "报告版本"
+```
+
+Behavior:
+
+- creates a Feishu Doc summary with `docs +create --api-version v2`
+- uploads generated HTML/JSON reports to Drive with `drive +upload` when `drive_folder_token` is set
+- writes a Base row with `base +record-upsert` when `base_token` and `table_id` are set
+- archive failures are recorded under `result.details.workflow_archive`; they do not fail the completed analysis
+
+## Notifications and dual-agent arbitration
+
+Optional proactive push:
+
+```toml
+[notifications]
+enabled = false
+report_ready = true
+```
+
+When enabled, a de-duplicated "report ready" message is pushed after a report URL is published.
+
+Optional dual-agent arbitration:
+
+```toml
+[dual_agent]
+enabled = false
+```
+
+When enabled, if a runner returns `secondary_agent_summary` in `TaskResult.details`, the bridge compares the primary result with the secondary conclusion and writes the arbitration result back to `result.details.arbitration`.
+
 ## Intent routing
 
 To let a local `codex` / `claude` decide whether a message is ordinary chat, a fresh analysis request, or a follow-up to an existing analysis session, enable `[intent_analysis]`:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import tempfile
 import time
+import unittest
 from pathlib import Path
 
 from lark_agent_bridge.approval import (
@@ -17,7 +18,7 @@ from lark_agent_bridge.approval import (
 )
 
 
-class TestClassifyRisk:
+class TestClassifyRisk(unittest.TestCase):
     def test_chat_is_low(self):
         assert classify_risk("chat") == RiskLevel.LOW
 
@@ -43,7 +44,7 @@ class TestClassifyRisk:
         assert classify_risk("bug_analysis", file_count=100) == RiskLevel.HIGH
 
 
-class TestBuildOperationRequest:
+class TestBuildOperationRequest(unittest.TestCase):
     def test_auto_classifies_risk(self):
         op = build_operation_request("bug_analysis", "分析 bug")
         assert op.risk_level == RiskLevel.MEDIUM
@@ -62,7 +63,7 @@ class TestBuildOperationRequest:
         assert op.risk_level == RiskLevel.LOW
 
 
-class TestApprovalStore:
+class TestApprovalStore(unittest.TestCase):
     def test_low_risk_auto_approved(self):
         store = ApprovalStore()
         op = OperationRequest(
@@ -128,6 +129,20 @@ class TestApprovalStore:
         resolved = store.resolve(decision.request_id, approved=True)
         assert resolved.status == ApprovalStatus.EXPIRED
 
+    def test_resolve_is_single_use(self):
+        store = ApprovalStore()
+        op = OperationRequest("bug", "bug", risk_level=RiskLevel.MEDIUM)
+        decision = store.evaluate(op)
+
+        first = store.resolve(decision.request_id, approved=True)
+        second = store.resolve(decision.request_id, approved=True)
+
+        assert first.status == ApprovalStatus.APPROVED
+        assert first.can_proceed is True
+        assert second.status == ApprovalStatus.EXPIRED
+        assert second.can_proceed is False
+        assert second.reason == "already_approved"
+
     def test_list_pending(self):
         store = ApprovalStore()
         for i in range(3):
@@ -165,7 +180,7 @@ class TestApprovalStore:
         assert store.pending_count == 0
 
 
-class TestPendingApproval:
+class TestPendingApproval(unittest.TestCase):
     def test_to_dict_roundtrip(self):
         op = OperationRequest(
             operation_type="bug",

@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 import time
+import unittest
+from unittest import mock
 
 from lark_agent_bridge.health import (
     HealthMonitor,
@@ -11,6 +15,7 @@ from lark_agent_bridge.health import (
     ProcessWatchdog,
     TrackedProcess,
     _process_alive,
+    run_tracked_process,
 )
 
 
@@ -163,3 +168,76 @@ class TestProcessAlive:
 
     def test_nonexistent_process(self):
         assert _process_alive(99999999) is False
+
+
+class ProcessAliveTests(unittest.TestCase):
+    def test_permission_error_means_process_exists_but_is_not_signalable(self):
+        with mock.patch("lark_agent_bridge.health.os.kill", side_effect=PermissionError):
+            self.assertTrue(_process_alive(12345))
+
+
+class RunTrackedProcessTests(unittest.TestCase):
+    def test_tracks_and_untracks_real_subprocess(self):
+        watchdog = ProcessWatchdog(max_idle_seconds=60)
+
+        completed = run_tracked_process(
+            [sys.executable, "-c", "print('ok')"],
+            watchdog=watchdog,
+            name="unit-test-subprocess",
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+
+        self.assertEqual(completed.returncode, 0)
+        self.assertEqual(completed.stdout.strip(), "ok")
+        self.assertEqual(watchdog.tracked_count, 0)
+
+    def test_falls_back_to_subprocess_run_without_watchdog(self):
+        completed = run_tracked_process(
+            [sys.executable, "-c", "print('fallback')"],
+            watchdog=None,
+            name="fallback",
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+
+        self.assertIsInstance(completed, subprocess.CompletedProcess)
+        self.assertEqual(completed.stdout.strip(), "fallback")
+
+    def test_timeout_kill_race_still_untracks_process(self):
+        class RaceProcess:
+            pid = os.getpid()
+            returncode = 0
+
+            def __init__(self):
+                self.calls = 0
+
+            def communicate(self, input=None, timeout=None):
+                self.calls += 1
+                if self.calls == 1:
+                    raise subprocess.TimeoutExpired(["cmd"], timeout=timeout)
+                return "", ""
+
+            def kill(self):
+                raise ProcessLookupError
+
+        watchdog = ProcessWatchdog(max_idle_seconds=60)
+        process = RaceProcess()
+
+        with mock.patch("lark_agent_bridge.health.subprocess.Popen", return_value=process):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                run_tracked_process(
+                    ["cmd"],
+                    watchdog=watchdog,
+                    name="race-process",
+                    capture_output=True,
+                    text=True,
+                    timeout=1,
+                    check=False,
+                )
+
+        self.assertEqual(watchdog.tracked_count, 0)

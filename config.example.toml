@@ -110,5 +110,43 @@ port = 8765
 # The same HTTP listener also serves the local session console at `/sessions`.
 public_base_url = ""
 
+[approval]
+# Medium/high-risk operations such as bug analysis, direct file analysis and reanalysis
+# pause on an interactive confirmation card before execution.
+enabled = true
+
+[workflow_archive]
+# Best-effort Base/Doc/Drive archival. Leave disabled until the target Base table
+# fields and Drive/Doc folder permissions are ready for the bot identity.
+enabled = false
+base_token = ""
+table_id = ""
+drive_folder_token = ""
+doc_parent_token = ""
+
+[workflow_archive.base_field_map]
+job_id = "任务ID"
+mode = "分析类型"
+status = "状态"
+summary = "结论摘要"
+report_url = "报告链接"
+bug_url = "Bug链接"
+provider = "Agent"
+duration_seconds = "耗时秒"
+chat_id = "群ID"
+sender_id = "发起人"
+doc_url = "Doc链接"
+report_version = "报告版本"
+
+[notifications]
+# Optional proactive pushes. Disabled by default to avoid duplicate group noise.
+enabled = false
+report_ready = true
+
+[dual_agent]
+# When enabled, the bridge arbitrates primary result text against
+# `secondary_agent_summary` if a runner provides it.
+enabled = false
+
 [runner]
 timeout_seconds = 900

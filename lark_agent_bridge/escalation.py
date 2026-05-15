@@ -14,6 +14,8 @@ timers; callers (e.g., health monitor, app loop) invoke checks.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -65,6 +67,19 @@ class PushNotification:
             "metadata": self.metadata,
             "created_at": self.created_at,
         }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "PushNotification":
+        return cls(
+            reason=PushReason(str(data.get("reason") or PushReason.STATUS_CHANGE.value)),
+            level=EscalationLevel(str(data.get("level") or EscalationLevel.INFO.value)),
+            title=str(data.get("title") or ""),
+            message=str(data.get("message") or ""),
+            target_chat_id=str(data.get("target_chat_id") or ""),
+            target_user_id=str(data.get("target_user_id") or ""),
+            metadata=dict(data.get("metadata") or {}),
+            created_at=float(data.get("created_at") or 0.0),
+        )
 
 
 @dataclass
@@ -276,10 +291,18 @@ def build_manual_escalation_notification(
 class NotificationHistory:
     """Track recently sent notifications to avoid duplicates."""
 
-    def __init__(self, *, max_size: int = 200, dedup_window_seconds: float = 60.0) -> None:
+    def __init__(
+        self,
+        state_file: str | Path | None = None,
+        *,
+        max_size: int = 200,
+        dedup_window_seconds: float = 60.0,
+    ) -> None:
+        self.state_file = Path(state_file) if state_file else None
         self.max_size = max(10, max_size)
         self.dedup_window_seconds = dedup_window_seconds
         self._history: list[PushNotification] = []
+        self._load()
 
     def should_send(self, notification: PushNotification) -> bool:
         """Check if a similar notification was sent recently."""
@@ -296,6 +319,7 @@ class NotificationHistory:
         self._history.append(notification)
         if len(self._history) > self.max_size:
             self._history = self._history[-self.max_size:]
+        self._persist()
 
     @property
     def count(self) -> int:
@@ -307,3 +331,38 @@ class NotificationHistory:
     def _dedup_key(self, n: PushNotification) -> str:
         job_id = n.metadata.get("job_id", "")
         return f"{n.reason.value}:{n.target_chat_id}:{job_id}:{n.level.value}"
+
+    def _persist(self) -> None:
+        if self.state_file is None:
+            return
+        self.state_file.parent.mkdir(parents=True, exist_ok=True)
+        data = [n.to_dict() for n in self._history[-self.max_size:]]
+        tmp = self.state_file.with_name(f".{self.state_file.name}.tmp")
+        try:
+            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp.replace(self.state_file)
+        finally:
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except OSError:
+                pass
+
+    def _load(self) -> None:
+        if self.state_file is None or not self.state_file.exists():
+            return
+        try:
+            data = json.loads(self.state_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        if not isinstance(data, list):
+            return
+        loaded: list[PushNotification] = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            try:
+                loaded.append(PushNotification.from_dict(item))
+            except (TypeError, ValueError):
+                continue
+        self._history = loaded[-self.max_size:]

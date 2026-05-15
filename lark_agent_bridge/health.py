@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import os
 import signal
+import subprocess
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -172,6 +173,68 @@ class ProcessWatchdog:
             }
             for proc in self._tracked.values()
         ]
+
+
+def run_tracked_process(
+    command: list[str],
+    *,
+    watchdog: ProcessWatchdog | None,
+    name: str,
+    max_idle_seconds: float | None = None,
+    **kwargs: Any,
+) -> subprocess.CompletedProcess[str]:
+    """Run a subprocess and register its PID with the watchdog when available.
+
+    Falls back to ``subprocess.run`` when no watchdog is supplied so existing
+    tests and standalone runners keep their previous behavior.
+    """
+    if watchdog is None:
+        return subprocess.run(command, **kwargs)
+
+    timeout = kwargs.pop("timeout", None)
+    check = bool(kwargs.pop("check", False))
+    capture_output = bool(kwargs.pop("capture_output", False))
+    input_data = kwargs.pop("input", None)
+
+    if capture_output:
+        if kwargs.get("stdout") is not None or kwargs.get("stderr") is not None:
+            raise ValueError("stdout and stderr arguments may not be used with capture_output")
+        kwargs["stdout"] = subprocess.PIPE
+        kwargs["stderr"] = subprocess.PIPE
+
+    process = subprocess.Popen(command, **kwargs)
+    watchdog.track(
+        process.pid,
+        name,
+        max_idle_seconds=max_idle_seconds if max_idle_seconds is not None else timeout,
+    )
+    try:
+        try:
+            stdout, stderr = process.communicate(input=input_data, timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+            stdout, stderr = process.communicate()
+            raise subprocess.TimeoutExpired(
+                command,
+                timeout,
+                output=exc.output if exc.output is not None else stdout,
+                stderr=exc.stderr if exc.stderr is not None else stderr,
+            ) from exc
+    finally:
+        watchdog.untrack(process.pid)
+
+    completed = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+    if check and completed.returncode:
+        raise subprocess.CalledProcessError(
+            completed.returncode,
+            command,
+            output=stdout,
+            stderr=stderr,
+        )
+    return completed
 
 
 # ---------------------------------------------------------------------------
@@ -333,8 +396,10 @@ def _process_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
         return True
-    except (ProcessLookupError, PermissionError):
+    except ProcessLookupError:
         return False
+    except PermissionError:
+        return True
     except OSError:
         return False
 

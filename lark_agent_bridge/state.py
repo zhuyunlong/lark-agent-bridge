@@ -526,6 +526,8 @@ def _now_iso() -> str:
 def _result_status(result: TaskResult) -> str:
     if result.skipped:
         return "skipped"
+    if result.error_code == "approval_pending":
+        return "pending"
     if result.success:
         return "succeeded"
     return "failed"

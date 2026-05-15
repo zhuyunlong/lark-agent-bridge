@@ -20,6 +20,7 @@ import urllib.request
 from typing import Callable
 
 from .downloader import DownloadError, LogDownloader
+from .health import ProcessWatchdog, run_tracked_process
 from .models import (
     BridgeConfig,
     BugRequest,
@@ -232,8 +233,9 @@ class IntentAnalysisRunner:
     FOLLOWUP_ACTIONS = {"continue_agent", "reanalysis", "context_chat", "none"}
     CONTEXT_SOURCES = {"explicit", "latest_chat", "none"}
 
-    def __init__(self, config: BridgeConfig) -> None:
+    def __init__(self, config: BridgeConfig, process_watchdog: ProcessWatchdog | None = None) -> None:
         self.config = config
+        self.process_watchdog = process_watchdog
 
     def is_enabled(self) -> bool:
         options = self.config.intent_analysis
@@ -273,8 +275,10 @@ class IntentAnalysisRunner:
             attempts.append(fallback_invocation)
         for index, (command, output_path) in enumerate(attempts):
             try:
-                completed = subprocess.run(
+                completed = run_tracked_process(
                     command,
+                    watchdog=self.process_watchdog,
+                    name="intent-analysis-agent",
                     cwd=self._working_dir(),
                     capture_output=True,
                     text=True,
@@ -528,8 +532,9 @@ class IntentAnalysisRunner:
 
 
 class ClaudeSkillRunner:
-    def __init__(self, config: BridgeConfig) -> None:
+    def __init__(self, config: BridgeConfig, process_watchdog: ProcessWatchdog | None = None) -> None:
         self.config = config
+        self.process_watchdog = process_watchdog
 
     def run_skill_analysis(self, request: ClaudeSkillRequest, *, event: LarkEvent | None = None) -> TaskResult:
         options = self.config.claude_agent
@@ -576,8 +581,10 @@ class ClaudeSkillRunner:
 
         started = time.monotonic()
         try:
-            completed = subprocess.run(
+            completed = run_tracked_process(
                 command,
+                watchdog=self.process_watchdog,
+                name="claude-skill-agent",
                 cwd=self._working_dir(),
                 capture_output=True,
                 text=True,
@@ -764,8 +771,9 @@ def _provider_candidates(provider: str, command_name: str) -> list[tuple[str, st
 
 
 class BugAnalysisRunner:
-    def __init__(self, config: BridgeConfig) -> None:
+    def __init__(self, config: BridgeConfig, process_watchdog: ProcessWatchdog | None = None) -> None:
         self.config = config
+        self.process_watchdog = process_watchdog
 
     def run_bug_analysis(
         self,
@@ -1893,8 +1901,10 @@ class BugAnalysisRunner:
         }[kind]
 
     def _run_json_command(self, command: list[str], *, timeout: int) -> dict[str, object]:
-        completed = subprocess.run(
+        completed = run_tracked_process(
             command,
+            watchdog=self.process_watchdog,
+            name="bug-json-command",
             cwd=self._working_dir(),
             capture_output=True,
             text=True,
@@ -2001,8 +2011,10 @@ class BugAnalysisRunner:
 
     def _expand_xp_file(self, xp_path: Path) -> Path:
         jar_path = self.config.workspace_root / ".ai/skills/log-decoder/tools/decryptFile.jar"
-        completed = subprocess.run(
+        completed = run_tracked_process(
             ["java", "-jar", str(jar_path), str(xp_path)],
+            watchdog=self.process_watchdog,
+            name="xp-log-decrypt",
             cwd=self._working_dir(),
             capture_output=True,
             text=True,
@@ -2134,8 +2146,10 @@ class BugAnalysisRunner:
             analysis_dir=analysis_dir,
             target_time=target_time,
         )
-        completed = subprocess.run(
+        completed = run_tracked_process(
             command,
+            watchdog=self.process_watchdog,
+            name=f"bug-analysis-{plan.kind}",
             cwd=self._working_dir(),
             capture_output=True,
             text=True,
@@ -2143,8 +2157,10 @@ class BugAnalysisRunner:
             check=False,
         )
         if completed.returncode != 0 and plan.kind == "startup":
-            completed = subprocess.run(
+            completed = run_tracked_process(
                 command,
+                watchdog=self.process_watchdog,
+                name=f"bug-analysis-{plan.kind}-retry",
                 cwd=self._working_dir(),
                 capture_output=True,
                 text=True,
@@ -2897,8 +2913,10 @@ class BugAnalysisRunner:
             provider_session_id=session_id,
         )
         try:
-            completed = subprocess.run(
+            completed = run_tracked_process(
                 command,
+                watchdog=self.process_watchdog,
+                name=f"bug-agent-summary-{provider or 'agent'}",
                 cwd=self._working_dir(),
                 capture_output=True,
                 text=True,
@@ -3486,9 +3504,15 @@ CRASH_ROUTE_TERMS = (
 
 
 class PerceptionSummaryRunner:
-    def __init__(self, config: BridgeConfig, lark_client=None) -> None:
+    def __init__(
+        self,
+        config: BridgeConfig,
+        lark_client=None,
+        process_watchdog: ProcessWatchdog | None = None,
+    ) -> None:
         self.config = config
         self.downloader = LogDownloader(config, lark_client) if lark_client is not None else None
+        self.process_watchdog = process_watchdog
 
     def run_summary(self, request: PerceptionSummaryRequest, *, event: LarkEvent | None = None) -> TaskResult:
         if request.error == "missing_prompt" or not request.prompt.strip():
@@ -3558,8 +3582,10 @@ class PerceptionSummaryRunner:
         command = [sys.executable, str(script_path), str(input_path)]
         started = time.monotonic()
         try:
-            completed = subprocess.run(
+            completed = run_tracked_process(
                 command,
+                watchdog=self.process_watchdog,
+                name="perception-summary",
                 cwd=self.config.workspace_root,
                 capture_output=True,
                 text=True,

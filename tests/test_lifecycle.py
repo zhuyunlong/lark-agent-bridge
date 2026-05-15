@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import time
-
-import pytest
+import unittest
 
 from lark_agent_bridge.lifecycle import (
     AnalysisLifecycle,
@@ -16,7 +15,7 @@ from lark_agent_bridge.lifecycle import (
 )
 
 
-class TestAnalysisLifecycle:
+class TestAnalysisLifecycle(unittest.TestCase):
     def test_create_defaults(self):
         lc = AnalysisLifecycle()
         assert lc.lifecycle_id.startswith("lc_")
@@ -34,7 +33,7 @@ class TestAnalysisLifecycle:
 
     def test_invalid_transition_raises(self):
         lc = AnalysisLifecycle(state=AnalysisState.COMPLETED)
-        with pytest.raises(ValueError, match="Invalid transition"):
+        with self.assertRaisesRegex(ValueError, "Invalid transition"):
             lc.transition_to(AnalysisState.ANALYZING)
 
     def test_full_lifecycle(self):
@@ -94,7 +93,7 @@ class TestAnalysisLifecycle:
         assert lc.is_terminal is True
 
 
-class TestStateTransition:
+class TestStateTransition(unittest.TestCase):
     def test_to_dict_roundtrip(self):
         t = StateTransition(from_state="created", to_state="queued", timestamp=1000.0, reason="test")
         d = t.to_dict()
@@ -103,7 +102,7 @@ class TestStateTransition:
         assert restored.timestamp == 1000.0
 
 
-class TestLifecycleStore:
+class TestLifecycleStore(unittest.TestCase):
     def test_create_and_get(self):
         store = LifecycleStore()
         lc = store.create(AnalysisType.BUG, request_text="test")
@@ -171,7 +170,7 @@ class TestLifecycleStore:
         assert store.count == 12
 
 
-class TestModeToAnalysisType:
+class TestModeToAnalysisType(unittest.TestCase):
     def test_known_modes(self):
         assert mode_to_analysis_type("bug_analysis") == AnalysisType.BUG
         assert mode_to_analysis_type("signal_lifecycle") == AnalysisType.SIGNAL
@@ -181,3 +180,7 @@ class TestModeToAnalysisType:
 
     def test_unknown_mode(self):
         assert mode_to_analysis_type("xyz") == AnalysisType.UNKNOWN
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -127,6 +127,47 @@ class ReportServerOptions:
 
 
 @dataclass(slots=True)
+class ApprovalOptions:
+    enabled: bool = True
+
+
+@dataclass(slots=True)
+class WorkflowArchiveOptions:
+    enabled: bool = False
+    base_token: str = ""
+    table_id: str = ""
+    drive_folder_token: str = ""
+    doc_parent_token: str = ""
+    base_field_map: dict[str, str] = field(
+        default_factory=lambda: {
+            "job_id": "任务ID",
+            "mode": "分析类型",
+            "status": "状态",
+            "summary": "结论摘要",
+            "report_url": "报告链接",
+            "bug_url": "Bug链接",
+            "provider": "Agent",
+            "duration_seconds": "耗时秒",
+            "chat_id": "群ID",
+            "sender_id": "发起人",
+            "doc_url": "Doc链接",
+            "report_version": "报告版本",
+        }
+    )
+
+
+@dataclass(slots=True)
+class NotificationOptions:
+    enabled: bool = False
+    report_ready: bool = True
+
+
+@dataclass(slots=True)
+class DualAgentOptions:
+    enabled: bool = False
+
+
+@dataclass(slots=True)
 class BridgeConfig:
     dry_run: bool = True
     workspace_root: Path = field(default_factory=lambda: Path.cwd())
@@ -145,6 +186,10 @@ class BridgeConfig:
     intent_analysis: IntentAnalysisOptions = field(default_factory=IntentAnalysisOptions)
     omlx_chat: OmlxChatOptions = field(default_factory=OmlxChatOptions)
     report_server: ReportServerOptions = field(default_factory=ReportServerOptions)
+    approval: ApprovalOptions = field(default_factory=ApprovalOptions)
+    workflow_archive: WorkflowArchiveOptions = field(default_factory=WorkflowArchiveOptions)
+    notifications: NotificationOptions = field(default_factory=NotificationOptions)
+    dual_agent: DualAgentOptions = field(default_factory=DualAgentOptions)
     runner_timeout_seconds: int = 900
 
 
@@ -208,6 +253,63 @@ class LarkEvent:
             parent_id=str(payload.get("parent_id") or message.get("parent_id") or ""),
             root_id=str(payload.get("root_id") or message.get("root_id") or ""),
             thread_id=str(payload.get("thread_id") or message.get("thread_id") or ""),
+            raw=payload,
+        )
+
+
+@dataclass(slots=True)
+class CardActionEvent:
+    event_id: str
+    action: str
+    request_id: str = ""
+    job_id: str = ""
+    root_message_id: str = ""
+    message_id: str = ""
+    chat_id: str = ""
+    operator_id: str = ""
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "CardActionEvent":
+        header = payload.get("header") or {}
+        event_body = payload.get("event") or payload
+        action_body = event_body.get("action") or {}
+        value = action_body.get("value") or payload.get("value") or {}
+        if not isinstance(value, dict):
+            value = {}
+        context = event_body.get("context") or {}
+        operator = event_body.get("operator") or {}
+        operator_id = event_body.get("operator_id") or ""
+        if isinstance(operator_id, dict):
+            operator_id = operator_id.get("open_id") or operator_id.get("user_id") or ""
+        if not operator_id and isinstance(operator, dict):
+            nested_operator_id = operator.get("operator_id") or {}
+            if isinstance(nested_operator_id, dict):
+                operator_id = (
+                    nested_operator_id.get("open_id")
+                    or nested_operator_id.get("user_id")
+                    or nested_operator_id.get("union_id")
+                    or ""
+                )
+        request_id = value.get("request_id") or value.get("action_id") or ""
+        return cls(
+            event_id=str(payload.get("event_id") or header.get("event_id") or ""),
+            action=_safe_card_action(value.get("action") or action_body.get("tag") or ""),
+            request_id=_safe_approval_request_id(request_id),
+            job_id=_safe_callback_identifier(value.get("job_id") or ""),
+            root_message_id=_safe_callback_identifier(
+                value.get("root_message_id") or value.get("conversation_root_message_id") or ""
+            ),
+            message_id=_safe_callback_identifier(
+                payload.get("message_id")
+                or context.get("open_message_id")
+                or context.get("message_id")
+                or ""
+            ),
+            chat_id=_safe_callback_identifier(
+                payload.get("chat_id") or context.get("open_chat_id") or context.get("chat_id") or ""
+            ),
+            operator_id=_safe_callback_identifier(operator_id),
             raw=payload,
         )
 
@@ -368,6 +470,32 @@ def create_job_context(data_dir: Path, event: LarkEvent | None = None, job_id: s
 def _safe_identifier(value: str) -> str:
     safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("._-")
     return safe or "job"
+
+
+_CALLBACK_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
+_APPROVAL_REQUEST_ID_RE = re.compile(r"^apr_[0-9a-f]{12}$")
+_CARD_ACTION_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,31}$")
+
+
+def _safe_callback_identifier(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text or not _CALLBACK_IDENTIFIER_RE.fullmatch(text):
+        return ""
+    return text
+
+
+def _safe_approval_request_id(value: Any) -> str:
+    text = str(value or "").strip()
+    if not _APPROVAL_REQUEST_ID_RE.fullmatch(text):
+        return ""
+    return text
+
+
+def _safe_card_action(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text or not _CARD_ACTION_RE.fullmatch(text):
+        return ""
+    return text
 
 
 def _jsonable(value: Any) -> Any:

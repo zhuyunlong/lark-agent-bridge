@@ -137,6 +137,49 @@ restart_max_delay_seconds = 8
         self.assertEqual(config.event_consumer.restart_initial_delay_seconds, 0.5)
         self.assertEqual(config.event_consumer.restart_max_delay_seconds, 8)
 
+    def test_load_approval_and_workflow_archive_options(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text(
+                """
+[approval]
+enabled = false
+
+[workflow_archive]
+enabled = true
+base_token = "base_token"
+table_id = "tbl_case"
+drive_folder_token = "fld_reports"
+doc_parent_token = "fld_docs"
+
+[workflow_archive.base_field_map]
+job_id = "任务ID"
+mode = "分析类型"
+summary = "结论摘要"
+
+[notifications]
+enabled = true
+report_ready = false
+
+[dual_agent]
+enabled = true
+""",
+                encoding="utf-8",
+            )
+
+            config = load_config(config_path)
+
+        self.assertFalse(config.approval.enabled)
+        self.assertTrue(config.workflow_archive.enabled)
+        self.assertEqual(config.workflow_archive.base_token, "base_token")
+        self.assertEqual(config.workflow_archive.table_id, "tbl_case")
+        self.assertEqual(config.workflow_archive.drive_folder_token, "fld_reports")
+        self.assertEqual(config.workflow_archive.doc_parent_token, "fld_docs")
+        self.assertEqual(config.workflow_archive.base_field_map["summary"], "结论摘要")
+        self.assertTrue(config.notifications.enabled)
+        self.assertFalse(config.notifications.report_ready)
+        self.assertTrue(config.dual_agent.enabled)
+
     def test_load_bug_analysis_options(self):
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "config.toml"

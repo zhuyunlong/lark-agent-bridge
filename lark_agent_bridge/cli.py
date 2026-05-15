@@ -47,7 +47,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "handle-event":
             payload = json.loads(Path(args.event).read_text(encoding="utf-8"))
-            _print_json(app.handle_event_payload(payload).to_dict())
+            _print_json(app.handle_payload(payload).to_dict())
             return 0
         if args.command == "run-signal":
             _print_json(app.run_signal(signal=args.signal, log_path=args.log_path, since=args.since).to_dict())
@@ -61,8 +61,8 @@ def main(argv: list[str] | None = None) -> int:
             app.start_report_server()
             stop_cleanup = _start_cleanup_loop(app)
             try:
-                for event in app.lark_client.consume_events(status_callback=app.record_daemon_status):
-                    _print_json(app.handle_event(event).to_dict())
+                for payload in app.lark_client.consume_payloads(status_callback=app.record_daemon_status):
+                    _print_json(app.handle_payload(payload).to_dict())
             finally:
                 app.stop_report_server()
                 if stop_cleanup is not None:
@@ -103,6 +103,7 @@ def _start_cleanup_loop(app: BridgeApp) -> threading.Event | None:
     def _worker() -> None:
         while not stop_event.wait(interval_seconds):
             app.cleanup_expired_jobs()
+            app.run_health_maintenance()
 
     threading.Thread(target=_worker, name="job-retention-cleanup", daemon=True).start()
     return stop_event

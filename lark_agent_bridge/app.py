@@ -19,7 +19,8 @@ from .agents import (
     OmlxChatClient,
     PerceptionSummaryRunner,
 )
-from .approval import ApprovalStore, build_operation_request
+from .arbitration import arbitrate, extract_conclusion
+from .approval import ApprovalStatus, ApprovalStore, build_operation_request
 from .cards import build_confirmation_card, build_result_card, build_status_card, card_to_json
 from .case_store import CaseStore
 from .downloader import LogDownloader
@@ -32,7 +33,16 @@ from .escalation import (
 from .health import HealthMonitor, ProcessWatchdog
 from .lark_client import LarkClient
 from .lifecycle import AnalysisType, LifecycleStore, mode_to_analysis_type
-from .models import BridgeConfig, DownloadResource, IntentDecision, LarkEvent, SignalRequest, TaskResult, create_job_context
+from .models import (
+    BridgeConfig,
+    CardActionEvent,
+    DownloadResource,
+    IntentDecision,
+    LarkEvent,
+    SignalRequest,
+    TaskResult,
+    create_job_context,
+)
 from .parser import (
     build_basic_chat_reply,
     extract_first_keyword_payload,
@@ -50,6 +60,7 @@ from .report_version import ReportVersionStore, derive_group_key
 from .runner import SignalChainRunner
 from .state import AgentActivityStore, ConversationContextStore, EventStateStore
 from .handlers.signal_lifecycle import SignalLifecycleHandler
+from .workflow_archive import WorkflowArchiver
 
 
 CHAT_COMMAND_PREFIXES = ("/chat",)
@@ -85,25 +96,31 @@ class BridgeApp:
         self.progress_callback = progress_callback
         self.process_watchdog = ProcessWatchdog()
         self.health_monitor = HealthMonitor(data_dir=config.data_dir, process_watchdog=self.process_watchdog)
+        self._restore_daemon_health_pid()
         self.case_store = CaseStore(config.data_dir / "state" / "cases.json")
         self.approval_store = ApprovalStore(config.data_dir / "state" / "approvals.json")
         self.version_store = ReportVersionStore(config.data_dir / "state" / "report_versions.json")
+        self.workflow_archiver = WorkflowArchiver(config, self.lark_client)
         self.escalation_checker = EscalationChecker()
-        self.notification_history = NotificationHistory()
+        self.notification_history = NotificationHistory(config.data_dir / "state" / "notification_history.json")
         self.lifecycle_store = LifecycleStore()
         self.report_publisher = report_publisher or HtmlReportPublisher(config)
         self.report_http_server = report_http_server or ReportHttpServer(
             config, activity_store=self.activity_store, health_monitor=self.health_monitor,
         )
-        runner = SignalChainRunner(config)
+        runner = SignalChainRunner(config, process_watchdog=self.process_watchdog)
         downloader = LogDownloader(config, self.lark_client)
         self.handler = handler or SignalLifecycleHandler(config, downloader, runner)
-        self.claude_runner = claude_runner or ClaudeSkillRunner(config)
-        self.bug_runner = bug_runner or BugAnalysisRunner(config)
+        self.claude_runner = claude_runner or ClaudeSkillRunner(config, process_watchdog=self.process_watchdog)
+        self.bug_runner = bug_runner or BugAnalysisRunner(config, process_watchdog=self.process_watchdog)
         setattr(self.bug_runner, "_lark_client", self.lark_client)
-        self.perception_runner = perception_runner or PerceptionSummaryRunner(config, self.lark_client)
+        self.perception_runner = perception_runner or PerceptionSummaryRunner(
+            config,
+            self.lark_client,
+            process_watchdog=self.process_watchdog,
+        )
         self.chat_client = chat_client or OmlxChatClient(config)
-        self.intent_runner = intent_runner or IntentAnalysisRunner(config)
+        self.intent_runner = intent_runner or IntentAnalysisRunner(config, process_watchdog=self.process_watchdog)
 
     def check(self) -> dict[str, object]:
         health = self.health_monitor.check_health()
@@ -131,10 +148,62 @@ class BridgeApp:
                 "command": self.config.intent_analysis.command or self.config.bug_analysis.command,
             },
             "health": health.to_dict(),
+            "approval": {
+                "enabled": self.config.approval.enabled,
+                "pending": len(self.approval_store.list_pending()),
+            },
+            "workflow_archive": {
+                "enabled": self.config.workflow_archive.enabled,
+                "base_configured": bool(self.config.workflow_archive.base_token and self.config.workflow_archive.table_id),
+                "drive_configured": bool(self.config.workflow_archive.drive_folder_token),
+                "doc_parent_token_configured": bool(self.config.workflow_archive.doc_parent_token),
+            },
+            "notifications": {
+                "enabled": self.config.notifications.enabled,
+                "report_ready": self.config.notifications.report_ready,
+            },
+            "dual_agent": {
+                "enabled": self.config.dual_agent.enabled,
+            },
         }
+
+    def handle_payload(self, payload: dict[str, object]) -> TaskResult:
+        if self._looks_like_card_action_payload(payload):
+            return self.handle_card_action_payload(payload)
+        return self.handle_event_payload(payload)
 
     def handle_event_payload(self, payload: dict[str, object]) -> TaskResult:
         return self.handle_event(LarkEvent.from_dict(payload))
+
+    def handle_card_action_payload(self, payload: dict[str, object]) -> TaskResult:
+        return self.handle_card_action(CardActionEvent.from_dict(payload))
+
+    def _looks_like_card_action_payload(self, payload: dict[str, object]) -> bool:
+        event_body = payload.get("event") or payload
+        if not isinstance(event_body, dict):
+            return False
+        action = event_body.get("action")
+        if isinstance(action, dict):
+            value = action.get("value")
+            if isinstance(value, dict) and value.get("action"):
+                return True
+        value = payload.get("value")
+        return isinstance(value, dict) and bool(value.get("action"))
+
+    def handle_card_action(self, action_event: CardActionEvent) -> TaskResult:
+        action = action_event.action.strip()
+        if action in {"approve", "reject"}:
+            return self._handle_approval_action(action_event, approved=(action == "approve"))
+        if action == "reanalyze":
+            return self._handle_reanalyze_action(action_event)
+        if action == "escalate":
+            return self._handle_escalate_action(action_event)
+        return TaskResult(
+            success=False,
+            message=f"不支持的卡片操作：{action or '(empty)'}",
+            error_code="unsupported_card_action",
+            details={"mode": "card_action", "action": action},
+        )
 
     def handle_event(self, event: LarkEvent) -> TaskResult:
         self.activity_store.record_event(event)
@@ -242,53 +311,35 @@ class BridgeApp:
             if not self.state_store.mark_seen(event):
                 return TaskResult(True, f"duplicate event skipped: {event.event_id}", skipped=True)
 
-            self._notify_progress(
-                "bug_request_received",
-                "收到 bug 分析请求",
-                event=event,
+            pending = self._maybe_request_approval(
+                event,
+                operation_type="bug_analysis",
+                description="Bug 分析",
+                route_content=route_content,
                 bug_url=bug_request.bug_url,
                 prompt=bug_request.prompt,
-                raw_text=bug_request.raw_text,
+                estimated_duration_seconds=self.config.bug_analysis.timeout_seconds,
             )
-            self.send_status_card(
-                event,
-                title="Bug 分析",
-                status="analyzing",
-                details={"Bug 链接": bug_request.bug_url[:60], "分析提示": bug_request.prompt or "默认"},
-                note="分析进行中，请稍候…",
-            )
-            result = self.bug_runner.run_bug_analysis(
-                bug_request,
-                event=event,
-                progress_callback=self._event_progress_callback(event),
-            )
-            return self._deliver_result(event, result, request_text=bug_request.raw_text or route_content)
+            if pending is not None:
+                return pending
+            return self._run_bug_request(event, bug_request, route_content)
 
         if direct_analysis_request.triggered:
             if not self.state_store.mark_seen(event):
                 return TaskResult(True, f"duplicate event skipped: {event.event_id}", skipped=True)
 
-            self._notify_progress(
-                "direct_analysis_request_received",
-                "收到直传文件分析请求",
-                event=event,
-                prompt=direct_analysis_request.prompt,
-                raw_text=direct_analysis_request.raw_text,
-                resources=[item.value for item in direct_analysis_request.resources],
-            )
-            self.send_status_card(
+            pending = self._maybe_request_approval(
                 event,
-                title="文件分析",
-                status="analyzing",
-                details={"文件数": str(len(direct_analysis_request.resources))},
-                note="分析进行中，请稍候…",
+                operation_type="direct_analysis",
+                description="直传文件分析",
+                route_content=route_content,
+                file_count=len(direct_analysis_request.resources),
+                prompt=direct_analysis_request.prompt,
+                estimated_duration_seconds=self.config.bug_analysis.timeout_seconds,
             )
-            result = self.bug_runner.run_direct_analysis(
-                direct_analysis_request,
-                event=event,
-                progress_callback=self._event_progress_callback(event),
-            )
-            return self._deliver_result(event, result, request_text=direct_analysis_request.raw_text or route_content)
+            if pending is not None:
+                return pending
+            return self._run_direct_analysis_request(event, direct_analysis_request, route_content)
 
         if perception_request.triggered:
             if not self.state_store.mark_seen(event):
@@ -402,6 +453,17 @@ class BridgeApp:
         )
         return removed
 
+    def run_health_maintenance(self) -> list[dict[str, object]]:
+        terminated = self.process_watchdog.terminate_stuck()
+        if terminated:
+            self._notify_progress(
+                "stuck_process_cleanup",
+                f"清理卡住的 agent 子进程 {len(terminated)} 个",
+                session_id="daemon",
+                terminated=terminated,
+            )
+        return terminated
+
     def start_report_server(self) -> None:
         self.report_http_server.start()
 
@@ -410,8 +472,22 @@ class BridgeApp:
 
     def record_daemon_status(self, payload: dict[str, object]) -> None:
         self.activity_store.record_daemon_status(payload)
+        pid = self._coerce_pid(payload.get("process_id"))
+        if pid is not None:
+            self.health_monitor.set_event_consumer_pid(pid)
         if self.progress_callback is not None:
             self.progress_callback(payload)
+
+    def _restore_daemon_health_pid(self) -> None:
+        pid = self._coerce_pid(self.activity_store.get_daemon_status().get("process_id"))
+        if pid is not None:
+            self.health_monitor.set_event_consumer_pid(pid)
+
+    def _coerce_pid(self, value: object) -> int | None:
+        try:
+            return int(value) if value is not None and str(value).strip() else None
+        except (TypeError, ValueError):
+            return None
 
     def _deliver_result(
         self,
@@ -423,6 +499,7 @@ class BridgeApp:
     ) -> TaskResult:
         finalized = self._prepare_delivery_result(event, result, request_text=request_text, root_message_id=root_message_id)
         self._send_result(event, finalized)
+        self._maybe_send_report_ready_notification(event, finalized)
         return finalized
 
     def _send_result(self, event: LarkEvent, result: TaskResult) -> None:
@@ -486,6 +563,25 @@ class BridgeApp:
                     path=str(path),
                 )
 
+    def _maybe_send_report_ready_notification(self, event: LarkEvent, result: TaskResult) -> None:
+        if not self.config.notifications.enabled or not self.config.notifications.report_ready:
+            return
+        if self.config.dry_run or not result.success:
+            return
+        report_url = str(result.details.get("published_report_url") or "").strip()
+        if not report_url:
+            return
+        notification = build_report_ready_notification(
+            report_url=report_url,
+            summary=result.message,
+            chat_id=event.chat_id,
+            job_id=result.job_id or "",
+        )
+        if not self.notification_history.should_send(notification):
+            return
+        self.notification_history.record(notification)
+        self.lark_client.send_response(event, f"{notification.title}\n{notification.message}")
+
     def _try_send_result_card(
         self,
         event: LarkEvent,
@@ -525,6 +621,7 @@ class BridgeApp:
             report_url=report_url or None,
             metadata=metadata if metadata else None,
             job_id=result.job_id,
+            root_message_id=session_id or event.root_id or event.message_id,
             duration_seconds=result.duration_seconds,
         )
         card_json_str = card_to_json(card)
@@ -711,6 +808,286 @@ class BridgeApp:
         decision = self.approval_store.resolve(request_id, approved=approved)
         return decision.can_proceed
 
+    def _run_bug_request(self, event: LarkEvent, bug_request, route_content: str) -> TaskResult:
+        self._notify_progress(
+            "bug_request_received",
+            "收到 bug 分析请求",
+            event=event,
+            bug_url=bug_request.bug_url,
+            prompt=bug_request.prompt,
+            raw_text=bug_request.raw_text,
+        )
+        self.send_status_card(
+            event,
+            title="Bug 分析",
+            status="analyzing",
+            details={"Bug 链接": bug_request.bug_url[:60], "分析提示": bug_request.prompt or "默认"},
+            note="分析进行中，请稍候…",
+        )
+        result = self.bug_runner.run_bug_analysis(
+            bug_request,
+            event=event,
+            progress_callback=self._event_progress_callback(event),
+        )
+        self._ensure_result_bug_url(result, bug_request.bug_url)
+        return self._deliver_result(event, result, request_text=bug_request.raw_text or route_content)
+
+    def _run_direct_analysis_request(self, event: LarkEvent, direct_analysis_request, route_content: str) -> TaskResult:
+        self._notify_progress(
+            "direct_analysis_request_received",
+            "收到直传文件分析请求",
+            event=event,
+            prompt=direct_analysis_request.prompt,
+            raw_text=direct_analysis_request.raw_text,
+            resources=[item.value for item in direct_analysis_request.resources],
+        )
+        self.send_status_card(
+            event,
+            title="文件分析",
+            status="analyzing",
+            details={"文件数": str(len(direct_analysis_request.resources))},
+            note="分析进行中，请稍候…",
+        )
+        result = self.bug_runner.run_direct_analysis(
+            direct_analysis_request,
+            event=event,
+            progress_callback=self._event_progress_callback(event),
+        )
+        return self._deliver_result(event, result, request_text=direct_analysis_request.raw_text or route_content)
+
+    def _maybe_request_approval(
+        self,
+        event: LarkEvent,
+        *,
+        operation_type: str,
+        description: str,
+        route_content: str,
+        **hints: object,
+    ) -> TaskResult | None:
+        if not self.config.approval.enabled:
+            return None
+        op = build_operation_request(
+            operation_type,
+            description,
+            requester_id=event.sender_id,
+            chat_id=event.chat_id,
+            **hints,
+        )
+        op.metadata.update(
+            {
+                "event_payload": self._event_payload(event),
+                "route_content": route_content,
+            }
+        )
+        decision = self.approval_store.evaluate(op)
+        if decision.can_proceed:
+            return None
+        if not self.config.dry_run and event.chat_type in {"group", "p2p"}:
+            card = build_confirmation_card(
+                title=f"操作确认：{description}",
+                description=f"即将执行 **{description}**，该操作风险等级为 **{op.risk_level.value}**。请确认是否继续。",
+                risk_level=op.risk_level.value,
+                action_id=decision.request_id,
+                metadata={"操作类型": operation_type, **{k: str(v) for k, v in hints.items()}},
+            )
+            self.lark_client.send_card_response(event, card_to_json(card))
+        return TaskResult(
+            success=False,
+            message=f"{description} 等待确认后执行。",
+            error_code="approval_pending",
+            details={
+                "mode": "approval",
+                "operation_type": operation_type,
+                "approval_request_id": decision.request_id,
+                "risk_level": op.risk_level.value,
+            },
+        )
+
+    def _handle_approval_action(self, action_event: CardActionEvent, *, approved: bool) -> TaskResult:
+        if not action_event.request_id:
+            return TaskResult(
+                success=False,
+                message="卡片回调缺少审批 request_id。",
+                error_code="missing_approval_request_id",
+                details={"mode": "card_action", "action": action_event.action},
+            )
+        pending = self.approval_store.get_pending(action_event.request_id)
+        if pending is None:
+            return TaskResult(
+                success=False,
+                message="审批请求已过期或不存在。",
+                error_code="approval_not_available",
+                details={"mode": "approval", "approval_request_id": action_event.request_id},
+            )
+        decision = self.approval_store.resolve(action_event.request_id, approved=approved)
+        if decision.status == ApprovalStatus.REJECTED:
+            return TaskResult(
+                success=False,
+                message="已取消执行。",
+                error_code="approval_rejected",
+                details={"mode": "approval", "approval_request_id": action_event.request_id},
+            )
+        if not decision.can_proceed:
+            return TaskResult(
+                success=False,
+                message="审批请求已过期或不存在。",
+                error_code="approval_not_available",
+                details={"mode": "approval", "approval_request_id": action_event.request_id},
+            )
+        return self._execute_approved_operation(pending.operation)
+
+    def _execute_approved_operation(self, operation) -> TaskResult:
+        metadata = operation.metadata or {}
+        event_payload = metadata.get("event_payload")
+        if not isinstance(event_payload, dict):
+            return TaskResult(
+                success=False,
+                message="审批请求缺少原始事件信息，无法继续执行。",
+                error_code="approval_missing_event_payload",
+                details={"mode": "approval", "operation_type": operation.operation_type},
+            )
+        event = LarkEvent.from_dict(event_payload)
+        route_content = str(metadata.get("route_content") or "")
+        self.activity_store.record_event(event, content=route_content)
+        if operation.operation_type == "bug_analysis":
+            request = parse_bug_request(route_content)
+            result = self._run_bug_request(event, request, route_content)
+        elif operation.operation_type == "direct_analysis":
+            referenced_resources = self._fetch_referenced_message_resources(event, route_content=route_content)
+            request = self._build_direct_analysis_request(route_content, referenced_resources)
+            result = self._run_direct_analysis_request(event, request, route_content)
+        elif operation.operation_type == "reanalyze":
+            result = self._execute_approved_reanalysis(event, route_content, metadata)
+        else:
+            result = TaskResult(
+                success=False,
+                message=f"审批已通过，但暂不支持执行操作类型：{operation.operation_type}",
+                error_code="unsupported_approved_operation",
+                details={"mode": "approval", "operation_type": operation.operation_type},
+            )
+        self.activity_store.record_result(event, result)
+        return result
+
+    def _execute_approved_reanalysis(self, event: LarkEvent, route_content: str, metadata: dict[str, object]) -> TaskResult:
+        root_message_id = str(metadata.get("root_message_id") or "")
+        followup_context = self.conversation_store.lookup(root_message_id) if root_message_id else self._resolve_followup_context(event)
+        if followup_context is None:
+            return self._missing_followup_reply_result(mode="approval", chat_type=event.chat_type)
+        previous_session = self.activity_store.get_session(followup_context.root_message_id) or {}
+        result = self.bug_runner.run_bug_reanalysis(
+            followup_text=route_content,
+            previous_context=followup_context,
+            previous_session=previous_session,
+            event=event,
+            progress_callback=self._event_progress_callback(event, session_id=followup_context.root_message_id),
+        )
+        self._ensure_result_bug_url(result, self._bug_url_from_session(previous_session))
+        return self._deliver_result(
+            event,
+            result,
+            request_text=f"{followup_context.request_text}\n\n追问/修正：{route_content}",
+            root_message_id=followup_context.root_message_id,
+        )
+
+    def _handle_reanalyze_action(self, action_event: CardActionEvent) -> TaskResult:
+        if not action_event.chat_id:
+            return TaskResult(
+                success=False,
+                message="卡片回调缺少 chat_id，无法重新分析。",
+                error_code="invalid_card_action_context",
+                details={"mode": "card_action", "action": "reanalyze"},
+            )
+        root_message_id = action_event.root_message_id or action_event.message_id
+        followup_context = self.conversation_store.lookup(root_message_id) if root_message_id else None
+        if followup_context is None and action_event.job_id:
+            session = self.activity_store.get_session(action_event.job_id) or {}
+            root_message_id = str(session.get("session_id") or "")
+            followup_context = self.conversation_store.lookup(root_message_id) if root_message_id else None
+        if followup_context is None:
+            return TaskResult(
+                success=False,
+                message="找不到可重新分析的历史上下文，请回复原分析消息后再重试。",
+                error_code="missing_reanalysis_context",
+                details={"mode": "card_action", "action": "reanalyze"},
+            )
+        event = self._event_from_card_action(action_event, root_message_id=followup_context.root_message_id)
+        if not self.state_store.mark_seen(event):
+            return TaskResult(True, f"duplicate event skipped: {event.event_id}", skipped=True)
+        route_content = "重新分析"
+        pending = self._maybe_request_approval(
+            event,
+            operation_type="reanalyze",
+            description="重新分析",
+            route_content=route_content,
+            root_message_id=followup_context.root_message_id,
+            retry_count=1,
+            estimated_duration_seconds=self.config.bug_analysis.timeout_seconds,
+        )
+        if pending is not None:
+            return pending
+        return self._execute_approved_reanalysis(
+            event,
+            route_content,
+            {"root_message_id": followup_context.root_message_id},
+        )
+
+    def _handle_escalate_action(self, action_event: CardActionEvent) -> TaskResult:
+        if not action_event.chat_id:
+            return TaskResult(
+                success=False,
+                message="卡片回调缺少 chat_id，无法升级人工。",
+                error_code="invalid_card_action_context",
+                details={"mode": "card_action", "action": "escalate"},
+            )
+        root_message_id = action_event.root_message_id or action_event.message_id
+        event = self._event_from_card_action(action_event, root_message_id=root_message_id)
+        message = f"已收到人工升级请求。job_id={action_event.job_id or '-'}"
+        if not self.config.dry_run and event.chat_type in {"group", "p2p"}:
+            self.lark_client.send_response(event, message)
+        return TaskResult(
+            success=True,
+            message=message,
+            details={
+                "mode": "card_action",
+                "action": "escalate",
+                "job_id": action_event.job_id,
+                "root_message_id": root_message_id,
+            },
+        )
+
+    def _event_payload(self, event: LarkEvent) -> dict[str, object]:
+        if event.raw:
+            return event.raw
+        return {
+            "event_id": event.event_id,
+            "message_id": event.message_id,
+            "chat_id": event.chat_id,
+            "chat_type": event.chat_type,
+            "sender_id": event.sender_id,
+            "message_type": event.message_type,
+            "content": event.content,
+            "create_time": event.create_time,
+            "timestamp": event.timestamp,
+            "reply_to": event.reply_to,
+            "parent_id": event.parent_id,
+            "root_id": event.root_id,
+            "thread_id": event.thread_id,
+        }
+
+    def _event_from_card_action(self, action_event: CardActionEvent, *, root_message_id: str = "") -> LarkEvent:
+        chat_type = "group" if action_event.chat_id.startswith("oc_") else "p2p" if action_event.chat_id else "unknown"
+        return LarkEvent(
+            event_id=action_event.event_id or f"card_{action_event.action}_{action_event.request_id or action_event.job_id}",
+            message_id=action_event.message_id,
+            chat_id=action_event.chat_id,
+            chat_type=chat_type,
+            sender_id=action_event.operator_id,
+            message_type="interactive",
+            content=action_event.action,
+            root_id=root_message_id,
+            raw=action_event.raw,
+        )
+
     def _notify_progress(
         self,
         stage: str,
@@ -753,6 +1130,7 @@ class BridgeApp:
     ) -> TaskResult:
         if not result.success:
             return result
+        self._apply_dual_agent_arbitration(result)
         published = self.report_publisher.publish_result(result)
         if published is None:
             return result
@@ -785,7 +1163,10 @@ class BridgeApp:
             request_text=request_text,
         )
         # Track report version
-        bug_url = str(details.get("bug_url", ""))
+        bug_url = str(details.get("bug_url") or self._bug_url_from_request_text(request_text))
+        if bug_url and not details.get("bug_url"):
+            details["bug_url"] = bug_url
+            result.details = details
         group_key = derive_group_key(
             bug_url=bug_url,
             case_id=result.job_id or "",
@@ -804,7 +1185,63 @@ class BridgeApp:
         details["report_version"] = version.version
         details["report_group_key"] = group_key
         result.details = details
+        if self.config.workflow_archive.enabled:
+            try:
+                archive = self.workflow_archiver.archive(result, event=event, request_text=request_text)
+            except Exception as exc:
+                archive = {
+                    "enabled": True,
+                    "skipped": False,
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                }
+            details = dict(result.details)
+            details["workflow_archive"] = archive
+            result.details = details
         return result
+
+    def _apply_dual_agent_arbitration(self, result: TaskResult) -> None:
+        if not self.config.dual_agent.enabled:
+            return
+        details = dict(result.details)
+        secondary_summary = str(
+            details.get("secondary_agent_summary")
+            or details.get("agent_secondary_summary")
+            or ""
+        ).strip()
+        if not secondary_summary:
+            return
+        primary_provider = str(
+            details.get("agent_summary_provider")
+            or details.get("provider")
+            or "primary"
+        )
+        secondary_provider = str(details.get("secondary_agent_provider") or "secondary")
+        arbitration = arbitrate(
+            extract_conclusion(result.message, provider=primary_provider),
+            extract_conclusion(secondary_summary, provider=secondary_provider),
+        )
+        details["arbitration"] = arbitration.to_dict()
+        result.details = details
+        result.message = f"{result.message}\n\n双 Agent 裁决：\n{arbitration.summary_text()}"
+
+    def _ensure_result_bug_url(self, result: TaskResult, bug_url: str) -> None:
+        normalized = bug_url.strip()
+        if not normalized:
+            return
+        details = dict(result.details)
+        details.setdefault("bug_url", normalized)
+        result.details = details
+
+    def _bug_url_from_session(self, session: dict[str, object]) -> str:
+        details = session.get("details", {}) if isinstance(session, dict) else {}
+        if isinstance(details, dict):
+            return str(details.get("bug_url") or "")
+        return ""
+
+    def _bug_url_from_request_text(self, request_text: str) -> str:
+        request = parse_bug_request(request_text)
+        return request.bug_url if request.triggered else ""
 
     def _handle_intent_routed_event(
         self,
@@ -1216,20 +1653,18 @@ class BridgeApp:
             bug_request = bug_request.__class__(bug_url="", prompt=route_content.strip(), raw_text=route_content, triggered=True, error="missing_bug_url")
         if not self.state_store.mark_seen(event):
             return TaskResult(True, f"duplicate event skipped: {event.event_id}", skipped=True)
-        self._notify_progress(
-            "bug_request_received",
-            "收到 bug 分析请求",
-            event=event,
+        pending = self._maybe_request_approval(
+            event,
+            operation_type="bug_analysis",
+            description="Bug 分析",
+            route_content=route_content,
             bug_url=bug_request.bug_url,
             prompt=bug_request.prompt,
-            raw_text=bug_request.raw_text,
+            estimated_duration_seconds=self.config.bug_analysis.timeout_seconds,
         )
-        result = self.bug_runner.run_bug_analysis(
-            bug_request,
-            event=event,
-            progress_callback=self._event_progress_callback(event),
-        )
-        return self._deliver_result(event, result, request_text=bug_request.raw_text or route_content)
+        if pending is not None:
+            return pending
+        return self._run_bug_request(event, bug_request, route_content)
 
     def _handle_direct_analysis_intent(self, event: LarkEvent, route_content: str) -> TaskResult:
         direct_analysis_request = parse_direct_analysis_request(route_content)
@@ -1243,20 +1678,18 @@ class BridgeApp:
             )
         if not self.state_store.mark_seen(event):
             return TaskResult(True, f"duplicate event skipped: {event.event_id}", skipped=True)
-        self._notify_progress(
-            "direct_analysis_request_received",
-            "收到直传文件分析请求",
-            event=event,
+        pending = self._maybe_request_approval(
+            event,
+            operation_type="direct_analysis",
+            description="直传文件分析",
+            route_content=route_content,
+            file_count=len(direct_analysis_request.resources),
             prompt=direct_analysis_request.prompt,
-            raw_text=direct_analysis_request.raw_text,
-            resources=[item.value for item in direct_analysis_request.resources],
+            estimated_duration_seconds=self.config.bug_analysis.timeout_seconds,
         )
-        result = self.bug_runner.run_direct_analysis(
-            direct_analysis_request,
-            event=event,
-            progress_callback=self._event_progress_callback(event),
-        )
-        return self._deliver_result(event, result, request_text=direct_analysis_request.raw_text or route_content)
+        if pending is not None:
+            return pending
+        return self._run_direct_analysis_request(event, direct_analysis_request, route_content)
 
     def _handle_perception_intent(self, event: LarkEvent, route_content: str) -> TaskResult:
         perception_request = parse_perception_summary_request(route_content)
@@ -1301,6 +1734,17 @@ class BridgeApp:
             not action and self._is_bug_reanalysis_followup(route_content, followup_context)
         )
         if should_reanalyze:
+            pending = self._maybe_request_approval(
+                event,
+                operation_type="reanalyze",
+                description="重新分析",
+                route_content=route_content,
+                root_message_id=followup_context.root_message_id,
+                retry_count=1,
+                estimated_duration_seconds=self.config.bug_analysis.timeout_seconds,
+            )
+            if pending is not None:
+                return pending
             previous_session = self.activity_store.get_session(followup_context.root_message_id) or {}
             result = self.bug_runner.run_bug_reanalysis(
                 followup_text=route_content,
@@ -1309,6 +1753,7 @@ class BridgeApp:
                 event=event,
                 progress_callback=self._event_progress_callback(event, session_id=followup_context.root_message_id),
             )
+            self._ensure_result_bug_url(result, self._bug_url_from_session(previous_session))
             finalized = self._deliver_result(
                 event,
                 result,

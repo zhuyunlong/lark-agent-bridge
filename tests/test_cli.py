@@ -119,7 +119,7 @@ class CliTests(unittest.TestCase):
             config = Path(tmp) / "config.toml"
             config.write_text(f'dry_run = false\ndata_dir = "{tmp}/data"\n', encoding="utf-8")
             fake_app = mock.Mock()
-            fake_app.lark_client.consume_events.return_value = iter(())
+            fake_app.lark_client.consume_payloads.return_value = iter(())
 
             with mock.patch("lark_agent_bridge.cli.BridgeApp", return_value=fake_app):
                 exit_code = main(["listen", "--config", str(config)])
@@ -134,7 +134,7 @@ class CliTests(unittest.TestCase):
 
             with mock.patch("lark_agent_bridge.cli.BridgeApp") as bridge_app:
                 fake_app = mock.Mock()
-                fake_app.lark_client.consume_events.return_value = iter(())
+                fake_app.lark_client.consume_payloads.return_value = iter(())
                 bridge_app.return_value = fake_app
                 exit_code = main(["listen", "--config", str(config)])
 
@@ -146,7 +146,7 @@ class CliTests(unittest.TestCase):
             config = Path(tmp) / "config.toml"
             config.write_text(f'dry_run = false\ndata_dir = "{tmp}/data"\n', encoding="utf-8")
             fake_app = mock.Mock()
-            fake_app.lark_client.consume_events.return_value = iter(())
+            fake_app.lark_client.consume_payloads.return_value = iter(())
 
             with mock.patch("lark_agent_bridge.cli.BridgeApp", return_value=fake_app):
                 exit_code = main(["listen", "--config", str(config)])
@@ -161,12 +161,12 @@ class CliTests(unittest.TestCase):
             config.write_text(f'dry_run = false\ndata_dir = "{tmp}/data"\n', encoding="utf-8")
             fake_app = mock.Mock()
 
-            def consume_events(*, status_callback=None):
+            def consume_payloads(*, status_callback=None):
                 assert status_callback is not None
                 status_callback({"stage": "event_consumer_ready", "event_key": "im.message.receive_v1"})
                 return iter(())
 
-            fake_app.lark_client.consume_events.side_effect = consume_events
+            fake_app.lark_client.consume_payloads.side_effect = consume_payloads
 
             with mock.patch("lark_agent_bridge.cli.BridgeApp", return_value=fake_app):
                 exit_code = main(["listen", "--config", str(config)])

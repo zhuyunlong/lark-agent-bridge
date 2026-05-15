@@ -11,14 +11,18 @@ import tomllib
 from .models import (
     BugAnalysisOptions,
     BridgeConfig,
+    ApprovalOptions,
     ClaudeAgentOptions,
     DownloadConfig,
+    DualAgentOptions,
     EventConsumerOptions,
     IntentAnalysisOptions,
     JobRetentionOptions,
     LarkOptions,
+    NotificationOptions,
     OmlxChatOptions,
     ReportServerOptions,
+    WorkflowArchiveOptions,
 )
 
 
@@ -56,6 +60,10 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
     intent_data = data.get("intent_analysis") or {}
     omlx_data = data.get("omlx_chat") or {}
     report_server_data = data.get("report_server") or {}
+    approval_data = data.get("approval") or {}
+    workflow_archive_data = data.get("workflow_archive") or {}
+    notifications_data = data.get("notifications") or {}
+    dual_agent_data = data.get("dual_agent") or {}
 
     return BridgeConfig(
         dry_run=_bool_value(os.environ.get("LARK_AGENT_BRIDGE_DRY_RUN"), bool(data.get("dry_run", True))),
@@ -187,6 +195,27 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
                 os.environ.get("LARK_AGENT_BRIDGE_REPORT_PUBLIC_BASE_URL")
                 or report_server_data.get("public_base_url", ReportServerOptions().public_base_url)
             ),
+        ),
+        approval=ApprovalOptions(
+            enabled=bool(approval_data.get("enabled", ApprovalOptions().enabled)),
+        ),
+        workflow_archive=WorkflowArchiveOptions(
+            enabled=bool(workflow_archive_data.get("enabled", WorkflowArchiveOptions().enabled)),
+            base_token=str(workflow_archive_data.get("base_token", "")),
+            table_id=str(workflow_archive_data.get("table_id", "")),
+            drive_folder_token=str(workflow_archive_data.get("drive_folder_token", "")),
+            doc_parent_token=str(workflow_archive_data.get("doc_parent_token", "")),
+            base_field_map=_string_dict(
+                workflow_archive_data.get("base_field_map", WorkflowArchiveOptions().base_field_map),
+                "workflow_archive.base_field_map",
+            ),
+        ),
+        notifications=NotificationOptions(
+            enabled=bool(notifications_data.get("enabled", NotificationOptions().enabled)),
+            report_ready=bool(notifications_data.get("report_ready", NotificationOptions().report_ready)),
+        ),
+        dual_agent=DualAgentOptions(
+            enabled=bool(dual_agent_data.get("enabled", DualAgentOptions().enabled)),
         ),
         runner_timeout_seconds=int(runner_data.get("timeout_seconds", 900)),
     )

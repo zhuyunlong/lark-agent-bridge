@@ -65,6 +65,35 @@ class LarkClientTests(unittest.TestCase):
         self.assertEqual(statuses[0]["stage"], "event_consumer_starting")
         self.assertIn("event_consumer_ready", [item["stage"] for item in statuses])
 
+    def test_consume_payloads_preserves_card_action_payloads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(
+                dry_run=False,
+                data_dir=Path(tmp),
+                event_consumer=EventConsumerOptions(restart_on_failure=False, ready_timeout_seconds=1),
+            )
+            client = LarkClient(config)
+            payload = {
+                "header": {"event_id": "evt_card"},
+                "event": {
+                    "context": {"open_message_id": "om_card", "open_chat_id": "oc_1"},
+                    "action": {"value": {"action": "approve", "request_id": "apr_1"}},
+                },
+            }
+            process = FakeProcess(
+                stdout_lines=[json.dumps(payload) + "\n"],
+                stderr_lines=[
+                    "[event] ready event_key=card.action.trigger\n",
+                    "[event] exited — received 1 event(s) in 0.1s (reason: signal)\n",
+                ],
+                returncode=0,
+            )
+
+            with mock.patch("lark_agent_bridge.lark_client.subprocess.Popen", return_value=process):
+                payloads = list(client.consume_payloads())
+
+        self.assertEqual(payloads, [payload])
+
     def test_consume_events_raises_when_ready_marker_never_arrives(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = BridgeConfig(
