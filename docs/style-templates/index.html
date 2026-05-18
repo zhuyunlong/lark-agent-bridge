@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>Style Templates</title>
+  <style>
+    body { font-family: -apple-system, "Helvetica Neue", PingFang SC, Microsoft YaHei, sans-serif; margin: 0; background: #f4f7fb; color: #1f2937; }
+    .container { max-width: 1180px; margin: 0 auto; padding: 24px; }
+    h1 { margin: 0 0 8px; font-size: 26px; }
+    .sub { color: #64748b; margin-bottom: 20px; line-height: 1.6; font-size: 13px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+    a { display: block; text-decoration: none; color: inherit; background: #fff; border: 1px solid #dbeafe; border-radius: 10px; padding: 16px 18px; box-shadow: 0 1px 3px rgba(15, 23, 42, 0.06); }
+    a:hover { border-color: #93c5fd; box-shadow: 0 4px 14px rgba(59, 130, 246, 0.1); }
+    .title { font-weight: 700; font-size: 15px; margin-bottom: 6px; }
+    .desc { color: #64748b; font-size: 13px; line-height: 1.6; }
+    .tag { display: inline-block; margin-top: 10px; padding: 2px 8px; border-radius: 999px; background: #eff6ff; color: #1d4ed8; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>HTML 模板预览</h1>
+    <div class="sub">先看单页模板，再进四栏对比页。</div>
+    <div class="grid">
+      <a href="3d-stuck-template.html">
+        <div class="title">3d-stuck</div>
+        <div class="desc">故障态视觉，适合卡顿、卡死、掉帧类分析。</div>
+        <span class="tag">打开模板</span>
+      </a>
+      <a href="unity-startup-template.html">
+        <div class="title">unity-startup</div>
+        <div class="desc">时序工程态，适合启动生命周期、首帧、黑屏链路。</div>
+        <span class="tag">打开模板</span>
+      </a>
+      <a href="perception-summary-template.html">
+        <div class="title">perception-summary</div>
+        <div class="desc">数据总览态，适合统计汇总、表格和多链路数据展示。</div>
+        <span class="tag">打开模板</span>
+      </a>
+      <a href="bridge-combined-template.html">
+        <div class="title">bridge-combined</div>
+        <div class="desc">Bridge 合并报告，适合组合结论和交叉证据。</div>
+        <span class="tag">打开模板</span>
+      </a>
+      <a href="compare.html">
+        <div class="title">四栏对比页</div>
+        <div class="desc">四个模板并排预览，方便直接比样式。</div>
+        <span class="tag">打开对比页</span>
+      </a>
+    </div>
+  </div>
+</body>
+</html>

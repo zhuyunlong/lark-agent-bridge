@@ -130,11 +130,32 @@ class LarkClient:
             "bot",
             "--message-id",
             message_id,
-            "--card",
+            "--msg-type",
+            "interactive",
+            "--content",
             card_json,
         ]
         if self.config.lark.reply_in_thread:
             command.append("--reply-in-thread")
+        return self._run_or_plan(command)
+
+    def update_card(self, message_id: str, card_json: str) -> CommandResult:
+        """Update an existing interactive card message."""
+        data = json.dumps(
+            {"msg_type": "interactive", "content": card_json},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        command = [
+            "lark-cli",
+            "api",
+            "PATCH",
+            f"/open-apis/im/v1/messages/{message_id}",
+            "--as",
+            "bot",
+            "--data",
+            data,
+        ]
         return self._run_or_plan(command)
 
     def send_response(self, event: LarkEvent, text: str, *, markdown: bool = False) -> CommandResult:
@@ -563,7 +584,7 @@ class LarkClient:
             command.extend(["--user-id", user_id])
         else:
             return CommandResult(command=command, returncode=2, stderr="chat_id or user_id is required")
-        command.extend(["--card", card_json])
+        command.extend(["--msg-type", "interactive", "--content", card_json])
         return self._run_or_plan(command)
 
     def _run(self, command: list[str], *, timeout: int, cwd: Path | None = None) -> CommandResult:

@@ -201,6 +201,79 @@ class LarkClientTests(unittest.TestCase):
             ],
         )
 
+    def test_update_card_uses_generic_patch_api(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client = LarkClient(BridgeConfig(dry_run=True, data_dir=Path(tmp)))
+
+            result = client.update_card("om_card_1", '{"config":{}}')
+
+        self.assertEqual(
+            result.command,
+            [
+                "lark-cli",
+                "api",
+                "PATCH",
+                "/open-apis/im/v1/messages/om_card_1",
+                "--as",
+                "bot",
+                "--data",
+                '{"msg_type":"interactive","content":"{\\"config\\":{}}"}',
+            ],
+        )
+
+    def test_reply_card_uses_interactive_content_payload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client = LarkClient(
+                BridgeConfig(
+                    dry_run=True,
+                    data_dir=Path(tmp),
+                    lark=LarkOptions(reply_in_thread=True),
+                )
+            )
+
+            result = client.reply_card("om_1", '{"config":{}}')
+
+        self.assertEqual(
+            result.command,
+            [
+                "lark-cli",
+                "im",
+                "+messages-reply",
+                "--as",
+                "bot",
+                "--message-id",
+                "om_1",
+                "--msg-type",
+                "interactive",
+                "--content",
+                '{"config":{}}',
+                "--reply-in-thread",
+            ],
+        )
+
+    def test_send_card_response_uses_interactive_content_payload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client = LarkClient(BridgeConfig(dry_run=True, data_dir=Path(tmp)))
+
+            result = client.send_card_response(event(), '{"config":{}}')
+
+        self.assertEqual(
+            result.command,
+            [
+                "lark-cli",
+                "im",
+                "+messages-send",
+                "--as",
+                "bot",
+                "--chat-id",
+                "oc_1",
+                "--msg-type",
+                "interactive",
+                "--content",
+                '{"config":{}}',
+            ],
+        )
+
     def test_group_response_uses_send_and_mentions_sender(self):
         with tempfile.TemporaryDirectory() as tmp:
             client = LarkClient(

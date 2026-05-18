@@ -72,6 +72,12 @@ timeout_seconds = 5400
 max_prompt_chars = 16000
 upload_result_files = true
 default_prompt = "调查3D启动时序"
+# Default false: follow-up and reanalysis create a fresh Agent session and reuse
+# cached bug/log/source metadata instead of resuming a large old Agent context.
+# Set true only when you explicitly need to continue the old Agent's private reasoning state.
+resume_followup_sessions = false
+# Terms that force a follow-up into reanalysis instead of answering from existing report context.
+force_reanalysis_terms = ["结果不合理", "信号定义", "源码", "源代码", "根据源码", "重新分析", "重新跑", "重跑", "再分析"]
 
 [intent_analysis]
 enabled = false

@@ -62,6 +62,39 @@ class UnityStartupSkillTests(unittest.TestCase):
         self.assertEqual(focus.index, 1)
         self.assertIn("之前最近", reason)
 
+    def test_choose_focus_session_ignores_stale_before_session_when_after_is_near(self):
+        stale = self.mod.Session(
+            index=1,
+            events=[],
+            first_by_node={},
+            all_by_node={},
+            status="partial",
+            diagnosis="stale",
+            missing_critical=[],
+            primary_pid=2468,
+        )
+        near_after = self.mod.Session(
+            index=2,
+            events=[],
+            first_by_node={},
+            all_by_node={},
+            status="complete",
+            diagnosis="near",
+            missing_critical=[],
+            primary_pid=2468,
+        )
+        stale.events = [self._fake_event(self.mod, "2026-04-30 14:52:49.770", 2468)]
+        stale.process_begin = self.mod.dt.datetime.strptime("2026-05-13 16:14:15", "%Y-%m-%d %H:%M:%S")
+        near_after.events = [self._fake_event(self.mod, "2026-05-13 16:14:26.462", 2468)]
+        near_after.process_begin = self.mod.dt.datetime.strptime("2026-05-13 16:14:15", "%Y-%m-%d %H:%M:%S")
+        target_time = self.mod.parse_target_time("2026-05-13 16:12")
+
+        focus, reason = self.mod.choose_focus_session([stale, near_after], target_time)
+
+        self.assertIsNotNone(focus)
+        self.assertEqual(focus.index, 2)
+        self.assertIn("之后最近", reason)
+
     def test_select_target_logs_falls_back_to_main_logs_without_package_path(self):
         with tempfile.TemporaryDirectory() as tmp:
             decoded_log = Path(tmp) / "main_2026-05-11_23-00.alog.log"
@@ -74,6 +107,57 @@ class UnityStartupSkillTests(unittest.TestCase):
         self.assertEqual(selected, [decoded_log])
         self.assertTrue(warnings)
         self.assertIn("main_*.log", warnings[0])
+
+    def test_select_report_sessions_prefers_focus_pid_and_nearby_window(self):
+        stale = self.mod.Session(
+            index=1,
+            events=[self._fake_event(self.mod, "2026-01-01 08:00:38.398", 2468)],
+            first_by_node={},
+            all_by_node={},
+            status="partial",
+            diagnosis="stale",
+            missing_critical=[],
+            primary_pid=2468,
+        )
+        near_focus = self.mod.Session(
+            index=2,
+            events=[self._fake_event(self.mod, "2026-05-13 16:14:26.462", 2468)],
+            first_by_node={},
+            all_by_node={},
+            status="complete",
+            diagnosis="focus",
+            missing_critical=[],
+            primary_pid=2468,
+        )
+        nearby_same_pid = self.mod.Session(
+            index=3,
+            events=[self._fake_event(self.mod, "2026-05-13 16:18:00.000", 2468)],
+            first_by_node={},
+            all_by_node={},
+            status="complete",
+            diagnosis="nearby",
+            missing_critical=[],
+            primary_pid=2468,
+        )
+        nearby_other_pid = self.mod.Session(
+            index=4,
+            events=[self._fake_event(self.mod, "2026-05-13 16:15:00.000", 7412)],
+            first_by_node={},
+            all_by_node={},
+            status="complete",
+            diagnosis="other",
+            missing_critical=[],
+            primary_pid=7412,
+        )
+
+        target_time = self.mod.parse_target_time("2026-05-13 16:12")
+        selected = self.mod.select_report_sessions(
+            [stale, near_focus, nearby_same_pid, nearby_other_pid],
+            near_focus,
+            target_time,
+        )
+
+        self.assertEqual([session.index for session in selected], [2, 3])
 
     def test_scan_system_load_snapshots_parses_logd_lines(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -107,6 +191,7 @@ class UnityStartupSkillTests(unittest.TestCase):
 
         self.assertEqual(len(markers), 1)
         self.assertEqual(markers[0].pid, 7412)
+        self.assertEqual(markers[0].timestamp.strftime("%Y-%m-%d %H:%M:%S"), "2026-05-11 23:11:29")
 
     @staticmethod
     def _fake_event(mod, timestamp_text: str, pid: int):

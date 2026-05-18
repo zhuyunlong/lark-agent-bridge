@@ -77,6 +77,37 @@ class AgentActivityStoreTests(unittest.TestCase):
         self.assertEqual(status["event_key"], "im.message.receive_v1")
         self.assertTrue(status["ready"])
 
+    def test_find_session_by_job_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "activity.json"
+            store = AgentActivityStore(path)
+            event = LarkEvent(
+                event_id="evt_1",
+                message_id="om_1",
+                chat_id="oc_1",
+                chat_type="group",
+                sender_id="ou_1",
+                message_type="text",
+                content="@bot 分析 bug",
+            )
+
+            store.record_result(
+                event,
+                TaskResult(
+                    success=True,
+                    message="分析完成",
+                    job_id="job_1",
+                    details={"mode": "bug_analysis"},
+                ),
+            )
+
+            reloaded = AgentActivityStore(path)
+            detail = reloaded.find_session_by_job_id("job_1")
+
+        self.assertIsNotNone(detail)
+        assert detail is not None
+        self.assertEqual(detail["session_id"], "om_1")
+
 
 if __name__ == "__main__":
     unittest.main()

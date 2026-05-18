@@ -34,6 +34,7 @@ class CardActionEventTests(unittest.TestCase):
                     "context": {
                         "open_message_id": "om_card",
                         "open_chat_id": "oc_card",
+                        "chat_type": "group",
                     },
                     "operator": {"operator_id": {"open_id": "ou_operator"}},
                     "action": {
@@ -42,6 +43,7 @@ class CardActionEventTests(unittest.TestCase):
                             "request_id": "apr_123456abcdef",
                             "job_id": "job_1",
                             "root_message_id": "om_root",
+                            "followup_text": "继续分析\u0000这个问题",
                         }
                     },
                 },
@@ -55,7 +57,9 @@ class CardActionEventTests(unittest.TestCase):
         self.assertEqual(event.root_message_id, "om_root")
         self.assertEqual(event.message_id, "om_card")
         self.assertEqual(event.chat_id, "oc_card")
+        self.assertEqual(event.chat_type, "group")
         self.assertEqual(event.operator_id, "ou_operator")
+        self.assertEqual(event.followup_text, "继续分析 这个问题")
 
     def test_rejects_malicious_callback_identifiers(self):
         event = CardActionEvent.from_dict(

@@ -396,6 +396,17 @@ class AgentActivityStore:
                 return None
             return _public_session(session, include_progress=True)
 
+    def find_session_by_job_id(self, job_id: str) -> dict[str, Any] | None:
+        normalized = job_id.strip()
+        if not normalized:
+            return None
+        with self._lock:
+            for session in self._sessions.values():
+                if str(session.get("job_id") or "").strip() != normalized:
+                    continue
+                return _public_session(session, include_progress=True)
+        return None
+
     def record_daemon_status(self, payload: dict[str, object]) -> None:
         with self._lock:
             status = _jsonable_limited(payload)

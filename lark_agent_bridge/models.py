@@ -20,6 +20,7 @@ class DownloadConfig:
 class JobRetentionOptions:
     enabled: bool = True
     max_age_hours: int = 6
+    bug_cache_max_age_hours: int = 24
     purge_all_on_listen_start: bool = True
     cleanup_interval_seconds: int = 60
 
@@ -74,6 +75,20 @@ class BugAnalysisOptions:
     max_prompt_chars: int = 16000
     upload_result_files: bool = True
     default_prompt: str = "调查3D启动时序"
+    resume_followup_sessions: bool = False
+    force_reanalysis_terms: list[str] = field(
+        default_factory=lambda: [
+            "结果不合理",
+            "信号定义",
+            "源码",
+            "源代码",
+            "根据源码",
+            "重新分析",
+            "重新跑",
+            "重跑",
+            "再分析",
+        ]
+    )
 
 
 @dataclass(slots=True)
@@ -266,7 +281,9 @@ class CardActionEvent:
     root_message_id: str = ""
     message_id: str = ""
     chat_id: str = ""
+    chat_type: str = ""
     operator_id: str = ""
+    followup_text: str = ""
     raw: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -309,7 +326,14 @@ class CardActionEvent:
             chat_id=_safe_callback_identifier(
                 payload.get("chat_id") or context.get("open_chat_id") or context.get("chat_id") or ""
             ),
+            chat_type=_safe_chat_type(
+                payload.get("chat_type")
+                or event_body.get("chat_type")
+                or context.get("chat_type")
+                or ""
+            ),
             operator_id=_safe_callback_identifier(operator_id),
+            followup_text=_safe_callback_text(value.get("followup_text") or ""),
             raw=payload,
         )
 
@@ -496,6 +520,22 @@ def _safe_card_action(value: Any) -> str:
     if not text or not _CARD_ACTION_RE.fullmatch(text):
         return ""
     return text
+
+
+def _safe_callback_text(value: Any, *, max_chars: int = 1000) -> str:
+    text = str(value or "")
+    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) > max_chars:
+        text = text[:max_chars].rstrip()
+    return text
+
+
+def _safe_chat_type(value: Any) -> str:
+    text = str(value or "").strip().casefold()
+    if text in {"group", "p2p"}:
+        return text
+    return ""
 
 
 def _jsonable(value: Any) -> Any:

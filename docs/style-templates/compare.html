@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HTML 模板四栏对比</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: -apple-system, "Helvetica Neue", PingFang SC, Microsoft YaHei, sans-serif; background: #edf2f7; color: #1f2937; }
+    .shell { max-width: 1600px; margin: 0 auto; padding: 20px; }
+    .top { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; flex-wrap: wrap; margin-bottom: 16px; }
+    h1 { margin: 0; font-size: 26px; }
+    .sub { color: #64748b; font-size: 13px; line-height: 1.6; max-width: 820px; }
+    .jump { display: flex; flex-wrap: wrap; gap: 8px; }
+    .jump a { text-decoration: none; color: #1d4ed8; background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 999px; padding: 4px 10px; font-size: 12px; }
+    .summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin: 16px 0 16px; }
+    .summary-card {
+      background: #fff;
+      border: 1px solid #dbeafe;
+      border-radius: 12px;
+      padding: 14px 16px;
+      box-shadow: 0 1px 3px rgba(15, 23, 42, 0.06);
+      min-width: 0;
+    }
+    .summary-card .k { font-size: 12px; color: #64748b; margin-bottom: 6px; }
+    .summary-card .v { font-size: 15px; font-weight: 700; margin-bottom: 8px; }
+    .summary-card .d { font-size: 12px; color: #64748b; line-height: 1.55; }
+    .summary-card .bar { height: 4px; border-radius: 999px; margin-bottom: 10px; background: #cbd5e1; }
+    .bar.stuck { background: linear-gradient(90deg, #dc2626, #d97706); }
+    .bar.startup { background: linear-gradient(90deg, #1d4ed8, #0f766e); }
+    .bar.perception { background: linear-gradient(90deg, #0f766e, #10b981); }
+    .bar.bridge { background: linear-gradient(90deg, #64748b, #1d4ed8); }
+    .matrix { background: #fff; border: 1px solid #dbeafe; border-radius: 12px; padding: 14px 16px; box-shadow: 0 1px 3px rgba(15, 23, 42, 0.06); margin-bottom: 16px; }
+    .matrix h2 { margin: 0 0 12px; font-size: 16px; }
+    .matrix table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .matrix th, .matrix td { padding: 8px 10px; border-bottom: 1px solid #e2e8f0; text-align: left; vertical-align: top; }
+    .matrix th { background: #f8fafc; color: #334155; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; color: #fff; white-space: nowrap; }
+    .badge.stuck { background: #dc2626; }
+    .badge.startup { background: #1d4ed8; }
+    .badge.perception { background: #0f766e; }
+    .badge.bridge { background: #64748b; }
+    .grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; align-items: start; }
+    .panel { background: #fff; border: 1px solid #dbeafe; border-radius: 12px; overflow: hidden; box-shadow: 0 1px 3px rgba(15, 23, 42, 0.08); min-width: 0; }
+    .head { padding: 12px 14px; border-bottom: 1px solid #e2e8f0; background: #f8fafc; }
+    .name { font-weight: 700; font-size: 14px; margin-bottom: 4px; }
+    .desc { color: #64748b; font-size: 12px; line-height: 1.5; }
+    iframe { width: 100%; height: 1100px; border: 0; display: block; background: #fff; }
+    @media (max-width: 1400px) { .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } iframe { height: 900px; } }
+    @media (max-width: 820px) { .grid { grid-template-columns: 1fr; } iframe { height: 820px; } }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="top">
+      <div>
+        <h1>HTML 模板四栏对比</h1>
+        <div class="sub">四套模板用同一组示例数据并排预览，便于直接比较视觉差异、信息密度和链路组织方式。</div>
+      </div>
+      <div class="jump">
+        <a href="3d-stuck-template.html">3d-stuck</a>
+        <a href="unity-startup-template.html">unity-startup</a>
+        <a href="perception-summary-template.html">perception-summary</a>
+        <a href="bridge-combined-template.html">bridge-combined</a>
+      </div>
+    </div>
+    <div class="summary">
+      <div class="summary-card">
+        <div class="bar stuck"></div>
+        <div class="k">3d-stuck</div>
+        <div class="v">故障排障风格</div>
+        <div class="d">更强调红黄预警、异常摘要和根因链，读感更像“诊断结果页”。</div>
+      </div>
+      <div class="summary-card">
+        <div class="bar startup"></div>
+        <div class="k">unity-startup</div>
+        <div class="v">启动时序风格</div>
+        <div class="d">更强调会话、阶段、首帧和 Surface 绑定，读感更像“时序分析页”。</div>
+      </div>
+      <div class="summary-card">
+        <div class="bar perception"></div>
+        <div class="k">perception-summary</div>
+        <div class="v">数据总览风格</div>
+        <div class="d">更强调多表格统计和链路汇总，读感更像“监控仪表板”。</div>
+      </div>
+      <div class="summary-card">
+        <div class="bar bridge"></div>
+        <div class="k">bridge-combined</div>
+        <div class="v">组合报告风格</div>
+        <div class="d">更强调跨报告合并结论和目标时间窗，读感更像“汇总发布页”。</div>
+      </div>
+    </div>
+    <div class="matrix">
+      <h2>对比维度</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>维度</th>
+            <th>3d-stuck</th>
+            <th>unity-startup</th>
+            <th>perception-summary</th>
+            <th>bridge-combined</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>核心读法</td>
+            <td><span class="badge stuck">故障结论</span></td>
+            <td><span class="badge startup">启动链路</span></td>
+            <td><span class="badge perception">数据汇总</span></td>
+            <td><span class="badge bridge">组合结论</span></td>
+          </tr>
+          <tr>
+            <td>最先看什么</td>
+            <td>异常摘要 + 根因链</td>
+            <td>会话链路 + 阶段详情</td>
+            <td>统计卡片 + 大表格</td>
+            <td>目标时间窗 + 合并链路</td>
+          </tr>
+          <tr>
+            <td>视觉重心</td>
+            <td>告警感、判断感强</td>
+            <td>时序感、工程感强</td>
+            <td>统计感、面板感强</td>
+            <td>汇总感、发布感强</td>
+          </tr>
+          <tr>
+            <td>适合场景</td>
+            <td>卡顿、卡死、掉帧</td>
+            <td>黑屏、首帧、启动慢</td>
+            <td>频率统计、数据链路</td>
+            <td>跨报告合并、统一回包</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="grid">
+      <section class="panel">
+        <div class="head">
+          <div class="name">3d-stuck</div>
+          <div class="desc">故障态视觉，适合卡顿/卡死/掉帧。</div>
+        </div>
+        <iframe src="3d-stuck-template.html" title="3d-stuck"></iframe>
+      </section>
+      <section class="panel">
+        <div class="head">
+          <div class="name">unity-startup</div>
+          <div class="desc">启动时序态，适合首帧/黑屏/Ready 链路。</div>
+        </div>
+        <iframe src="unity-startup-template.html" title="unity-startup"></iframe>
+      </section>
+      <section class="panel">
+        <div class="head">
+          <div class="name">perception-summary</div>
+          <div class="desc">数据总览态，适合统计和多表格链路。</div>
+        </div>
+        <iframe src="perception-summary-template.html" title="perception-summary"></iframe>
+      </section>
+      <section class="panel">
+        <div class="head">
+          <div class="name">bridge-combined</div>
+          <div class="desc">Bridge 合并页，适合组合结论和目标时间窗。</div>
+        </div>
+        <iframe src="bridge-combined-template.html" title="bridge-combined"></iframe>
+      </section>
+    </div>
+  </div>
+</body>
+</html>

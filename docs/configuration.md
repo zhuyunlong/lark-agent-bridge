@@ -62,7 +62,7 @@ Use `[bug_analysis]` to define the preferred Agent for:
 
 - bug final summary
 - bug follow-up continuation
-- bug reanalysis continuation
+- bug reanalysis summary
 - default provider fallback for `[intent_analysis]`
 
 Example:
@@ -73,6 +73,7 @@ enabled = true
 provider = "codex"
 command = "codex"
 working_dir = "../.."
+resume_followup_sessions = false
 ```
 
 or:
@@ -89,7 +90,9 @@ Behavior:
 
 - `provider = "codex"` means prefer Codex first
 - `provider = "claude"` means prefer Claude Code first
-- if the preferred provider cannot start, returns non-zero, or cannot continue the summary session, the bridge automatically tries the other provider
+- if the preferred provider cannot start or returns non-zero, the bridge automatically tries the other provider
+- follow-ups and reanalysis create a fresh Agent session by default, while reusing the previous bug link, downloaded logs, extracted logs, report metadata, skill decision, and source-repo paths
+- set `resume_followup_sessions = true` only if you explicitly want a follow-up to resume the old Agent session; reanalysis still uses a fresh Agent summary session so the new prompt and current skill/source evidence are not biased by stale private context
 
 ### Intent routing default agent
 
@@ -162,7 +165,7 @@ Notes:
 - `bind_host` uses `0.0.0.0` by default so peers inside the same LAN can open the generated report link
 - published pages are stored under `data/published_reports/`
 - reply-context state for follow-up questions is stored under `data/state/conversation_contexts.json`
-- the same listener serves the local session console at `/sessions` and JSON APIs under `/api/sessions`
+- the same listener serves the local admin console at `/admin` (`/sessions` is an alias) and JSON APIs under `/api/sessions`, `/api/cases`, `/api/skills`
 - listener daemon health is exposed in `check` output and at `/api/daemon`
 - agent timeline state for the console is stored under `data/state/agent_activity.json`
 
@@ -274,7 +277,7 @@ Notes:
 - if `provider` / `command` are empty, the bridge reuses `[bug_analysis]`
 - the preferred provider is still selected from this block first; if it fails, the bridge tries the alternate provider automatically
 - this agent only classifies intent; it does not replace the heavy local bug/log analyzers
-- for bug follow-up messages, the classifier chooses whether to continue the saved Bug agent session directly or trigger a reanalysis that still resumes the same provider session afterward
+- for bug follow-up messages, the classifier chooses whether the existing report context can answer or a reanalysis is needed; reanalysis reuses cached logs and source metadata but starts a fresh Agent summary session
 - when `enabled = false`, the bridge falls back to the legacy deterministic routing rules
 
 ## Behavior permissions

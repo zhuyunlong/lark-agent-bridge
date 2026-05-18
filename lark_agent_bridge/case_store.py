@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import json
 import re
+import hashlib
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -182,24 +183,34 @@ class CaseStore:
 
         message = getattr(result, "message", "") or ""
         report_url = str(details.get("published_report_url", ""))
+        normalized_bug_url = (bug_url or str(details.get("bug_url", ""))).strip()
         problem_type = _infer_problem_type(message, mode)
         root_cause_tags = _extract_root_cause_tags(message)
         conclusion_confidence = _infer_confidence(message)
+        case_id = _stable_case_id(normalized_bug_url) if normalized_bug_url else job_id
+        previous = self._cases.get(case_id)
 
         case = CaseRecord(
-            case_id=job_id,
+            case_id=case_id,
             problem_type=problem_type,
             analysis_mode=mode,
             conclusion=_truncate(message, 4000),
             conclusion_confidence=conclusion_confidence,
             report_url=report_url,
-            bug_url=bug_url,
+            bug_url=normalized_bug_url,
             root_cause_tags=root_cause_tags,
             agent_provider=str(details.get("provider", "")),
             duration_seconds=getattr(result, "duration_seconds", None),
             request_text=_truncate(request_text, 2000),
             job_id=job_id,
+            created_at=previous.created_at if previous is not None else "",
         )
+        if previous is not None:
+            case.human_confirmed = previous.human_confirmed
+            case.reproduced = previous.reproduced
+            case.chat_id = previous.chat_id
+            case.sender_id = previous.sender_id
+            case.extra = dict(previous.extra)
 
         if event is not None:
             case.chat_id = getattr(event, "chat_id", "")
@@ -247,6 +258,24 @@ class CaseStore:
     def list_recent(self, *, limit: int = 20) -> list[CaseRecord]:
         """List most recent cases."""
         cases = list(self._cases.values())
+        cases.sort(key=lambda c: c.updated_at or c.created_at, reverse=True)
+        return cases[:limit]
+
+    def list_latest_by_bug(self, *, limit: int = 20) -> list[CaseRecord]:
+        """List the latest visible record for each bug URL.
+
+        Newer records with a bug URL already share a stable case_id. This
+        grouping also keeps older job-id-based records tidy in the admin UI.
+        """
+        grouped: dict[str, CaseRecord] = {}
+        for case in self._cases.values():
+            group_key = case.bug_url.strip() or case.case_id
+            previous = grouped.get(group_key)
+            if previous is None or (case.updated_at or case.created_at) > (
+                previous.updated_at or previous.created_at
+            ):
+                grouped[group_key] = case
+        cases = list(grouped.values())
         cases.sort(key=lambda c: c.updated_at or c.created_at, reverse=True)
         return cases[:limit]
 
@@ -387,6 +416,11 @@ def _extract_root_cause_tags(text: str) -> list[str]:
             tags.append(tag)
             seen.add(tag)
     return tags
+
+
+def _stable_case_id(bug_url: str) -> str:
+    digest = hashlib.sha1(bug_url.strip().encode("utf-8")).hexdigest()[:16]
+    return f"bug-{digest}"
 
 
 def _case_text(case: CaseRecord) -> str:

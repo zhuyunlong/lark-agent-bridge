@@ -122,6 +122,41 @@ class TestCaseStore:
             assert case.conclusion_confidence == "high"  # "根因" matches high confidence
             assert case.chat_id == "oc_123"
 
+    def test_save_from_result_keeps_latest_report_per_bug_url(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = CaseStore(Path(tmp) / "cases.json")
+
+            class FakeResult:
+                success = True
+                skipped = False
+                duration_seconds = 1.0
+
+                def __init__(self, job_id: str, report_url: str) -> None:
+                    self.job_id = job_id
+                    self.message = f"分析完成 {job_id}"
+                    self.details = {
+                        "mode": "bug_analysis",
+                        "published_report_url": report_url,
+                        "provider": "codex",
+                    }
+
+            first = store.save_from_result(
+                FakeResult("job-001", "http://example.com/reports/old"),
+                bug_url="https://meegle.example.com/bug/123",
+            )
+            second = store.save_from_result(
+                FakeResult("job-002", "http://example.com/reports/new"),
+                bug_url="https://meegle.example.com/bug/123",
+            )
+
+            assert first is not None
+            assert second is not None
+            assert first.case_id == second.case_id
+            assert store.count == 1
+            latest = store.list_latest_by_bug(limit=10)
+            assert latest[0].job_id == "job-002"
+            assert latest[0].report_url == "http://example.com/reports/new"
+
     def test_save_from_result_skipped(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = CaseStore(Path(tmp) / "cases.json")

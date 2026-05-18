@@ -58,6 +58,7 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
             if config.job_retention.purge_all_on_listen_start:
                 app.purge_all_jobs()
+            app.cleanup_expired_jobs()
             app.start_report_server()
             stop_cleanup = _start_cleanup_loop(app)
             try:

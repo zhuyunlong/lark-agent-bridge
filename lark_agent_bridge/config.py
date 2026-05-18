@@ -88,6 +88,7 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
         job_retention=JobRetentionOptions(
             enabled=bool(retention_data.get("enabled", True)),
             max_age_hours=int(retention_data.get("max_age_hours", 6)),
+            bug_cache_max_age_hours=int(retention_data.get("bug_cache_max_age_hours", 24)),
             purge_all_on_listen_start=bool(retention_data.get("purge_all_on_listen_start", True)),
             cleanup_interval_seconds=int(retention_data.get("cleanup_interval_seconds", 60)),
         ),
@@ -151,6 +152,13 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
             max_prompt_chars=int(bug_data.get("max_prompt_chars", 16000)),
             upload_result_files=bool(bug_data.get("upload_result_files", True)),
             default_prompt=str(bug_data.get("default_prompt", BugAnalysisOptions().default_prompt)),
+            resume_followup_sessions=bool(
+                bug_data.get("resume_followup_sessions", BugAnalysisOptions().resume_followup_sessions)
+            ),
+            force_reanalysis_terms=_string_list(
+                bug_data.get("force_reanalysis_terms", BugAnalysisOptions().force_reanalysis_terms),
+                "bug_analysis.force_reanalysis_terms",
+            ),
         ),
         intent_analysis=IntentAnalysisOptions(
             enabled=bool(intent_data.get("enabled", False)),

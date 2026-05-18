@@ -15,6 +15,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.download.timeout_seconds, 60)
         self.assertTrue(config.report_server.enabled)
         self.assertFalse(config.approval.enabled)
+        self.assertEqual(config.job_retention.bug_cache_max_age_hours, 24)
 
     def test_toml_overrides_are_resolved_relative_to_config(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -100,6 +101,7 @@ public_base_url = "https://bridge.example.com/reports"
 [job_retention]
 enabled = true
 max_age_hours = 4
+bug_cache_max_age_hours = 24
 purge_all_on_listen_start = false
 cleanup_interval_seconds = 30
 """,
@@ -110,6 +112,7 @@ cleanup_interval_seconds = 30
 
         self.assertTrue(config.job_retention.enabled)
         self.assertEqual(config.job_retention.max_age_hours, 4)
+        self.assertEqual(config.job_retention.bug_cache_max_age_hours, 24)
         self.assertFalse(config.job_retention.purge_all_on_listen_start)
         self.assertEqual(config.job_retention.cleanup_interval_seconds, 30)
 
@@ -192,6 +195,8 @@ provider = "codex"
 command = "codex"
 timeout_seconds = 99
 default_prompt = "分析这个bug"
+resume_followup_sessions = true
+force_reanalysis_terms = ["重新分析", "源码"]
 """,
                 encoding="utf-8",
             )
@@ -203,6 +208,8 @@ default_prompt = "分析这个bug"
         self.assertEqual(config.bug_analysis.command, "codex")
         self.assertEqual(config.bug_analysis.timeout_seconds, 99)
         self.assertEqual(config.bug_analysis.default_prompt, "分析这个bug")
+        self.assertTrue(config.bug_analysis.resume_followup_sessions)
+        self.assertEqual(config.bug_analysis.force_reanalysis_terms, ["重新分析", "源码"])
 
     def test_load_intent_analysis_options(self):
         with tempfile.TemporaryDirectory() as tmp:

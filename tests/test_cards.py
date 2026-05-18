@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import unittest
 
 from lark_agent_bridge.cards import (
     build_confirmation_card,
+    build_followup_result_card,
     build_result_card,
     build_status_card,
     build_text_fallback,
@@ -113,6 +115,30 @@ class TestBuildResultCard:
                     break
 
 
+class TestBuildFollowupResultCard:
+    def test_followup_card_has_choice_and_feedback_buttons(self):
+        card = build_followup_result_card(
+            title="Bug 追问",
+            summary="系统主题是黑夜。",
+            report_url="http://example.com/report",
+            root_message_id="om_root",
+            job_id="job_1",
+            followup_text="问题时刻系统主题是白天还是黑夜",
+            answer_confidence=0.9,
+        )
+
+        rendered = str(card)
+        assert "打开报告" in rendered
+        assert "基于当前报告回答" in rendered
+        assert "基于已有日志重新分析" in rendered
+        assert "继续原 Agent" in rendered
+        assert "有用" in rendered
+        assert "不准" in rendered
+        assert "'action': 'answer_from_report'" in rendered
+        assert "'action': 'continue_agent'" in rendered
+        assert "'followup_text': '问题时刻系统主题是白天还是黑夜'" in rendered
+
+
 class TestBuildConfirmationCard:
     def test_basic_confirmation(self):
         card = build_confirmation_card(
@@ -163,3 +189,26 @@ class TestBuildTextFallback:
     def test_empty_card(self):
         fallback = build_text_fallback({})
         assert fallback == ""
+
+
+class DynamicStatusCardTests(unittest.TestCase):
+    def test_status_card_with_progress_runtime_and_tokens(self):
+        card = build_status_card(
+            title="Bug 分析",
+            status="analyzing",
+            details={"任务ID": "job_1"},
+            progress=[
+                {"stage": "bug_fetch_data", "message": "拉取 bug 详情"},
+                {"stage": "bug_agent_summary", "message": "调用本地 Agent", "details": {"provider": "codex"}},
+            ],
+            elapsed_seconds=12.4,
+            token_usage={"input_tokens": 1000, "output_tokens": 200, "total_tokens": 1200},
+            report_url="http://127.0.0.1:8765/reports/job_1/",
+        )
+
+        rendered = str(card)
+        self.assertIn("后台进度", rendered)
+        self.assertIn("bug_fetch_data", rendered)
+        self.assertIn("12.4 秒", rendered)
+        self.assertIn("1200", rendered)
+        self.assertIn("打开报告", rendered)

@@ -54,8 +54,8 @@ Reply behavior:
 - `group` chat without a leading mention to this bot: silently skip, no reply
 - `group` chat addressed to this bot: ordinary chat still sends a normal group message and `@` the sender
 - Claude Code skill analysis: send a text excerpt first, then upload `claude_skill_result.md` as a file
-- HTML-producing analysis (`/signal`, Bug 链接分析, 附件直传分析, 感知总结): reply to the triggering message with `@` the sender, publish one LAN-accessible HTML link, and in group chats also upload the HTML report; no JSON uploads
-- when a user replies to the previous HTML result and `@` this bot, the bridge continues the conversation with the stored analysis context; if the user corrects the problem time and asks to re-analyse, the bridge reuses the previous Bug job and prepared log input instead of fetching/downloading/decrypting again, refreshes only the affected reports, and then lets the configured Bug agent (`codex` / `claude`) continue the same summary session when the provider supports resume
+- HTML-producing analysis (`/signal`, Bug 链接分析, 附件直传分析, 感知总结): reply to the triggering message with a dynamic progress card, update the same card with backend progress nodes, elapsed time, Agent token usage when available, and the final report link; in group chats also upload the HTML report; no JSON uploads
+- when a user replies to the previous HTML result and `@` this bot, the bridge continues with the stored analysis context; simple follow-ups can answer from existing report metadata, while reanalysis reuses the previous Bug job, downloaded logs, extracted logs, skill decision, and source-repo paths. Agent summary runs start a fresh session by default; old Agent session resume is an explicit opt-in for rare diagnostic cases.
 - rejected requests: still send back a clear error message
 - addressed but unsupported requests: reply `not a handled request`
 - job retention: `listen` startup purges old `data/jobs/*`; while the service keeps running, a background cleanup loop removes job directories older than 6 hours by default
@@ -81,7 +81,7 @@ Bug analysis routing is URL-based, and the short description controls the route:
 
 The default Claude Code tool allowlist is read-only: `Read`, `Grep`, `Glob`, `LS`. It does not grant edit or shell execution permissions unless you change `config.toml`.
 
-Bug analysis uses `[bug_analysis]` for timeout and working directory, `[intent_analysis]` for optional agent-based message routing, and `[report_server]` for HTML publication. The current implementation does not depend on a local agent to complete the heavy bug-fetch/decode/report pipeline; it executes the local scripts directly for better stability, then hands the final conclusion to the configured Bug agent (`codex` / `claude`) when available. When intent routing is enabled, a local agent first decides whether an addressed message is ordinary chat, a fresh analysis request, or a follow-up that should continue the same saved Bug agent session.
+Bug analysis uses `[bug_analysis]` for timeout and working directory, `[intent_analysis]` for optional agent-based message routing, and `[report_server]` for HTML publication. The current implementation does not depend on a local agent to complete the heavy bug-fetch/decode/report pipeline; it executes the local scripts directly for better stability, then hands the final conclusion to the configured Bug agent (`codex` / `claude`) when available. When intent routing is enabled, a local agent can help classify ambiguous addressed messages; clear bug replies bypass that slow path, and reanalysis starts from cached logs plus current skill/source evidence rather than an old Agent session.
 
 Current Bug routing rules:
 
@@ -121,11 +121,11 @@ model = "gemma-4-26b-a4b-it-4bit"
 api_key = ""
 ```
 
-HTML links are served by the built-in report server. If `[report_server].public_base_url` is empty, or still points at loopback, the bridge will automatically switch to the current LAN IP. `listen` starts the local HTTP server in the background. The same server also exposes the local session console at `/sessions`, with JSON APIs under `/api/sessions`, so you can inspect Bot conversations, job IDs, report links, and agent progress stages from a browser.
+HTML links are served by the built-in report server. If `[report_server].public_base_url` is empty, or still points at loopback, the bridge will automatically switch to the current LAN IP. `listen` starts the local HTTP server in the background. The same server also exposes the local admin console at `/admin` and keeps `/sessions` as a compatibility alias. JSON APIs under `/api/sessions`, `/api/cases`, `/api/skills`, `/api/daemon`, and `/api/health` let you inspect Bot conversations, latest report per Bug, skill definitions, job IDs, report links, and agent progress stages from a browser.
 
 `listen` also manages `lark-cli event consume` as a daemon-style subprocess: it waits for the official `[event] ready event_key=...` stderr marker, keeps stdin open so the consumer does not exit from EOF under supervisors, records the latest listener health in `data/state/agent_activity.json`, exposes it in `check` and `/api/daemon`, and restarts non-zero consumer failures with configurable backoff.
 
-Interactive result cards are supported. Approval cards are available only when the deployment has a real card callback ingress wired into the bridge; keep `[approval].enabled = false` for the default `listen` path, otherwise medium/high-risk analysis requests will wait on `approval_pending` until they expire. Successful reports can also be archived into Feishu Doc, Drive, and Base by enabling `[workflow_archive]`, and optional `[notifications]` / `[dual_agent]` switches add report-ready pushes and primary-vs-secondary conclusion arbitration.
+Interactive result cards are supported. Dynamic progress-card updates are best-effort and use `lark-cli api PATCH /open-apis/im/v1/messages/{message_id}`; if update fails, the bridge keeps the analysis running and falls back to the final result reply. Approval cards are available only when the deployment has a real card callback ingress wired into the bridge; keep `[approval].enabled = false` for the default `listen` path, otherwise medium/high-risk analysis requests will wait on `approval_pending` until they expire. Successful reports can also be archived into Feishu Doc, Drive, and Base by enabling `[workflow_archive]`, and optional `[notifications]` / `[dual_agent]` switches add report-ready pushes and primary-vs-secondary conclusion arbitration.
 
 To avoid cross-bot conflicts in busy groups, set `[lark].bot_name` or `[lark].bot_open_id` for this bot. Only that bot's leading mention should trigger group handling; messages that do not mention this bot are ignored.
 
@@ -217,7 +217,7 @@ For diagnostics without starting the listener:
 scripts/run-listener.sh check
 ```
 
-After `listen` starts, open `http://<bridge-lan-ip>:8765/sessions` to view the local conversation and agent-progress console. The page polls the local API and uses the same retention policy as jobs/reports.
+After `listen` starts, open `http://<bridge-lan-ip>:8765/admin` to view the local management console. It includes multi-session progress, historical cases with the latest report per Bug, listener health, and skill management for listing, creating, editing, deleting, and statically debugging local `.ai/skills` entries. `/sessions` still opens the same console for older bookmarks.
 
 Do not expose this bridge as a generic shell executor. The supported behaviors are `signal_lifecycle`, read-only `claude_skill`, local `omlx_chat`, and a small set of bridge help replies.
 

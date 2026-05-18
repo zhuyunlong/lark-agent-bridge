@@ -6,12 +6,17 @@ import re
 
 from .config import DEFAULT_SIGNAL_ALIASES
 from .models import BugRequest, ClaudeSkillRequest, DirectAnalysisRequest, DownloadResource, PerceptionSummaryRequest, SignalRequest
+from .signal_resolver import SignalResolver
 
 
 URL_RE = re.compile(r"https?://[^\s<>\"]+")
-BUG_URL_RE = re.compile(r"https?://(?:project\.feishu\.cn|(?:www\.)?meegle\.com)[^\s<>\"]*/buglo/detail/\d+[^\s<>\"]*")
-SIGNAL_ENUM_RE = re.compile(r"\bSIGNAL_[A-Z0-9_]+\b")
-SIGNAL_CODE_RE = re.compile(r"(?<!\d)\d{5,6}(?!\d)")
+BUG_URL_RE = re.compile(
+    r"https?://(?:project\.feishu\.cn|(?:www\.)?meegle\.com)[^\s<>\"]*/buglo/detail/\d+"
+    r"(?:[/?#][^\s<>\"，。；;、)）\]】}]*)?"
+)
+SIGNAL_ENUM_RE = re.compile(r"(?<![A-Za-z0-9_])SIGNAL_[A-Z0-9_]+(?![A-Za-z0-9_])")
+SIGNAL_BARE_NAME_RE = re.compile(r"(?<![A-Za-z0-9_])([A-Z][A-Z0-9]+(?:_[A-Z0-9]+)+)(?![A-Za-z0-9_])")
+SIGNAL_CODE_RE = re.compile(r"(?<![A-Za-z0-9_])\d{5,6}(?![A-Za-z0-9_])")
 FILE_KEY_RE = re.compile(r"\bfile_[A-Za-z0-9_]+\b")
 IMAGE_KEY_RE = re.compile(r"\bimg_[A-Za-z0-9_]+\b")
 DATE_RANGE_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}\s+\d{1,2}\s*-\s*\d{1,2}\b")
@@ -125,6 +130,7 @@ def parse_signal_request(
     *,
     signal_aliases: dict[str, str] | None = None,
     command_prefixes: list[str] | None = None,
+    signal_resolver: SignalResolver | None = None,
 ) -> SignalRequest:
     aliases = signal_aliases or DEFAULT_SIGNAL_ALIASES
     prefixes = command_prefixes or ["/signal"]
@@ -133,7 +139,7 @@ def parse_signal_request(
     triggered = any(prefix in normalized_text for prefix in prefixes) or any(
         term in normalized_text for term in TRIGGER_TERMS
     )
-    signal = _find_signal(normalized_text, aliases)
+    signal = _find_signal(normalized_text, aliases, signal_resolver=signal_resolver)
     resources = _find_resources(normalized_text)
     since = _find_since(normalized_text)
     error = "missing_signal" if triggered and not signal else None
@@ -159,7 +165,7 @@ def build_basic_chat_reply(text: str, *, command_prefixes: list[str] | None = No
         return (
             "我是本地运行的 Lark Agent Bridge。"
             "我负责在飞书里接收消息、下载日志或附件，并调用本地分析脚本回传报告；"
-            "现在支持 signal 调查、bug 链接分析、附件直传通用分析、当前感知数据总结、普通聊天和帮助回复。"
+            "现在支持 signal 调查、XTheme 时光主题分析、bug 链接分析、附件直传通用分析、当前感知数据总结、普通聊天和帮助回复。"
         )
 
     if _contains_any(normalized_text, lowered, HELP_TERMS):
@@ -169,11 +175,12 @@ def build_basic_chat_reply(text: str, *, command_prefixes: list[str] | None = No
             "2. 使用枚举名或别名，例如 `SIGNAL_X3D_LD_NORMAL_OVER_ALL_DATA`、`LD normal`\n"
             "3. 飞书附件或 URL 直传通用分析，例如 `分析启动和卡顿 file_xxx 11:30`\n"
             "4. 飞书项目 bug 链接分析，例如 `https://project.feishu.cn/.../buglo/detail/... 调查3D启动时序`\n"
-            "5. bug 链接 + 当前感知数据总结，例如 `https://project.feishu.cn/.../buglo/detail/... 总结当前感知数据`\n"
-            "6. 感知数据总结，例如 `/perception-summary 总结当前感知数据 file_xxx`\n"
-            "7. Claude Code 只读分析，例如 `/skill 分析这个目录`\n"
-            "8. 群里简单聊天，例如 `@机器人 /chat 讲个笑话`；私聊可直接提问\n"
-            "9. 基础问答，例如 `你好`、`你是谁`、`帮助`"
+            "5. bug 链接 + XTheme 时光主题分析，例如 `https://project.feishu.cn/.../buglo/detail/... 分析 xtheme / 晨曦 / 主题切换`\n"
+            "6. bug 链接 + 当前感知数据总结，例如 `https://project.feishu.cn/.../buglo/detail/... 总结当前感知数据`\n"
+            "7. 感知数据总结，例如 `/perception-summary 总结当前感知数据 file_xxx`\n"
+            "8. Claude Code 只读分析，例如 `/skill 分析这个目录`\n"
+            "9. 群里简单聊天，例如 `@机器人 /chat 讲个笑话`；私聊可直接提问\n"
+            "10. 基础问答，例如 `你好`、`你是谁`、`帮助`"
         )
 
     if _contains_any(normalized_text, lowered, GREETING_TERMS):
@@ -318,18 +325,37 @@ def extract_first_keyword_payload(text: str, keywords: list[str] | tuple[str, ..
     return None
 
 
-def _find_signal(text: str, aliases: dict[str, str]) -> str | None:
+def _find_signal(text: str, aliases: dict[str, str], *, signal_resolver: SignalResolver | None = None) -> str | None:
     enum_match = SIGNAL_ENUM_RE.search(text)
     if enum_match:
-        return enum_match.group(0)
-    code_match = SIGNAL_CODE_RE.search(text)
-    if code_match:
-        return code_match.group(0)
+        return _resolve_signal_value(enum_match.group(0), signal_resolver)
+    bare_match = SIGNAL_BARE_NAME_RE.search(text)
+    if bare_match:
+        resolved_bare = _resolve_bare_signal_name(bare_match.group(1), signal_resolver)
+        if resolved_bare:
+            return resolved_bare
     lowered = text.casefold()
     for alias, signal in sorted(aliases.items(), key=lambda item: len(item[0]), reverse=True):
         if alias.casefold() in lowered:
             return signal
+    code_match = SIGNAL_CODE_RE.search(text)
+    if code_match:
+        return _resolve_signal_value(code_match.group(0), signal_resolver)
     return None
+
+
+def _resolve_signal_value(value: str, signal_resolver: SignalResolver | None) -> str:
+    if signal_resolver is None:
+        return value
+    resolved = signal_resolver.resolve(value)
+    return resolved.signal if resolved is not None else value
+
+
+def _resolve_bare_signal_name(value: str, signal_resolver: SignalResolver | None) -> str | None:
+    if signal_resolver is None:
+        return None
+    resolved = signal_resolver.resolve(value)
+    return resolved.signal if resolved is not None else None
 
 
 def find_resources(text: str, *, source_message_id: str = "") -> list[DownloadResource]:

@@ -13,10 +13,13 @@ import shutil
 import socket
 import threading
 import time
-from urllib.parse import quote, unquote, urlsplit, urlunsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit, urlunsplit
 
+from .admin_ui import render_admin_page
+from .case_store import CaseStore
 from .models import BridgeConfig, TaskResult
 from .state import AgentActivityStore
+from .skill_manager import SkillManager, SkillManagerError
 
 
 @dataclass(slots=True)
@@ -75,6 +78,7 @@ class HtmlReportPublisher:
                 summary_text=result.message,
                 mode=str(result.details.get("mode", "")),
                 reports=copied_paths,
+                result=result,
             ),
             encoding="utf-8",
         )
@@ -85,6 +89,15 @@ class HtmlReportPublisher:
                     "mode": result.details.get("mode", ""),
                     "source_reports": [str(path) for path in html_paths],
                     "published_reports": [path.name for path in copied_paths],
+                    "analysis_skill": result.details.get("analysis_skill", ""),
+                    "classification_source": result.details.get("classification_source", ""),
+                    "classification_provider": result.details.get("classification_provider", ""),
+                    "agent_summary_provider": result.details.get("agent_summary_provider", ""),
+                    "agent_summary_duration_seconds": result.details.get("agent_summary_duration_seconds"),
+                    "agent_summary_input_tokens": result.details.get("agent_summary_input_tokens"),
+                    "agent_summary_output_tokens": result.details.get("agent_summary_output_tokens"),
+                    "agent_summary_total_tokens": result.details.get("agent_summary_total_tokens"),
+                    "duration_seconds": result.duration_seconds,
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -174,17 +187,31 @@ class HtmlReportPublisher:
             return combined
         return combined[: limit - 1].rstrip() + "…"
 
-    def _render_index(self, *, summary_text: str, mode: str, reports: list[Path]) -> str:
+    def _render_index(self, *, summary_text: str, mode: str, reports: list[Path], result: TaskResult) -> str:
+        preview_text = _summary_preview_text(summary_text)
         report_sections = "\n".join(
             (
                 "<section class=\"report-card\">"
                 f"<h2>{escape(_report_title(mode, index, len(reports)))}</h2>"
-                f"<p><a href=\"{quote(report.name)}\" target=\"_blank\" rel=\"noreferrer\">打开原始 HTML</a></p>"
+                f"<p><a href=\"{quote(report.name)}\" target=\"_blank\" rel=\"noreferrer\">打开 HTML 报告</a></p>"
                 f"<iframe src=\"{quote(report.name)}\" loading=\"lazy\"></iframe>"
                 "</section>"
             )
             for index, report in enumerate(reports, start=1)
         )
+        runtime_items = _runtime_summary_items(result)
+        runtime_html = ""
+        if runtime_items:
+            runtime_html = (
+                "<section class=\"summary runtime\">"
+                "<h2>运行信息</h2>"
+                "<dl class=\"meta-grid\">"
+                + "".join(
+                    f"<div class=\"meta-item\"><dt>{escape(label)}</dt><dd>{escape(value)}</dd></div>"
+                    for label, value in runtime_items
+                )
+                + "</dl></section>"
+            )
         return (
             "<!doctype html>\n"
             "<html lang=\"zh-CN\">\n"
@@ -193,21 +220,30 @@ class HtmlReportPublisher:
             "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />\n"
             "  <title>Lark Agent Bridge Report</title>\n"
             "  <style>\n"
-            "    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; padding: 24px; background: #f5f7fb; color: #1f2937; }\n"
-            "    .shell { max-width: 1200px; margin: 0 auto; }\n"
-            "    .summary, .report-card { background: #fff; border-radius: 14px; box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08); padding: 20px; margin-bottom: 20px; }\n"
-            "    pre { white-space: pre-wrap; word-break: break-word; margin: 0; }\n"
-            "    iframe { width: 100%; min-height: 900px; border: 1px solid #dbe2f0; border-radius: 10px; background: #fff; }\n"
+            "    :root { --bg:#eef3ff; --panel:#fff; --text:#14213d; --muted:#5f6b85; --border:#d8e1f4; --blue:#2563eb; --purple:#7c3aed; --cyan:#0891b2; }\n"
+            "    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; padding: 24px; background: radial-gradient(circle at top left, rgba(37,99,235,.10), transparent 28%), radial-gradient(circle at top right, rgba(124,58,237,.10), transparent 26%), linear-gradient(180deg, #f4f7ff 0%, var(--bg) 100%); color: var(--text); }\n"
+            "    .shell { max-width: 1240px; margin: 0 auto; }\n"
+            "    .summary, .report-card { background: linear-gradient(180deg, rgba(255,255,255,.96), rgba(248,251,255,.96)); border-radius: 18px; box-shadow: 0 14px 36px rgba(15, 23, 42, 0.09); padding: 22px; margin-bottom: 20px; border: 1px solid var(--border); }\n"
+            "    .runtime h2 { margin-bottom: 16px; }\n"
+            "    .meta-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin: 0; }\n"
+            "    .meta-item { background: linear-gradient(180deg, rgba(255,255,255,.98), rgba(238,244,255,.96)); border: 1px solid var(--border); border-radius: 14px; padding: 12px 14px; }\n"
+            "    .meta-item dt { font-size: 12px; color: var(--muted); margin-bottom: 4px; }\n"
+            "    .meta-item dd { margin: 0; font-size: 16px; font-weight: 700; color: var(--text); word-break: break-word; }\n"
+            "    .lead { font-size: 16px; line-height: 1.75; color: var(--text); margin-bottom: 12px; white-space: pre-wrap; }\n"
+            "    iframe { width: 100%; min-height: 920px; border: 1px solid var(--border); border-radius: 14px; background: #fff; }\n"
             "    h1, h2 { margin-top: 0; }\n"
-            "    a { color: #2563eb; }\n"
+            "    h1 { color: var(--blue); font-size: 28px; }\n"
+            "    h2 { color: var(--cyan); }\n"
+            "    a { color: var(--blue); font-weight: 600; }\n"
             "  </style>\n"
             "</head>\n"
             "<body>\n"
             "  <main class=\"shell\">\n"
             "    <section class=\"summary\">\n"
             "      <h1>分析结果</h1>\n"
-            f"      <pre>{escape(summary_text.strip() or '分析完成')}</pre>\n"
+            f"      <div class=\"lead\">{escape(preview_text)}</div>\n"
             "    </section>\n"
+            f"    {runtime_html}\n"
             f"    {report_sections}\n"
             "  </main>\n"
             "</body>\n"
@@ -220,9 +256,19 @@ class HtmlReportPublisher:
 
 
 class ReportHttpServer:
-    def __init__(self, config: BridgeConfig, *, activity_store: AgentActivityStore | None = None, health_monitor: object | None = None) -> None:
+    def __init__(
+        self,
+        config: BridgeConfig,
+        *,
+        activity_store: AgentActivityStore | None = None,
+        case_store: CaseStore | None = None,
+        skill_manager: SkillManager | None = None,
+        health_monitor: object | None = None,
+    ) -> None:
         self.config = config
         self.activity_store = activity_store
+        self.case_store = case_store
+        self.skill_manager = skill_manager
         self.health_monitor = health_monitor
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
@@ -232,8 +278,20 @@ class ReportHttpServer:
             return
         root_dir = self.config.data_dir / "published_reports"
         root_dir.mkdir(parents=True, exist_ok=True)
-        prefix = _url_prefix(resolve_public_base_url(self.config.report_server.public_base_url, port=self.config.report_server.port))
-        handler = _build_handler(root_dir, prefix, self.activity_store, self.health_monitor)
+        prefix = _url_prefix(
+            resolve_public_base_url(
+                self.config.report_server.public_base_url,
+                port=self.config.report_server.port,
+            )
+        )
+        handler = _build_handler(
+            root_dir,
+            prefix,
+            self.activity_store,
+            self.case_store,
+            self.skill_manager,
+            self.health_monitor,
+        )
         self._server = ThreadingHTTPServer(
             (resolve_bind_host(self.config.report_server.bind_host), self.config.report_server.port),
             handler,
@@ -271,7 +329,14 @@ class _HtmlTextExtractor(HTMLParser):
         return "\n".join(self._parts)
 
 
-def _build_handler(root_dir: Path, prefix: str, activity_store: AgentActivityStore | None = None, health_monitor: object | None = None):
+def _build_handler(
+    root_dir: Path,
+    prefix: str,
+    activity_store: AgentActivityStore | None = None,
+    case_store: CaseStore | None = None,
+    skill_manager: SkillManager | None = None,
+    health_monitor: object | None = None,
+):
     class _ReportHandler(SimpleHTTPRequestHandler):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, directory=str(root_dir), **kwargs)
@@ -281,20 +346,41 @@ def _build_handler(root_dir: Path, prefix: str, activity_store: AgentActivitySto
             request_path = unquote(parsed.path)
             if request_path in {"", "/"}:
                 self.send_response(302)
-                self.send_header("Location", "/sessions")
+                self.send_header("Location", "/admin")
                 self.end_headers()
                 return
-            if request_path in {"/sessions", "/sessions/"}:
+            if request_path in {"/sessions", "/sessions/", "/admin", "/admin/"}:
                 self._send_html(_render_sessions_page())
                 return
             if request_path == "/api/sessions":
                 self._send_json({"sessions": self._list_sessions()})
+                return
+            if request_path == "/api/cases":
+                self._send_json({"cases": self._list_cases(parsed.query)})
+                return
+            if request_path == "/api/skills":
+                self._send_json({"skills": self._list_skills()})
                 return
             if request_path == "/api/daemon":
                 self._send_json({"daemon": self._get_daemon_status()})
                 return
             if request_path == "/api/health":
                 self._send_json(self._get_health())
+                return
+            if request_path.startswith("/api/cases/"):
+                case_id = request_path.removeprefix("/api/cases/").strip("/")
+                case = self._get_case(unquote(case_id))
+                if case is None:
+                    self._send_json({"error": "case not found"}, status=404)
+                    return
+                self._send_json({"case": case})
+                return
+            if request_path.startswith("/api/skills/"):
+                skill_name = request_path.removeprefix("/api/skills/").strip("/")
+                try:
+                    self._send_json({"skill": self._get_skill(unquote(skill_name))})
+                except SkillManagerError as exc:
+                    self._send_json({"error": str(exc)}, status=exc.status_code)
                 return
             if request_path.startswith("/api/sessions/"):
                 session_id = request_path.removeprefix("/api/sessions/").strip("/")
@@ -312,12 +398,21 @@ def _build_handler(root_dir: Path, prefix: str, activity_store: AgentActivitySto
         def do_HEAD(self) -> None:
             parsed = urlsplit(self.path)
             request_path = unquote(parsed.path)
-            if request_path in {"/sessions", "/sessions/"}:
+            if request_path in {"/sessions", "/sessions/", "/admin", "/admin/"}:
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.end_headers()
                 return
-            if request_path == "/api/sessions" or request_path.startswith("/api/sessions/") or request_path == "/api/daemon" or request_path == "/api/health":
+            if (
+                request_path == "/api/sessions"
+                or request_path.startswith("/api/sessions/")
+                or request_path == "/api/cases"
+                or request_path.startswith("/api/cases/")
+                or request_path == "/api/skills"
+                or request_path.startswith("/api/skills/")
+                or request_path == "/api/daemon"
+                or request_path == "/api/health"
+            ):
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.end_headers()
@@ -326,6 +421,60 @@ def _build_handler(root_dir: Path, prefix: str, activity_store: AgentActivitySto
                 self.send_error(404)
                 return
             super().do_HEAD()
+
+        def do_POST(self) -> None:
+            parsed = urlsplit(self.path)
+            request_path = unquote(parsed.path).rstrip("/")
+            if request_path == "/api/skills":
+                try:
+                    payload = self._read_json_body()
+                    self._send_json({"skill": self._create_skill(payload)}, status=201)
+                except SkillManagerError as exc:
+                    self._send_json({"error": str(exc)}, status=exc.status_code)
+                except ValueError as exc:
+                    self._send_json({"error": str(exc)}, status=400)
+                return
+            if request_path.startswith("/api/skills/") and request_path.endswith("/debug"):
+                skill_name = request_path.removeprefix("/api/skills/").removesuffix("/debug").strip("/")
+                try:
+                    payload = self._read_json_body()
+                    self._send_json(self._debug_skill(unquote(skill_name), payload))
+                except SkillManagerError as exc:
+                    self._send_json({"error": str(exc)}, status=exc.status_code)
+                except ValueError as exc:
+                    self._send_json({"error": str(exc)}, status=400)
+                return
+            if request_path.startswith("/api/cases/") and request_path.endswith("/confirm"):
+                case_id = request_path.removeprefix("/api/cases/").removesuffix("/confirm").strip("/")
+                try:
+                    payload = self._read_json_body()
+                    case = self._confirm_case(unquote(case_id), payload)
+                    if case is None:
+                        self._send_json({"error": "case not found"}, status=404)
+                        return
+                    self._send_json({"case": case})
+                except ValueError as exc:
+                    self._send_json({"error": str(exc)}, status=400)
+                return
+            self._send_json({"error": "unsupported endpoint"}, status=404)
+
+        def do_PUT(self) -> None:
+            self._handle_skill_update()
+
+        def do_PATCH(self) -> None:
+            self._handle_skill_update()
+
+        def do_DELETE(self) -> None:
+            parsed = urlsplit(self.path)
+            request_path = unquote(parsed.path).rstrip("/")
+            if not request_path.startswith("/api/skills/"):
+                self._send_json({"error": "unsupported endpoint"}, status=404)
+                return
+            skill_name = request_path.removeprefix("/api/skills/").strip("/")
+            try:
+                self._send_json({"deleted": self._delete_skill(unquote(skill_name))})
+            except SkillManagerError as exc:
+                self._send_json({"error": str(exc)}, status=exc.status_code)
 
         def log_message(self, format: str, *args) -> None:
             return
@@ -347,6 +496,86 @@ def _build_handler(root_dir: Path, prefix: str, activity_store: AgentActivitySto
             if activity_store is None:
                 return []
             return activity_store.list_sessions(limit=200)
+
+        def _list_cases(self, query: str) -> list[dict[str, object]]:
+            if case_store is None:
+                return []
+            params = parse_qs(query)
+            limit = _query_int(params, "limit", 200)
+            keyword = _query_str(params, "keyword")
+            problem_type = _query_str(params, "problem_type")
+            analysis_mode = _query_str(params, "analysis_mode")
+            root_cause_tag = _query_str(params, "root_cause_tag")
+            if any([keyword, problem_type, analysis_mode, root_cause_tag]):
+                cases = case_store.search(
+                    keyword=keyword,
+                    problem_type=problem_type,
+                    analysis_mode=analysis_mode,
+                    root_cause_tag=root_cause_tag,
+                    limit=limit,
+                )
+            elif _query_str(params, "all") in {"1", "true", "yes"}:
+                cases = case_store.list_recent(limit=limit)
+            else:
+                cases = case_store.list_latest_by_bug(limit=limit)
+            return [case.to_dict() for case in cases]
+
+        def _get_case(self, case_id: str) -> dict[str, object] | None:
+            if case_store is None:
+                return None
+            case = case_store.get(case_id)
+            return case.to_dict() if case is not None else None
+
+        def _confirm_case(self, case_id: str, payload: dict[str, object]) -> dict[str, object] | None:
+            if case_store is None:
+                return None
+            confirmed = bool(payload.get("confirmed", True))
+            notes = str(payload.get("notes") or "")
+            case = case_store.update_human_confirmation(case_id, confirmed=confirmed, notes=notes)
+            return case.to_dict() if case is not None else None
+
+        def _list_skills(self) -> list[dict[str, object]]:
+            if skill_manager is None:
+                return []
+            return [item.to_dict() for item in skill_manager.list_skills()]
+
+        def _get_skill(self, name: str) -> dict[str, object]:
+            if skill_manager is None:
+                raise SkillManagerError("skill manager not configured", status_code=503)
+            return skill_manager.get_skill(name).to_dict(include_content=True)
+
+        def _create_skill(self, payload: dict[str, object]) -> dict[str, object]:
+            if skill_manager is None:
+                raise SkillManagerError("skill manager not configured", status_code=503)
+            name = str(payload.get("name") or "")
+            content = str(payload.get("content") or "")
+            description = str(payload.get("description") or "")
+            label = str(payload.get("label") or "")
+            return skill_manager.create_skill(
+                name=name,
+                content=content,
+                description=description,
+                label=label,
+            ).to_dict(include_content=True)
+
+        def _update_skill(self, name: str, payload: dict[str, object]) -> dict[str, object]:
+            if skill_manager is None:
+                raise SkillManagerError("skill manager not configured", status_code=503)
+            content = str(payload.get("content") or "")
+            if not content.strip():
+                raise ValueError("content 不能为空")
+            return skill_manager.update_skill(name, content=content).to_dict(include_content=True)
+
+        def _delete_skill(self, name: str) -> dict[str, object]:
+            if skill_manager is None:
+                raise SkillManagerError("skill manager not configured", status_code=503)
+            return skill_manager.delete_skill(name).to_dict(include_content=False)
+
+        def _debug_skill(self, name: str, payload: dict[str, object]) -> dict[str, object]:
+            if skill_manager is None:
+                raise SkillManagerError("skill manager not configured", status_code=503)
+            sample_text = str(payload.get("sample_text") or "")
+            return skill_manager.debug_skill(name, sample_text=sample_text)
 
         def _get_session(self, session_id: str) -> dict[str, object] | None:
             if activity_store is None:
@@ -386,256 +615,54 @@ def _build_handler(root_dir: Path, prefix: str, activity_store: AgentActivitySto
             self.end_headers()
             self.wfile.write(body)
 
+        def _read_json_body(self) -> dict[str, object]:
+            length = int(self.headers.get("Content-Length") or 0)
+            if length <= 0:
+                return {}
+            raw = self.rfile.read(length).decode("utf-8")
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise ValueError("请求体不是合法 JSON") from exc
+            if not isinstance(payload, dict):
+                raise ValueError("请求体必须是 JSON 对象")
+            return payload
+
+        def _handle_skill_update(self) -> None:
+            parsed = urlsplit(self.path)
+            request_path = unquote(parsed.path).rstrip("/")
+            if not request_path.startswith("/api/skills/"):
+                self._send_json({"error": "unsupported endpoint"}, status=404)
+                return
+            skill_name = request_path.removeprefix("/api/skills/").strip("/")
+            try:
+                payload = self._read_json_body()
+                self._send_json({"skill": self._update_skill(unquote(skill_name), payload)})
+            except SkillManagerError as exc:
+                self._send_json({"error": str(exc)}, status=exc.status_code)
+            except ValueError as exc:
+                self._send_json({"error": str(exc)}, status=400)
+
     return _ReportHandler
 
 
+def _query_str(params: dict[str, list[str]], key: str) -> str:
+    values = params.get(key) or []
+    return str(values[0]).strip() if values else ""
+
+
+def _query_int(params: dict[str, list[str]], key: str, default: int) -> int:
+    raw = _query_str(params, key)
+    if not raw:
+        return default
+    try:
+        return max(1, min(int(raw), 1000))
+    except ValueError:
+        return default
+
+
 def _render_sessions_page() -> str:
-    return """<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Lark Agent Bridge Sessions</title>
-  <style>
-    :root { color-scheme: light; }
-    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f3f6fb; color: #172033; }
-    header { padding: 18px 24px; background: #101827; color: #fff; display: flex; justify-content: space-between; align-items: center; }
-    h1 { font-size: 20px; margin: 0; }
-    button { border: 0; border-radius: 8px; padding: 8px 12px; background: #2563eb; color: #fff; cursor: pointer; }
-    main { display: grid; grid-template-columns: minmax(320px, 420px) 1fr; gap: 16px; padding: 16px; }
-    .panel { background: #fff; border-radius: 14px; box-shadow: 0 8px 28px rgba(15, 23, 42, 0.08); overflow: hidden; }
-    .status { grid-column: 1 / -1; padding: 14px 18px; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px; align-items: center; }
-    .list { max-height: calc(100vh - 104px); overflow: auto; }
-    .item { display: block; width: 100%; text-align: left; color: #172033; background: #fff; border: 0; border-bottom: 1px solid #e5eaf3; border-radius: 0; padding: 14px 16px; }
-    .item:hover, .item.active { background: #eff6ff; }
-    .row { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
-    .title { font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .meta, .muted { color: #64748b; font-size: 12px; }
-    .badge { border-radius: 999px; padding: 2px 8px; font-size: 12px; background: #e2e8f0; color: #334155; }
-    .badge.succeeded { background: #dcfce7; color: #166534; }
-    .badge.failed { background: #fee2e2; color: #991b1b; }
-    .badge.running { background: #dbeafe; color: #1d4ed8; }
-    .badge.skipped { background: #fef3c7; color: #92400e; }
-    .detail { padding: 18px; max-height: calc(100vh - 104px); overflow: auto; }
-    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; margin: 14px 0; }
-    .card { border: 1px solid #e5eaf3; border-radius: 10px; padding: 10px; background: #f8fafc; }
-    pre { white-space: pre-wrap; word-break: break-word; background: #0f172a; color: #e2e8f0; border-radius: 10px; padding: 12px; overflow: auto; }
-    .timeline { border-left: 2px solid #dbeafe; margin-left: 9px; padding-left: 16px; }
-    .step { position: relative; padding-bottom: 14px; }
-    .step::before { content: ''; position: absolute; left: -22px; top: 4px; width: 10px; height: 10px; border-radius: 999px; background: #2563eb; }
-    a { color: #2563eb; }
-    @media (max-width: 860px) { main { grid-template-columns: 1fr; } .list, .detail { max-height: none; } }
-  </style>
-</head>
-<body>
-  <header>
-    <h1>Lark Agent Bridge 会话控制台</h1>
-    <button id="refresh">刷新</button>
-  </header>
-  <main>
-    <section class="panel status" id="daemon"><span class="muted">正在读取 listener 状态...</span></section>
-    <section class="panel list" id="sessions"></section>
-    <section class="panel detail" id="detail"><p class="muted">选择左侧会话查看后台 agent 过程。</p></section>
-  </main>
-  <script>
-    let selected = "";
-    const daemonEl = document.getElementById("daemon");
-    const sessionsEl = document.getElementById("sessions");
-    const detailEl = document.getElementById("detail");
-    const refreshButton = document.getElementById("refresh");
-
-    function text(value) {
-      return value === undefined || value === null || value === "" ? "-" : String(value);
-    }
-
-    function badge(status) {
-      const span = document.createElement("span");
-      span.className = "badge " + (status || "");
-      span.textContent = status || "unknown";
-      return span;
-    }
-
-    function renderSessions(items) {
-      sessionsEl.textContent = "";
-      if (!items.length) {
-        const empty = document.createElement("p");
-        empty.className = "muted";
-        empty.style.padding = "16px";
-        empty.textContent = "暂无会话。";
-        sessionsEl.appendChild(empty);
-        return;
-      }
-      for (const item of items) {
-        const button = document.createElement("button");
-        button.className = "item" + (item.session_id === selected ? " active" : "");
-        button.dataset.sessionId = item.session_id || "";
-        button.onclick = () => loadDetail(item.session_id);
-        const row = document.createElement("div");
-        row.className = "row";
-        const title = document.createElement("div");
-        title.className = "title";
-        title.textContent = item.content || item.message || item.session_id;
-        row.appendChild(title);
-        row.appendChild(badge(item.status));
-        const meta = document.createElement("div");
-        meta.className = "meta";
-        meta.textContent = [item.mode || "unknown", item.chat_type || "-", item.updated_at || item.started_at || ""].join(" · ");
-        button.appendChild(row);
-        button.appendChild(meta);
-        sessionsEl.appendChild(button);
-      }
-    }
-
-    function renderDaemon(status) {
-      daemonEl.textContent = "";
-      const title = document.createElement("strong");
-      title.textContent = "Listener: " + text(status.stage || "unknown");
-      const meta = document.createElement("span");
-      meta.className = "muted";
-      meta.textContent = [
-        "event_key=" + text(status.event_key),
-        "pid=" + text(status.process_id),
-        "updated=" + text(status.updated_at)
-      ].join(" · ");
-      daemonEl.appendChild(title);
-      daemonEl.appendChild(meta);
-    }
-
-    function kv(label, value) {
-      const card = document.createElement("div");
-      card.className = "card";
-      const name = document.createElement("div");
-      name.className = "meta";
-      name.textContent = label;
-      const body = document.createElement("div");
-      body.textContent = text(value);
-      card.appendChild(name);
-      card.appendChild(body);
-      return card;
-    }
-
-    function renderDetail(session) {
-      detailEl.textContent = "";
-      const top = document.createElement("div");
-      top.className = "row";
-      const title = document.createElement("h2");
-      title.textContent = session.mode || "会话详情";
-      top.appendChild(title);
-      top.appendChild(badge(session.status));
-      detailEl.appendChild(top);
-
-      const cards = document.createElement("div");
-      cards.className = "cards";
-      cards.appendChild(kv("session", session.session_id));
-      cards.appendChild(kv("event", session.event_id));
-      cards.appendChild(kv("chat", session.chat_id));
-      cards.appendChild(kv("job", session.job_id));
-      cards.appendChild(kv("updated", session.updated_at));
-      detailEl.appendChild(cards);
-
-      if (session.report_url) {
-        const link = document.createElement("a");
-        link.href = session.report_url;
-        link.target = "_blank";
-        link.rel = "noreferrer";
-        link.textContent = "打开报告链接";
-        detailEl.appendChild(link);
-      }
-
-      const requestTitle = document.createElement("h3");
-      requestTitle.textContent = "用户请求";
-      detailEl.appendChild(requestTitle);
-      const request = document.createElement("pre");
-      request.textContent = text(session.content);
-      detailEl.appendChild(request);
-
-      const resultTitle = document.createElement("h3");
-      resultTitle.textContent = "回复结果";
-      detailEl.appendChild(resultTitle);
-      const result = document.createElement("pre");
-      result.textContent = text(session.message);
-      detailEl.appendChild(result);
-
-      const progressTitle = document.createElement("h3");
-      progressTitle.textContent = "后台 agent 过程";
-      detailEl.appendChild(progressTitle);
-      const timeline = document.createElement("div");
-      timeline.className = "timeline";
-      for (const step of session.progress || []) {
-        const item = document.createElement("div");
-        item.className = "step";
-        const row = document.createElement("div");
-        row.className = "row";
-        const strong = document.createElement("strong");
-        strong.textContent = step.stage || "progress";
-        row.appendChild(strong);
-        const ts = document.createElement("span");
-        ts.className = "meta";
-        ts.textContent = step.timestamp || "";
-        row.appendChild(ts);
-        const msg = document.createElement("div");
-        msg.textContent = step.message || "";
-        item.appendChild(row);
-        item.appendChild(msg);
-        if (step.details && Object.keys(step.details).length) {
-          const pre = document.createElement("pre");
-          pre.textContent = JSON.stringify(step.details, null, 2);
-          item.appendChild(pre);
-        }
-        timeline.appendChild(item);
-      }
-      if (!(session.progress || []).length) {
-        const empty = document.createElement("p");
-        empty.className = "muted";
-        empty.textContent = "暂无进度事件。";
-        timeline.appendChild(empty);
-      }
-      detailEl.appendChild(timeline);
-    }
-
-    async function loadSessions() {
-      await loadDaemon();
-      const response = await fetch("/api/sessions", { cache: "no-store" });
-      const data = await response.json();
-      renderSessions(data.sessions || []);
-      if (!selected && data.sessions && data.sessions.length) {
-        await loadDetail(data.sessions[0].session_id);
-      } else if (selected) {
-        await loadDetail(selected);
-      }
-    }
-
-    async function loadDaemon() {
-      const response = await fetch("/api/daemon", { cache: "no-store" });
-      if (!response.ok) {
-        renderDaemon({});
-        return;
-      }
-      const data = await response.json();
-      renderDaemon(data.daemon || {});
-    }
-
-    async function loadDetail(id) {
-      selected = id;
-      const response = await fetch("/api/sessions/" + encodeURIComponent(id), { cache: "no-store" });
-      if (!response.ok) {
-        detailEl.textContent = "会话不存在或已过期。";
-        return;
-      }
-      const data = await response.json();
-      renderDetail(data.session);
-      for (const button of sessionsEl.querySelectorAll(".item")) {
-        button.classList.toggle("active", button.dataset.sessionId === id);
-      }
-    }
-
-    refreshButton.onclick = loadSessions;
-    loadSessions();
-    setInterval(loadSessions, 3000);
-  </script>
-</body>
-</html>
-"""
+    return render_admin_page()
 
 
 def _safe_slug(value: str) -> str:
@@ -697,6 +724,74 @@ def _report_title(mode: str, index: int, total: int) -> str:
     if total == 1:
         return "HTML 报告"
     return f"{mode or 'analysis'} 报告 {index}"
+
+
+def _runtime_summary_items(result: TaskResult) -> list[tuple[str, str]]:
+    details = result.details if isinstance(result.details, dict) else {}
+    items: list[tuple[str, str]] = []
+    skill = str(details.get("analysis_skill") or "").strip()
+    if skill:
+        items.append(("命中 Skill", skill))
+    classification_source = str(details.get("classification_source") or "").strip()
+    if classification_source:
+        items.append(("分类来源", classification_source))
+    classification_provider = str(details.get("classification_provider") or "").strip()
+    if classification_provider:
+        items.append(("分类 Agent", classification_provider))
+    provider = str(details.get("agent_summary_provider") or details.get("provider") or "").strip()
+    if provider:
+        items.append(("Agent 类型", provider))
+    input_tokens = details.get("agent_summary_input_tokens")
+    output_tokens = details.get("agent_summary_output_tokens")
+    total_tokens = details.get("agent_summary_total_tokens")
+    usage_scope = str(details.get("agent_summary_usage_scope") or "").strip()
+    if any(isinstance(value, int) for value in (input_tokens, output_tokens, total_tokens)):
+        items.append(
+            (
+                "本轮 Agent Token" if usage_scope == "delta" else "累计 Agent Token",
+                f"{_format_token_millions(input_tokens)} / "
+                f"{_format_token_millions(output_tokens)} / "
+                f"{_format_token_millions(total_tokens)}",
+            )
+        )
+    agent_duration = details.get("agent_summary_duration_seconds")
+    if isinstance(agent_duration, (int, float)):
+        items.append(("Agent 耗时", f"{float(agent_duration):.1f} 秒"))
+    if isinstance(result.duration_seconds, (int, float)):
+        items.append(("总耗时", f"{float(result.duration_seconds):.1f} 秒"))
+    return items
+
+
+def _summary_preview_text(summary_text: str) -> str:
+    lines = [line.strip() for line in summary_text.splitlines() if line.strip()]
+    if not lines:
+        return "分析完成"
+    filtered: list[str] = []
+    for line in lines:
+        if line == "Bug 分析完成":
+            continue
+        filtered.append(line)
+        if line.startswith("## ") and len(filtered) >= 3:
+            filtered.pop()
+            break
+        if len(filtered) >= 4:
+            break
+    if not filtered:
+        filtered = lines[:3]
+    preview = "\n".join(filtered)
+    if len(preview) <= 320:
+        return preview
+    return preview[:319].rstrip() + "…"
+
+
+def _format_token_millions(value: object) -> str:
+    if not isinstance(value, int):
+        return "-"
+    if value < 1_000:
+        return str(value)
+    if value < 1_000_000:
+        return f"{value / 1_000:.2f}K"
+    return f"{value / 1_000_000:.2f}M"
 
 
 def _url_prefix(public_base_url: str) -> str:

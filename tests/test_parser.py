@@ -1,3 +1,5 @@
+from pathlib import Path
+import tempfile
 import unittest
 
 from lark_agent_bridge.parser import (
@@ -9,6 +11,7 @@ from lark_agent_bridge.parser import (
     parse_signal_request,
     should_use_omlx_chat,
 )
+from lark_agent_bridge.signal_resolver import SignalResolver
 
 
 class ParserTests(unittest.TestCase):
@@ -30,6 +33,22 @@ class ParserTests(unittest.TestCase):
         request = parse_signal_request("帮我看 LD normal 有没有到 Unity，日志 https://e.test/a.log")
 
         self.assertEqual(request.signal, "SIGNAL_X3D_LD_NORMAL_OVER_ALL_DATA")
+        self.assertTrue(request.triggered)
+
+    def test_parse_bare_signal_name_without_forcing_signal_prefix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            signal_proto = repo / "module_floorcenter/module_proto/src/main/proto/signal.proto"
+            signal_proto.parent.mkdir(parents=True, exist_ok=True)
+            signal_proto.write_text(
+                "enum SignalCode {\n  SIGNAL_VCU_ELECTRICIT_PERCENT = 40019;\n}\n",
+                encoding="utf-8",
+            )
+            resolver = SignalResolver(repo)
+
+            request = parse_signal_request("帮我看 VCU_ELECTRICIT_PERCENT 为什么不对", signal_resolver=resolver)
+
+        self.assertEqual(request.signal, "SIGNAL_VCU_ELECTRICIT_PERCENT")
         self.assertTrue(request.triggered)
 
     def test_missing_signal_on_triggered_request(self):
@@ -81,6 +100,18 @@ class ParserTests(unittest.TestCase):
             "https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722",
         )
         self.assertEqual(request.prompt, "调查3D启动时序")
+
+    def test_parse_bug_request_stops_before_chinese_punctuation_prompt(self):
+        request = parse_bug_request(
+            "https://project.feishu.cn/xpfailuremgmt/buglo/detail/6993883118，调查 SIGNAL_CTL_XPILOT_ADAS_LD_STATE 信号链路和现状"
+        )
+
+        self.assertTrue(request.triggered)
+        self.assertEqual(
+            request.bug_url,
+            "https://project.feishu.cn/xpfailuremgmt/buglo/detail/6993883118",
+        )
+        self.assertEqual(request.prompt, "调查 SIGNAL_CTL_XPILOT_ADAS_LD_STATE 信号链路和现状")
 
     def test_parse_perception_summary_prefix(self):
         request = parse_perception_summary_request("@bot perception-summary 总结当前感知数据")
