@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -60,6 +61,80 @@ class CardActionEventTests(unittest.TestCase):
         self.assertEqual(event.chat_type, "group")
         self.assertEqual(event.operator_id, "ou_operator")
         self.assertEqual(event.followup_text, "继续分析 这个问题")
+
+    def test_from_nested_lark_callback_payload_prefers_form_prompt(self):
+        event = CardActionEvent.from_dict(
+            {
+                "header": {"event_id": "evt_card_form"},
+                "event": {
+                    "context": {
+                        "open_message_id": "om_card",
+                        "open_chat_id": "oc_card",
+                        "chat_type": "group",
+                    },
+                    "operator": {"operator_id": {"open_id": "ou_operator"}},
+                    "action": {
+                        "value": {
+                            "action": "reanalyze",
+                            "job_id": "job_1",
+                            "root_message_id": "om_root",
+                            "followup_text": "旧追问不应覆盖输入框",
+                        },
+                        "form_value": {
+                            "followup_prompt": "  根据导航源码重新分析 P 挡场景  ",
+                        },
+                    },
+                },
+            }
+        )
+
+        self.assertEqual(event.action, "reanalyze")
+        self.assertEqual(event.followup_text, "根据导航源码重新分析 P 挡场景")
+
+    def test_from_nested_lark_callback_payload_accepts_input_value(self):
+        event = CardActionEvent.from_dict(
+            {
+                "header": {"event_id": "evt_card_input"},
+                "event": {
+                    "context": {"open_message_id": "om_card", "open_chat_id": "oc_card"},
+                    "operator": {"operator_id": {"open_id": "ou_operator"}},
+                    "action": {
+                        "value": {"action": "answer_from_report", "root_message_id": "om_root"},
+                        "input_value": "结合报告解释生命周期节点",
+                    },
+                },
+            }
+        )
+
+        self.assertEqual(event.followup_text, "结合报告解释生命周期节点")
+
+    def test_from_nested_lark_callback_payload_accepts_json_string_value(self):
+        event = CardActionEvent.from_dict(
+            {
+                "header": {"event_id": "evt_card_json_value"},
+                "event": {
+                    "context": {
+                        "open_message_id": "om_card",
+                        "open_chat_id": "oc_card",
+                        "chat_type": "group",
+                    },
+                    "operator": {"operator_id": {"open_id": "ou_operator"}},
+                    "action": {
+                        "value": json.dumps(
+                            {
+                                "action": "feedback_unhelpful",
+                                "job_id": "job_1",
+                                "root_message_id": "om_root",
+                            }
+                        )
+                    },
+                },
+            }
+        )
+
+        self.assertEqual(event.action, "feedback_unhelpful")
+        self.assertEqual(event.job_id, "job_1")
+        self.assertEqual(event.root_message_id, "om_root")
 
     def test_rejects_malicious_callback_identifiers(self):
         event = CardActionEvent.from_dict(

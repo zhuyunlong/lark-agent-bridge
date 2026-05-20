@@ -84,7 +84,39 @@ class ConversationContextStore:
         return None
 
     def lookup(self, key: str) -> ConversationContext | None:
-        return self._contexts.get(key.strip()) if key and key.strip() else None
+        normalized = key.strip() if key else ""
+        if not normalized:
+            return None
+        context = self._contexts.get(normalized)
+        if context is None:
+            return None
+        root_key = context.root_message_id.strip()
+        if root_key and root_key != normalized:
+            return self._contexts.get(root_key) or context
+        return context
+
+    def remember_alias(self, *, alias_message_id: str, root_message_id: str) -> ConversationContext | None:
+        alias = alias_message_id.strip()
+        root = root_message_id.strip()
+        if not alias or not root or alias == root:
+            return self.lookup(root)
+        context = self.lookup(root)
+        if context is None:
+            return None
+        self._contexts[alias] = ConversationContext(
+            root_message_id=context.root_message_id,
+            chat_id=context.chat_id,
+            mode=context.mode,
+            request_text=context.request_text,
+            summary_text=context.summary_text,
+            report_url=context.report_url,
+            report_excerpt=context.report_excerpt,
+            history=list(context.history),
+            created_at=context.created_at,
+            updated_at=context.updated_at,
+        )
+        self._save()
+        return context
 
     def remember(
         self,
@@ -144,6 +176,21 @@ class ConversationContextStore:
             pass
         return count
 
+    def delete(self, root_message_id: str) -> int:
+        normalized = root_message_id.strip()
+        if not normalized:
+            return 0
+        context = self.lookup(normalized)
+        root = context.root_message_id.strip() if context is not None else normalized
+        removed = 0
+        for key, item in list(self._contexts.items()):
+            if key == normalized or key == root or item.root_message_id == normalized or item.root_message_id == root:
+                self._contexts.pop(key, None)
+                removed += 1
+        if removed:
+            self._save()
+        return removed
+
     def prune_expired(self, *, max_age_hours: int, now: datetime | None = None) -> int:
         if max_age_hours <= 0:
             return 0
@@ -169,8 +216,10 @@ class ConversationContextStore:
             return None
         candidates = [
             context
-            for context in self._contexts.values()
-            if context.chat_id == chat and (modes is None or context.mode in modes)
+            for key, context in self._contexts.items()
+            if context.chat_id == chat
+            and (modes is None or context.mode in modes)
+            and (context.root_message_id == key or context.root_message_id not in self._contexts)
         ]
         if not candidates:
             return None
@@ -195,7 +244,7 @@ class ConversationContextStore:
             if not isinstance(key, str) or not isinstance(value, dict):
                 continue
             contexts[key] = ConversationContext(
-                root_message_id=key,
+                root_message_id=str(value.get("root_message_id") or key),
                 chat_id=str(value.get("chat_id", "")),
                 mode=str(value.get("mode", "")),
                 request_text=str(value.get("request_text", "")),
@@ -212,6 +261,7 @@ class ConversationContextStore:
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             key: {
+                "root_message_id": context.root_message_id,
                 "chat_id": context.chat_id,
                 "mode": context.mode,
                 "request_text": context.request_text,
@@ -298,7 +348,7 @@ class AgentActivityStore:
                 }
             )
             session["progress"] = progress[-self.max_progress_events :]
-            if session.get("status") not in {"succeeded", "failed", "skipped"}:
+            if session.get("status") not in {"succeeded", "failed", "skipped", "cancelled"}:
                 session["status"] = "running"
             session["updated_at"] = now
             self._sessions[key] = session
@@ -314,6 +364,8 @@ class AgentActivityStore:
         with self._lock:
             now = _now_iso()
             session = self._sessions.get(key, {"session_id": key, "progress": [], "started_at": now})
+            was_cancelled = str(session.get("status") or "") == "cancelled"
+            cancelled_message = str(session.get("message") or "")
             details = _jsonable_limited(result.details)
             report_url = ""
             if isinstance(details, dict):
@@ -326,12 +378,12 @@ class AgentActivityStore:
                     "chat_type": event.chat_type,
                     "sender_id": event.sender_id,
                     "content": _trim_text(event.content, 4000),
-                    "status": _result_status(result),
+                    "status": "cancelled" if was_cancelled else _result_status(result),
                     "mode": str(result.details.get("mode") or ""),
-                    "success": result.success,
+                    "success": False if was_cancelled else result.success,
                     "skipped": result.skipped,
-                    "error_code": result.error_code or "",
-                    "message": _trim_text(result.message, 4000),
+                    "error_code": "cancelled_by_admin" if was_cancelled else result.error_code or "",
+                    "message": _trim_text(cancelled_message or result.message, 4000) if was_cancelled else _trim_text(result.message, 4000),
                     "job_id": result.job_id or "",
                     "job_dir": str(result.job_dir or ""),
                     "html_report": str(result.html_report or ""),
@@ -351,6 +403,49 @@ class AgentActivityStore:
                 self._sessions.pop(event_key, None)
             self._save()
 
+    def cancel_session(
+        self,
+        session_id: str,
+        *,
+        reason: str = "",
+        terminated_processes: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any] | None:
+        normalized = session_id.strip()
+        if not normalized:
+            return None
+        with self._lock:
+            session = self._sessions.get(normalized)
+            if session is None:
+                return None
+            now = _now_iso()
+            progress = session.setdefault("progress", [])
+            if not isinstance(progress, list):
+                progress = []
+                session["progress"] = progress
+            message = reason.strip() or "后台管理页请求终止任务。"
+            progress.append(
+                {
+                    "timestamp": now,
+                    "stage": "admin_task_terminate_requested",
+                    "message": message,
+                    "details": {
+                        "executor": "后台管理页",
+                        "terminated_processes": _jsonable_limited(terminated_processes or []),
+                    },
+                }
+            )
+            session["progress"] = progress[-self.max_progress_events :]
+            session["status"] = "cancelled"
+            session["success"] = False
+            session["skipped"] = False
+            session["error_code"] = "cancelled_by_admin"
+            session["message"] = _trim_text(message, 4000)
+            session["updated_at"] = now
+            session["finished_at"] = now
+            self._sessions[normalized] = session
+            self._save()
+            return _public_session(session, include_progress=True)
+
     def record_error(self, event: LarkEvent, error: BaseException) -> None:
         key = self._session_key(event)
         if not key:
@@ -358,6 +453,11 @@ class AgentActivityStore:
         with self._lock:
             now = _now_iso()
             session = self._sessions.get(key, {"session_id": key, "progress": [], "started_at": now})
+            if str(session.get("status") or "") == "cancelled":
+                session["updated_at"] = now
+                self._sessions[key] = session
+                self._save()
+                return
             session.update(
                 {
                     "event_id": event.event_id,
@@ -378,10 +478,14 @@ class AgentActivityStore:
             self._sessions[key] = session
             self._save()
 
-    def list_sessions(self, *, limit: int | None = None) -> list[dict[str, Any]]:
+    def list_sessions(self, *, limit: int | None = None, include_hidden: bool = False) -> list[dict[str, Any]]:
         with self._lock:
             sessions = sorted(
-                self._sessions.values(),
+                (
+                    session
+                    for session in self._sessions.values()
+                    if include_hidden or _is_admin_visible_session(session)
+                ),
                 key=lambda item: str(item.get("updated_at") or item.get("started_at") or ""),
                 reverse=True,
             )
@@ -406,6 +510,73 @@ class AgentActivityStore:
                     continue
                 return _public_session(session, include_progress=True)
         return None
+
+    def delete_session(
+        self,
+        session_id: str,
+        *,
+        actor_id: str = "",
+        actor_role: str = "",
+    ) -> dict[str, Any] | None:
+        normalized = session_id.strip()
+        if not normalized:
+            return None
+        with self._lock:
+            session = self._sessions.pop(normalized, None)
+            if session is None:
+                return None
+            self._save()
+            deleted = _public_session(session, include_progress=True)
+            deleted["delete_authorization"] = _delete_authorization(
+                actor_id=actor_id,
+                actor_role=actor_role,
+                scope="analysis_history.delete",
+            )
+            return deleted
+
+    def delete_session_by_job_id(
+        self,
+        job_id: str,
+        *,
+        actor_id: str = "",
+        actor_role: str = "",
+    ) -> dict[str, Any] | None:
+        normalized = job_id.strip()
+        if not normalized:
+            return None
+        with self._lock:
+            for key, session in list(self._sessions.items()):
+                if str(session.get("job_id") or "").strip() != normalized:
+                    continue
+                self._sessions.pop(key, None)
+                self._save()
+                deleted = _public_session(session, include_progress=True)
+                deleted["delete_authorization"] = _delete_authorization(
+                    actor_id=actor_id,
+                    actor_role=actor_role,
+                    scope="analysis_history.delete",
+                )
+                return deleted
+        return None
+
+    def find_session_by_artifact_name(self, artifact_name: str, *, chat_id: str = "") -> dict[str, Any] | None:
+        normalized = Path(artifact_name.strip()).name
+        if not normalized:
+            return None
+        chat = chat_id.strip()
+        matches: list[dict[str, Any]] = []
+        with self._lock:
+            for session in self._sessions.values():
+                if chat and str(session.get("chat_id") or "") != chat:
+                    continue
+                if str(session.get("status") or "") != "succeeded":
+                    continue
+                if normalized not in _session_artifact_names(session):
+                    continue
+                matches.append(session)
+            if len(matches) != 1:
+                return None
+            return _public_session(matches[0], include_progress=True)
 
     def record_daemon_status(self, payload: dict[str, object]) -> None:
         with self._lock:
@@ -548,12 +719,68 @@ def _public_session(session: dict[str, Any], *, include_progress: bool) -> dict[
     result = _jsonable_limited(session, max_text=4000)
     if not isinstance(result, dict):
         return {}
+    result["visible_in_admin"] = _is_admin_visible_session(session)
+    result["can_terminate"] = str(session.get("status") or "") == "running"
     if not include_progress:
         progress = result.get("progress")
         result["progress_count"] = len(progress) if isinstance(progress, list) else 0
         result.pop("progress", None)
         result.pop("details", None)
     return result
+
+
+def _is_admin_visible_session(session: dict[str, Any]) -> bool:
+    """Return whether a session should appear in the default admin list."""
+    if not bool(session.get("skipped")):
+        return True
+    mode = ""
+    details = session.get("details")
+    if isinstance(details, dict):
+        mode = str(details.get("mode") or "").strip()
+    if not mode:
+        mode = str(session.get("mode") or "").strip()
+    if mode == "not_addressed":
+        return False
+    message = str(session.get("message") or "").strip()
+    if message.startswith("duplicate event skipped:"):
+        return False
+    return True
+
+
+def _delete_authorization(*, actor_id: str, actor_role: str, scope: str) -> dict[str, Any]:
+    return {
+        "checked": False,
+        "actor_id": actor_id,
+        "actor_role": actor_role,
+        "scope": scope,
+        "note": "权限管理暂未启用，后续可在此接入角色/用户校验。",
+    }
+
+
+def _session_artifact_names(session: dict[str, Any]) -> set[str]:
+    names: set[str] = set()
+    for key in ("html_report", "json_report"):
+        value = str(session.get(key) or "").strip()
+        if value:
+            names.add(Path(value).name)
+    details = session.get("details")
+    if isinstance(details, dict):
+        for key in ("files_to_send", "source_report_paths", "report_files"):
+            value = details.get(key)
+            if isinstance(value, (list, tuple)):
+                for item in value:
+                    item_text = str(item or "").strip()
+                    if item_text:
+                        names.add(Path(item_text).name)
+            else:
+                item_text = str(value or "").strip()
+                if item_text:
+                    names.add(Path(item_text).name)
+        for key in ("html_report", "json_report", "published_report_index"):
+            item_text = str(details.get(key) or "").strip()
+            if item_text:
+                names.add(Path(item_text).name)
+    return {name for name in names if name}
 
 
 def _jsonable_limited(value: Any, *, max_text: int = 2000) -> Any:

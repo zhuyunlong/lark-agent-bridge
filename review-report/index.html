@@ -1,0 +1,1013 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Lark Agent Bridge — 全面代码审查报告</title>
+<style>
+  :root {
+    --bg: #f0f2f5; --surface: #ffffff; --text: #1a1a2e; --muted: #6b7280;
+    --border: #e5e7eb; --blue: #2563eb; --green: #059669; --amber: #d97706;
+    --red: #dc2626; --violet: #7c3aed; --cyan: #0891b2; --indigo: #4f46e5;
+    --shadow: 0 4px 24px rgba(0,0,0,.06); --radius: 12px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Noto Sans SC', sans-serif;
+         background: var(--bg); color: var(--text); line-height: 1.7; }
+
+  /* ---- NAV ---- */
+  nav.toc { position: fixed; left: 0; top: 0; bottom: 0; width: 260px;
+            background: #111827; color: #e5e7eb; overflow-y: auto; padding: 20px 0; z-index: 100; }
+  nav.toc h2 { font-size: 14px; color: #9ca3af; padding: 0 20px; margin: 18px 0 8px; text-transform: uppercase; letter-spacing: .05em; }
+  nav.toc a { display: block; padding: 7px 20px; color: #d1d5db; text-decoration: none; font-size: 13px; transition: .15s; border-left: 3px solid transparent; }
+  nav.toc a:hover, nav.toc a.active { color: #fff; background: rgba(255,255,255,.06); border-left-color: var(--blue); }
+  nav.toc .logo { padding: 10px 20px 18px; font-weight: 800; font-size: 16px; color: #fff; border-bottom: 1px solid #374151; }
+
+  /* ---- MAIN ---- */
+  main { margin-left: 260px; padding: 32px 40px 60px; max-width: 1200px; }
+
+  h1 { font-size: 28px; margin-bottom: 6px; }
+  h2 { font-size: 22px; margin: 40px 0 16px; padding-bottom: 8px; border-bottom: 2px solid var(--border); }
+  h3 { font-size: 17px; margin: 24px 0 10px; color: var(--indigo); }
+  h4 { font-size: 14px; margin: 16px 0 6px; color: var(--muted); }
+  p, li { font-size: 14px; }
+  ul, ol { padding-left: 1.5em; }
+  li { margin-bottom: 4px; }
+
+  .subtitle { color: var(--muted); font-size: 14px; margin-bottom: 24px; }
+  .badge { display: inline-block; font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 999px; }
+  .badge-blue { background: #dbeafe; color: #1d4ed8; }
+  .badge-green { background: #d1fae5; color: #065f46; }
+  .badge-amber { background: #fef3c7; color: #92400e; }
+  .badge-red { background: #fee2e2; color: #991b1b; }
+  .badge-violet { background: #ede9fe; color: #5b21b6; }
+  .badge-cyan { background: #cffafe; color: #0e7490; }
+
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+          padding: 20px; margin-bottom: 16px; box-shadow: var(--shadow); }
+  .card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; margin-bottom: 20px; }
+  .stat-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; text-align: center; }
+  .stat-card .num { font-size: 32px; font-weight: 800; }
+  .stat-card .label { font-size: 12px; color: var(--muted); margin-top: 4px; }
+
+  table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 13px; }
+  th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--border); }
+  th { background: #f8fafc; color: var(--muted); font-size: 12px; font-weight: 600; text-transform: uppercase; }
+  tr:hover td { background: #f8fafc; }
+
+  pre, code { font-family: 'SF Mono', Menlo, Consolas, monospace; font-size: 12px; }
+  pre { background: #1e293b; color: #e2e8f0; padding: 16px; border-radius: 8px; overflow-x: auto; line-height: 1.6; }
+  code { background: #f1f5f9; padding: 2px 6px; border-radius: 4px; color: var(--indigo); }
+
+  /* ---- DIAGRAM CONTAINERS ---- */
+  .diagram-container { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+                       padding: 24px; margin: 16px 0; overflow-x: auto; box-shadow: var(--shadow); }
+  .diagram-container svg { max-width: 100%; height: auto; }
+  .diagram-title { font-size: 14px; font-weight: 700; color: var(--muted); margin-bottom: 12px; text-transform: uppercase; letter-spacing: .03em; }
+
+  /* ---- SVG DIAGRAMS ---- */
+  .flow-box { fill: #fff; stroke: #94a3b8; stroke-width: 1.5; rx: 8; }
+  .flow-box-primary { fill: #eff6ff; stroke: #3b82f6; stroke-width: 2; rx: 8; }
+  .flow-box-accent { fill: #fef3c7; stroke: #f59e0b; stroke-width: 2; rx: 8; }
+  .flow-box-danger { fill: #fee2e2; stroke: #ef4444; stroke-width: 2; rx: 8; }
+  .flow-box-green { fill: #d1fae5; stroke: #10b981; stroke-width: 2; rx: 8; }
+  .flow-box-violet { fill: #ede9fe; stroke: #8b5cf6; stroke-width: 2; rx: 8; }
+  .flow-text { font-family: -apple-system, sans-serif; font-size: 11px; fill: #1e293b; text-anchor: middle; dominant-baseline: central; }
+  .flow-text-sm { font-family: -apple-system, sans-serif; font-size: 10px; fill: #6b7280; text-anchor: middle; dominant-baseline: central; }
+  .flow-arrow { stroke: #94a3b8; stroke-width: 1.5; fill: none; marker-end: url(#arrowhead); }
+  .flow-arrow-blue { stroke: #3b82f6; stroke-width: 1.5; fill: none; marker-end: url(#arrowhead-blue); }
+  .flow-label { font-family: -apple-system, sans-serif; font-size: 9px; fill: #6b7280; }
+
+  .bug-item { padding: 14px; border-left: 4px solid; margin-bottom: 10px; border-radius: 0 8px 8px 0; background: var(--surface); }
+  .bug-critical { border-left-color: var(--red); }
+  .bug-major { border-left-color: var(--amber); }
+  .bug-minor { border-left-color: var(--cyan); }
+  .bug-title { font-weight: 700; font-size: 14px; margin-bottom: 4px; }
+  .bug-meta { color: var(--muted); font-size: 12px; }
+  .bug-fix { margin-top: 6px; font-size: 13px; padding: 8px 12px; background: #f0fdf4; border-radius: 6px; border: 1px solid #bbf7d0; }
+
+  .ui-comparison { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin: 16px 0; }
+  .ui-box { border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+  .ui-box-header { padding: 10px 14px; font-weight: 700; font-size: 13px; }
+  .ui-box-body { padding: 14px; font-size: 13px; }
+  .ui-current .ui-box-header { background: #fee2e2; color: #991b1b; }
+  .ui-proposed .ui-box-header { background: #d1fae5; color: #065f46; }
+
+  @media (max-width: 900px) {
+    nav.toc { display: none; }
+    main { margin-left: 0; padding: 20px 16px; }
+    .ui-comparison { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ===== ARROW MARKER DEFS ===== -->
+<svg style="position:absolute;width:0;height:0">
+  <defs>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#94a3b8"/>
+    </marker>
+    <marker id="arrowhead-blue" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#3b82f6"/>
+    </marker>
+  </defs>
+</svg>
+
+<!-- ===== SIDE NAV ===== -->
+<nav class="toc">
+  <div class="logo">📋 Code Review Report</div>
+  <h2>概览</h2>
+  <a href="#overview">项目概览</a>
+  <a href="#stats">数据统计</a>
+  <h2>架构</h2>
+  <a href="#arch-flow">整体流程图</a>
+  <a href="#message-routing">消息路由流程</a>
+  <a href="#sequence">时序图</a>
+  <a href="#data-model">数据模型</a>
+  <a href="#module-deps">模块依赖</a>
+  <h2>Bug Review</h2>
+  <a href="#bugs-critical">严重 Bug</a>
+  <a href="#bugs-major">重要 Bug</a>
+  <a href="#bugs-minor">改进建议</a>
+  <a href="#fix-plan">修复计划</a>
+  <h2>WebUI Review</h2>
+  <a href="#ui-overview">WebUI 现状评估</a>
+  <a href="#ui-improvements">改进方案</a>
+  <a href="#ui-mockup">参考设计</a>
+</nav>
+
+<!-- ===== MAIN CONTENT ===== -->
+<main>
+
+<!-- ============================================================ -->
+<!-- 1. PROJECT OVERVIEW                                           -->
+<!-- ============================================================ -->
+<h1 id="overview">Lark Agent Bridge — 全面代码审查报告</h1>
+<p class="subtitle">生成时间：2026-05-21 &nbsp; | &nbsp; 代码版本：v0.1.0 &nbsp; | &nbsp; Python 3.11+ &nbsp; | &nbsp; 仅标准库</p>
+
+<div class="card">
+  <h3>项目定位</h3>
+  <p>本地运行的飞书 Bot 消息桥，负责接收飞书消息事件，将分析请求路由到本地 AI Agent（Claude Code / Codex / omlx），执行日志下载、脚本分析、HTML 报告生成与回传。</p>
+  <p style="margin-top:8px"><strong>核心能力：</strong>信号链路调查 · Bug 链接分析 · 直传文件分析 · 感知数据总结 · Claude Code 只读分析 · 普通 omlx 聊天 · 基础问答</p>
+</div>
+
+<div id="stats" class="card-grid">
+  <div class="stat-card"><div class="num" style="color:var(--blue)">23,851</div><div class="label">源码总行数</div></div>
+  <div class="stat-card"><div class="num" style="color:var(--green)">414</div><div class="label">单元测试</div></div>
+  <div class="stat-card"><div class="num" style="color:var(--violet)">30+</div><div class="label">源文件</div></div>
+  <div class="stat-card"><div class="num" style="color:var(--amber)">0</div><div class="label">外部依赖</div></div>
+  <div class="stat-card"><div class="num" style="color:var(--cyan)">9,671</div><div class="label">agents.py 行数</div></div>
+  <div class="stat-card"><div class="num" style="color:var(--red)">3,739</div><div class="label">app.py 行数</div></div>
+</div>
+
+<table>
+  <tr><th>模块</th><th>行数</th><th>职责</th></tr>
+  <tr><td><code>agents.py</code></td><td>9,671</td><td>Claude/Codex/omlx/Bug/Perception Agent 编排，日志解压、分类、脚本调度</td></tr>
+  <tr><td><code>app.py</code></td><td>3,739</td><td>主编排层：事件处理、路由、进度卡片、结果投递、追问上下文</td></tr>
+  <tr><td><code>report_server.py</code></td><td>1,073</td><td>HTML 报告发布 + HTTP 服务 + REST API</td></tr>
+  <tr><td><code>state.py</code></td><td>804</td><td>事件去重、会话上下文、活动记录</td></tr>
+  <tr><td><code>cards.py</code></td><td>693</td><td>飞书交互卡片构建</td></tr>
+  <tr><td><code>admin_ui.py</code></td><td>681</td><td>单页后台管理控制台</td></tr>
+  <tr><td><code>lark_client.py</code></td><td>669</td><td>lark-cli 命令封装</td></tr>
+  <tr><td><code>models.py</code></td><td>623</td><td>数据模型 (dataclass)</td></tr>
+  <tr><td><code>parser.py</code></td><td>444</td><td>消息文本解析、意图提取</td></tr>
+  <tr><td><code>config.py</code></td><td>324</td><td>TOML 配置加载 + 环境变量合并</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<!-- 2. ARCHITECTURE FLOW                                          -->
+<!-- ============================================================ -->
+<h2 id="arch-flow">整体架构流程图</h2>
+<div class="diagram-container">
+  <div class="diagram-title">系统全局架构</div>
+  <svg viewBox="0 0 960 520" xmlns="http://www.w3.org/2000/svg">
+    <!-- Layer: External -->
+    <rect x="20" y="20" width="140" height="50" class="flow-box-accent"/>
+    <text x="90" y="45" class="flow-text">飞书 Bot 平台</text>
+
+    <rect x="20" y="100" width="140" height="50" class="flow-box"/>
+    <text x="90" y="125" class="flow-text">lark-cli event consume</text>
+
+    <!-- Layer: Bridge Core -->
+    <rect x="220" y="20" width="520" height="480" rx="12" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1" stroke-dasharray="6,4"/>
+    <text x="480" y="44" class="flow-text" style="font-size:13px;font-weight:800;fill:#475569">Bridge 核心</text>
+
+    <rect x="260" y="70" width="160" height="44" class="flow-box-primary"/>
+    <text x="340" y="92" class="flow-text">BridgeApp.handle_event</text>
+
+    <rect x="260" y="140" width="160" height="40" class="flow-box"/>
+    <text x="340" y="160" class="flow-text">Policy Guard</text>
+
+    <rect x="260" y="206" width="160" height="40" class="flow-box-primary"/>
+    <text x="340" y="226" class="flow-text">Parser / Router</text>
+
+    <!-- Route branches -->
+    <rect x="250" y="280" width="100" height="36" class="flow-box-green"/>
+    <text x="300" y="298" class="flow-text" style="font-size:10px">Signal 分析</text>
+
+    <rect x="362" y="280" width="100" height="36" class="flow-box-green"/>
+    <text x="412" y="298" class="flow-text" style="font-size:10px">Bug 分析</text>
+
+    <rect x="474" y="280" width="100" height="36" class="flow-box-green"/>
+    <text x="524" y="298" class="flow-text" style="font-size:10px">直传分析</text>
+
+    <rect x="586" y="280" width="100" height="36" class="flow-box-green"/>
+    <text x="636" y="298" class="flow-text" style="font-size:10px">Claude Skill</text>
+
+    <rect x="250" y="340" width="100" height="36" class="flow-box-violet"/>
+    <text x="300" y="358" class="flow-text" style="font-size:10px">感知总结</text>
+
+    <rect x="362" y="340" width="100" height="36" class="flow-box-violet"/>
+    <text x="412" y="358" class="flow-text" style="font-size:10px">omlx Chat</text>
+
+    <rect x="474" y="340" width="100" height="36" class="flow-box-violet"/>
+    <text x="524" y="358" class="flow-text" style="font-size:10px">追问 Followup</text>
+
+    <rect x="586" y="340" width="100" height="36" class="flow-box"/>
+    <text x="636" y="358" class="flow-text" style="font-size:10px">基础问答</text>
+
+    <!-- Result delivery -->
+    <rect x="350" y="410" width="200" height="44" class="flow-box-primary"/>
+    <text x="450" y="432" class="flow-text">结果投递 / 卡片更新</text>
+
+    <rect x="350" y="470" width="200" height="24" class="flow-box"/>
+    <text x="450" y="482" class="flow-text-sm">Archive / Notify / Version</text>
+
+    <!-- Layer: External Services -->
+    <rect x="790" y="70" width="150" height="44" class="flow-box-accent"/>
+    <text x="865" y="92" class="flow-text">Report HTTP Server</text>
+
+    <rect x="790" y="140" width="150" height="40" class="flow-box"/>
+    <text x="865" y="160" class="flow-text">Admin WebUI</text>
+
+    <rect x="790" y="210" width="150" height="40" class="flow-box"/>
+    <text x="865" y="230" class="flow-text">REST API (/api/*)</text>
+
+    <rect x="790" y="290" width="150" height="40" class="flow-box-accent"/>
+    <text x="865" y="310" class="flow-text">本地 Agent</text>
+    <text x="865" y="324" class="flow-text-sm">(Claude/Codex/omlx)</text>
+
+    <rect x="790" y="370" width="150" height="40" class="flow-box"/>
+    <text x="865" y="390" class="flow-text">guideengine 脚本</text>
+
+    <rect x="790" y="440" width="150" height="40" class="flow-box"/>
+    <text x="865" y="460" class="flow-text">State / Case Store</text>
+
+    <!-- Arrows -->
+    <line x1="90" y1="70" x2="90" y2="100" class="flow-arrow"/>
+    <line x1="160" y1="125" x2="260" y2="92" class="flow-arrow"/>
+    <line x1="340" y1="114" x2="340" y2="140" class="flow-arrow"/>
+    <line x1="340" y1="180" x2="340" y2="206" class="flow-arrow"/>
+    <line x1="300" y1="246" x2="300" y2="280" class="flow-arrow"/>
+    <line x1="412" y1="246" x2="412" y2="280" class="flow-arrow"/>
+    <line x1="524" y1="246" x2="524" y2="280" class="flow-arrow"/>
+    <line x1="636" y1="246" x2="636" y2="280" class="flow-arrow"/>
+    <line x1="300" y1="316" x2="300" y2="340" class="flow-arrow"/>
+    <line x1="412" y1="316" x2="412" y2="340" class="flow-arrow"/>
+    <line x1="524" y1="316" x2="524" y2="340" class="flow-arrow"/>
+    <line x1="450" y1="376" x2="450" y2="410" class="flow-arrow"/>
+    <line x1="450" y1="454" x2="450" y2="470" class="flow-arrow"/>
+
+    <line x1="550" y1="432" x2="790" y2="92" class="flow-arrow-blue"/>
+    <line x1="686" y1="298" x2="790" y2="310" class="flow-arrow-blue"/>
+    <line x1="350" y1="298" x2="350" y2="298" class="flow-arrow"/>
+    <path d="M 350 298 L 280 298 L 280 390 L 790 390" class="flow-arrow-blue" fill="none"/>
+  </svg>
+</div>
+
+<!-- ============================================================ -->
+<!-- 3. MESSAGE ROUTING FLOW                                       -->
+<!-- ============================================================ -->
+<h2 id="message-routing">消息路由决策流程图</h2>
+<div class="diagram-container">
+  <div class="diagram-title">_handle_event 路由逻辑</div>
+  <svg viewBox="0 0 880 680" xmlns="http://www.w3.org/2000/svg">
+    <!-- Start -->
+    <rect x="340" y="10" width="180" height="36" class="flow-box-primary"/>
+    <text x="430" y="28" class="flow-text">消息到达</text>
+
+    <!-- Group check -->
+    <rect x="340" y="70" width="180" height="36" class="flow-box"/>
+    <text x="430" y="88" class="flow-text">群聊? → 提取 @bot 内容</text>
+    <line x1="430" y1="46" x2="430" y2="70" class="flow-arrow"/>
+
+    <!-- Policy -->
+    <rect x="340" y="130" width="180" height="36" class="flow-box"/>
+    <text x="430" y="148" class="flow-text">Policy Guard 校验</text>
+    <line x1="430" y1="106" x2="430" y2="130" class="flow-arrow"/>
+
+    <rect x="620" y="130" width="130" height="36" class="flow-box-danger"/>
+    <text x="685" y="148" class="flow-text" style="font-size:10px">拒绝 → 发错误消息</text>
+    <line x1="520" y1="148" x2="620" y2="148" class="flow-arrow"/>
+    <text x="558" y="142" class="flow-label">不允许</text>
+
+    <!-- Followup check -->
+    <rect x="340" y="190" width="180" height="36" class="flow-box"/>
+    <text x="430" y="208" class="flow-text">追问上下文? (Bug followup)</text>
+    <line x1="430" y1="166" x2="430" y2="190" class="flow-arrow"/>
+    <text x="445" y="180" class="flow-label">允许</text>
+
+    <rect x="620" y="190" width="130" height="36" class="flow-box-green"/>
+    <text x="685" y="208" class="flow-text" style="font-size:10px">handle_followup</text>
+    <line x1="520" y1="208" x2="620" y2="208" class="flow-arrow"/>
+    <text x="558" y="202" class="flow-label">命中</text>
+
+    <!-- Bug URL -->
+    <rect x="340" y="250" width="180" height="36" class="flow-box"/>
+    <text x="430" y="268" class="flow-text">Bug URL 匹配?</text>
+    <line x1="430" y1="226" x2="430" y2="250" class="flow-arrow"/>
+
+    <rect x="620" y="250" width="130" height="36" class="flow-box-green"/>
+    <text x="685" y="268" class="flow-text" style="font-size:10px">Bug 分析管线</text>
+    <line x1="520" y1="268" x2="620" y2="268" class="flow-arrow"/>
+
+    <!-- Intent router -->
+    <rect x="340" y="310" width="180" height="36" class="flow-box"/>
+    <text x="430" y="328" class="flow-text">Intent Agent 路由?</text>
+    <line x1="430" y1="286" x2="430" y2="310" class="flow-arrow"/>
+
+    <!-- Signal -->
+    <rect x="340" y="370" width="180" height="36" class="flow-box"/>
+    <text x="430" y="388" class="flow-text">Signal 请求?</text>
+    <line x1="430" y1="346" x2="430" y2="370" class="flow-arrow"/>
+
+    <rect x="620" y="370" width="130" height="36" class="flow-box-green"/>
+    <text x="685" y="388" class="flow-text" style="font-size:10px">Signal Chain 分析</text>
+    <line x1="520" y1="388" x2="620" y2="388" class="flow-arrow"/>
+
+    <!-- Claude -->
+    <rect x="340" y="430" width="180" height="36" class="flow-box"/>
+    <text x="430" y="448" class="flow-text">Claude Skill 前缀?</text>
+    <line x1="430" y1="406" x2="430" y2="430" class="flow-arrow"/>
+
+    <rect x="620" y="430" width="130" height="36" class="flow-box-green"/>
+    <text x="685" y="448" class="flow-text" style="font-size:10px">Claude Code 分析</text>
+    <line x1="520" y1="448" x2="620" y2="448" class="flow-arrow"/>
+
+    <!-- Direct -->
+    <rect x="340" y="490" width="180" height="36" class="flow-box"/>
+    <text x="430" y="508" class="flow-text">直传文件 + 分析词?</text>
+    <line x1="430" y1="466" x2="430" y2="490" class="flow-arrow"/>
+
+    <!-- Perception -->
+    <rect x="340" y="540" width="180" height="36" class="flow-box"/>
+    <text x="430" y="558" class="flow-text">感知总结触发词?</text>
+    <line x1="430" y1="526" x2="430" y2="540" class="flow-arrow"/>
+
+    <!-- omlx -->
+    <rect x="340" y="590" width="180" height="36" class="flow-box"/>
+    <text x="430" y="608" class="flow-text">omlx Chat / 基础问答?</text>
+    <line x1="430" y1="576" x2="430" y2="590" class="flow-arrow"/>
+
+    <!-- Fallback -->
+    <rect x="340" y="640" width="180" height="36" class="flow-box-accent"/>
+    <text x="430" y="658" class="flow-text">not a handled request</text>
+    <line x1="430" y1="626" x2="430" y2="640" class="flow-arrow"/>
+  </svg>
+</div>
+
+<!-- ============================================================ -->
+<!-- 4. SEQUENCE DIAGRAM                                           -->
+<!-- ============================================================ -->
+<h2 id="sequence">时序图 — Bug 分析核心流程</h2>
+<div class="diagram-container">
+  <div class="diagram-title">Bug 分析完整时序</div>
+  <svg viewBox="0 0 900 740" xmlns="http://www.w3.org/2000/svg">
+    <!-- Lifelines -->
+    <rect x="40" y="10" width="100" height="30" class="flow-box-accent"/>
+    <text x="90" y="25" class="flow-text">用户 (飞书)</text>
+    <line x1="90" y1="40" x2="90" y2="720" stroke="#cbd5e1" stroke-dasharray="4,3"/>
+
+    <rect x="210" y="10" width="100" height="30" class="flow-box-primary"/>
+    <text x="260" y="25" class="flow-text">BridgeApp</text>
+    <line x1="260" y1="40" x2="260" y2="720" stroke="#cbd5e1" stroke-dasharray="4,3"/>
+
+    <rect x="390" y="10" width="120" height="30" class="flow-box"/>
+    <text x="450" y="25" class="flow-text">BugAnalysisRunner</text>
+    <line x1="450" y1="40" x2="450" y2="720" stroke="#cbd5e1" stroke-dasharray="4,3"/>
+
+    <rect x="580" y="10" width="100" height="30" class="flow-box"/>
+    <text x="630" y="25" class="flow-text">本地脚本</text>
+    <line x1="630" y1="40" x2="630" y2="720" stroke="#cbd5e1" stroke-dasharray="4,3"/>
+
+    <rect x="750" y="10" width="100" height="30" class="flow-box-accent"/>
+    <text x="800" y="25" class="flow-text">Agent (AI)</text>
+    <line x1="800" y1="40" x2="800" y2="720" stroke="#cbd5e1" stroke-dasharray="4,3"/>
+
+    <!-- Messages -->
+    <line x1="90" y1="80" x2="260" y2="80" class="flow-arrow-blue"/>
+    <text x="175" y="74" class="flow-label">@bot Bug链接 + 方向</text>
+
+    <line x1="260" y1="110" x2="90" y2="110" class="flow-arrow"/>
+    <text x="175" y="104" class="flow-label">发送进度卡片</text>
+
+    <line x1="260" y1="140" x2="450" y2="140" class="flow-arrow-blue"/>
+    <text x="355" y="134" class="flow-label">run_bug_analysis()</text>
+
+    <line x1="450" y1="170" x2="450" y2="170" class="flow-arrow"/>
+    <text x="470" y="168" class="flow-label" style="text-anchor:start">fetch_bug_info (lark-cli)</text>
+
+    <line x1="450" y1="200" x2="450" y2="200" class="flow-arrow"/>
+    <text x="470" y="198" class="flow-label" style="text-anchor:start">download_bug_attachments</text>
+
+    <line x1="450" y1="230" x2="450" y2="230" class="flow-arrow"/>
+    <text x="470" y="228" class="flow-label" style="text-anchor:start">extract_and_decode_logs</text>
+
+    <line x1="450" y1="270" x2="450" y2="270" class="flow-arrow"/>
+    <text x="470" y="268" class="flow-label" style="text-anchor:start">classify → startup/stuck/crash/signal</text>
+
+    <rect x="430" y="290" width="220" height="24" rx="4" fill="#f0fdf4" stroke="#86efac"/>
+    <text x="540" y="304" class="flow-text-sm" style="fill:#166534">Skill 选择：基于关键词 + 日志内容</text>
+
+    <line x1="450" y1="340" x2="630" y2="340" class="flow-arrow-blue"/>
+    <text x="540" y="334" class="flow-label">执行分析脚本</text>
+
+    <line x1="630" y1="380" x2="450" y2="380" class="flow-arrow"/>
+    <text x="540" y="374" class="flow-label">HTML + JSON 报告</text>
+
+    <rect x="430" y="400" width="220" height="24" rx="4" fill="#eff6ff" stroke="#93c5fd"/>
+    <text x="540" y="414" class="flow-text-sm" style="fill:#1d4ed8">合并报告 (startup+stuck / 单技能)</text>
+
+    <line x1="450" y1="450" x2="800" y2="450" class="flow-arrow-blue"/>
+    <text x="620" y="444" class="flow-label">Agent 增强总结 (有超时保护)</text>
+
+    <line x1="800" y1="490" x2="450" y2="490" class="flow-arrow"/>
+    <text x="620" y="484" class="flow-label">结构化结论 (或超时降级)</text>
+
+    <line x1="450" y1="520" x2="260" y2="520" class="flow-arrow"/>
+    <text x="355" y="514" class="flow-label">TaskResult + 报告路径</text>
+
+    <line x1="260" y1="550" x2="260" y2="550" class="flow-arrow"/>
+    <text x="280" y="548" class="flow-label" style="text-anchor:start">publish_result → 发布HTML</text>
+
+    <line x1="260" y1="580" x2="260" y2="580" class="flow-arrow"/>
+    <text x="280" y="578" class="flow-label" style="text-anchor:start">case_store.save + version_store</text>
+
+    <line x1="260" y1="610" x2="90" y2="610" class="flow-arrow-blue"/>
+    <text x="175" y="604" class="flow-label">更新进度卡片 → 完成</text>
+
+    <line x1="260" y1="640" x2="90" y2="640" class="flow-arrow"/>
+    <text x="175" y="634" class="flow-label">发送结果卡片 + 报告链接</text>
+
+    <line x1="260" y1="670" x2="260" y2="670" class="flow-arrow"/>
+    <text x="280" y="668" class="flow-label" style="text-anchor:start">workflow_archive (可选)</text>
+
+    <line x1="260" y1="700" x2="260" y2="700" class="flow-arrow"/>
+    <text x="280" y="698" class="flow-label" style="text-anchor:start">conversation_store 保存上下文</text>
+  </svg>
+</div>
+
+<!-- ============================================================ -->
+<!-- 5. DATA MODEL                                                 -->
+<!-- ============================================================ -->
+<h2 id="data-model">数据模型与状态流</h2>
+<div class="diagram-container">
+  <div class="diagram-title">核心数据模型关系</div>
+  <svg viewBox="0 0 900 400" xmlns="http://www.w3.org/2000/svg">
+    <!-- BridgeConfig -->
+    <rect x="20" y="20" width="200" height="160" class="flow-box-primary"/>
+    <text x="120" y="42" class="flow-text" style="font-weight:800">BridgeConfig</text>
+    <text x="120" y="62" class="flow-text-sm">dry_run, workspace_root</text>
+    <text x="120" y="78" class="flow-text-sm">download: DownloadConfig</text>
+    <text x="120" y="94" class="flow-text-sm">lark: LarkOptions</text>
+    <text x="120" y="110" class="flow-text-sm">claude_agent: ClaudeAgentOpts</text>
+    <text x="120" y="126" class="flow-text-sm">bug_analysis: BugAnalysisOpts</text>
+    <text x="120" y="142" class="flow-text-sm">omlx_chat: OmlxChatOptions</text>
+    <text x="120" y="158" class="flow-text-sm">report_server, approval, ...</text>
+
+    <!-- LarkEvent -->
+    <rect x="260" y="20" width="180" height="120" class="flow-box-accent"/>
+    <text x="350" y="42" class="flow-text" style="font-weight:800">LarkEvent</text>
+    <text x="350" y="62" class="flow-text-sm">event_id, message_id</text>
+    <text x="350" y="78" class="flow-text-sm">chat_id, chat_type</text>
+    <text x="350" y="94" class="flow-text-sm">sender_id, content</text>
+    <text x="350" y="110" class="flow-text-sm">reply_to, parent_id, raw</text>
+
+    <!-- TaskResult -->
+    <rect x="480" y="20" width="180" height="140" class="flow-box-green"/>
+    <text x="570" y="42" class="flow-text" style="font-weight:800">TaskResult</text>
+    <text x="570" y="62" class="flow-text-sm">success, message, skipped</text>
+    <text x="570" y="78" class="flow-text-sm">html_report, json_report</text>
+    <text x="570" y="94" class="flow-text-sm">job_id, job_dir</text>
+    <text x="570" y="110" class="flow-text-sm">command, error_code</text>
+    <text x="570" y="126" class="flow-text-sm">details: dict, duration_s</text>
+
+    <!-- Stores -->
+    <rect x="700" y="20" width="180" height="100" class="flow-box-violet"/>
+    <text x="790" y="42" class="flow-text" style="font-weight:800">持久化 Store</text>
+    <text x="790" y="62" class="flow-text-sm">EventStateStore (去重)</text>
+    <text x="790" y="78" class="flow-text-sm">ConversationCtxStore</text>
+    <text x="790" y="94" class="flow-text-sm">AgentActivityStore</text>
+
+    <rect x="700" y="140" width="180" height="80" class="flow-box"/>
+    <text x="790" y="162" class="flow-text" style="font-weight:800">业务 Store</text>
+    <text x="790" y="182" class="flow-text-sm">CaseStore (案例库)</text>
+    <text x="790" y="198" class="flow-text-sm">ReportVersionStore</text>
+
+    <!-- Requests -->
+    <rect x="260" y="200" width="180" height="100" class="flow-box"/>
+    <text x="350" y="220" class="flow-text" style="font-weight:800">请求模型</text>
+    <text x="350" y="240" class="flow-text-sm">SignalRequest</text>
+    <text x="350" y="256" class="flow-text-sm">BugRequest</text>
+    <text x="350" y="272" class="flow-text-sm">ClaudeSkillRequest</text>
+    <text x="350" y="288" class="flow-text-sm">DirectAnalysisRequest</text>
+
+    <rect x="480" y="200" width="180" height="80" class="flow-box"/>
+    <text x="570" y="220" class="flow-text" style="font-weight:800">运行时模型</text>
+    <text x="570" y="240" class="flow-text-sm">JobContext (job_dir, output)</text>
+    <text x="570" y="256" class="flow-text-sm">DownloadResource</text>
+    <text x="570" y="272" class="flow-text-sm">DownloadedResource</text>
+
+    <!-- Context -->
+    <rect x="20" y="240" width="200" height="80" class="flow-box"/>
+    <text x="120" y="260" class="flow-text" style="font-weight:800">上下文模型</text>
+    <text x="120" y="280" class="flow-text-sm">ConversationContext</text>
+    <text x="120" y="296" class="flow-text-sm">CardActionEvent</text>
+
+    <!-- Arrows -->
+    <line x1="220" y1="80" x2="260" y2="80" class="flow-arrow" style="stroke-dasharray:4,3"/>
+    <line x1="440" y1="80" x2="480" y2="80" class="flow-arrow"/>
+    <line x1="660" y1="60" x2="700" y2="60" class="flow-arrow"/>
+    <line x1="660" y1="120" x2="700" y2="180" class="flow-arrow"/>
+  </svg>
+</div>
+
+<!-- ============================================================ -->
+<!-- 6. MODULE DEPENDENCY                                          -->
+<!-- ============================================================ -->
+<h2 id="module-deps">模块依赖图</h2>
+<div class="diagram-container">
+  <div class="diagram-title">核心模块依赖关系</div>
+  <svg viewBox="0 0 800 360" xmlns="http://www.w3.org/2000/svg">
+    <!-- CLI -->
+    <rect x="330" y="10" width="120" height="32" class="flow-box-accent"/>
+    <text x="390" y="26" class="flow-text">cli.py</text>
+
+    <!-- App -->
+    <rect x="330" y="70" width="120" height="32" class="flow-box-primary"/>
+    <text x="390" y="86" class="flow-text">app.py</text>
+    <line x1="390" y1="42" x2="390" y2="70" class="flow-arrow"/>
+
+    <!-- Layer 2: Core modules -->
+    <rect x="20" y="140" width="100" height="28" class="flow-box"/>
+    <text x="70" y="154" class="flow-text-sm">parser.py</text>
+
+    <rect x="135" y="140" width="100" height="28" class="flow-box"/>
+    <text x="185" y="154" class="flow-text-sm">policy.py</text>
+
+    <rect x="250" y="140" width="100" height="28" class="flow-box-green"/>
+    <text x="300" y="154" class="flow-text-sm">agents.py</text>
+
+    <rect x="365" y="140" width="100" height="28" class="flow-box"/>
+    <text x="415" y="154" class="flow-text-sm">lark_client.py</text>
+
+    <rect x="480" y="140" width="110" height="28" class="flow-box"/>
+    <text x="535" y="154" class="flow-text-sm">report_server.py</text>
+
+    <rect x="605" y="140" width="100" height="28" class="flow-box"/>
+    <text x="655" y="154" class="flow-text-sm">cards.py</text>
+
+    <rect x="720" y="140" width="70" height="28" class="flow-box"/>
+    <text x="755" y="154" class="flow-text-sm">state.py</text>
+
+    <!-- Layer 3: Support modules -->
+    <rect x="20" y="210" width="100" height="28" class="flow-box"/>
+    <text x="70" y="224" class="flow-text-sm">config.py</text>
+
+    <rect x="135" y="210" width="100" height="28" class="flow-box"/>
+    <text x="185" y="224" class="flow-text-sm">models.py</text>
+
+    <rect x="250" y="210" width="100" height="28" class="flow-box"/>
+    <text x="300" y="224" class="flow-text-sm">runner.py</text>
+
+    <rect x="365" y="210" width="100" height="28" class="flow-box"/>
+    <text x="415" y="224" class="flow-text-sm">downloader.py</text>
+
+    <rect x="480" y="210" width="110" height="28" class="flow-box"/>
+    <text x="535" y="224" class="flow-text-sm">admin_ui.py</text>
+
+    <rect x="605" y="210" width="100" height="28" class="flow-box"/>
+    <text x="655" y="224" class="flow-text-sm">health.py</text>
+
+    <rect x="720" y="210" width="70" height="28" class="flow-box"/>
+    <text x="755" y="224" class="flow-text-sm">case_store</text>
+
+    <!-- Layer 4 -->
+    <rect x="20" y="280" width="100" height="28" class="flow-box"/>
+    <text x="70" y="294" class="flow-text-sm">approval.py</text>
+
+    <rect x="135" y="280" width="100" height="28" class="flow-box"/>
+    <text x="185" y="294" class="flow-text-sm">escalation.py</text>
+
+    <rect x="250" y="280" width="100" height="28" class="flow-box"/>
+    <text x="300" y="294" class="flow-text-sm">arbitration.py</text>
+
+    <rect x="365" y="280" width="100" height="28" class="flow-box"/>
+    <text x="415" y="294" class="flow-text-sm">lifecycle.py</text>
+
+    <rect x="480" y="280" width="110" height="28" class="flow-box"/>
+    <text x="535" y="294" class="flow-text-sm">skill_manager.py</text>
+
+    <rect x="605" y="280" width="100" height="28" class="flow-box"/>
+    <text x="655" y="294" class="flow-text-sm">workflow_*.py</text>
+
+    <rect x="720" y="280" width="70" height="28" class="flow-box"/>
+    <text x="755" y="294" class="flow-text-sm">reporting/</text>
+
+    <!-- Arrows from app -->
+    <line x1="350" y1="102" x2="70" y2="140" class="flow-arrow"/>
+    <line x1="360" y1="102" x2="185" y2="140" class="flow-arrow"/>
+    <line x1="380" y1="102" x2="300" y2="140" class="flow-arrow"/>
+    <line x1="400" y1="102" x2="415" y2="140" class="flow-arrow"/>
+    <line x1="420" y1="102" x2="535" y2="140" class="flow-arrow"/>
+    <line x1="430" y1="102" x2="655" y2="140" class="flow-arrow"/>
+    <line x1="440" y1="102" x2="755" y2="140" class="flow-arrow"/>
+
+    <!-- agents deps -->
+    <line x1="300" y1="168" x2="300" y2="210" class="flow-arrow"/>
+    <line x1="300" y1="168" x2="415" y2="210" class="flow-arrow"/>
+    <line x1="300" y1="168" x2="755" y2="280" class="flow-arrow"/>
+
+    <!-- report_server deps -->
+    <line x1="535" y1="168" x2="535" y2="210" class="flow-arrow"/>
+  </svg>
+</div>
+
+<!-- ============================================================ -->
+<!-- 7. BUG REVIEW                                                 -->
+<!-- ============================================================ -->
+<h2 id="bugs-critical">🔴 严重级别 Bug（可能影响功能/安全）</h2>
+
+<div class="bug-item bug-critical">
+  <div class="bug-title">B-01: <code>EventStateStore</code> 文件持续增长无上限</div>
+  <div class="bug-meta"><span class="badge badge-red">严重</span> &nbsp; state.py:28-37 &nbsp; | &nbsp; 内存 + 磁盘</div>
+  <p style="margin-top:8px"><code>seen_events.jsonl</code> 只追加不清理，长期运行后文件无限增长。每次启动全量加载到内存 <code>_seen: set[str]</code>，大量事件后 OOM 风险。</p>
+  <div class="bug-fix">
+    <strong>修复：</strong>添加按时间窗口的事件淘汰机制（如保留最近24h或最近10000条），启动时只加载近期记录。或改用 SQLite + TTL 索引。
+  </div>
+</div>
+
+<div class="bug-item bug-critical">
+  <div class="bug-title">B-02: <code>agents.py</code> 超大单文件 — God Object 反模式</div>
+  <div class="bug-meta"><span class="badge badge-red">严重</span> &nbsp; agents.py (9,671行) &nbsp; | &nbsp; 可维护性</div>
+  <p style="margin-top:8px"><code>agents.py</code> 承载了 Claude/Codex/Bug/Perception/omlx 全部 Agent 编排逻辑，包括日志解压、文件分类、脚本执行、HTML 合并、Agent 增强总结等。混合了 IO 操作、业务逻辑和模板代码。</p>
+  <div class="bug-fix">
+    <strong>修复：</strong>拆分为 <code>agents/claude_runner.py</code>、<code>agents/bug_runner.py</code>、<code>agents/omlx_client.py</code>、<code>agents/perception_runner.py</code>、<code>agents/log_processor.py</code> 等独立模块。
+  </div>
+</div>
+
+<div class="bug-item bug-critical">
+  <div class="bug-title">B-03: <code>setattr(self.bug_runner, "_lark_client", ...)</code> 隐式注入</div>
+  <div class="bug-meta"><span class="badge badge-red">严重</span> &nbsp; app.py:283 &nbsp; | &nbsp; 设计缺陷</div>
+  <p style="margin-top:8px"><code>BridgeApp.__init__</code> 通过 <code>setattr</code> 向 <code>BugAnalysisRunner</code> 注入 <code>_lark_client</code>，绕过了 <code>dataclass(slots=True)</code> 的类型安全。这是典型的猴子补丁，代码阅读者无法从类定义发现该依赖。</p>
+  <div class="bug-fix">
+    <strong>修复：</strong>将 <code>lark_client</code> 作为 <code>BugAnalysisRunner.__init__</code> 的显式参数，或在 Runner 构造时注入。
+  </div>
+</div>
+
+<div class="bug-item bug-critical">
+  <div class="bug-title">B-04: HTTP 报告服务绑定 0.0.0.0 且无鉴权</div>
+  <div class="bug-meta"><span class="badge badge-red">严重</span> &nbsp; config.example.toml:129 + report_server.py &nbsp; | &nbsp; 安全</div>
+  <p style="margin-top:8px">默认配置 <code>bind_host = "0.0.0.0"</code>，使 HTTP 服务暴露在局域网所有接口。报告服务和 Admin API 没有任何认证，任何同网段用户可访问 <code>/api/sessions</code>、<code>/api/cases</code>、删除分析历史等。</p>
+  <div class="bug-fix">
+    <strong>修复：</strong>默认绑定 <code>127.0.0.1</code>（代码中已是默认值，但配置示例写 <code>0.0.0.0</code> 会误导），管理 API 添加 Bearer Token 或 Basic Auth。
+  </div>
+</div>
+
+<h2 id="bugs-major">🟠 重要级别 Bug（影响可靠性/性能）</h2>
+
+<div class="bug-item bug-major">
+  <div class="bug-title">B-05: <code>ConversationContextStore</code> 全量 JSON 序列化无并发保护</div>
+  <div class="bug-meta"><span class="badge badge-amber">重要</span> &nbsp; state.py &nbsp; | &nbsp; 数据一致性</div>
+  <p style="margin-top:8px">每次保存都是全量写入 <code>conversation_contexts.json</code>。虽然有 <code>threading.Lock</code>，但如果在写入过程中进程崩溃，JSON 可能损坏。多个并发事件处理时，高频的全量序列化也影响性能。</p>
+  <div class="bug-fix">
+    <strong>修复：</strong>采用 write-then-rename 的原子写入模式，或改用 SQLite WAL 模式。
+  </div>
+</div>
+
+<div class="bug-item bug-major">
+  <div class="bug-title">B-06: <code>_download_url</code> 未校验重定向目标</div>
+  <div class="bug-meta"><span class="badge badge-amber">重要</span> &nbsp; downloader.py:48-78 &nbsp; | &nbsp; 安全 (SSRF)</div>
+  <p style="margin-top:8px"><code>urllib.request.urlopen</code> 会自动跟随 HTTP 重定向。攻击者可以在飞书消息中构造外部 URL 重定向到内网地址（如 <code>http://169.254.169.254</code>），形成 SSRF。</p>
+  <div class="bug-fix">
+    <strong>修复：</strong>使用自定义 <code>HTTPRedirectHandler</code> 限制重定向目标为公网地址，或禁止重定向并返回最终 URL 让用户确认。
+  </div>
+</div>
+
+<div class="bug-item bug-major">
+  <div class="bug-title">B-07: 进度卡片 <code>_progress_cards</code> 内存字典无清理上限</div>
+  <div class="bug-meta"><span class="badge badge-amber">重要</span> &nbsp; app.py:254 &nbsp; | &nbsp; 内存泄漏</div>
+  <p style="margin-top:8px"><code>_progress_cards: dict[str, dict]</code> 在事件处理中持续添加条目，仅在卡片成功完成后清理。如果 <code>_finish_progress_card</code> 失败（网络问题等），条目会永远留在内存中。</p>
+  <div class="bug-fix">
+    <strong>修复：</strong>为 <code>_progress_cards</code> 设置 TTL 清理机制（如 2h 自动过期），或使用 <code>collections.OrderedDict</code> + 容量上限。
+  </div>
+</div>
+
+<div class="bug-item bug-major">
+  <div class="bug-title">B-08: <code>_optional_path</code> 错误消息硬编码为 "claude_agent.working_dir"</div>
+  <div class="bug-meta"><span class="badge badge-amber">重要</span> &nbsp; config.py:317 &nbsp; | &nbsp; 代码质量</div>
+  <p style="margin-top:8px"><code>_optional_path</code> 被多个配置项复用（bug_analysis.working_dir, intent_analysis.working_dir 等），但报错消息始终为 <code>"claude_agent.working_dir must be a path string"</code>。</p>
+  <div class="bug-fix">
+    <strong>修复：</strong>添加 <code>field_name</code> 参数传入实际字段名。
+  </div>
+</div>
+
+<div class="bug-item bug-major">
+  <div class="bug-title">B-09: <code>app.py</code> 路由优先级耦合过紧</div>
+  <div class="bug-meta"><span class="badge badge-amber">重要</span> &nbsp; app.py:392-604 &nbsp; | &nbsp; 可维护性</div>
+  <p style="margin-top:8px"><code>_handle_event</code> 方法超过 200 行 if-elif-else 串联判断，每种请求类型的判断顺序隐含了优先级语义但无文档说明。新增路由需要小心地插入到正确位置。</p>
+  <div class="bug-fix">
+    <strong>修复：</strong>将路由逻辑抽象为有序的 <code>RouteHandler</code> 链，每个处理器自行判断 <code>can_handle()</code> + <code>handle()</code>，支持优先级配置。
+  </div>
+</div>
+
+<div class="bug-item bug-major">
+  <div class="bug-title">B-10: <code>omlx_chat</code> API 密钥可能以空字符串形式提交</div>
+  <div class="bug-meta"><span class="badge badge-amber">重要</span> &nbsp; agents.py:247-270 &nbsp; | &nbsp; 安全</div>
+  <p style="margin-top:8px">当 <code>api_key</code> 为空字符串时，HTTP 请求仍然会发送 <code>Authorization: Bearer </code>（空值），部分 API 实现可能会因此返回 500 而非 401。</p>
+  <div class="bug-fix">
+    <strong>修复：</strong>在 <code>_chat</code> 方法中，api_key 为空时跳过 Authorization header 或提前报错提示配置缺失。
+  </div>
+</div>
+
+<h2 id="bugs-minor">🔵 建议级别（代码质量 / 小改进）</h2>
+
+<div class="bug-item bug-minor">
+  <div class="bug-title">B-11: <code>admin_ui.py</code> 模板硬编码 681 行 HTML/CSS/JS</div>
+  <div class="bug-meta"><span class="badge badge-cyan">建议</span> &nbsp; admin_ui.py &nbsp; | &nbsp; 可维护性</div>
+  <p style="margin-top:8px">前端代码以 Python 多行字符串嵌入，无法利用 IDE 的 HTML/JS 语法检查和格式化。</p>
+  <div class="bug-fix"><strong>建议：</strong>将 HTML 模板拆分到 <code>templates/admin.html</code>，运行时通过 <code>importlib.resources</code> 加载。</div>
+</div>
+
+<div class="bug-item bug-minor">
+  <div class="bug-title">B-12: 缺少结构化日志</div>
+  <div class="bug-meta"><span class="badge badge-cyan">建议</span> &nbsp; 全局 &nbsp; | &nbsp; 可观测性</div>
+  <p style="margin-top:8px">项目使用 <code>print()</code> 输出信息，没有使用 Python <code>logging</code> 模块。无法配置日志级别、格式化输出或将日志写入文件。</p>
+  <div class="bug-fix"><strong>建议：</strong>引入 <code>logging</code> 模块，使用分层 logger（bridge.app, bridge.agents 等），支持 JSON 格式输出。</div>
+</div>
+
+<div class="bug-item bug-minor">
+  <div class="bug-title">B-13: <code>_FAST_ANSWER_STOP_TOKENS</code> 与 <code>_FAST_ANSWER_DOMAIN_STOP_TERMS</code> 高度重复</div>
+  <div class="bug-meta"><span class="badge badge-cyan">建议</span> &nbsp; app.py:149-209 &nbsp; | &nbsp; 代码重复</div>
+  <p style="margin-top:8px">两个集合大部分内容相同，维护时容易不一致。</p>
+  <div class="bug-fix"><strong>建议：</strong>合并为一个集合，域特定扩展通过 <code>set.union()</code> 实现。</div>
+</div>
+
+<div class="bug-item bug-minor">
+  <div class="bug-title">B-14: 多处 <code>[:500]</code> / <code>[:300]</code> 截断缺少一致性</div>
+  <div class="bug-meta"><span class="badge badge-cyan">建议</span> &nbsp; 多文件 &nbsp; | &nbsp; 一致性</div>
+  <p style="margin-top:8px">错误消息截断使用不同的魔法数字（500, 300, 700），应抽取为常量。</p>
+  <div class="bug-fix"><strong>建议：</strong>定义 <code>MAX_ERROR_PREVIEW_CHARS = 500</code> 等常量并统一使用。</div>
+</div>
+
+<div class="bug-item bug-minor">
+  <div class="bug-title">B-15: 测试覆盖率未量化，无集成测试</div>
+  <div class="bug-meta"><span class="badge badge-cyan">建议</span> &nbsp; tests/ &nbsp; | &nbsp; 质量保障</div>
+  <p style="margin-top:8px">414 个单元测试全部通过，但缺少覆盖率度量和端到端集成测试（如模拟完整事件→报告发布流程）。</p>
+  <div class="bug-fix"><strong>建议：</strong>引入 <code>coverage</code> 工具，目标覆盖率 ≥80%。添加关键路径的 integration test。</div>
+</div>
+
+<!-- ============================================================ -->
+<!-- 8. FIX PLAN                                                   -->
+<!-- ============================================================ -->
+<h2 id="fix-plan">修复计划</h2>
+
+<table>
+  <tr><th>优先级</th><th>Bug ID</th><th>问题</th><th>预估工时</th><th>建议阶段</th></tr>
+  <tr><td><span class="badge badge-red">P0</span></td><td>B-04</td><td>HTTP 服务无鉴权 + 0.0.0.0 绑定</td><td>0.5d</td><td>立即修复</td></tr>
+  <tr><td><span class="badge badge-red">P0</span></td><td>B-06</td><td>URL 下载 SSRF 风险</td><td>0.5d</td><td>立即修复</td></tr>
+  <tr><td><span class="badge badge-red">P0</span></td><td>B-01</td><td>事件去重存储无上限增长</td><td>1d</td><td>本周</td></tr>
+  <tr><td><span class="badge badge-red">P1</span></td><td>B-03</td><td>setattr 隐式注入</td><td>0.5d</td><td>本周</td></tr>
+  <tr><td><span class="badge badge-amber">P1</span></td><td>B-05</td><td>JSON 存储无原子写入</td><td>0.5d</td><td>本周</td></tr>
+  <tr><td><span class="badge badge-amber">P1</span></td><td>B-07</td><td>进度卡片内存泄漏</td><td>0.5d</td><td>本周</td></tr>
+  <tr><td><span class="badge badge-amber">P1</span></td><td>B-10</td><td>空 API Key 请求异常</td><td>0.3d</td><td>本周</td></tr>
+  <tr><td><span class="badge badge-amber">P2</span></td><td>B-02</td><td>agents.py 拆分重构</td><td>3d</td><td>下个迭代</td></tr>
+  <tr><td><span class="badge badge-amber">P2</span></td><td>B-08</td><td>_optional_path 错误消息</td><td>0.2d</td><td>下个迭代</td></tr>
+  <tr><td><span class="badge badge-amber">P2</span></td><td>B-09</td><td>路由链重构</td><td>2d</td><td>下个迭代</td></tr>
+  <tr><td><span class="badge badge-cyan">P3</span></td><td>B-11</td><td>Admin UI 模板外置</td><td>0.5d</td><td>后续优化</td></tr>
+  <tr><td><span class="badge badge-cyan">P3</span></td><td>B-12</td><td>结构化日志</td><td>1d</td><td>后续优化</td></tr>
+  <tr><td><span class="badge badge-cyan">P3</span></td><td>B-13~15</td><td>代码质量小改进</td><td>1d</td><td>后续优化</td></tr>
+</table>
+
+<!-- ============================================================ -->
+<!-- 9. WEBUI REVIEW                                               -->
+<!-- ============================================================ -->
+<h2 id="ui-overview">WebUI 现状评估</h2>
+
+<div class="card">
+  <h3>当前 Admin UI 分析</h3>
+  <p>后台管理界面以 <code>admin_ui.py</code> 中 681 行内联 HTML/CSS/JS 实现，是一个功能完整的 SPA。支持 4 个 Tab 页面：多会话进度、分析历史、Skill 管理、运行状态。</p>
+
+  <h4>✅ 做得好的地方</h4>
+  <ul>
+    <li>零外部依赖的纯 HTML/CSS/JS 实现，符合项目"仅标准库"的理念</li>
+    <li>全局实时刷新 (5s 轮询)，支持 URL 参数定位会话</li>
+    <li>功能完整：进度条、时间线、Skill CRUD、调试面板、分析历史搜索过滤</li>
+    <li>响应式设计（有移动端断点适配）</li>
+  </ul>
+
+  <h4>❌ 需要改进的地方</h4>
+  <ul>
+    <li><strong>视觉层次不清：</strong>所有 Tab 内容结构和视觉权重一致，缺少信息层次梯度</li>
+    <li><strong>颜色系统偏单调：</strong>大面积 #fff 背景搭配灰色边框，视觉平面化严重</li>
+    <li><strong>排版密度过高：</strong>面板间距紧凑，长列表没有虚拟滚动，大量数据时卡顿</li>
+    <li><strong>交互反馈弱：</strong>操作（删除、保存、终止）没有确认对话框和 toast 提示</li>
+    <li><strong>数据可视化缺失：</strong>运行状态只有原始 JSON，缺少趋势图、耗时分布图等</li>
+    <li><strong>暗色模式缺失：</strong>长时间看大屏不友好</li>
+    <li><strong>筛选和排序能力不足：</strong>分析历史缺少时间范围筛选和结论置信度排序</li>
+    <li><strong>Header 过于简单：</strong>缺少系统状态指示器（连接状态、最后心跳等）</li>
+  </ul>
+</div>
+
+<h2 id="ui-improvements">WebUI 改进方案</h2>
+
+<div class="ui-comparison">
+  <div class="ui-box ui-current">
+    <div class="ui-box-header">❌ 现有实现</div>
+    <div class="ui-box-body">
+      <ul>
+        <li>Header 仅有标题 + 刷新按钮</li>
+        <li>指标卡全部相同大小和颜色</li>
+        <li>进度条颜色固定蓝色</li>
+        <li>时间线节点样式单一</li>
+        <li>JSON 原始输出作为状态展示</li>
+        <li>无操作确认和 toast</li>
+      </ul>
+    </div>
+  </div>
+  <div class="ui-box ui-proposed">
+    <div class="ui-box-header">✅ 建议改进</div>
+    <div class="ui-box-body">
+      <ul>
+        <li>Header 增加连接状态指示灯 + 最后事件时间</li>
+        <li>指标卡使用语义色 (运行=蓝, 失败=红, 成功=绿)</li>
+        <li>进度条按状态变色 + 动画 pulse 效果</li>
+        <li>时间线增加耗时标注和关键节点高亮</li>
+        <li>运行状态改为结构化仪表盘</li>
+        <li>操作前显示确认 modal，操作后 toast 通知</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<h3>具体改进建议</h3>
+
+<div class="card">
+  <h4>1. 全局 Header 升级</h4>
+<pre>/* 建议结构 */
+&lt;header&gt;
+  &lt;div class="logo"&gt;
+    &lt;span class="status-dot"&gt;&lt;/span&gt;  &lt;!-- 绿/黄/红 连接状态 --&gt;
+    Lark Agent Bridge
+  &lt;/div&gt;
+  &lt;div class="header-meta"&gt;
+    &lt;span&gt;Listener: &lt;b&gt;healthy&lt;/b&gt;&lt;/span&gt;
+    &lt;span&gt;Last Event: &lt;b&gt;12s ago&lt;/b&gt;&lt;/span&gt;
+    &lt;span&gt;Uptime: &lt;b&gt;3h 42m&lt;/b&gt;&lt;/span&gt;
+  &lt;/div&gt;
+  &lt;div class="header-actions"&gt;
+    &lt;button&gt;🔄 刷新&lt;/button&gt;
+    &lt;button&gt;⚙️ 设置&lt;/button&gt;
+  &lt;/div&gt;
+&lt;/header&gt;</pre>
+</div>
+
+<div class="card">
+  <h4>2. 指标卡片视觉增强</h4>
+  <p>为每个指标卡添加图标和语义色渐变背景，增加趋势箭头：</p>
+<pre>/* 改进样式 */
+.metric {
+  background: linear-gradient(135deg, #eff6ff 0%, #ffffff 100%);
+  border-left: 4px solid var(--blue);
+  transition: transform .15s, box-shadow .15s;
+}
+.metric:hover { transform: translateY(-2px); box-shadow: 0 8px 20px rgba(0,0,0,.1); }
+.metric.danger { border-left-color: var(--red); background: linear-gradient(135deg, #fef2f2, #fff); }
+.metric .trend { font-size: 11px; color: var(--green); }  /* ▲ +3 */</pre>
+</div>
+
+<div class="card">
+  <h4>3. 分析历史页增强</h4>
+  <ul>
+    <li>添加 <strong>日期范围选择器</strong>（DatePicker），支持按天/周/月筛选</li>
+    <li>添加 <strong>耗时分布柱状图</strong>（用 CSS/SVG 实现，无需外部库）</li>
+    <li>添加 <strong>成功率趋势折线</strong>，最近 7 天每天成功/失败统计</li>
+    <li>列表项增加 <strong>置信度标签</strong>（high/medium/low），支持按置信度排序</li>
+    <li>报告预览区增加 <strong>iframe 内嵌预览</strong>，避免跳转新页面</li>
+  </ul>
+</div>
+
+<div class="card">
+  <h4>4. 运行状态仪表盘</h4>
+  <p>将当前的原始 JSON 展示改为结构化仪表盘：</p>
+<pre>/* 建议布局 */
+┌──────────────────────────────────────────┐
+│  Listener 状态                           │
+│  ┌────────┐ ┌────────┐ ┌────────┐       │
+│  │ PID    │ │ 重启次数│ │ 就绪状态│       │
+│  │ 12345  │ │   0    │ │  ✅   │       │
+│  └────────┘ └────────┘ └────────┘       │
+│                                          │
+│  系统健康度  ████████████░░ 85%          │
+│                                          │
+│  ┌─ 健康检查项 ─────────────────┐       │
+│  │ ✅ Event Consumer: running    │       │
+│  │ ✅ Report Server: listening   │       │
+│  │ ⚠️ Disk Usage: 78% (warn)    │       │
+│  │ ✅ Agent Processes: 0 stuck   │       │
+│  └──────────────────────────────┘       │
+│                                          │
+│  最近事件时间线 (最近 10 条)              │
+│  ├─ 01:45:23  Signal 分析 ✅             │
+│  ├─ 01:42:10  Bug 分析 ✅               │
+│  └─ 01:38:55  omlx Chat ✅              │
+└──────────────────────────────────────────┘</pre>
+</div>
+
+<div class="card">
+  <h4>5. 交互体验升级</h4>
+  <ul>
+    <li><strong>操作确认 Modal：</strong>删除分析记录、终止任务前弹出确认对话框</li>
+    <li><strong>Toast 通知：</strong>保存成功、删除成功、网络错误等操作反馈</li>
+    <li><strong>加载骨架屏：</strong>数据加载时显示灰色占位块而非空白</li>
+    <li><strong>暗色模式切换：</strong>基于 <code>prefers-color-scheme</code> 自动切换 + 手动开关</li>
+    <li><strong>键盘快捷键：</strong><code>R</code> 刷新、<code>1-4</code> 切换 Tab、<code>Esc</code> 关闭弹窗</li>
+    <li><strong>搜索实时过滤：</strong>输入即过滤，不需要点击"查询"按钮</li>
+  </ul>
+</div>
+
+<div class="card">
+  <h4>6. Skill 管理页增强</h4>
+  <ul>
+    <li>编辑器增加 <strong>语法高亮</strong>（对 Markdown frontmatter 的 YAML 部分着色）</li>
+    <li>增加 <strong>Skill 使用频率统计</strong>（最近 7 天被触发次数）</li>
+    <li>调试面板增加 <strong>模拟命中结果的详细对比</strong>（展示每个 Skill 的匹配分数排名）</li>
+    <li>支持 <strong>Skill 导入/导出</strong>（JSON 格式批量操作）</li>
+  </ul>
+</div>
+
+<h2 id="ui-mockup">参考设计 — 指标卡片效果</h2>
+<div class="diagram-container">
+  <div class="diagram-title">改进后的指标卡片示意</div>
+  <div style="display:grid;grid-template-columns:repeat(6,1fr);gap:12px">
+    <div style="background:linear-gradient(135deg,#eff6ff,#fff);border:1px solid #bfdbfe;border-left:4px solid #3b82f6;border-radius:10px;padding:14px">
+      <div style="font-size:11px;color:#6b7280;margin-bottom:8px">🔄 运行中</div>
+      <div style="font-size:28px;font-weight:800;color:#1d4ed8">2</div>
+      <div style="font-size:10px;color:#3b82f6;margin-top:4px">▲ +1 vs 1h前</div>
+    </div>
+    <div style="background:linear-gradient(135deg,#fef3c7,#fff);border:1px solid #fde68a;border-left:4px solid #f59e0b;border-radius:10px;padding:14px">
+      <div style="font-size:11px;color:#6b7280;margin-bottom:8px">⏳ 待确认</div>
+      <div style="font-size:28px;font-weight:800;color:#d97706">0</div>
+      <div style="font-size:10px;color:#6b7280;margin-top:4px">— 无变化</div>
+    </div>
+    <div style="background:linear-gradient(135deg,#fef2f2,#fff);border:1px solid #fecaca;border-left:4px solid #ef4444;border-radius:10px;padding:14px">
+      <div style="font-size:11px;color:#6b7280;margin-bottom:8px">❌ 失败</div>
+      <div style="font-size:28px;font-weight:800;color:#dc2626">1</div>
+      <div style="font-size:10px;color:#ef4444;margin-top:4px">▲ 需关注</div>
+    </div>
+    <div style="background:linear-gradient(135deg,#f0fdf4,#fff);border:1px solid #bbf7d0;border-left:4px solid #22c55e;border-radius:10px;padding:14px">
+      <div style="font-size:11px;color:#6b7280;margin-bottom:8px">📊 今日会话</div>
+      <div style="font-size:28px;font-weight:800;color:#16a34a">18</div>
+      <div style="font-size:10px;color:#22c55e;margin-top:4px">▲ +5 vs 昨日</div>
+    </div>
+    <div style="background:linear-gradient(135deg,#ede9fe,#fff);border:1px solid #ddd6fe;border-left:4px solid #8b5cf6;border-radius:10px;padding:14px">
+      <div style="font-size:11px;color:#6b7280;margin-bottom:8px">📁 分析记录</div>
+      <div style="font-size:28px;font-weight:800;color:#7c3aed">142</div>
+      <div style="font-size:10px;color:#6b7280;margin-top:4px">总计</div>
+    </div>
+    <div style="background:linear-gradient(135deg,#ecfeff,#fff);border:1px solid #a5f3fc;border-left:4px solid #06b6d4;border-radius:10px;padding:14px">
+      <div style="font-size:11px;color:#6b7280;margin-bottom:8px">🧩 Skills</div>
+      <div style="font-size:28px;font-weight:800;color:#0891b2">7</div>
+      <div style="font-size:10px;color:#6b7280;margin-top:4px">活跃</div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- FOOTER                                                        -->
+<!-- ============================================================ -->
+<hr style="margin:40px 0 20px;border:0;border-top:1px solid var(--border)"/>
+<p style="color:var(--muted);font-size:12px;text-align:center">
+  由 GitHub Copilot CLI 自动生成 · lark-agent-bridge v0.1.0 · 2026-05-21
+</p>
+
+</main>
+
+<script>
+// Sidebar active highlight on scroll
+document.addEventListener('scroll', () => {
+  const links = document.querySelectorAll('nav.toc a');
+  let active = null;
+  links.forEach(link => {
+    const target = document.querySelector(link.getAttribute('href'));
+    if (target && target.getBoundingClientRect().top <= 100) active = link;
+  });
+  links.forEach(l => l.classList.remove('active'));
+  if (active) active.classList.add('active');
+});
+</script>
+
+</body>
+</html>

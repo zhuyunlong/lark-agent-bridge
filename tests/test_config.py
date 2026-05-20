@@ -4,6 +4,7 @@ import unittest
 from unittest import mock
 
 from lark_agent_bridge.config import load_config
+from lark_agent_bridge.models import BridgeConfig
 
 
 class ConfigTests(unittest.TestCase):
@@ -194,6 +195,7 @@ enabled = true
 provider = "codex"
 command = "codex"
 timeout_seconds = 99
+agent_summary_timeout_seconds = 45
 default_prompt = "分析这个bug"
 resume_followup_sessions = true
 force_reanalysis_terms = ["重新分析", "源码"]
@@ -207,9 +209,15 @@ force_reanalysis_terms = ["重新分析", "源码"]
         self.assertEqual(config.bug_analysis.provider, "codex")
         self.assertEqual(config.bug_analysis.command, "codex")
         self.assertEqual(config.bug_analysis.timeout_seconds, 99)
+        self.assertEqual(config.bug_analysis.agent_summary_timeout_seconds, 45)
         self.assertEqual(config.bug_analysis.default_prompt, "分析这个bug")
         self.assertTrue(config.bug_analysis.resume_followup_sessions)
         self.assertEqual(config.bug_analysis.force_reanalysis_terms, ["重新分析", "源码"])
+
+    def test_default_bug_analysis_prompt_is_empty(self):
+        config = load_config()
+
+        self.assertEqual(config.bug_analysis.default_prompt, "")
 
     def test_load_intent_analysis_options(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -272,6 +280,26 @@ api_key = "file-api-key"
         self.assertEqual(config.lark.bot_name, "Env Bot")
         self.assertEqual(config.omlx_chat.api_key, "env-api-key")
         self.assertEqual(config.report_server.public_base_url, "https://env.example.com/reports")
+
+    def test_loads_local_resource_options(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            downloads = Path(tmp) / "downloads"
+            config_path.write_text(
+                f"""
+[local_resources]
+enabled = true
+require_allowed_user = true
+allowed_dirs = ["{downloads}"]
+""",
+                encoding="utf-8",
+            )
+
+            config = load_config(config_path)
+
+        self.assertTrue(config.local_resources.enabled)
+        self.assertTrue(config.local_resources.require_allowed_user)
+        self.assertEqual(config.local_resources.allowed_dirs, [downloads])
 
 
 if __name__ == "__main__":

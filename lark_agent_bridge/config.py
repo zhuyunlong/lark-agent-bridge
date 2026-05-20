@@ -19,6 +19,7 @@ from .models import (
     IntentAnalysisOptions,
     JobRetentionOptions,
     LarkOptions,
+    LocalResourceOptions,
     NotificationOptions,
     OmlxChatOptions,
     ReportServerOptions,
@@ -51,6 +52,7 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
     aliases.update(_string_dict(data.get("signal_aliases", {}), "signal_aliases"))
 
     download_data = data.get("download") or {}
+    local_resource_data = data.get("local_resources") or {}
     retention_data = data.get("job_retention") or {}
     event_consumer_data = data.get("event_consumer") or {}
     lark_data = data.get("lark") or {}
@@ -85,11 +87,25 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
             max_bytes=int(download_data.get("max_bytes", 5 * 1024 * 1024 * 1024)),
             timeout_seconds=int(download_data.get("timeout_seconds", 60)),
         ),
+        local_resources=LocalResourceOptions(
+            enabled=bool(local_resource_data.get("enabled", LocalResourceOptions().enabled)),
+            require_allowed_user=bool(
+                local_resource_data.get("require_allowed_user", LocalResourceOptions().require_allowed_user)
+            ),
+            allowed_dirs=_path_list(
+                local_resource_data.get(
+                    "allowed_dirs",
+                    [str(path) for path in LocalResourceOptions().allowed_dirs],
+                ),
+                base_dir,
+                "local_resources.allowed_dirs",
+            ),
+        ),
         job_retention=JobRetentionOptions(
             enabled=bool(retention_data.get("enabled", True)),
             max_age_hours=int(retention_data.get("max_age_hours", 6)),
             bug_cache_max_age_hours=int(retention_data.get("bug_cache_max_age_hours", 24)),
-            purge_all_on_listen_start=bool(retention_data.get("purge_all_on_listen_start", True)),
+            purge_all_on_listen_start=bool(retention_data.get("purge_all_on_listen_start", False)),
             cleanup_interval_seconds=int(retention_data.get("cleanup_interval_seconds", 60)),
         ),
         event_consumer=EventConsumerOptions(
@@ -149,6 +165,12 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
             command=str(bug_data.get("command", "claude")),
             working_dir=_optional_path(bug_data.get("working_dir"), base_dir),
             timeout_seconds=int(bug_data.get("timeout_seconds", 5400)),
+            agent_summary_timeout_seconds=int(
+                bug_data.get(
+                    "agent_summary_timeout_seconds",
+                    BugAnalysisOptions().agent_summary_timeout_seconds,
+                )
+            ),
             max_prompt_chars=int(bug_data.get("max_prompt_chars", 16000)),
             upload_result_files=bool(bug_data.get("upload_result_files", True)),
             default_prompt=str(bug_data.get("default_prompt", BugAnalysisOptions().default_prompt)),

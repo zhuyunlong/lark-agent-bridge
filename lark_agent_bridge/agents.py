@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+import hashlib
 import json
+import math
 import re
+import select
+import shlex
+import signal
 from pathlib import Path
 import shutil
 import stat
@@ -20,11 +25,13 @@ import urllib.request
 from typing import Callable
 
 from .downloader import DownloadError, LogDownloader
-from .health import ProcessWatchdog, run_tracked_process
+from .evidence_logs import preserve_evidence_log_bundle
+from .health import ProcessWatchdog, _safe_terminate, run_tracked_process
 from .models import (
     BridgeConfig,
     BugRequest,
     ClaudeSkillRequest,
+    DownloadResource,
     IntentDecision,
     LarkEvent,
     PerceptionSummaryRequest,
@@ -72,6 +79,38 @@ _BUG_ATTACHMENT_DOWNLOAD_SUFFIXES = (
     ".log",
     ".txt",
 )
+_BUG_ARCHIVE_SUFFIXES = (
+    ".zip",
+    ".7z",
+    ".rar",
+    ".tar.gz",
+    ".tar.bz2",
+    ".tar.xz",
+    ".tgz",
+    ".tar",
+    ".gz",
+    ".bz2",
+    ".xz",
+)
+_BUG_LOG_INPUT_PRIORITY_SUFFIXES = (
+    ".xp.zip.001",
+    ".xp",
+    ".zip",
+    ".7z",
+    ".rar",
+    ".tar.gz",
+    ".tar.bz2",
+    ".tar.xz",
+    ".tgz",
+    ".tar",
+    ".gz",
+    ".bz2",
+    ".xz",
+    ".alog",
+    ".xlog",
+    ".log",
+    ".txt",
+)
 _TOKEN_USAGE_KEYS = {
     "input_tokens": ("input_tokens", "inputTokens", "prompt_tokens", "promptTokens"),
     "output_tokens": ("output_tokens", "outputTokens", "completion_tokens", "completionTokens"),
@@ -79,6 +118,43 @@ _TOKEN_USAGE_KEYS = {
 }
 _RUNTIME_HTML_MARKER_START = "<!-- LARK_AGENT_RUNTIME_START -->"
 _RUNTIME_HTML_MARKER_END = "<!-- LARK_AGENT_RUNTIME_END -->"
+_BUG_LOG_COVERAGE_WINDOW_MINUTES = 10
+_BUG_LOG_COVERAGE_MAX_FILES = 400
+_BUG_LOG_COVERAGE_MAX_LINES_PER_FILE = 20000
+_BUG_LOG_COVERAGE_SUFFIXES = (
+    ".alog.log",
+    ".xlog.log",
+    ".alog",
+    ".xlog",
+    ".log",
+    ".txt",
+)
+_GENERIC_BUG_PROMPT_TERMS = (
+    "分析",
+    "分析下",
+    "分析一下",
+    "看下",
+    "看一下",
+    "查下",
+    "查一下",
+    "帮我看下",
+    "帮我看一下",
+    "调查",
+    "排查",
+    "日志分析",
+    "重新分析",
+    "再分析",
+)
+_GENERAL_SCOPE_PATTERNS = (
+    re.compile(r"[/\\][^\s，。；；、]+"),
+    re.compile(r"\b[\w.-]+\.(?:kt|java|cpp|cc|c|h|hpp|py|md|log|xlog|alog|zip|7z|rar|tar|gz|json|xml)\b", re.I),
+    re.compile(r"\b(?:[a-z_][a-z0-9_]*\.){2,}[a-z_][a-z0-9_]*\b", re.I),
+    re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)+\b"),
+    re.compile(r"\b(?=[A-Za-z0-9_]*[a-z])(?=[A-Za-z0-9_]*[A-Z])[A-Za-z_][A-Za-z0-9_]{5,}\b"),
+    re.compile(r"\b[A-Z][A-Z0-9]+(?:_[A-Z0-9]+){2,}\b"),
+    re.compile(r"\bpid\s*[:=]?\s*\d+\b", re.I),
+    re.compile(r"进程(?:号)?\s*[:=]?\s*\d+"),
+)
 
 
 class OmlxChatClient:
@@ -195,6 +271,7 @@ class OmlxChatClient:
             method="POST",
         )
         started = time.monotonic()
+        evidence_log_bundle: dict[str, object] | None = None
         try:
             with urllib.request.urlopen(request, timeout=options.timeout_seconds) as response:
                 body = response.read().decode("utf-8")
@@ -417,12 +494,16 @@ class IntentAnalysisRunner:
             '- "reason": 一句简短中文说明\n\n'
             "判断规则：\n"
             "1. analysis_followup 表示用户在继续同一个已有分析会话。\n"
+            "   群聊里如果没有 has_reply_link，不能仅因 latest_chat_context 主题相似就选 analysis_followup；"
+            "看起来像新的分析命令时应选择对应的新请求路径。\n"
             "2. 对 bug 续聊，如果用户是在修正时间、要求重跑、要求基于同一份已下载日志重新生成结论/报告，选 reanalysis；"
             "如果是基于现有日志/报告继续追问、补充搜索、要求继续分析，选 continue_agent。\n"
             "3. 非 bug 的历史分析追问，若只是基于已有摘要/报告继续问答，选 context_chat。\n"
             "4. 如果消息是普通闲聊、问候、解释型问题，选 chat。\n"
             "5. 如果消息是在发新的 bug 链接分析请求，选 bug；如果是带附件/URL 的日志分析请求但不是 bug 链接，选 direct_analysis；"
-            "如果是信号生命周期调查，选 signal；如果是感知总结，选 perception_summary；如果是 /skill 一类代码分析，选 claude_skill。\n"
+            "如果是信号生命周期调查，只有在用户明确给出单个 SignalCode / SIGNAL_... 并询问信号来源、是否送达或链路时才选 signal；"
+            "3D场景信号、SceneType、上电P、临停P、特殊场景等属于更专一的场景信号分析，带 bug 链接选 bug，带附件/URL 日志选 direct_analysis，不能因为含“信号”二字就选 signal。"
+            "如果是感知总结，选 perception_summary；如果是 /skill 一类代码分析，选 claude_skill。\n"
             "6. 只有在没有合适路径时才选 unsupported。\n\n"
             "输入 JSON：\n"
             f"{json.dumps(payload, ensure_ascii=False, indent=2)}"
@@ -608,9 +689,10 @@ class ClaudeSkillRunner:
             )
 
         context = create_job_context(self.config.data_dir, event=event)
+        bridge_session_id = (event.root_id or event.message_id or event.event_id).strip() if event is not None else ""
         artifact_path = context.output_dir / "claude_skill_result.md"
         prompt = self._build_prompt(request)
-        command = self.build_command(prompt)
+        command = self.build_command()
         self._write_request_file(context.job_dir / "claude_skill_request.json", request)
         if self.config.dry_run:
             return TaskResult(
@@ -635,10 +717,13 @@ class ClaudeSkillRunner:
                 cwd=self._working_dir(),
                 capture_output=True,
                 text=True,
+                input=prompt,
                 timeout=options.timeout_seconds,
                 check=False,
+                session_id=bridge_session_id,
             )
         except subprocess.TimeoutExpired as exc:
+            self._write_process_logs(context.logs_dir, stdout=exc.stdout or "", stderr=exc.stderr or "")
             return TaskResult(
                 success=False,
                 message="Claude Code skill 分析超时",
@@ -652,6 +737,7 @@ class ClaudeSkillRunner:
                 details={"mode": "claude_skill"},
             )
         except OSError as exc:
+            self._write_process_logs(context.logs_dir, stderr=str(exc))
             return TaskResult(
                 success=False,
                 message=f"Claude Code 启动失败: {exc}",
@@ -665,6 +751,7 @@ class ClaudeSkillRunner:
             )
 
         if completed.returncode != 0:
+            self._write_process_logs(context.logs_dir, stdout=completed.stdout, stderr=completed.stderr)
             return TaskResult(
                 success=False,
                 message="Claude Code skill 分析失败",
@@ -694,7 +781,7 @@ class ClaudeSkillRunner:
             details=details,
         )
 
-    def build_command(self, prompt: str) -> list[str]:
+    def build_command(self, prompt: str = "") -> list[str]:
         options = self.config.claude_agent
         command = [
             options.command,
@@ -717,7 +804,6 @@ class ClaudeSkillRunner:
             command.extend(["--tools", ""])
         for directory in self._add_dirs():
             command.extend(["--add-dir", str(directory)])
-        command.append(prompt)
         return command
 
     def _build_prompt(self, request: ClaudeSkillRequest) -> str:
@@ -752,6 +838,11 @@ class ClaudeSkillRunner:
             "error": request.error,
         }
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _write_process_logs(self, logs_dir: Path, *, stdout: str = "", stderr: str = "") -> None:
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        (logs_dir / "claude_skill.stdout.log").write_text(stdout or "", encoding="utf-8")
+        (logs_dir / "claude_skill.stderr.log").write_text(stderr or "", encoding="utf-8")
 
 
 def _extract_chat_answer(payload: dict[str, object]) -> str:
@@ -852,7 +943,7 @@ class BugAnalysisRunner:
                     "label": "通用问题分析",
                     "requires_logs": False,
                     "role": "primary",
-                    "description": "没有合适专用 skill 时，由 agent 直接基于现有报告、源码证据和日志上下文给出结论。",
+                    "description": "没有合适专用 skill 时只做分诊和材料检查；缺少明确方向时要求用户补充，不盲扫源码给根因。",
                 }
             )
             return entries
@@ -894,7 +985,7 @@ class BugAnalysisRunner:
                 "label": "通用问题分析",
                 "requires_logs": False,
                 "role": "primary",
-                "description": "没有合适专用 skill 时，由 agent 直接基于现有报告、源码证据和日志上下文给出结论。",
+                "description": "没有合适专用 skill 时只做分诊和材料检查；缺少明确方向时要求用户补充，不盲扫源码给根因。",
             }
         )
         return entries
@@ -922,6 +1013,173 @@ class BugAnalysisRunner:
             provider=provider,
         )
 
+    def _needs_general_direction(
+        self,
+        selection: "BugAnalysisSelection",
+        *,
+        prompt_text: str,
+    ) -> bool:
+        if selection.skill_name != "general":
+            return False
+        if any(plan.kind != "general" for plan in selection.plans):
+            return False
+        return not self._has_explicit_general_scope(prompt_text)
+
+    def _has_explicit_general_scope(self, prompt_text: str) -> bool:
+        prompt = self._normalize_general_prompt(prompt_text)
+        if not prompt:
+            return False
+        if prompt.casefold() in _GENERIC_BUG_PROMPT_TERMS:
+            return False
+        return any(pattern.search(prompt) for pattern in _GENERAL_SCOPE_PATTERNS)
+
+    def _normalize_general_prompt(self, prompt_text: str) -> str:
+        prompt = re.sub(r"https?://\S+", " ", prompt_text or "")
+        prompt = re.sub(r"\s+", " ", prompt).strip(" \t\r\n，。；;、:：")
+        return prompt
+
+    def _general_direction_needed_result(
+        self,
+        *,
+        context,
+        selection: "BugAnalysisSelection",
+        started: float,
+        request_text: str,
+        bug_url: str,
+        title: str,
+        progress_callback: Callable[[dict[str, object]], None] | None,
+    ) -> TaskResult:
+        self._emit_progress(
+            progress_callback,
+            stage="bug_need_analysis_direction",
+            message="未命中专用预设，等待用户补充明确分析方向",
+            job_id=context.job_id,
+            bug_url=bug_url,
+            title=title,
+            classification_skill=selection.skill_name,
+            classification_source=selection.source,
+            classification_reason=selection.reason,
+        )
+        message = (
+            "当前没有命中专用分析预设，且请求中缺少明确分析方向。\n"
+            "为了避免盲扫源码/日志后给出不可靠结论，我没有继续自动分析。\n\n"
+            "请补充一个可约束的方向，例如：\n"
+            "- 启动 / 卡顿 / Crash / 感知数据 / 主题切换 / 场景信号\n"
+            "- 具体 SignalCode、枚举名、类名、函数名、进程号、包名或日志关键词\n"
+            "- 只检查日志材料是否完整，或指定要看的时间窗口\n\n"
+            "如果仍没有明确方向，目前能力不足以给出可靠根因。"
+        )
+        return TaskResult(
+            success=True,
+            message=message,
+            skipped=True,
+            job_id=context.job_id,
+            job_dir=context.job_dir,
+            duration_seconds=time.monotonic() - started,
+            details={
+                "mode": "bug_clarification",
+                "analysis_kind": "general",
+                "analysis_kinds": ["general"],
+                "analysis_skill": "general",
+                "analysis_skill_label": "通用问题分诊",
+                "classification_source": selection.source,
+                "classification_reason": selection.reason,
+                "classification_provider": selection.provider,
+                "bug_url": bug_url,
+                "user_request_text": request_text,
+                "needs_user_direction": True,
+            },
+        )
+
+    def _bug_time_clarification_result(
+        self,
+        *,
+        context,
+        started: float,
+        request_text: str,
+        bug_url: str,
+        time_context: BugTimeContext,
+        status: str,
+        progress_callback: Callable[[dict[str, object]], None] | None,
+        log_coverage: LogCoverage | None = None,
+    ) -> TaskResult:
+        self._emit_progress(
+            progress_callback,
+            stage="bug_time_gate_blocked",
+            message="问题时间或日志覆盖不满足分析前置条件",
+            job_id=context.job_id,
+            bug_url=bug_url,
+            time_gate_status=status,
+            fault_time=time_context.fault_time,
+            time_source=time_context.source,
+            log_start=log_coverage.start_time if log_coverage else "",
+            log_end=log_coverage.end_time if log_coverage else "",
+        )
+        if status == "missing_fault_time":
+            message = (
+                "缺少明确问题时间：请补充几月几日 几点几分，越精确越好。\n"
+                "我已检查用户输入、Bug 标题和描述，但没有找到可用于定位日志的完整时间点。\n"
+                "补充示例：`问题时间 2026-05-11 23:12:30，分析3D卡顿`。"
+            )
+        elif status == "log_time_unknown":
+            message = (
+                f"已识别问题时间 `{time_context.fault_time}`，但当前日志无法解析出有效时间范围。\n"
+                "请补充包含该时间点附近的已解密文本日志，或确认附件是否为正确日志包。"
+            )
+        else:
+            coverage_text = (
+                f"{log_coverage.start_time} ~ {log_coverage.end_time}"
+                if log_coverage and log_coverage.start_time
+                else "未识别"
+            )
+            message = (
+                f"日志时间范围未覆盖问题时间 `{time_context.fault_time}`。\n"
+                f"当前日志覆盖范围：`{coverage_text}`。\n"
+                "请补充覆盖该问题时间前后约 10 分钟的日志，或修正问题时间后再继续分析。"
+            )
+        return TaskResult(
+            success=True,
+            message=message,
+            skipped=True,
+            job_id=context.job_id,
+            job_dir=context.job_dir,
+            duration_seconds=time.monotonic() - started,
+            details={
+                "mode": "bug_time_clarification",
+                "bug_url": bug_url,
+                "user_request_text": request_text,
+                "time_gate_status": status,
+                "fault_time": time_context.fault_time,
+                "fault_time_source": time_context.source,
+                "fault_time_note": time_context.note,
+                "log_coverage_start": log_coverage.start_time if log_coverage else "",
+                "log_coverage_end": log_coverage.end_time if log_coverage else "",
+                "log_coverage_scanned_files": log_coverage.scanned_files if log_coverage else 0,
+                "log_coverage_scanned_lines": log_coverage.scanned_lines if log_coverage else 0,
+            },
+        )
+
+    def _bug_time_context_payload(self, time_context: BugTimeContext | None) -> dict[str, object]:
+        if time_context is None:
+            return {}
+        return {
+            "fault_time": time_context.fault_time,
+            "source": time_context.source,
+            "note": time_context.note,
+            "has_full_datetime": time_context.has_full_datetime,
+            "candidates": time_context.candidates,
+        }
+
+    def _time_context_from_fault_time(self, fault_time: str, *, source: str, note: str = "") -> BugTimeContext:
+        normalized = self._normalize_fault_time_text(fault_time)
+        return BugTimeContext(
+            fault_time=normalized,
+            source=source,
+            note=note or ("已从上下文继承问题时间。" if normalized else "上下文中未找到完整问题时间。"),
+            has_full_datetime=self._parse_bug_datetime(normalized) is not None,
+            candidates=[],
+        )
+
     def _skill_name_for_kind(self, kind: str) -> str:
         for skill_name, (mapped_kind, _label, _requires_logs) in _PRIMARY_BUG_SKILL_MAP.items():
             if mapped_kind == kind:
@@ -938,7 +1196,7 @@ class BugAnalysisRunner:
                 signal_resolver=self.signal_resolver,
             )
             return [BugAnalysisPlan(kind="signal", signal_code=signal_request.signal)]
-        if kind in {"startup", "stuck", "crash", "perception", "xtheme", "general"}:
+        if kind in {"startup", "stuck", "crash", "scene_signal", "perception", "xtheme", "general"}:
             return [BugAnalysisPlan(kind=kind)]
         return [BugAnalysisPlan(kind="general")]
 
@@ -949,6 +1207,7 @@ class BugAnalysisRunner:
         title: str,
         description: str,
         attachments: object,
+        time_context: BugTimeContext | None = None,
     ) -> BugAnalysisSelection | None:
         primary_skills = [item for item in self._available_bug_skills() if item.get("role") == "primary"]
         aux_skills = [item for item in self._available_bug_skills() if item.get("role") == "auxiliary"]
@@ -957,19 +1216,23 @@ class BugAnalysisRunner:
             "bug_title": title,
             "bug_description": description[:4000],
             "attachments": attachments if isinstance(attachments, list) else [],
+            "problem_time": self._bug_time_context_payload(time_context),
             "primary_skills": primary_skills,
             "auxiliary_skills": aux_skills,
         }
         prompt = (
             "你是 Lark Agent Bridge 的 bug skill 分类器。"
             "请根据用户请求、Bug 标题、描述和当前工作区技能，选择最合适的主分析 skill。"
+            "在选择 skill 前必须先参考 problem_time；如果 has_full_datetime=false，表示问题时间不足，后续应先要求补充时间而不是继续分析。"
             "只有当没有任何专用 skill 明确匹配时，才选择 general。"
-            "signal-chain-analyzer 只在用户明确要排查信号链路/信号来源/信号是否送达时使用，"
-            "不要因为文本里出现 signal 字样就滥用。"
+            "general 不是让系统盲扫源码给根因，而是表示需要分诊、材料检查或要求用户补充更明确方向。"
+            "先判断是否有更专一的 primary skill；signal-chain-analyzer 优先级最低，只在用户明确要排查某个具体 SignalCode / SIGNAL_... 的通用信号链路、信号来源或是否送达时使用，"
+            "不要因为文本里出现 signal/信号 字样就滥用。"
+            "3D场景信号 / SceneType / 上电P / 临停P / 特殊场景 / 小憩 / 露营 / 洗车 / 充电场景 / 放电场景 / 场景选择 / 离车舒享 / 行车场景 / 泊车场景 优先考虑 scene-signal-diagnosis。"
             "xtheme / 105004 / 105009 / 晨曦 / 傍晚 / 主题切换 / XuiConditionHelper 应优先考虑 xtheme-analyzer。"
             "只输出一个 JSON 对象，字段必须完整："
-            '{"analysis_kind":"startup|stuck|crash|signal|perception|xtheme|general",'
-            '"skill":"unity-startup-lifecycle-check|3d-stuck-investigate|signal-chain-analyzer|perception-data-summary|xtheme-analyzer|general",'
+            '{"analysis_kind":"startup|stuck|crash|scene_signal|signal|perception|xtheme|general",'
+            '"skill":"unity-startup-lifecycle-check|3d-stuck-investigate|scene-signal-diagnosis|signal-chain-analyzer|perception-data-summary|xtheme-analyzer|general",'
             '"signal_hint":"可为空",'
             '"reason":"一句中文理由"}'
             "\n输入 JSON：\n"
@@ -1027,13 +1290,15 @@ class BugAnalysisRunner:
             "你是 Lark Agent Bridge 的 bug 续聊决策器。"
             "请先判断当前追问能否直接基于已有分析结果回答；如果不能，再决定是否需要重新分析，"
             "并选择最合适的主分析 skill。"
-            "signal-chain-analyzer 只用于明确的信号链路问题；"
+            "如果没有专用 skill 明确匹配，general 只代表分诊或澄清，不要把泛泛请求改写成源码根因分析。"
+            "先判断是否有更专一的 primary skill；signal-chain-analyzer 优先级最低，只用于明确给出具体 SignalCode / SIGNAL_... 的通用信号链路问题；"
+            "3D场景信号 / SceneType / 上电P / 临停P / 特殊场景 / 小憩 / 露营 / 洗车 / 充电场景 / 放电场景 / 场景选择 / 离车舒享 / 行车场景 / 泊车场景 优先考虑 scene-signal-diagnosis。"
             "xtheme / 105004 / 105009 / 晨曦 / 傍晚 / 主题切换 / XuiConditionHelper 优先考虑 xtheme-analyzer。"
             "如果选择的 skill 需要日志，而当前 prepared_log_input / selected_log_input 为空，请把 retry_download_if_missing 设为 true。"
             "只输出一个 JSON 对象，字段必须完整："
             '{"action":"answer_from_existing|reanalyze",'
-            '"analysis_kind":"startup|stuck|crash|signal|perception|xtheme|general",'
-            '"skill":"unity-startup-lifecycle-check|3d-stuck-investigate|signal-chain-analyzer|perception-data-summary|xtheme-analyzer|general",'
+            '"analysis_kind":"startup|stuck|crash|scene_signal|signal|perception|xtheme|general",'
+            '"skill":"unity-startup-lifecycle-check|3d-stuck-investigate|scene-signal-diagnosis|signal-chain-analyzer|perception-data-summary|xtheme-analyzer|general",'
             '"signal_hint":"可为空",'
             '"retry_download_if_missing":true,'
             '"reason":"一句中文理由"}'
@@ -1199,7 +1464,7 @@ class BugAnalysisRunner:
                 details={"mode": "bug_analysis"},
             )
 
-        prompt_text = request.prompt.strip() or options.default_prompt
+        prompt_text = request.prompt.strip() or options.default_prompt.strip()
         if len(prompt_text) > options.max_prompt_chars:
             return TaskResult(
                 success=False,
@@ -1209,6 +1474,8 @@ class BugAnalysisRunner:
             )
 
         context = create_job_context(self.config.data_dir, event=event)
+        bridge_session_id = self._bridge_session_id(event)
+        bridge_kwargs = {"bridge_session_id": bridge_session_id} if bridge_session_id else {}
         metadata_path = context.output_dir / "bug_metadata.md"
         request_text = self._request_text(raw_text=request.raw_text, prompt_text=prompt_text, bug_url=request.bug_url)
         plans = self.classify_requests(prompt_text=prompt_text, title="", description="")
@@ -1287,7 +1554,11 @@ class BugAnalysisRunner:
         started = time.monotonic()
         try:
             self._emit_progress(progress_callback, stage="bug_check_env", message="检查 meegle 环境")
-            env_status = self._run_json_command([str(self._bug_fetcher_script()), "check-env"], timeout=60)
+            env_status = self._run_json_command(
+                [str(self._bug_fetcher_script()), "check-env"],
+                timeout=60,
+                **bridge_kwargs,
+            )
             if not env_status.get("meegle_installed", False):
                 return self._failure(
                     context=context,
@@ -1311,6 +1582,7 @@ class BugAnalysisRunner:
             resolved = self._run_json_command(
                 [str(self._bug_fetcher_script()), "resolve-url", request.bug_url],
                 timeout=60,
+                **bridge_kwargs,
             )
             project_key = str(resolved["project_key"])
             work_item_id = str(resolved["work_item_id"])
@@ -1331,25 +1603,54 @@ class BugAnalysisRunner:
             fetched = self._run_json_command(
                 [str(self._bug_fetcher_script()), "fetch-data", project_key, work_item_id],
                 timeout=120,
+                **bridge_kwargs,
             )
             full_item = self._run_json_command(
                 ["meegle", "workitem", "get", "--project-key", project_key, "--work-item-id", work_item_id, "--format", "json"],
                 timeout=120,
+                **bridge_kwargs,
             )
-            option_map = self._load_option_map(project_key)
+            option_map = self._load_option_map(project_key, **bridge_kwargs)
             title = str(fetched.get("title", ""))
             description = self._bug_description(fetched)
+            time_context = self._resolve_bug_time_context(
+                request_text=request_text,
+                title=title,
+                description=description,
+                reference_time=str(fetched.get("create_time") or ""),
+            )
             selection = self._classify_bug_request_with_agent(
                 prompt_text=prompt_text,
                 title=title,
                 description=description,
                 attachments=fetched.get("attachments", []),
+                time_context=time_context,
             )
             if selection is not None and any(plan.kind == "signal" and not plan.signal_code for plan in selection.plans):
                 selection = None
             if selection is None:
                 selection = self._manual_bug_selection(prompt_text=prompt_text, title=title, description=description)
+            if self._needs_general_direction(selection, prompt_text=prompt_text):
+                return self._general_direction_needed_result(
+                    context=context,
+                    selection=selection,
+                    started=started,
+                    request_text=request_text,
+                    bug_url=request.bug_url,
+                    title=title,
+                    progress_callback=progress_callback,
+                )
             plans = selection.plans
+            if not time_context.has_full_datetime:
+                return self._bug_time_clarification_result(
+                    context=context,
+                    started=started,
+                    request_text=request_text,
+                    bug_url=request.bug_url,
+                    time_context=time_context,
+                    status="missing_fault_time",
+                    progress_callback=progress_callback,
+                )
             requires_log_input = any(self._plan_requires_log_input(item) for item in plans)
             selected_input = self._select_log_input(bug_dir, fetched)
             cache_reused = False
@@ -1372,6 +1673,7 @@ class BugAnalysisRunner:
                     bug_dir,
                     fetched.get("attachments", []),
                     timeout=options.timeout_seconds,
+                    **bridge_kwargs,
                 )
                 selected_input = self._select_log_input(bug_dir, fetched)
             plan = plans[0]
@@ -1413,13 +1715,40 @@ class BugAnalysisRunner:
                 selected_input=selected_input,
                 prepared_input=prepared_input,
             )
-            fault_time, fault_time_note = self._extract_fault_time(title, description)
+            fault_time, fault_time_note = time_context.fault_time, time_context.note
+            log_coverage = self._scan_log_time_coverage(prepared_input, fault_time=fault_time) if prepared_input else None
+            if log_coverage is None or not log_coverage.has_time_evidence:
+                return self._bug_time_clarification_result(
+                    context=context,
+                    started=started,
+                    request_text=request_text,
+                    bug_url=request.bug_url,
+                    time_context=time_context,
+                    status="log_time_unknown",
+                    progress_callback=progress_callback,
+                    log_coverage=log_coverage,
+                )
+            if not log_coverage.covers_fault_time:
+                return self._bug_time_clarification_result(
+                    context=context,
+                    started=started,
+                    request_text=request_text,
+                    bug_url=request.bug_url,
+                    time_context=time_context,
+                    status="log_not_covering_fault_time",
+                    progress_callback=progress_callback,
+                    log_coverage=log_coverage,
+                )
             source_evidence_path = self._write_reanalysis_source_evidence(
                 plans=plans,
                 request_text=request_text,
                 followup_text=prompt_text,
                 output_dir=context.output_dir,
-                enabled=self._should_collect_source_evidence(request_text, prompt_text) or any(plan.kind == "general" for plan in plans),
+                enabled=self._should_collect_source_evidence(request_text, prompt_text)
+                or (
+                    any(plan.kind == "general" for plan in plans)
+                    and self._has_explicit_general_scope(prompt_text)
+                ),
                 extra_texts=(title, description),
             )
             html_paths: list[Path] = []
@@ -1437,7 +1766,7 @@ class BugAnalysisRunner:
                     html_path=current_html,
                     json_path=current_json,
                     analysis_dir=current_analysis_dir,
-                    target_time=fault_time if current_plan.kind in {"startup", "xtheme"} else None,
+                    target_time=fault_time if current_plan.kind in {"startup", "xtheme", "scene_signal"} else None,
                     request_text=request_text if current_plan.kind == "xtheme" else None,
                 )
                 self._emit_progress(
@@ -1466,16 +1795,19 @@ class BugAnalysisRunner:
                     )
                     completed = subprocess.CompletedProcess(args=current_command, returncode=0, stdout="", stderr="")
                 else:
-                    completed = self._run_analysis(
-                        plan=current_plan,
-                        input_path=input_for_plan,
-                        html_path=current_html,
-                        json_path=current_json,
-                        analysis_dir=current_analysis_dir,
-                        timeout=options.timeout_seconds,
-                        target_time=fault_time if current_plan.kind in {"startup", "xtheme"} else None,
-                        request_text=request_text if current_plan.kind == "xtheme" else None,
-                    )
+                    analysis_kwargs = {
+                        "plan": current_plan,
+                        "input_path": input_for_plan,
+                        "html_path": current_html,
+                        "json_path": current_json,
+                        "analysis_dir": current_analysis_dir,
+                        "timeout": options.timeout_seconds,
+                        "target_time": fault_time if current_plan.kind in {"startup", "xtheme", "scene_signal"} else None,
+                        "request_text": request_text if current_plan.kind == "xtheme" else None,
+                    }
+                    if bridge_session_id:
+                        analysis_kwargs["bridge_session_id"] = bridge_session_id
+                    completed = self._run_analysis(**analysis_kwargs)
                 if completed.returncode != 0:
                     return self._failure(
                         context=context,
@@ -1523,9 +1855,19 @@ class BugAnalysisRunner:
                 classification_source=selection.source,
                 classification_reason=selection.reason,
                 classification_provider=selection.provider,
+                fault_time=fault_time,
+                fault_time_note=fault_time_note,
+                log_coverage=log_coverage,
             )
             metadata_path.write_text(metadata_text, encoding="utf-8")
             self._append_source_evidence_metadata(metadata_path, source_evidence_path)
+            evidence_log_bundle = preserve_evidence_log_bundle(
+                output_dir=context.output_dir,
+                source_roots=[selected_input, prepared_input, bug_dir],
+                reference_files=[metadata_path, *(path for path in report_jsons.values() if path is not None)],
+                reference_texts=[summary],
+            )
+            self._append_evidence_log_metadata(metadata_path, evidence_log_bundle)
             combined_artifacts = self._build_combined_report_artifacts(
                 plans=plans,
                 prompt_text=prompt_text,
@@ -1543,7 +1885,11 @@ class BugAnalysisRunner:
                 metadata_path=metadata_path,
                 output_path=agent_summary_path,
                 progress_callback=progress_callback,
-                timeout=min(options.timeout_seconds, 1800),
+                timeout=self._agent_summary_timeout(
+                    options.timeout_seconds,
+                    reference_seconds=time.monotonic() - started,
+                ),
+                bridge_session_id=bridge_session_id,
             )
             self._append_agent_runtime_metadata(
                 metadata_path,
@@ -1601,15 +1947,28 @@ class BugAnalysisRunner:
             "signal_code": plan.signal_code,
             "selected_log_input": str(selected_input) if selected_input else "",
             "prepared_log_input": str(prepared_input) if prepared_input else "",
+            "fault_time": fault_time,
+            "fault_time_source": time_context.source,
+            "fault_time_note": fault_time_note,
+            "log_coverage_start": log_coverage.start_time if log_coverage else "",
+            "log_coverage_end": log_coverage.end_time if log_coverage else "",
+            "log_coverage_scanned_files": log_coverage.scanned_files if log_coverage else 0,
+            "log_coverage_scanned_lines": log_coverage.scanned_lines if log_coverage else 0,
             "bug_dir": str(bug_dir),
             "bug_cache_dir": str(bug_dir),
             "bug_cache_reused": cache_reused,
+            "bug_url": request.bug_url,
             "user_request_text": request_text,
             "agent_request_file": str(request_artifact),
             "agent_summary_file": str(agent_summary_path),
         }
         if source_evidence_path is not None:
             details["source_evidence_file"] = str(source_evidence_path)
+        if evidence_log_bundle is not None:
+            details["evidence_log_bundle"] = str(evidence_log_bundle.get("bundle_dir") or "")
+            details["evidence_log_manifest"] = str(evidence_log_bundle.get("manifest_path") or "")
+            details["evidence_log_focus_logs"] = evidence_log_bundle.get("focus_logs") or []
+            details["evidence_log_file_count"] = evidence_log_bundle.get("file_count") or 0
         final_message = summary
         if agent_summary_result["message"]:
             final_message = str(agent_summary_result["message"])
@@ -1657,8 +2016,12 @@ class BugAnalysisRunner:
         classification_source: str = "",
         classification_reason: str = "",
         classification_provider: str = "",
+        local_log_resources: list[DownloadResource] | None = None,
+        bridge_session_id: str = "",
     ) -> TaskResult:
         started = time.monotonic()
+        bridge_session_id = bridge_session_id.strip() or self._bridge_session_id(event)
+        bridge_kwargs = {"bridge_session_id": bridge_session_id} if bridge_session_id else {}
         details = previous_session.get("details", {})
         if not isinstance(details, dict):
             details = {}
@@ -1674,10 +2037,45 @@ class BugAnalysisRunner:
                 details={"mode": "bug_reanalysis"},
             )
         job_dir = Path(job_dir_value) if job_dir_value else self.config.data_dir / "jobs" / job_id
+        result_context = type("Context", (), {"job_id": job_id, "job_dir": job_dir})()
         output_dir = job_dir / "output"
         output_dir.mkdir(parents=True, exist_ok=True)
         download_retry_result: dict[str, object] | None = None
         request_text = str(getattr(previous_context, "request_text", "") or details.get("user_request_text") or "")
+        local_log_resources = local_log_resources or []
+        local_selected_input: Path | None = None
+        local_prepared_input: Path | None = None
+        if local_log_resources:
+            for resource in local_log_resources:
+                if resource.kind != "local":
+                    continue
+                candidate = Path(resource.value).expanduser()
+                if not candidate.exists():
+                    continue
+                local_selected_input = candidate.resolve()
+                try:
+                    local_prepared_input = self._prepare_log_input(local_selected_input)
+                except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
+                    return TaskResult(
+                        success=False,
+                        message=f"本地日志准备失败：{exc}",
+                        job_id=job_id,
+                        job_dir=job_dir,
+                        duration_seconds=time.monotonic() - started,
+                        error_code="bug_reanalysis_local_log_prepare_failed",
+                        details={
+                            "mode": "bug_reanalysis",
+                            "local_log_resources": [item.value for item in local_log_resources],
+                        },
+                    )
+                self._emit_progress(
+                    progress_callback,
+                    stage="bug_reanalysis_local_log_selected",
+                    message="使用卡片输入中授权的本地日志文件",
+                    selected_log_input=str(local_selected_input),
+                    prepared_log_input=str(local_prepared_input),
+                )
+                break
         target_time = self._extract_followup_fault_time(
             followup_text,
             reference_text="\n".join(
@@ -1688,15 +2086,48 @@ class BugAnalysisRunner:
                 ]
             ),
         )
-        prepared_input = self._path_from_details(details, "prepared_log_input")
-        selected_input = self._path_from_details(details, "selected_log_input") or prepared_input
+        if not target_time:
+            target_time = str(details.get("target_time") or details.get("fault_time") or "").strip()
+        if not target_time:
+            inherited_time, _ = self._extract_fault_time("", request_text)
+            target_time = inherited_time
+        time_context = self._time_context_from_fault_time(
+            target_time,
+            source="followup_or_previous_context",
+            note="从追问或上一轮上下文确定问题时间。",
+        )
+        prepared_input = local_prepared_input or self._path_from_details(details, "prepared_log_input")
+        selected_input = local_selected_input or self._path_from_details(details, "selected_log_input") or prepared_input
         plans = plans_override or self._plans_for_reanalysis(details, request_text=request_text, followup_text=followup_text)
         requires_log_input = any(self._plan_requires_log_input(plan) for plan in plans)
+        if requires_log_input and not time_context.has_full_datetime:
+            return self._bug_time_clarification_result(
+                context=result_context,
+                started=started,
+                request_text=f"{request_text}\n追问/修正：{followup_text}".strip(),
+                bug_url=str(details.get("bug_url") or ""),
+                time_context=time_context,
+                status="missing_fault_time",
+                progress_callback=progress_callback,
+            )
+        if requires_log_input and prepared_input is None:
+            recovered_selected, recovered_prepared = self._recover_cached_bug_log_input(details, request_text=request_text)
+            if recovered_prepared is not None:
+                selected_input = recovered_selected or recovered_prepared
+                prepared_input = recovered_prepared
+                self._emit_progress(
+                    progress_callback,
+                    stage="bug_reanalysis_recover_bug_cache",
+                    message="从同一 bug cache 恢复已下载日志输入",
+                    selected_log_input=str(selected_input or ""),
+                    prepared_log_input=str(prepared_input),
+                )
         if requires_log_input and prepared_input is None:
             retry = self._retry_bug_log_download(
                 previous_session=previous_session,
                 job_dir=job_dir,
                 progress_callback=progress_callback,
+                **bridge_kwargs,
             )
             download_retry_result = retry
             if retry.get("prepared_input") is not None:
@@ -1716,6 +2147,32 @@ class BugAnalysisRunner:
                     duration_seconds=time.monotonic() - started,
                     error_code="bug_reanalysis_missing_prepared_input",
                     details=failure_details,
+                )
+
+        log_coverage: LogCoverage | None = None
+        if requires_log_input:
+            log_coverage = self._scan_log_time_coverage(prepared_input, fault_time=target_time) if prepared_input else None
+            if log_coverage is None or not log_coverage.has_time_evidence:
+                return self._bug_time_clarification_result(
+                    context=result_context,
+                    started=started,
+                    request_text=f"{request_text}\n追问/修正：{followup_text}".strip(),
+                    bug_url=str(details.get("bug_url") or ""),
+                    time_context=time_context,
+                    status="log_time_unknown",
+                    progress_callback=progress_callback,
+                    log_coverage=log_coverage,
+                )
+            if not log_coverage.covers_fault_time:
+                return self._bug_time_clarification_result(
+                    context=result_context,
+                    started=started,
+                    request_text=f"{request_text}\n追问/修正：{followup_text}".strip(),
+                    bug_url=str(details.get("bug_url") or ""),
+                    time_context=time_context,
+                    status="log_not_covering_fault_time",
+                    progress_callback=progress_callback,
+                    log_coverage=log_coverage,
                 )
 
         force_rerun_kinds = self._forced_reanalysis_kinds(
@@ -1785,7 +2242,7 @@ class BugAnalysisRunner:
                     html_path=html_path,
                     json_path=json_path,
                     analysis_dir=analysis_dir,
-                    target_time=target_time if plan.kind in {"startup", "xtheme"} else None,
+                    target_time=target_time if plan.kind in {"startup", "xtheme", "scene_signal"} else None,
                     request_text=followup_text if plan.kind == "xtheme" else None,
                 )
                 self._emit_progress(
@@ -1800,7 +2257,7 @@ class BugAnalysisRunner:
                     plan_label=self._analysis_label(plan.kind),
                     html_path=str(html_path),
                     json_path=str(json_path),
-                    target_time=target_time if plan.kind in {"startup", "xtheme"} else "",
+                    target_time=target_time if plan.kind in {"startup", "xtheme", "scene_signal"} else "",
                 )
                 if plan.kind == "general":
                     self._write_general_bug_report(
@@ -1819,16 +2276,19 @@ class BugAnalysisRunner:
                     )
                     completed = subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
                 else:
-                    completed = self._run_analysis(
-                        plan=plan,
-                        input_path=input_for_plan,
-                        html_path=html_path,
-                        json_path=json_path,
-                        analysis_dir=analysis_dir,
-                        timeout=self.config.bug_analysis.timeout_seconds,
-                        target_time=target_time if plan.kind in {"startup", "xtheme"} else None,
-                        request_text=followup_text if plan.kind == "xtheme" else None,
-                    )
+                    analysis_kwargs = {
+                        "plan": plan,
+                        "input_path": input_for_plan,
+                        "html_path": html_path,
+                        "json_path": json_path,
+                        "analysis_dir": analysis_dir,
+                        "timeout": self.config.bug_analysis.timeout_seconds,
+                        "target_time": target_time if plan.kind in {"startup", "xtheme", "scene_signal"} else None,
+                        "request_text": followup_text if plan.kind == "xtheme" else None,
+                    }
+                    if bridge_session_id:
+                        analysis_kwargs["bridge_session_id"] = bridge_session_id
+                    completed = self._run_analysis(**analysis_kwargs)
                 if completed.returncode != 0:
                     return TaskResult(
                         success=False,
@@ -1911,10 +2371,22 @@ class BugAnalysisRunner:
             metadata_path=agent_metadata_path,
             output_path=agent_summary_path,
             progress_callback=progress_callback,
-            timeout=min(self.config.bug_analysis.timeout_seconds, 1800),
+            timeout=self._agent_summary_timeout(
+                self.config.bug_analysis.timeout_seconds,
+                reference_seconds=max(
+                    self._agent_summary_timeout_reference(previous_session) or 0.0,
+                    time.monotonic() - started,
+                ),
+            ),
             provider_session_id="",
             followup_text=followup_text,
             previous_summary_path=previous_summary_path,
+            prefer_lightweight=self._should_prefer_lightweight_bug_summary(
+                request_text=request_text,
+                followup_text=followup_text,
+                provider_session_id="",
+            ),
+            bridge_session_id=bridge_session_id,
         )
         self._append_agent_runtime_metadata(
             agent_metadata_path,
@@ -1957,9 +2429,14 @@ class BugAnalysisRunner:
             "classification_provider": classification_provider or "",
             "selected_log_input": str(selected_input or ""),
             "prepared_log_input": str(prepared_input),
+            "local_log_resources": [item.value for item in local_log_resources],
             "user_request_text": request_text,
             "followup_text": followup_text,
             "target_time": target_time,
+            "log_coverage_start": log_coverage.start_time if log_coverage else "",
+            "log_coverage_end": log_coverage.end_time if log_coverage else "",
+            "log_coverage_scanned_files": log_coverage.scanned_files if log_coverage else 0,
+            "log_coverage_scanned_lines": log_coverage.scanned_lines if log_coverage else 0,
             "rerun_analysis_kinds": rerun_kinds,
             "reused_analysis_kinds": reused_kinds,
             "agent_request_file": str(agent_request_path),
@@ -1997,8 +2474,10 @@ class BugAnalysisRunner:
         event: LarkEvent | None = None,
         progress_callback: Callable[[dict[str, object]], None] | None = None,
         resume_agent_session: bool = False,
+        bridge_session_id: str = "",
     ) -> TaskResult:
         started = time.monotonic()
+        bridge_session_id = bridge_session_id.strip() or self._bridge_session_id(event)
         details = previous_session.get("details", {})
         if not isinstance(details, dict):
             details = {}
@@ -2074,10 +2553,19 @@ class BugAnalysisRunner:
             metadata_path=agent_metadata_path,
             output_path=agent_summary_path,
             progress_callback=progress_callback,
-            timeout=min(self.config.bug_analysis.timeout_seconds, 1800),
+            timeout=self._agent_summary_timeout(
+                self.config.bug_analysis.timeout_seconds,
+                reference_seconds=self._agent_summary_timeout_reference(previous_session),
+            ),
             provider_session_id=provider_session_id,
             followup_text=followup_text,
             previous_summary_path=previous_summary_path,
+            prefer_lightweight=self._should_prefer_lightweight_bug_summary(
+                request_text=request_text,
+                followup_text=followup_text,
+                provider_session_id=provider_session_id,
+            ),
+            bridge_session_id=bridge_session_id,
         )
         self._append_agent_runtime_metadata(
             agent_metadata_path,
@@ -2166,6 +2654,7 @@ class BugAnalysisRunner:
             )
 
         context = create_job_context(self.config.data_dir, event=event)
+        bridge_session_id = self._bridge_session_id(event)
         metadata_path = context.output_dir / "direct_analysis_metadata.md"
         started = time.monotonic()
         request_text = self._request_text(raw_text=request.raw_text, prompt_text=request.prompt, bug_url="")
@@ -2177,6 +2666,22 @@ class BugAnalysisRunner:
             request_text=request_text,
             resources=[item.value for item in request.resources],
         )
+        fault_time, _ = self._extract_fault_time("", request.prompt)
+        time_context = self._time_context_from_fault_time(
+            fault_time,
+            source="user",
+            note="从直传文件分析请求中提取问题时间。",
+        )
+        if not time_context.has_full_datetime:
+            return self._bug_time_clarification_result(
+                context=context,
+                started=started,
+                request_text=request_text,
+                bug_url="",
+                time_context=time_context,
+                status="missing_fault_time",
+                progress_callback=progress_callback,
+            )
         downloader = getattr(self, "_direct_downloader", None)
         if downloader is None:
             downloader = LogDownloader(self.config, getattr(self, "_lark_client", None))
@@ -2206,7 +2711,30 @@ class BugAnalysisRunner:
         html_paths: list[Path] = []
         report_jsons: dict[str, Path | None] = {}
         command: list[str] | None = None
-        fault_time, _ = self._extract_fault_time("", request.prompt)
+        evidence_log_bundle: dict[str, object] | None = None
+        log_coverage = self._scan_log_time_coverage(prepared_input, fault_time=fault_time)
+        if not log_coverage.has_time_evidence:
+            return self._bug_time_clarification_result(
+                context=context,
+                started=started,
+                request_text=request_text,
+                bug_url="",
+                time_context=time_context,
+                status="log_time_unknown",
+                progress_callback=progress_callback,
+                log_coverage=log_coverage,
+            )
+        if not log_coverage.covers_fault_time:
+            return self._bug_time_clarification_result(
+                context=context,
+                started=started,
+                request_text=request_text,
+                bug_url="",
+                time_context=time_context,
+                status="log_not_covering_fault_time",
+                progress_callback=progress_callback,
+                log_coverage=log_coverage,
+            )
         source_evidence_path = self._write_reanalysis_source_evidence(
             plans=plans,
             request_text=request_text,
@@ -2228,7 +2756,7 @@ class BugAnalysisRunner:
                 html_path=current_html,
                 json_path=current_json,
                 analysis_dir=current_analysis_dir,
-                target_time=fault_time if current_plan.kind in {"startup", "xtheme"} else None,
+                target_time=fault_time if current_plan.kind in {"startup", "xtheme", "scene_signal"} else None,
                 request_text=request.prompt if current_plan.kind == "xtheme" else None,
             )
             try:
@@ -2256,16 +2784,19 @@ class BugAnalysisRunner:
                     )
                     completed = subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
                 else:
-                    completed = self._run_analysis(
-                        plan=current_plan,
-                        input_path=input_for_plan,
-                        html_path=current_html,
-                        json_path=current_json,
-                        analysis_dir=current_analysis_dir,
-                        timeout=self.config.bug_analysis.timeout_seconds,
-                        target_time=fault_time if current_plan.kind in {"startup", "xtheme"} else None,
-                        request_text=request.prompt if current_plan.kind == "xtheme" else None,
-                    )
+                    analysis_kwargs = {
+                        "plan": current_plan,
+                        "input_path": input_for_plan,
+                        "html_path": current_html,
+                        "json_path": current_json,
+                        "analysis_dir": current_analysis_dir,
+                        "timeout": self.config.bug_analysis.timeout_seconds,
+                        "target_time": fault_time if current_plan.kind in {"startup", "xtheme", "scene_signal"} else None,
+                        "request_text": request.prompt if current_plan.kind == "xtheme" else None,
+                    }
+                    if bridge_session_id:
+                        analysis_kwargs["bridge_session_id"] = bridge_session_id
+                    completed = self._run_analysis(**analysis_kwargs)
             except subprocess.TimeoutExpired as exc:
                 return TaskResult(
                     success=False,
@@ -2297,6 +2828,13 @@ class BugAnalysisRunner:
 
         summary = self._build_direct_analysis_summary(plans, request.prompt, html_paths)
         metadata_path.write_text(summary, encoding="utf-8")
+        evidence_log_bundle = preserve_evidence_log_bundle(
+            output_dir=context.output_dir,
+            source_roots=[selected_input, prepared_input, context.input_dir],
+            reference_files=[metadata_path, *(path for path in report_jsons.values() if path is not None)],
+            reference_texts=[summary],
+        )
+        self._append_evidence_log_metadata(metadata_path, evidence_log_bundle)
         combined_artifacts = self._build_combined_report_artifacts(
             plans=plans,
             prompt_text=request.prompt,
@@ -2325,6 +2863,13 @@ class BugAnalysisRunner:
             details={
                 "mode": "direct_analysis",
                 "analysis_kinds": [item.kind for item in plans],
+                "selected_log_input": str(selected_input),
+                "prepared_log_input": str(prepared_input),
+                "fault_time": fault_time,
+                "log_coverage_start": log_coverage.start_time,
+                "log_coverage_end": log_coverage.end_time,
+                "log_coverage_scanned_files": log_coverage.scanned_files,
+                "log_coverage_scanned_lines": log_coverage.scanned_lines,
                 **(
                     {
                         "combined_report_html": str(combined_artifacts["html_path"]),
@@ -2337,6 +2882,16 @@ class BugAnalysisRunner:
                     [metadata_path, Path(combined_artifacts["html_path"])]
                     if combined_artifacts is not None
                     else [metadata_path, *html_paths]
+                ),
+                **(
+                    {
+                        "evidence_log_bundle": str(evidence_log_bundle.get("bundle_dir") or ""),
+                        "evidence_log_manifest": str(evidence_log_bundle.get("manifest_path") or ""),
+                        "evidence_log_focus_logs": evidence_log_bundle.get("focus_logs") or [],
+                        "evidence_log_file_count": evidence_log_bundle.get("file_count") or 0,
+                    }
+                    if evidence_log_bundle is not None
+                    else {}
                 ),
             },
         )
@@ -2356,6 +2911,15 @@ class BugAnalysisRunner:
             return [BugAnalysisPlan(kind="xtheme")]
         explicit_signal_enum = "signal_" in lowered
         explicit_signal_terms = any(term in lowered for term in SIGNAL_ROUTE_TERMS)
+        if (
+            signal_request.signal
+            and (explicit_signal_enum or explicit_signal_terms)
+            and not _is_core_scene_signal(signal_request.signal)
+            and not _has_strong_scene_signal_intent(lowered)
+        ):
+            return [BugAnalysisPlan(kind="signal", signal_code=signal_request.signal)]
+        if looks_like_scene_signal_request(combined):
+            return [BugAnalysisPlan(kind="scene_signal")]
         if explicit_signal_enum or (explicit_signal_terms and signal_request.signal):
             return [BugAnalysisPlan(kind="signal", signal_code=signal_request.signal)]
         if any(term in lowered for term in CRASH_ROUTE_TERMS):
@@ -2420,6 +2984,18 @@ class BugAnalysisRunner:
             if request_text:
                 command.extend(["--request-text", request_text])
             return command
+        if plan.kind == "scene_signal":
+            command = [
+                sys.executable,
+                str(self._scene_signal_script()),
+                "--log-path",
+                str(input_path),
+                "--output-dir",
+                str(analysis_dir),
+            ]
+            if target_time:
+                command.extend(["--target-time", target_time])
+            return command
         if plan.kind == "crash":
             return [
                 sys.executable,
@@ -2447,7 +3023,7 @@ class BugAnalysisRunner:
         return options.working_dir or self.config.workspace_root
 
     def _plan_requires_log_input(self, plan: "BugAnalysisPlan") -> bool:
-        return plan.kind in {"startup", "stuck", "crash", "perception", "xtheme"}
+        return plan.kind in {"startup", "stuck", "crash", "scene_signal", "perception", "xtheme", "signal", "general"}
 
     def _bug_fetcher_script(self) -> Path:
         return self.config.workspace_root / ".ai/skills/feishu-bug-fetcher/scripts/bug-fetcher.sh"
@@ -2460,6 +3036,9 @@ class BugAnalysisRunner:
 
     def _signal_script(self) -> Path:
         return self.config.workspace_root / ".ai/skills/signal-chain-analyzer/scripts/analyze_signal_chain.py"
+
+    def _scene_signal_script(self) -> Path:
+        return self.config.workspace_root / ".ai/skills/scene-signal-diagnosis/scripts/extract_scene_signal_events.py"
 
     def _perception_script(self) -> Path:
         return self.config.workspace_root / ".ai/skills/perception-data-summary/scripts/analyze_perception_data_summary.py"
@@ -2491,7 +3070,7 @@ class BugAnalysisRunner:
                 signal_code=str(details.get("signal_code") or "") or None,
             )
             for kind in kinds
-            if kind in {"startup", "stuck", "crash", "signal", "perception", "xtheme", "general"}
+            if kind in {"startup", "stuck", "crash", "scene_signal", "signal", "perception", "xtheme", "general"}
         ]
         if plans:
             return plans
@@ -2535,21 +3114,27 @@ class BugAnalysisRunner:
     def _extract_followup_fault_time(self, followup_text: str, *, reference_text: str) -> str:
         normalized = followup_text.replace("：", ":")
         full_match = re.search(
-            r"(20\d{2})[-_/年](\d{1,2})[-_/月](\d{1,2})[日_\s-]*(\d{1,2}):(\d{2})",
+            r"(20\d{2})[-_/年](\d{1,2})[-_/月](\d{1,2})[日_\s-]*(\d{1,2}):(\d{2})(?::(\d{2}))?",
             normalized,
         )
         if full_match:
-            return (
+            base = (
                 f"{int(full_match.group(1)):04d}-{int(full_match.group(2)):02d}-{int(full_match.group(3)):02d} "
                 f"{int(full_match.group(4)):02d}:{int(full_match.group(5)):02d}"
             )
-        short_match = re.search(r"(?<!\d)(\d{1,2}):(\d{2})(?:\s*分)?(?!\d)", normalized)
+            if full_match.group(6) is not None:
+                return f"{base}:{int(full_match.group(6)):02d}"
+            return base
+        short_match = re.search(r"(?<!\d)(\d{1,2}):(\d{2})(?::(\d{2}))?(?:\s*分)?(?!\d)", normalized)
         if not short_match:
             return ""
         reference_date = self._extract_reference_date(reference_text)
+        short_time = f"{int(short_match.group(1)):02d}:{int(short_match.group(2)):02d}"
+        if short_match.group(3) is not None:
+            short_time = f"{short_time}:{int(short_match.group(3)):02d}"
         if reference_date:
-            return f"{reference_date} {int(short_match.group(1)):02d}:{int(short_match.group(2)):02d}"
-        return f"{int(short_match.group(1)):02d}:{int(short_match.group(2)):02d}"
+            return f"{reference_date} {short_time}"
+        return short_time
 
     def _extract_reference_date(self, text: str) -> str:
         normalized = text.replace("：", ":")
@@ -2563,6 +3148,7 @@ class BugAnalysisRunner:
             "startup": f"bug_3d_startup_report.{suffix}",
             "stuck": f"bug_3d_stuck_report.{suffix}",
             "crash": f"bug_crash_report.{suffix}",
+            "scene_signal": f"bug_scene_signal_report.{suffix}",
             "perception": f"bug_perception_data_summary.{suffix}",
             "signal": f"bug_signal_chain_report.{suffix}",
             "xtheme": f"bug_xtheme_analysis_report.{suffix}",
@@ -2577,13 +3163,20 @@ class BugAnalysisRunner:
             "startup": "3D启动时序分析",
             "stuck": "3D卡顿分析",
             "crash": "Crash/闪退分析",
+            "scene_signal": "3D场景信号分析",
             "perception": "当前感知数据总结",
             "signal": "信号链路分析",
             "xtheme": "XTheme时光主题分析",
             "general": "通用问题分析",
         }[kind]
 
-    def _run_json_command(self, command: list[str], *, timeout: int) -> dict[str, object]:
+    def _run_json_command(
+        self,
+        command: list[str],
+        *,
+        timeout: int,
+        bridge_session_id: str = "",
+    ) -> dict[str, object]:
         completed = run_tracked_process(
             command,
             watchdog=self.process_watchdog,
@@ -2593,6 +3186,7 @@ class BugAnalysisRunner:
             text=True,
             timeout=timeout,
             check=False,
+            session_id=bridge_session_id,
         )
         if completed.returncode != 0:
             message = completed.stderr.strip() or completed.stdout.strip() or "command failed"
@@ -2602,7 +3196,7 @@ class BugAnalysisRunner:
             raise RuntimeError(str(payload.get("error", "command returned ok=false")))
         return payload
 
-    def _load_option_map(self, project_key: str) -> dict[str, str]:
+    def _load_option_map(self, project_key: str, *, bridge_session_id: str = "") -> dict[str, str]:
         payload = self._run_json_command(
             [
                 "meegle",
@@ -2622,6 +3216,7 @@ class BugAnalysisRunner:
                 "json",
             ],
             timeout=120,
+            bridge_session_id=bridge_session_id,
         )
         option_map: dict[str, str] = {}
         for field in payload.get("list", []):
@@ -2709,6 +3304,116 @@ class BugAnalysisRunner:
         payload.setdefault("created_at", now)
         metadata_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
+    def _recover_cached_bug_log_input(
+        self,
+        details: dict[str, object],
+        *,
+        request_text: str,
+    ) -> tuple[Path | None, Path | None]:
+        bug_dir = self._bug_cache_dir_from_context(details, request_text=request_text)
+        if bug_dir is None or not bug_dir.exists():
+            return None, None
+        selected_input, prepared_input = self._read_bug_cache_log_input(bug_dir)
+        if prepared_input is not None:
+            return selected_input or prepared_input, prepared_input
+        selected_input = self._select_existing_bug_cache_input(bug_dir)
+        if selected_input is None:
+            return None, None
+        try:
+            prepared_input = self._reuse_prepared_bug_input(selected_input)
+            if prepared_input is None:
+                prepared_input = self._prepare_log_input(selected_input)
+        except (OSError, RuntimeError, zipfile.BadZipFile):
+            if selected_input.is_dir():
+                prepared_input = selected_input
+            else:
+                return None, None
+        return selected_input, prepared_input
+
+    def _bug_cache_dir_from_context(self, details: dict[str, object], *, request_text: str) -> Path | None:
+        for key in ("bug_cache_dir", "bug_dir"):
+            value = details.get(key)
+            if isinstance(value, str) and value.strip():
+                return Path(value).expanduser()
+        bug_url = str(details.get("bug_url") or "").strip()
+        if not bug_url:
+            match = re.search(r"https?://project\.feishu\.cn/\S+", request_text)
+            bug_url = match.group(0).rstrip("`，。；;、)") if match else ""
+        identity = self._bug_identity_from_url_or_text(bug_url or request_text)
+        if identity is None:
+            return None
+        project_key, work_item_id = identity
+        return self._bug_cache_dir(project_key, work_item_id)
+
+    def _bug_identity_from_url_or_text(self, text: str) -> tuple[str, str] | None:
+        match = re.search(r"project\.feishu\.cn/([^/\s]+)/buglo/detail/(\d+)", text)
+        if not match:
+            return None
+        return match.group(1), match.group(2)
+
+    def _read_bug_cache_log_input(self, bug_dir: Path) -> tuple[Path | None, Path | None]:
+        metadata_path = bug_dir / "cache.json"
+        if not metadata_path.exists():
+            return None, None
+        try:
+            payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None, None
+        if not isinstance(payload, dict):
+            return None, None
+        selected_input = self._existing_path_from_text(payload.get("selected_log_input"))
+        prepared_input = self._existing_path_from_text(payload.get("prepared_log_input"))
+        if prepared_input is None and selected_input is not None:
+            try:
+                prepared_input = self._reuse_prepared_bug_input(selected_input)
+                if prepared_input is None:
+                    prepared_input = self._prepare_log_input(selected_input)
+            except (OSError, RuntimeError, zipfile.BadZipFile):
+                prepared_input = selected_input if selected_input.is_dir() else None
+        return selected_input, prepared_input
+
+    def _existing_path_from_text(self, value: object) -> Path | None:
+        if not isinstance(value, str) or not value.strip():
+            return None
+        path = Path(value).expanduser()
+        return path if path.exists() else None
+
+    def _select_existing_bug_cache_input(self, bug_dir: Path) -> Path | None:
+        logs_dir = bug_dir / "logs"
+        attachments_dir = bug_dir / "attachments"
+        if self._has_meaningful_log_tree(logs_dir):
+            return logs_dir
+        if self._has_decoded_log_tree(attachments_dir):
+            return attachments_dir
+        candidates: list[Path] = []
+        for root in (attachments_dir, logs_dir):
+            if not root.exists():
+                continue
+            try:
+                candidates.extend(path for path in root.rglob("*") if path.is_file())
+            except OSError:
+                continue
+        for suffix in _BUG_LOG_INPUT_PRIORITY_SUFFIXES:
+            for candidate in sorted(candidates, key=lambda item: str(item)):
+                if candidate.name.lower().endswith(suffix) and self._is_usable_log_attachment(candidate):
+                    return candidate
+        if self._has_meaningful_log_tree(attachments_dir):
+            return attachments_dir
+        if self._has_meaningful_log_tree(bug_dir):
+            return bug_dir
+        return None
+
+    def _has_decoded_log_tree(self, root: Path) -> bool:
+        if not root.exists():
+            return False
+        try:
+            for path in root.rglob("*"):
+                if path.is_file() and self._is_log_coverage_file(path):
+                    return True
+        except OSError:
+            return False
+        return False
+
     def cleanup_expired_bug_cache(self, *, max_age_hours: int, now: datetime | None = None) -> int:
         if max_age_hours <= 0:
             return 0
@@ -2759,6 +3464,7 @@ class BugAnalysisRunner:
         attachments: object,
         *,
         timeout: int,
+        bridge_session_id: str = "",
     ) -> dict[str, object]:
         attachments_dir = bug_dir / "attachments"
         logs_dir = bug_dir / "logs"
@@ -2817,6 +3523,7 @@ class BugAnalysisRunner:
                 text=True,
                 timeout=timeout,
                 check=False,
+                session_id=bridge_session_id,
             )
             if completed.returncode != 0:
                 errors.append(name)
@@ -2891,8 +3598,7 @@ class BugAnalysisRunner:
 
         if self._has_meaningful_log_tree(logs_dir):
             return logs_dir
-        priority_suffixes = (".xp.zip.001", ".xp", ".zip", ".alog", ".xlog", ".log", ".txt")
-        for suffix in priority_suffixes:
+        for suffix in _BUG_LOG_INPUT_PRIORITY_SUFFIXES:
             for candidate in attachments:
                 if candidate.name.lower().endswith(suffix) and self._is_usable_log_attachment(candidate):
                     return candidate
@@ -2902,16 +3608,66 @@ class BugAnalysisRunner:
         lower_name = selected_input.name.lower()
         if lower_name.endswith(".xp"):
             return self._expand_xp_file(selected_input)
-        if lower_name.endswith(".zip") and not lower_name.endswith(".xp.zip.001"):
-            if not zipfile.is_zipfile(selected_input):
-                raise RuntimeError(f"日志附件不是有效 zip: {selected_input.name}")
-            extract_dir = selected_input.with_suffix("")
+        if self._is_archive_log_attachment(selected_input) and not lower_name.endswith(".xp.zip.001"):
+            return self._extract_log_archive(selected_input)
+        return selected_input
+
+    def _is_archive_log_attachment(self, path: Path) -> bool:
+        lower_name = path.name.lower()
+        return any(lower_name.endswith(suffix) for suffix in _BUG_ARCHIVE_SUFFIXES)
+
+    def _archive_extract_dir(self, archive_path: Path) -> Path:
+        lower_name = archive_path.name.lower()
+        for suffix in sorted(_BUG_ARCHIVE_SUFFIXES, key=len, reverse=True):
+            if lower_name.endswith(suffix):
+                return archive_path.with_name(archive_path.name[: -len(suffix)])
+        return archive_path.with_suffix("")
+
+    def _extract_log_archive(self, archive_path: Path) -> Path:
+        lower_name = archive_path.name.lower()
+        extract_dir = self._archive_extract_dir(archive_path)
+        if lower_name.endswith(".zip"):
+            if not zipfile.is_zipfile(archive_path):
+                raise RuntimeError(f"日志附件不是有效 zip: {archive_path.name}")
             if not extract_dir.exists():
-                with zipfile.ZipFile(selected_input) as zf:
+                with zipfile.ZipFile(archive_path) as zf:
                     zf.extractall(extract_dir)
                 self._normalize_tree_permissions(extract_dir)
             return extract_dir
-        return selected_input
+        if extract_dir.exists():
+            return extract_dir
+        extract_dir.mkdir(parents=True, exist_ok=True)
+        command = self._archive_extract_command(archive_path, extract_dir)
+        if command is None:
+            raise RuntimeError(f"无法解压日志附件 {archive_path.name}: 未找到 bsdtar/7z/unar")
+        completed = run_tracked_process(
+            command,
+            watchdog=self.process_watchdog,
+            name="bug-log-archive-extract",
+            cwd=self._working_dir(),
+            capture_output=True,
+            text=True,
+            timeout=600,
+            check=False,
+        )
+        if completed.returncode != 0:
+            shutil.rmtree(extract_dir, ignore_errors=True)
+            reason = completed.stderr.strip() or completed.stdout.strip() or "archive extract failed"
+            raise RuntimeError(f"日志附件解压失败 {archive_path.name}: {reason}")
+        self._normalize_tree_permissions(extract_dir)
+        return extract_dir
+
+    def _archive_extract_command(self, archive_path: Path, extract_dir: Path) -> list[str] | None:
+        bsdtar = shutil.which("bsdtar")
+        if bsdtar:
+            return [bsdtar, "-xf", str(archive_path), "-C", str(extract_dir)]
+        seven_zip = shutil.which("7zz") or shutil.which("7z")
+        if seven_zip:
+            return [seven_zip, "x", "-y", f"-o{extract_dir}", str(archive_path)]
+        unar = shutil.which("unar")
+        if unar:
+            return [unar, "-force-overwrite", "-output-directory", str(extract_dir), str(archive_path)]
+        return None
 
     def _retry_bug_log_download(
         self,
@@ -2919,15 +3675,21 @@ class BugAnalysisRunner:
         previous_session: dict[str, object],
         job_dir: Path,
         progress_callback: Callable[[dict[str, object]], None] | None,
+        bridge_session_id: str = "",
     ) -> dict[str, object]:
         details = previous_session.get("details", {}) if isinstance(previous_session, dict) else {}
         if not isinstance(details, dict):
             details = {}
+        bridge_kwargs = {"bridge_session_id": bridge_session_id} if bridge_session_id else {}
         bug_url = str(details.get("bug_url") or "").strip()
         if not bug_url:
             return {"ok": False, "message": "缺少 bug_url，无法重新下载日志。"}
         try:
-            env_status = self._run_json_command([str(self._bug_fetcher_script()), "check-env"], timeout=60)
+            env_status = self._run_json_command(
+                [str(self._bug_fetcher_script()), "check-env"],
+                timeout=60,
+                **bridge_kwargs,
+            )
         except Exception as exc:
             return {"ok": False, "message": f"重新检查 meegle 环境失败：{exc}"}
         if not env_status.get("meegle_installed", False):
@@ -2940,7 +3702,11 @@ class BugAnalysisRunner:
                 "reason": "AUTH_REQUIRED",
             }
         try:
-            resolved = self._run_json_command([str(self._bug_fetcher_script()), "resolve-url", bug_url], timeout=60)
+            resolved = self._run_json_command(
+                [str(self._bug_fetcher_script()), "resolve-url", bug_url],
+                timeout=60,
+                **bridge_kwargs,
+            )
         except Exception as exc:
             return {"ok": False, "message": f"重新解析 bug 链接失败：{exc}"}
         project_key = str(resolved.get("project_key") or "").strip()
@@ -2961,6 +3727,7 @@ class BugAnalysisRunner:
             fetched = self._run_json_command(
                 [str(self._bug_fetcher_script()), "fetch-data", project_key, work_item_id],
                 timeout=120,
+                **bridge_kwargs,
             )
         except Exception as exc:
             return {"ok": False, "message": f"重新拉取 bug 附件列表失败：{exc}"}
@@ -2970,6 +3737,7 @@ class BugAnalysisRunner:
             bug_dir,
             fetched.get("attachments", []),
             timeout=self.config.bug_analysis.timeout_seconds,
+            **bridge_kwargs,
         )
         selected_input = self._select_log_input(bug_dir, fetched)
         prepared_input = self._reuse_prepared_bug_input(selected_input) if selected_input else None
@@ -3142,13 +3910,22 @@ class BugAnalysisRunner:
 
     def _log_file_priority(self, path: Path) -> int:
         lower = path.name.lower()
-        if lower.endswith(".alog"):
+        if lower.endswith((".alog.log", ".xlog.log")):
             return 0
-        if lower.endswith(".xlog"):
-            return 1
         if lower.endswith(".log"):
+            return 1
+        if lower.endswith(".txt"):
             return 2
-        return 3
+        if lower.endswith(".alog"):
+            return 3
+        if lower.endswith(".xlog"):
+            return 4
+        return 5
+
+    def _bridge_session_id(self, event: LarkEvent | None, fallback: str = "") -> str:
+        if event is None:
+            return fallback.strip()
+        return (event.root_id or event.message_id or event.event_id or fallback).strip()
 
     def _run_analysis(
         self,
@@ -3161,6 +3938,7 @@ class BugAnalysisRunner:
         timeout: int,
         target_time: str | None = None,
         request_text: str | None = None,
+        bridge_session_id: str = "",
     ) -> subprocess.CompletedProcess[str]:
         command = self.build_command(
             plan=plan,
@@ -3180,6 +3958,7 @@ class BugAnalysisRunner:
             text=True,
             timeout=timeout,
             check=False,
+            session_id=bridge_session_id,
         )
         if completed.returncode != 0 and plan.kind == "startup":
             completed = run_tracked_process(
@@ -3191,6 +3970,7 @@ class BugAnalysisRunner:
                 text=True,
                 timeout=timeout,
                 check=False,
+                session_id=bridge_session_id,
             )
         if completed.returncode != 0:
             return completed
@@ -3198,6 +3978,15 @@ class BugAnalysisRunner:
         if plan.kind == "startup":
             generated_html = analysis_dir / "unity_startup_lifecycle_report.html"
             generated_json = analysis_dir / "unity_startup_lifecycle_report.json"
+            if generated_html.exists():
+                shutil.copy2(generated_html, html_path)
+            if generated_json.exists():
+                shutil.copy2(generated_json, json_path)
+            return completed
+
+        if plan.kind == "scene_signal":
+            generated_html = analysis_dir / "scene_signal_events.html"
+            generated_json = analysis_dir / "scene_signal_events.json"
             if generated_html.exists():
                 shutil.copy2(generated_html, html_path)
             if generated_json.exists():
@@ -3225,10 +4014,13 @@ class BugAnalysisRunner:
 
     def _bug_description(self, fetched: dict[str, object]) -> str:
         fields = fetched.get("fields", {})
+        fallback = fetched.get("description", "")
         if not isinstance(fields, dict):
-            return ""
+            return fallback if isinstance(fallback, str) else ""
         value = fields.get("field_204366", "")
-        return value if isinstance(value, str) else ""
+        if isinstance(value, str) and value:
+            return value
+        return fallback if isinstance(fallback, str) else ""
 
     def _build_bug_outputs(
         self,
@@ -3248,6 +4040,9 @@ class BugAnalysisRunner:
         classification_source: str = "",
         classification_reason: str = "",
         classification_provider: str = "",
+        fault_time: str | None = None,
+        fault_time_note: str | None = None,
+        log_coverage: LogCoverage | None = None,
     ) -> tuple[str, str]:
         title = str(fetched.get("title", ""))
         description = self._bug_description(fetched)
@@ -3258,7 +4053,10 @@ class BugAnalysisRunner:
         bug_source = self._map_option(option_map, fetched.get("fields", {}), "field_24095d")
         found_version = self._string_field(fetched.get("fields", {}), "field_010122")
         probability = self._map_option(option_map, fetched.get("fields", {}), "field_45dc84")
-        fault_time, fault_time_note = self._extract_fault_time(title, description)
+        if fault_time is None or fault_time_note is None:
+            extracted_fault_time, extracted_fault_time_note = self._extract_fault_time(title, description)
+            fault_time = extracted_fault_time if fault_time is None else fault_time
+            fault_time_note = extracted_fault_time_note if fault_time_note is None else fault_time_note
         summary_blocks: list[str] = []
         for plan in plans:
             html_path = next((path for path in html_paths if path.name == self._report_name(plan.kind, "html")), None)
@@ -3280,6 +4078,15 @@ class BugAnalysisRunner:
             f"  - `{self._analysis_label(plan.kind)}` -> `{self._report_name(plan.kind, 'html')}`"
             for plan in plans
         )
+        report_artifact_lines: list[str] = []
+        for plan in plans:
+            html_path = next((path for path in html_paths if path.name == self._report_name(plan.kind, "html")), None)
+            json_path = report_jsons.get(plan.kind)
+            if html_path is not None:
+                report_artifact_lines.append(f"  - HTML `{self._analysis_label(plan.kind)}`: `{html_path}`")
+            if json_path is not None:
+                report_artifact_lines.append(f"  - JSON `{self._analysis_label(plan.kind)}`: `{json_path}`")
+        report_artifacts = "\n".join(report_artifact_lines) if report_artifact_lines else "  - 无"
         metadata = (
             "# Bug Metadata\n\n"
             f"- Bug ID: `{work_item_id}`\n"
@@ -3299,11 +4106,13 @@ class BugAnalysisRunner:
             f"- 信号代码: `{', '.join(plan.signal_code for plan in plans if plan.signal_code) or '无'}`\n"
             f"- 故障时间: `{fault_time or '未识别'}`\n"
             f"  说明: {fault_time_note}\n"
+            f"- 日志覆盖范围: `{self._format_log_coverage_for_metadata(log_coverage)}`\n"
             "- 用户原始请求:\n\n```text\n"
             f"{request_text}\n"
             "```\n"
             f"- 分析请求: `{prompt_text}`\n"
             f"- 选中日志输入: `{selected_input or '无，可静态分析'}`\n"
+            f"- 报告产物:\n{report_artifacts}\n"
             f"- 附件:\n{attachment_lines}\n"
             "- 缺陷描述:\n\n```text\n"
             f"{description.strip() or '(无描述)'}\n"
@@ -3339,11 +4148,262 @@ class BugAnalysisRunner:
             return value
         return "未返回 / 未设置"
 
+    def _resolve_bug_time_context(
+        self,
+        *,
+        request_text: str,
+        title: str,
+        description: str,
+        reference_time: str = "",
+    ) -> BugTimeContext:
+        sources = [
+            ("user", self._strip_urls_for_time_parse(request_text)),
+            ("title", title or ""),
+            ("description", description or ""),
+        ]
+        reference_year = self._reference_year_from_text(reference_time)
+        candidates: list[dict[str, str]] = []
+        for source, text in sources:
+            candidate = self._extract_time_candidate(text, reference_year=reference_year)
+            if candidate:
+                candidates.append({"source": source, **candidate})
+
+        if not candidates:
+            return BugTimeContext(
+                fault_time="",
+                source="",
+                note="用户输入、标题和缺陷描述中都未识别到几月几日几点几分的问题时间。",
+                has_full_datetime=False,
+                candidates=[],
+            )
+
+        reference_date = self._select_reference_date(candidates)
+        for preferred_source in ("user", "title", "description"):
+            for candidate in candidates:
+                if candidate["source"] != preferred_source:
+                    continue
+                fault_time = candidate["value"]
+                has_full_datetime = bool(candidate.get("date"))
+                if not has_full_datetime and reference_date:
+                    fault_time = f"{reference_date} {candidate['time']}"
+                    has_full_datetime = True
+                note = self._bug_time_context_note(candidate, reference_date=reference_date, completed=has_full_datetime)
+                return BugTimeContext(
+                    fault_time=fault_time,
+                    source=preferred_source,
+                    note=note,
+                    has_full_datetime=has_full_datetime,
+                    candidates=candidates,
+                )
+
+        return BugTimeContext(
+            fault_time="",
+            source="",
+            note="已找到时间片段，但无法补齐到几月几日几点几分。",
+            has_full_datetime=False,
+            candidates=candidates,
+        )
+
+    def _strip_urls_for_time_parse(self, text: str) -> str:
+        return re.sub(r"https?://\S+", " ", text or "")
+
+    def _reference_year_from_text(self, text: str) -> int | None:
+        match = re.search(r"\b(20\d{2})\b", text or "")
+        return int(match.group(1)) if match else None
+
+    def _extract_time_candidate(self, text: str, *, reference_year: int | None = None) -> dict[str, str] | None:
+        normalized = (text or "").replace("：", ":")
+        full_match = re.search(
+            r"(20\d{2})[-_/年](\d{1,2})[-_/月](\d{1,2})[日_\s-]*(\d{1,2}):(\d{2})(?::(\d{2}))?",
+            normalized,
+        )
+        if full_match:
+            date = f"{int(full_match.group(1)):04d}-{int(full_match.group(2)):02d}-{int(full_match.group(3)):02d}"
+            time_text = self._format_time_parts(full_match.group(4), full_match.group(5), full_match.group(6))
+            return {"value": f"{date} {time_text}", "date": date, "time": time_text, "raw": full_match.group(0)}
+        md_match = re.search(
+            r"(?<!\d)(\d{1,2})[-/](\d{1,2})(?:[日_\s-]+)(\d{1,2}):(\d{2})(?::(\d{2}))?",
+            normalized,
+        )
+        if md_match:
+            year = reference_year or datetime.now().year
+            date = f"{year:04d}-{int(md_match.group(1)):02d}-{int(md_match.group(2)):02d}"
+            time_text = self._format_time_parts(md_match.group(3), md_match.group(4), md_match.group(5))
+            return {"value": f"{date} {time_text}", "date": date, "time": time_text, "raw": md_match.group(0)}
+        cn_match = re.search(
+            r"(?<!\d)(\d{1,2})月(\d{1,2})日[^\d]{0,8}(\d{1,2}):(\d{2})(?::(\d{2}))?",
+            normalized,
+        )
+        if cn_match:
+            year = reference_year or datetime.now().year
+            date = f"{year:04d}-{int(cn_match.group(1)):02d}-{int(cn_match.group(2)):02d}"
+            time_text = self._format_time_parts(cn_match.group(3), cn_match.group(4), cn_match.group(5))
+            return {"value": f"{date} {time_text}", "date": date, "time": time_text, "raw": cn_match.group(0)}
+        short_match = re.search(r"(?<!\d)(\d{1,2}):(\d{2})(?::(\d{2}))?(?!\d)", normalized)
+        if short_match:
+            time_text = self._format_time_parts(short_match.group(1), short_match.group(2), short_match.group(3))
+            return {"value": time_text, "date": "", "time": time_text, "raw": short_match.group(0)}
+        return None
+
+    def _format_time_parts(self, hour: str, minute: str, second: str | None = None) -> str:
+        base = f"{int(hour):02d}:{int(minute):02d}"
+        if second is not None:
+            return f"{base}:{int(second):02d}"
+        return base
+
+    def _select_reference_date(self, candidates: list[dict[str, str]]) -> str:
+        for source in ("user", "title", "description"):
+            for candidate in candidates:
+                if candidate.get("source") == source and candidate.get("date"):
+                    return str(candidate["date"])
+        return ""
+
+    def _bug_time_context_note(self, candidate: dict[str, str], *, reference_date: str, completed: bool) -> str:
+        labels = {"user": "用户输入", "title": "标题", "description": "缺陷描述"}
+        source = labels.get(candidate.get("source", ""), candidate.get("source", ""))
+        if candidate.get("date"):
+            return f"从{source}提取完整问题时间。"
+        if completed and reference_date:
+            return f"从{source}提取时分，并用 {reference_date} 补齐日期。"
+        return f"从{source}只提取到时分，缺少日期。"
+
+    def _scan_log_time_coverage(self, input_path: Path, *, fault_time: str) -> LogCoverage:
+        fault_dt = self._parse_bug_datetime(fault_time)
+        if fault_dt is None:
+            return LogCoverage(
+                has_time_evidence=False,
+                covers_fault_time=False,
+                reason="fault_time_not_full_datetime",
+            )
+        reference_year = fault_dt.year
+        timestamps: list[datetime] = []
+        scanned_files = 0
+        scanned_lines = 0
+        sample_file = ""
+        for path in self._iter_log_coverage_files(input_path):
+            scanned_files += 1
+            file_dt = self._parse_log_file_datetime(path.name)
+            if file_dt is not None:
+                file_start = datetime(
+                    file_dt.tm_year,
+                    file_dt.tm_mon,
+                    file_dt.tm_mday,
+                    file_dt.tm_hour,
+                    file_dt.tm_min,
+                )
+                timestamps.extend([file_start, file_start + timedelta(minutes=59, seconds=59)])
+                sample_file = sample_file or str(path)
+            try:
+                with path.open("r", encoding="utf-8", errors="replace") as handle:
+                    for index, line in enumerate(handle):
+                        if index >= _BUG_LOG_COVERAGE_MAX_LINES_PER_FILE:
+                            break
+                        scanned_lines += 1
+                        line_dt = self._parse_log_line_datetime(line, reference_year=reference_year)
+                        if line_dt is None:
+                            continue
+                        timestamps.append(line_dt)
+                        sample_file = sample_file or str(path)
+            except OSError:
+                continue
+        if not timestamps:
+            return LogCoverage(
+                has_time_evidence=False,
+                covers_fault_time=False,
+                scanned_files=scanned_files,
+                scanned_lines=scanned_lines,
+                reason="no_log_time_found",
+            )
+        timestamps.sort()
+        start = timestamps[0]
+        end = timestamps[-1]
+        window = timedelta(minutes=_BUG_LOG_COVERAGE_WINDOW_MINUTES)
+        covers = start - window <= fault_dt <= end + window
+        return LogCoverage(
+            has_time_evidence=True,
+            covers_fault_time=covers,
+            start_time=self._format_bug_datetime_minute(start),
+            end_time=self._format_bug_datetime_minute(end),
+            scanned_files=scanned_files,
+            scanned_lines=scanned_lines,
+            sample_file=sample_file,
+            reason="covered" if covers else "not_covering_fault_time",
+        )
+
+    def _iter_log_coverage_files(self, input_path: Path) -> list[Path]:
+        if input_path.is_file():
+            return [input_path] if self._is_log_coverage_file(input_path) else []
+        candidates: list[Path] = []
+        try:
+            for path in input_path.rglob("*"):
+                if len(candidates) >= _BUG_LOG_COVERAGE_MAX_FILES:
+                    break
+                if path.is_file() and self._is_log_coverage_file(path):
+                    candidates.append(path)
+        except OSError:
+            return candidates
+        candidates.sort(key=lambda item: str(item))
+        return candidates
+
+    def _is_log_coverage_file(self, path: Path) -> bool:
+        lower_name = path.name.lower()
+        return any(lower_name.endswith(suffix) for suffix in _BUG_LOG_COVERAGE_SUFFIXES)
+
+    def _parse_log_line_datetime(self, line: str, *, reference_year: int) -> datetime | None:
+        full_match = re.search(
+            r"\b(20\d{2})[-/](\d{1,2})[-/](\d{1,2})[ T](\d{1,2}):(\d{2}):(\d{2})(?:\.\d+)?\b",
+            line,
+        )
+        if full_match:
+            return self._safe_datetime(
+                int(full_match.group(1)),
+                int(full_match.group(2)),
+                int(full_match.group(3)),
+                int(full_match.group(4)),
+                int(full_match.group(5)),
+                int(full_match.group(6)),
+            )
+        bracket_match = re.search(r"\[(20\d{2}-\d{2}-\d{2}) \+\d{4} (\d{2}:\d{2}:\d{2})\]", line)
+        if bracket_match:
+            try:
+                return datetime.strptime(f"{bracket_match.group(1)} {bracket_match.group(2)}", "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                return None
+        md_match = re.search(r"(?<!\d)(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})(?:\.\d+)?", line)
+        if md_match:
+            return self._safe_datetime(
+                reference_year,
+                int(md_match.group(1)),
+                int(md_match.group(2)),
+                int(md_match.group(3)),
+                int(md_match.group(4)),
+                int(md_match.group(5)),
+            )
+        return None
+
+    def _safe_datetime(self, year: int, month: int, day: int, hour: int, minute: int, second: int = 0) -> datetime | None:
+        try:
+            return datetime(year, month, day, hour, minute, second)
+        except ValueError:
+            return None
+
+    def _parse_bug_datetime(self, value: str) -> datetime | None:
+        normalized = self._normalize_fault_time_text(value)
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+            try:
+                return datetime.strptime(normalized, fmt)
+            except ValueError:
+                continue
+        return None
+
+    def _format_bug_datetime_minute(self, value: datetime) -> str:
+        return value.strftime("%Y-%m-%d %H:%M")
+
     def _extract_fault_time(self, title: str, description: str) -> tuple[str, str]:
         match = re.search(r"(?:故障|发生|出现|问题|异常)?时间[：:]\s*(.+?)(?:\n|$)", description)
         if match:
             return self._normalize_fault_time_text(match.group(1)), "从缺陷描述提取"
-        direct_match = re.search(r"(20\d{2}[-_/年]\d{1,2}[-_/月]\d{1,2}[日_\s-]*\d{1,2}:\d{2})", description)
+        direct_match = re.search(r"(20\d{2}[-_/年]\d{1,2}[-_/月]\d{1,2}[日_\s-]*\d{1,2}:\d{2}(?::\d{2})?)", description)
         if direct_match:
             return self._normalize_fault_time_text(direct_match.group(1)), "从文本中的完整时间戳提取"
         short_match = re.search(r"(?<!\d)(\d{1,2}:\d{2})(?!\d)", description)
@@ -3422,6 +4482,8 @@ class BugAnalysisRunner:
                 status = (
                     "已下载"
                     if name in downloaded
+                    else "已复用缓存日志"
+                    if download.get("reused")
                     else "已跳过"
                     if name in skipped
                     else "下载失败"
@@ -3501,6 +4563,63 @@ class BugAnalysisRunner:
                 f"HTML: {html_path}"
             )
 
+        if plan.kind == "xtheme":
+            verdict = payload.get("verdict", {}) if isinstance(payload, dict) else {}
+            counts = payload.get("counts", {}) if isinstance(payload, dict) else {}
+            issues = payload.get("issues", []) if isinstance(payload, dict) else []
+            focus_snapshot = payload.get("focus_snapshot", []) if isinstance(payload, dict) else []
+            msg = str(verdict.get("msg", "")) if isinstance(verdict, dict) else ""
+            issue_lines: list[str] = []
+            if isinstance(issues, list):
+                for issue in issues[:3]:
+                    if not isinstance(issue, dict):
+                        continue
+                    title = str(issue.get("title") or "").strip()
+                    detail = str(issue.get("detail") or "").strip()
+                    if title or detail:
+                        issue_lines.append(f"- {title}: {detail}".strip())
+            focus_lines: list[str] = []
+            if isinstance(focus_snapshot, list):
+                for item in focus_snapshot[:5]:
+                    if not isinstance(item, dict):
+                        continue
+                    kind = str(item.get("kind") or "").strip()
+                    value = str(item.get("value") or "").strip()
+                    ts = str(item.get("ts") or "").strip()
+                    source = str(item.get("source") or "").strip()
+                    if kind or value:
+                        focus_lines.append(f"- {ts} {kind}: {value} [{source}]".strip())
+            counts_text = ""
+            if isinstance(counts, dict) and counts:
+                counts_text = ", ".join(f"{key}={value}" for key, value in counts.items())
+            return (
+                "Bug 分析完成\n"
+                f"类型: {self._analysis_label(plan.kind)}\n"
+                f"结论: {msg or '已生成 XTheme 主题链路报告'}\n"
+                f"目标时间: {payload.get('target_time') or fault_time or '未识别'}\n"
+                f"统计: {counts_text or '无'}\n"
+                f"关键问题:\n{chr(10).join(issue_lines) if issue_lines else '- 无明确异常'}\n"
+                f"问题时间证据:\n{chr(10).join(focus_lines) if focus_lines else '- 无问题时间快照'}\n"
+                f"描述: {prompt_text}\n"
+                f"HTML: {html_path}"
+            )
+
+        if plan.kind == "scene_signal":
+            verdict = str(payload.get("verdict") or "已生成 3D 场景信号报告") if isinstance(payload, dict) else "已生成 3D 场景信号报告"
+            latest_chain = payload.get("latest_sr_chain", {}) if isinstance(payload, dict) else {}
+            chain_value = str(latest_chain.get("value") or "") if isinstance(latest_chain, dict) else ""
+            chain_desc = str(latest_chain.get("value_desc") or "") if isinstance(latest_chain, dict) else ""
+            event_count = payload.get("event_count", "") if isinstance(payload, dict) else ""
+            return (
+                "Bug 分析完成\n"
+                f"类型: {self._analysis_label(plan.kind)}\n"
+                f"结论: {verdict}\n"
+                f"最终 SR 场景: {chain_value or '未命中'} {chain_desc}\n"
+                f"事件数: {event_count or '未知'}\n"
+                f"描述: {prompt_text}\n"
+                f"HTML: {html_path}"
+            )
+
         if plan.kind == "general":
             verdict = payload.get("verdict", {}) if isinstance(payload, dict) else {}
             msg = str(verdict.get("text") or payload.get("summary") or "已生成通用问题分析报告")
@@ -3526,7 +4645,15 @@ class BugAnalysisRunner:
             f"结论: {summary or '已生成信号链路报告'}\n"
             f"扫描文件: {scanned_files}\n"
             f"HTML: {html_path}"
-        )
+            )
+
+    def _format_log_coverage_for_metadata(self, log_coverage: LogCoverage | None) -> str:
+        if log_coverage is None:
+            return "未检查"
+        if not log_coverage.has_time_evidence:
+            return "未识别有效日志时间"
+        status = "覆盖问题时间" if log_coverage.covers_fault_time else "未覆盖问题时间"
+        return f"{log_coverage.start_time} ~ {log_coverage.end_time}（{status}）"
 
     def _write_general_bug_report(
         self,
@@ -3567,7 +4694,7 @@ class BugAnalysisRunner:
             {
                 "sev": verdict_sev,
                 "title": "路由策略",
-                "detail": "当前请求未匹配 startup/stuck/crash/perception/signal 等专用脚本，因此回落到通用问题分析，而不是再默认启动时序。",
+                "detail": "当前请求未匹配 startup/stuck/crash/scene_signal/perception/signal 等专用脚本，因此回落到通用问题分析，而不是再默认启动时序。",
             },
             {
                 "sev": "yellow" if not has_logs else "green",
@@ -3818,8 +4945,22 @@ class BugAnalysisRunner:
             if signal_json_path is None or not signal_json_path.exists():
                 return None
             signal_payload = json.loads(signal_json_path.read_text(encoding="utf-8"))
-            focus_scope = self._signal_focus_scope(signal_payload)
-            summary = self._build_signal_overview_summary_text(signal_payload, prompt_text, fault_time, focus_scope)
+            focus_scope = self._signal_focus_scope(signal_payload, fault_time)
+            android_data_link = self._signal_android_data_link_checks(
+                signal_payload,
+                focus_scope,
+                selected_input=selected_input,
+                source_evidence_path=source_evidence_path,
+            )
+            summary = self._build_signal_overview_summary_text(
+                signal_payload,
+                prompt_text,
+                fault_time,
+                focus_scope,
+                android_data_link=android_data_link,
+            )
+            signal_overview_payload = dict(signal_payload)
+            signal_overview_payload["summary"] = self._signal_scoped_summary_text(signal_payload)
             html_path = output_dir / self._signal_overview_report_name("html")
             json_path = output_dir / self._signal_overview_report_name("json")
             html_path.write_text(
@@ -3830,6 +4971,7 @@ class BugAnalysisRunner:
                     selected_input=selected_input,
                     source_evidence_path=source_evidence_path,
                     focus_scope=focus_scope,
+                    android_data_link=android_data_link,
                 ),
                 encoding="utf-8",
             )
@@ -3843,7 +4985,8 @@ class BugAnalysisRunner:
                         "source_evidence_file": str(source_evidence_path) if source_evidence_path else "",
                         "summary": summary,
                         "focus_scope": focus_scope,
-                        "signal": signal_payload,
+                        "android_data_link": android_data_link,
+                        "signal": signal_overview_payload,
                     },
                     ensure_ascii=False,
                     indent=2,
@@ -4102,6 +5245,7 @@ class BugAnalysisRunner:
         selected_input: Path | None,
         source_evidence_path: Path | None,
         focus_scope: dict[str, object],
+        android_data_link: list[dict[str, object]] | None = None,
     ) -> ReportComposition:
         signal = signal_payload.get("signal", {}) if isinstance(signal_payload, dict) else {}
         signal_name = str(signal.get("name") or signal.get("code") or "未知信号")
@@ -4116,7 +5260,7 @@ class BugAnalysisRunner:
         evidence_rows = self._signal_evidence_rows(signal_payload, focus_scope)
         boundary_issues = self._signal_boundary_issues(signal_payload, focus_scope, fault_time)
         source_rows = self._signal_source_rows(signal_payload, source_evidence_path)
-        summary_text = str(signal_payload.get("summary") or "").strip()
+        summary_text = self._signal_scoped_summary_text(signal_payload)
         visible_scope = self._signal_visible_scope_text(signal_payload, focus_scope)
         verdict_sev = alignment["sev"]
         if verdict_sev == "green" and any(issue.get("sev") == "yellow" for issue in boundary_issues):
@@ -4178,7 +5322,7 @@ class BugAnalysisRunner:
                     body_html="".join(detail_blocks),
                 )
             )
-        return plan_signal_report(
+        composition = plan_signal_report(
             title_suffix=title_suffix,
             prompt_text=combined_bug_html.H(prompt_text),
             raw_signal_report_name=combined_bug_html.H(self._report_name("signal", "html")),
@@ -4199,6 +5343,9 @@ class BugAnalysisRunner:
                 empty_text="未提取到额外源码引用",
             ),
         )
+        if android_data_link:
+            composition.sections = self._signal_android_data_link_sections(android_data_link) + composition.sections
+        return composition
 
     def _signal_overview_report_name(self, suffix: str) -> str:
         return f"bug_signal_overview_report.{suffix}"
@@ -4209,6 +5356,7 @@ class BugAnalysisRunner:
         prompt_text: str,
         fault_time: str,
         focus_scope: dict[str, object],
+        android_data_link: list[dict[str, object]] | None = None,
     ) -> str:
         signal = signal_payload.get("signal", {}) if isinstance(signal_payload, dict) else {}
         signal_name = str(signal.get("name") or signal.get("code") or "未知信号")
@@ -4221,6 +5369,9 @@ class BugAnalysisRunner:
         alignment = self._signal_fault_alignment(fault_time, focus_scope)
         boundary = self._signal_boundary_issues(signal_payload, focus_scope, fault_time)
         top_issue = boundary[0]["detail"] if boundary else "已生成信号链路总览报告。"
+        likely_cause = self._signal_android_likely_cause(android_data_link or [])
+        if likely_cause:
+            top_issue = likely_cause
         coverage_note = self._signal_coverage_note(signal_payload, focus_scope)
         time_note = "未识别"
         if start and end:
@@ -4249,6 +5400,7 @@ class BugAnalysisRunner:
         selected_input: Path | None,
         source_evidence_path: Path | None,
         focus_scope: dict[str, object],
+        android_data_link: list[dict[str, object]] | None = None,
     ) -> str:
         composition = self._plan_signal_report(
             signal_payload=signal_payload,
@@ -4257,13 +5409,40 @@ class BugAnalysisRunner:
             selected_input=selected_input,
             source_evidence_path=source_evidence_path,
             focus_scope=focus_scope,
+            android_data_link=android_data_link or [],
         )
         return combined_bug_html.render_report_shell(**composition_to_renderer_payload(composition))
 
-    def _signal_focus_scope(self, signal_payload: dict[str, object]) -> dict[str, object]:
+    def _signal_focus_scope(self, signal_payload: dict[str, object], fault_time: str = "") -> dict[str, object]:
         evidence_items = self._signal_evidence_items(signal_payload)
+        reference_date = self._signal_reference_date(evidence_items)
+        target_items = [
+            item
+            for item in evidence_items
+            if str(item.get("stage") or "") != "lifecycle" and self._signal_item_matches_target(signal_payload, item)
+        ]
+        scoped_items = target_items or evidence_items
+        fault_dt = self._parse_bug_datetime(fault_time)
+        nearest: tuple[float, tuple[str, str]] | None = None
+        if fault_dt is not None:
+            for item in scoped_items:
+                package = self._signal_package_from_path(str(item.get("file") or ""))
+                pid = self._signal_pid_from_text(str(item.get("text") or ""))
+                if not package and not pid:
+                    continue
+                timestamp = self._signal_parse_datetime(
+                    text=str(item.get("text") or ""),
+                    time_text=str(item.get("time") or ""),
+                    reference_date=reference_date,
+                )
+                if timestamp is None:
+                    continue
+                distance = abs((timestamp - fault_dt).total_seconds())
+                key = (package, pid)
+                if nearest is None or distance < nearest[0]:
+                    nearest = (distance, key)
         counts: dict[tuple[str, str], int] = {}
-        for item in evidence_items:
+        for item in scoped_items:
             package = self._signal_package_from_path(str(item.get("file") or ""))
             pid = self._signal_pid_from_text(str(item.get("text") or ""))
             if not package and not pid:
@@ -4271,14 +5450,15 @@ class BugAnalysisRunner:
             counts[(package, pid)] = counts.get((package, pid), 0) + 1
         package = ""
         pid = ""
-        if counts:
+        if nearest is not None:
+            package, pid = nearest[1]
+        elif counts:
             (package, pid), _ = sorted(
                 counts.items(),
                 key=lambda item: (item[1], bool(item[0][0]), bool(item[0][1]), item[0][0], item[0][1]),
                 reverse=True,
             )[0]
-        reference_date = self._signal_reference_date(evidence_items)
-        time_window = self._signal_time_window(evidence_items, reference_date, package, pid)
+        time_window = self._signal_time_window(scoped_items, reference_date, package, pid)
         return {
             "package": package,
             "pid": pid,
@@ -4317,6 +5497,7 @@ class BugAnalysisRunner:
                     {
                         "stage": str(stage_key),
                         "title": title,
+                        "code": str(example.get("code") or ""),
                         "file": str(example.get("file") or ""),
                         "line": example.get("line"),
                         "text": str(example.get("text") or ""),
@@ -4486,7 +5667,7 @@ class BugAnalysisRunner:
             ("datacenter", self._signal_datacenter_stage_title(signal_payload)),
             ("android_business", self._signal_business_stage_title(signal_payload)),
         ):
-            match = self._signal_find_stage_example(signal_payload, stage_key, package, pid, prefer_hmi=False)
+            match = self._signal_find_stage_example(signal_payload, stage_key, package, pid, prefer_hmi=False, target_only=True)
             if match is None:
                 continue
             nodes.append(
@@ -4497,7 +5678,7 @@ class BugAnalysisRunner:
                     "note": str(match.get("text") or ""),
                 }
             )
-        hmi_match = self._signal_find_stage_example(signal_payload, "android_business", package, pid, prefer_hmi=True)
+        hmi_match = self._signal_find_stage_example(signal_payload, "android_business", package, pid, prefer_hmi=True, target_only=True)
         if hmi_match is not None:
             nodes.append(
                 {
@@ -4507,7 +5688,7 @@ class BugAnalysisRunner:
                     "note": str(hmi_match.get("text") or ""),
                 }
             )
-        business_entry = self._signal_select_business_entry(source_evidence_path, prompt_text=fault_time)
+        business_entry = self._signal_select_business_entry(source_evidence_path, prompt_text=fault_time, signal_payload=signal_payload)
         if business_entry is not None:
             nodes.append(
                 {
@@ -4597,7 +5778,7 @@ class BugAnalysisRunner:
                     "note": hmi_ref["text"],
                 }
             )
-        business_entry = self._signal_select_business_entry(source_evidence_path, prompt_text=prompt_text)
+        business_entry = self._signal_select_business_entry(source_evidence_path, prompt_text=prompt_text, signal_payload=signal_payload)
         if business_entry is not None:
             nodes.append(
                 {
@@ -4626,6 +5807,16 @@ class BugAnalysisRunner:
                 return False
         return True
 
+    def _signal_item_matches_target(self, signal_payload: dict[str, object], item: dict[str, object]) -> bool:
+        signal = signal_payload.get("signal", {}) if isinstance(signal_payload, dict) else {}
+        code = str(signal.get("code") or "").strip()
+        name = str(signal.get("name") or "").strip()
+        item_code = str(item.get("code") or "").strip()
+        if item_code:
+            return bool(code and item_code == code)
+        text = str(item.get("text") or "")
+        return bool((code and re.search(rf"(?<!\d){re.escape(code)}(?!\d)", text)) or (name and name in text))
+
     def _signal_find_runtime_event(
         self,
         signal_payload: dict[str, object],
@@ -4650,6 +5841,7 @@ class BugAnalysisRunner:
         pid: str,
         *,
         prefer_hmi: bool,
+        target_only: bool = False,
     ) -> dict[str, object] | None:
         log_report = signal_payload.get("log_report", {}) if isinstance(signal_payload, dict) else {}
         stages = log_report.get("stages", {}) if isinstance(log_report, dict) else {}
@@ -4658,6 +5850,8 @@ class BugAnalysisRunner:
             return None
         for example in stage.get("examples", []) or []:
             if not isinstance(example, dict):
+                continue
+            if target_only and not self._signal_item_matches_target(signal_payload, example):
                 continue
             if package:
                 item_package = self._signal_package_from_path(str(example.get("file") or ""))
@@ -4728,10 +5922,10 @@ class BugAnalysisRunner:
             if self._signal_item_matches_scope(event, package, pid):
                 items.append(event)
         for stage_key in ("datacenter", "android_business", "other"):
-            match = self._signal_find_stage_example(signal_payload, stage_key, package, pid, prefer_hmi=False)
+            match = self._signal_find_stage_example(signal_payload, stage_key, package, pid, prefer_hmi=False, target_only=True)
             if match is not None:
                 items.append(match)
-        hmi = self._signal_find_stage_example(signal_payload, "android_business", package, pid, prefer_hmi=True)
+        hmi = self._signal_find_stage_example(signal_payload, "android_business", package, pid, prefer_hmi=True, target_only=True)
         if hmi is not None:
             items.append(hmi)
         rows: list[tuple[str, str, str, str, str]] = []
@@ -4767,6 +5961,752 @@ class BugAnalysisRunner:
             )
         return rows[:8]
 
+    def _signal_android_data_link_checks(
+        self,
+        signal_payload: dict[str, object],
+        focus_scope: dict[str, object],
+        *,
+        selected_input: Path | None,
+        source_evidence_path: Path | None,
+    ) -> list[dict[str, object]]:
+        lifecycle = signal_payload.get("lifecycle_report", {}) if isinstance(signal_payload, dict) else {}
+        context = lifecycle.get("context", {}) if isinstance(lifecycle, dict) else {}
+        chain_edges = signal_payload.get("chain_edges", []) if isinstance(signal_payload, dict) else []
+        is_android_datacenter = bool(context) or any(
+            isinstance(edge, dict) and "datacenter" in str(edge.get("target") or "").casefold()
+            for edge in chain_edges
+        )
+        if not is_android_datacenter:
+            return []
+        source_facts = self._signal_android_source_facts(signal_payload, source_evidence_path)
+        source_facts = self._signal_merge_cached_keywords(signal_payload, source_facts)
+        scan_terms = self._signal_android_scan_terms(signal_payload, source_facts)
+        log_hits = self._signal_scan_log_terms(signal_payload, selected_input, scan_terms)
+        self._signal_store_keyword_profile(
+            signal_payload,
+            source_facts,
+            scan_terms=scan_terms,
+            log_hits=log_hits,
+            selected_input=selected_input,
+            source_evidence_path=source_evidence_path,
+        )
+        signal = signal_payload.get("signal", {}) if isinstance(signal_payload, dict) else {}
+        signal_name = str(signal.get("name") or "").strip()
+        event_ids = [str(item) for item in source_facts.get("event_ids", []) if str(item).strip()]
+        event_id_text = " / ".join(event_ids) or "上游事件"
+        helper_class = str(context.get("helper_class") or "Helper") if isinstance(context, dict) else "Helper"
+        helper_file = str(context.get("helper_file") or "") if isinstance(context, dict) else ""
+        helper_full_class = self._signal_kotlin_class_from_file(helper_file, helper_class)
+        controller_class = str(context.get("controller_class") or "Controller") if isinstance(context, dict) else "Controller"
+
+        package = str(focus_scope.get("package") or "")
+        pid = str(focus_scope.get("pid") or "")
+        init_terms = [f"injectSignalProvider[{helper_full_class}" if helper_full_class else "", helper_class, controller_class, "injectSignalProvider["]
+        init_hit = self._signal_best_log_hit(log_hits, init_terms, pid=pid, package=package)
+        init_runtime = self._signal_find_runtime_event(signal_payload, package, pid, "injectSignalProvider")
+        init_status = "通过" if init_hit is not None or init_runtime else "证据不足"
+        init_evidence = self._signal_log_hit_text(init_runtime) or self._signal_log_hit_text(init_hit) or self._signal_runtime_evidence_text(signal_payload, "injectSignalProvider")
+
+        register_terms = []
+        for event_id in event_ids:
+            register_terms.extend([f"register {event_id} indeed", f"registerRemoteListener: event:{event_id}", f"registerEventListener: event:{event_id}"])
+        register_hit = self._signal_best_log_hit(log_hits, register_terms, pid=pid, package=package)
+        unsupported_hit = self._signal_best_log_hit(
+            log_hits,
+            [f"not support id:{event_id}" for event_id in event_ids] + [f"register not support id:{event_id}" for event_id in event_ids],
+            pid=pid,
+            package=package,
+        )
+        if unsupported_hit is not None:
+            register_status = "未通过"
+            register_conclusion = f"上游 {event_id_text} 明确返回不支持。"
+        elif register_hit is not None:
+            register_status = "通过"
+            register_conclusion = f"上游 {event_id_text} 已完成监听注册，未看到 not support。"
+        else:
+            register_status = "证据不足"
+            register_conclusion = f"源码可定位到 {event_id_text}，但当前日志未证明上游监听注册成功。"
+
+        producer_terms = [str(item) for item in source_facts.get("producer_terms", []) if str(item).strip()]
+        producer_hit = self._signal_best_log_hit(log_hits, producer_terms, pid=pid, package=package)
+        target_datacenter_hit = self._signal_find_stage_example(
+            signal_payload,
+            "datacenter",
+            package,
+            pid,
+            prefer_hmi=False,
+            target_only=True,
+        )
+        if producer_hit is not None:
+            upstream_status = "通过"
+            upstream_conclusion = f"已看到 {helper_class} 收到上游数据并进入目标信号处理。"
+            upstream_evidence = self._signal_log_hit_text(producer_hit)
+        else:
+            upstream_status = "未通过"
+            if event_ids:
+                upstream_conclusion = f"未看到 {event_id_text} 回调数据进入 {helper_class}。"
+            else:
+                upstream_conclusion = f"未看到上游回调数据进入 {helper_class}。"
+            source_ref_text = self._signal_source_fact_text(source_facts, "producer_refs")
+            missing_terms = "、".join(producer_terms[:4])
+            upstream_evidence = source_ref_text or "当前日志未看到上游回调和 onNextData。"
+            if missing_terms:
+                upstream_evidence = f"{upstream_evidence}；日志未命中关键字：{missing_terms}"
+            if target_datacenter_hit is not None:
+                upstream_evidence = f"{upstream_evidence}；仅看到取流/订阅：{self._signal_log_hit_text(target_datacenter_hit)}"
+
+        business_terms = [str(item) for item in source_facts.get("consumer_terms", []) if str(item).strip()]
+        business_register_hit = self._signal_best_log_hit(
+            log_hits,
+            [f"getSignalFlow: signalCode={signal_name}", signal_name],
+            pid=pid,
+            package=package,
+        )
+        if target_datacenter_hit is not None or business_register_hit is not None or source_facts.get("consumer_refs"):
+            business_register_status = "通过"
+            business_register_conclusion = "业务已注册目标信号。"
+            business_register_evidence = (
+                self._signal_log_hit_text(target_datacenter_hit)
+                or self._signal_log_hit_text(business_register_hit)
+                or self._signal_source_fact_text(source_facts, "consumer_refs")
+            )
+        else:
+            business_register_status = "证据不足"
+            business_register_conclusion = "未看到业务注册目标信号的源码或日志证据。"
+            business_register_evidence = ""
+
+        business_hit = self._signal_best_log_hit(log_hits, business_terms, pid=pid, package=package)
+        business_stage_hits = self._signal_target_stage_hits(
+            signal_payload,
+            (signal_payload.get("log_report", {}) or {}).get("stages", {}) if isinstance(signal_payload.get("log_report", {}), dict) else {},
+            "android_business",
+        )
+        if business_hit is not None or business_stage_hits:
+            business_receive_status = "通过"
+            business_receive_conclusion = "业务已收到目标信号。"
+            business_receive_evidence = self._signal_log_hit_text(business_hit) or f"目标信号业务消费命中 {business_stage_hits} 条。"
+        else:
+            business_receive_status = "未通过"
+            business_receive_conclusion = "业务未收到目标信号。"
+            business_receive_evidence = (
+                self._signal_source_fact_text(source_facts, "consumer_refs")
+                or "源码存在消费分支，但日志未出现对应业务 update/collect 输出。"
+            )
+
+        checks = [
+            self._signal_android_check(
+                "1",
+                "module_datacenter 初始化 / 上游 SDK 链接",
+                init_status,
+                f"{helper_class} / {controller_class} 初始化链路可见。" if init_status == "通过" else "未看到完整初始化链路日志。",
+                init_evidence,
+            ),
+            self._signal_android_check(
+                "2",
+                "向上游注册信号 / 上游支持性",
+                register_status,
+                register_conclusion,
+                self._signal_log_hit_text(unsupported_hit) or self._signal_log_hit_text(register_hit) or self._signal_source_fact_text(source_facts, "producer_refs"),
+            ),
+            self._signal_android_check(
+                "3",
+                "上游数据进入 DataCenter",
+                upstream_status,
+                upstream_conclusion,
+                upstream_evidence,
+            ),
+            self._signal_android_check(
+                "4",
+                "业务注册目标信号",
+                business_register_status,
+                business_register_conclusion,
+                business_register_evidence,
+            ),
+            self._signal_android_check(
+                "5",
+                "业务收到目标信号",
+                business_receive_status,
+                business_receive_conclusion,
+                business_receive_evidence,
+            ),
+        ]
+        for check in checks:
+            check["source_keywords"] = source_facts.get("keywords", [])
+            check["keyword_cache"] = source_facts.get("keyword_cache", {})
+        return checks
+
+    def _signal_android_check(self, step: str, checkpoint: str, status: str, conclusion: str, evidence: str) -> dict[str, object]:
+        sev = "green" if status == "通过" else "red" if status == "未通过" else "yellow"
+        return {
+            "step": step,
+            "checkpoint": checkpoint,
+            "status": status,
+            "sev": sev,
+            "conclusion": conclusion,
+            "evidence": evidence or "未提取到直接证据。",
+        }
+
+    def _signal_android_data_link_sections(self, checks: list[dict[str, object]]) -> list[ReportSection]:
+        rows = [
+            (
+                item.get("step", ""),
+                item.get("checkpoint", ""),
+                item.get("status", ""),
+                item.get("conclusion", ""),
+                item.get("evidence", ""),
+            )
+            for item in checks
+        ]
+        failed = [item for item in checks if item.get("status") == "未通过"]
+        likely_cause = self._signal_android_likely_cause(checks)
+        sections = [
+            ReportSection(
+                kind="table",
+                title="Android 数据链路排查",
+                description="按 module_datacenter 初始化、上游注册、上游入数、业务注册、业务接收逐段给出结论。",
+                rows=rows,
+                cols=["序号", "排查点", "结论", "判断", "参考日志 / 源码"],
+                empty_text="当前信号不是 Android module_datacenter 链路。",
+            )
+        ]
+        if likely_cause:
+            sections.append(
+                ReportSection(
+                    kind="issues",
+                    title="最可能卡点",
+                    items=[{"sev": "red" if failed else "yellow", "title": "当前最可能原因", "detail": likely_cause}],
+                )
+            )
+        return sections
+
+    def _signal_android_likely_cause(self, checks: list[dict[str, object]]) -> str:
+        if not checks:
+            return ""
+        by_step = {str(item.get("step") or ""): item for item in checks}
+        upstream = by_step.get("3", {})
+        business_register = by_step.get("4", {})
+        business_receive = by_step.get("5", {})
+        if upstream.get("status") == "未通过" and business_register.get("status") == "通过":
+            return (
+                f"{upstream.get('conclusion') or '未看到上游数据进入 DataCenter'}"
+                f" {business_receive.get('conclusion') or '业务未收到目标信号'}"
+                " 结合现有证据，最可能卡点在上游事件回调没有下发有效载荷，或载荷缺少目标信号需要的 value key。"
+            )
+        failed = [item for item in checks if item.get("status") == "未通过"]
+        if failed:
+            return "；".join(str(item.get("conclusion") or item.get("checkpoint") or "") for item in failed if item)
+        return ""
+
+    def _signal_android_source_facts(
+        self,
+        signal_payload: dict[str, object],
+        source_evidence_path: Path | None,
+    ) -> dict[str, object]:
+        signal = signal_payload.get("signal", {}) if isinstance(signal_payload, dict) else {}
+        signal_name = str(signal.get("name") or "").strip()
+        lifecycle = signal_payload.get("lifecycle_report", {}) if isinstance(signal_payload, dict) else {}
+        context = lifecycle.get("context", {}) if isinstance(lifecycle, dict) else {}
+        helper_file = str(context.get("helper_file") or "") if isinstance(context, dict) else ""
+        facts: dict[str, object] = {
+            "event_ids": [],
+            "producer_terms": [],
+            "consumer_terms": [],
+            "producer_refs": [],
+            "consumer_refs": [],
+            "keywords": [],
+        }
+        event_ids: list[str] = []
+        producer_terms: list[str] = []
+        producer_refs: list[str] = []
+        helper_path = self._repo_relative_path(helper_file)
+        if helper_path is not None:
+            helper_text = self._read_text_quiet(helper_path)
+            helper_lines = helper_text.splitlines()
+            consts = self._signal_kotlin_string_constants(helper_text)
+            for line_no, line in enumerate(helper_lines, 1):
+                if signal_name and signal_name in line:
+                    matched_event = False
+                    for nearby_no in range(line_no, min(len(helper_lines), line_no + 8) + 1):
+                        nearby = helper_lines[nearby_no - 1]
+                        match = re.search(r"\b(\d{4,})\b\s*(?:to|,)\s*SignalCode\.([A-Z0-9_]+)", nearby)
+                        if match:
+                            event_ids.append(match.group(1))
+                            producer_refs.append(f"{helper_file}:{nearby_no} {nearby.strip()}")
+                            matched_event = True
+                            break
+                    if not matched_event:
+                        match = re.search(r"\b(\d{4,})\b\s*(?:to|,)\s*SignalCode\.([A-Z0-9_]+)", line)
+                        if match:
+                            event_ids.append(match.group(1))
+                    producer_refs.append(f"{helper_file}:{line_no} {line.strip()}")
+            for event_id in list(dict.fromkeys(event_ids)):
+                callback_name = self._signal_callback_name_for_event(helper_text, event_id)
+                if callback_name:
+                    callback_lines = self._signal_kotlin_function_block(helper_lines, callback_name)
+                    producer_lines = self._signal_kotlin_target_branch(callback_lines, signal_name)
+                    for offset, line in producer_lines:
+                        if signal_name and signal_name in line:
+                            producer_refs.append(f"{helper_file}:{offset} {line.strip()}")
+                        for token in re.findall(r"\b(?:EVENT_KEY|VALUE_KEY)_[A-Z0-9_]+\b", line):
+                            producer_terms.append(token)
+                            if token in consts:
+                                producer_terms.append(consts[token])
+                        literal = self._signal_log_literal_from_source_line(line)
+                        if literal:
+                            producer_terms.append(literal)
+        refs = []
+        refs.extend(signal_payload.get("source_references", []) if isinstance(signal_payload, dict) else [])
+        refs.extend(self._parse_source_evidence_entries(source_evidence_path))
+        refs.extend(self._signal_repo_signal_references(signal_name))
+        consumer_refs: list[str] = []
+        consumer_terms: list[str] = []
+        for ref in refs:
+            if not isinstance(ref, dict):
+                continue
+            file_text = str(ref.get("file") or "")
+            line_text = str(ref.get("text") or "")
+            if signal_name and signal_name in line_text and "module_proto" not in file_text and "module_datacenter" not in file_text:
+                consumer_refs.append(f"{file_text}:{ref.get('line') or ''} {line_text}".strip())
+                path = self._repo_relative_path(file_text)
+                if path is not None:
+                    consumer_terms.extend(self._signal_consumer_log_terms(path, signal_name))
+        keywords = self._unique_nonempty([*event_ids, *producer_terms, *consumer_terms, signal_name])
+        facts["event_ids"] = self._unique_nonempty(event_ids)
+        facts["producer_terms"] = self._unique_nonempty(producer_terms)
+        facts["consumer_terms"] = self._unique_nonempty(consumer_terms)
+        facts["producer_refs"] = self._unique_nonempty(producer_refs)
+        facts["consumer_refs"] = self._unique_nonempty(consumer_refs)
+        facts["keywords"] = keywords
+        facts["source_signature"] = self._signal_keyword_source_signature(facts)
+        return facts
+
+    def _signal_merge_cached_keywords(
+        self,
+        signal_payload: dict[str, object],
+        source_facts: dict[str, object],
+    ) -> dict[str, object]:
+        cache_entry = self._signal_load_keyword_profile(signal_payload)
+        current_signature = str(source_facts.get("source_signature") or "")
+        cache_status = "miss"
+        cache_updated_at = ""
+        if cache_entry:
+            cached_signature = str(cache_entry.get("source_signature") or "")
+            cache_updated_at = str(cache_entry.get("updated_at") or "")
+            if current_signature and cached_signature == current_signature:
+                cache_status = "hit"
+                for key in ("event_ids", "producer_terms", "consumer_terms", "producer_refs", "consumer_refs"):
+                    cached_values = cache_entry.get(key, [])
+                    if isinstance(cached_values, list):
+                        source_facts[key] = self._unique_nonempty([*(source_facts.get(key, []) or []), *cached_values])
+                cached_keywords = cache_entry.get("keywords", [])
+                source_facts["keywords"] = self._unique_nonempty([*(source_facts.get("keywords", []) or []), *(cached_keywords if isinstance(cached_keywords, list) else [])])
+            elif not current_signature:
+                cache_status = "fallback"
+                for key in ("event_ids", "producer_terms", "consumer_terms", "producer_refs", "consumer_refs", "keywords"):
+                    cached_values = cache_entry.get(key, [])
+                    if isinstance(cached_values, list):
+                        source_facts[key] = self._unique_nonempty([*(source_facts.get(key, []) or []), *cached_values])
+                source_facts["source_signature"] = cached_signature
+            else:
+                cache_status = "stale_refresh"
+        source_facts["keyword_cache"] = {
+            "status": cache_status,
+            "updated_at": cache_updated_at,
+            "source_signature": str(source_facts.get("source_signature") or ""),
+        }
+        return source_facts
+
+    def _signal_keyword_source_signature(self, source_facts: dict[str, object]) -> str:
+        payload = {
+            key: source_facts.get(key, [])
+            for key in ("event_ids", "producer_refs", "consumer_refs", "producer_terms", "consumer_terms")
+        }
+        if not any(isinstance(value, list) and value for value in payload.values()):
+            return ""
+        raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+    def _signal_keyword_cache_path(self) -> Path:
+        return Path(self.config.data_dir).expanduser().resolve() / "signal_keyword_cache.json"
+
+    def _signal_keyword_cache_key(self, signal_payload: dict[str, object]) -> str:
+        signal = signal_payload.get("signal", {}) if isinstance(signal_payload, dict) else {}
+        code = str(signal.get("code") or "").strip()
+        name = str(signal.get("name") or "").strip()
+        return code or name or "unknown"
+
+    def _signal_load_keyword_profile(self, signal_payload: dict[str, object]) -> dict[str, object] | None:
+        path = self._signal_keyword_cache_path()
+        if not path.exists():
+            return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        entry = payload.get(self._signal_keyword_cache_key(signal_payload))
+        return entry if isinstance(entry, dict) else None
+
+    def _signal_store_keyword_profile(
+        self,
+        signal_payload: dict[str, object],
+        source_facts: dict[str, object],
+        *,
+        scan_terms: list[str],
+        log_hits: dict[str, list[dict[str, object]]],
+        selected_input: Path | None,
+        source_evidence_path: Path | None,
+    ) -> None:
+        cache_key = self._signal_keyword_cache_key(signal_payload)
+        if not cache_key or cache_key == "unknown":
+            return
+        signal = signal_payload.get("signal", {}) if isinstance(signal_payload, dict) else {}
+        verified_terms = [term for term in self._unique_nonempty(scan_terms) if log_hits.get(term)]
+        profile = {
+            "signal_code": str(signal.get("code") or ""),
+            "signal_name": str(signal.get("name") or ""),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "source_signature": str(source_facts.get("source_signature") or ""),
+            "event_ids": source_facts.get("event_ids", []),
+            "producer_terms": source_facts.get("producer_terms", []),
+            "consumer_terms": source_facts.get("consumer_terms", []),
+            "producer_refs": source_facts.get("producer_refs", []),
+            "consumer_refs": source_facts.get("consumer_refs", []),
+            "keywords": source_facts.get("keywords", []),
+            "verified_terms": verified_terms,
+            "selected_input": str(selected_input) if selected_input else "",
+            "source_evidence_file": str(source_evidence_path) if source_evidence_path else "",
+        }
+        path = self._signal_keyword_cache_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if path.exists():
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(payload, dict):
+                    payload = {}
+            else:
+                payload = {}
+            payload[cache_key] = profile
+            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        except (OSError, json.JSONDecodeError):
+            return
+
+    def _signal_android_scan_terms(self, signal_payload: dict[str, object], source_facts: dict[str, object]) -> list[str]:
+        signal = signal_payload.get("signal", {}) if isinstance(signal_payload, dict) else {}
+        signal_name = str(signal.get("name") or "").strip()
+        lifecycle = signal_payload.get("lifecycle_report", {}) if isinstance(signal_payload, dict) else {}
+        context = lifecycle.get("context", {}) if isinstance(lifecycle, dict) else {}
+        helper_class = str(context.get("helper_class") or "").strip() if isinstance(context, dict) else ""
+        helper_file = str(context.get("helper_file") or "").strip() if isinstance(context, dict) else ""
+        helper_full_class = self._signal_kotlin_class_from_file(helper_file, helper_class)
+        controller_class = str(context.get("controller_class") or "").strip() if isinstance(context, dict) else ""
+        terms: list[str] = [
+            signal_name,
+            f"getSignalFlow: signalCode={signal_name}" if signal_name else "",
+            f"injectSignalProvider[{helper_full_class}" if helper_full_class else "",
+            helper_class,
+            controller_class,
+            "injectSignalProvider[",
+        ]
+        for event_id in source_facts.get("event_ids", []) if isinstance(source_facts, dict) else []:
+            event_id_text = str(event_id)
+            terms.extend(
+                [
+                    f"register {event_id_text} indeed",
+                    f"registerRemoteListener: event:{event_id_text}",
+                    f"registerEventListener: event:{event_id_text}",
+                    f"not support id:{event_id_text}",
+                    f"register not support id:{event_id_text}",
+                ]
+            )
+        for key in ("producer_terms", "consumer_terms"):
+            terms.extend(str(item) for item in source_facts.get(key, []) if str(item).strip())
+        return self._unique_nonempty(terms)
+
+    def _signal_scan_log_terms(
+        self,
+        signal_payload: dict[str, object],
+        selected_input: Path | None,
+        terms: list[str],
+        *,
+        max_hits_per_term: int = 20,
+        max_files: int = 80,
+        max_lines_per_file: int = 200000,
+    ) -> dict[str, list[dict[str, object]]]:
+        clean_terms = self._unique_nonempty(terms)
+        if not clean_terms:
+            return {}
+        files: list[Path] = []
+        for item in self._signal_evidence_items(signal_payload):
+            path = Path(str(item.get("file") or "")).expanduser()
+            if path.exists() and path.is_file():
+                files.append(path)
+        if selected_input is not None and selected_input.exists():
+            files.extend(self._iter_log_coverage_files(selected_input)[:max_files])
+        unique_files: list[Path] = []
+        seen_files: set[str] = set()
+        for path in files:
+            key = str(path)
+            if key in seen_files:
+                continue
+            seen_files.add(key)
+            unique_files.append(path)
+            if len(unique_files) >= max_files:
+                break
+        hits: dict[str, list[dict[str, object]]] = {term: [] for term in clean_terms}
+        remaining = set(clean_terms)
+        for path in unique_files:
+            if not remaining:
+                break
+            try:
+                with path.open("r", encoding="utf-8", errors="replace") as handle:
+                    for line_no, line in enumerate(handle, 1):
+                        if line_no > max_lines_per_file:
+                            break
+                        for term in list(remaining):
+                            if term and term in line:
+                                hits[term].append({"term": term, "file": str(path), "line": line_no, "text": line.rstrip()})
+                                if len(hits[term]) >= max_hits_per_term:
+                                    remaining.discard(term)
+                        if not remaining:
+                            break
+            except OSError:
+                continue
+        return {term: items for term, items in hits.items() if items}
+
+    def _signal_best_log_hit(
+        self,
+        hits: dict[str, list[dict[str, object]]],
+        terms: list[str],
+        *,
+        pid: str = "",
+        package: str = "",
+    ) -> dict[str, object] | None:
+        ordered_terms = self._unique_nonempty(terms)
+        if pid or package:
+            for term in ordered_terms:
+                for item in hits.get(term, []) or []:
+                    text = str(item.get("text") or "")
+                    file_text = str(item.get("file") or "")
+                    item_pid = self._signal_pid_from_text(text)
+                    if pid and item_pid and item_pid != pid:
+                        continue
+                    if package and package not in file_text and package not in text:
+                        item_package = self._signal_package_from_path(file_text)
+                        if item_package and item_package != package:
+                            continue
+                    return item
+        for term in ordered_terms:
+            items = hits.get(term)
+            if items:
+                return items[0]
+        return None
+
+    def _signal_log_hit_text(self, hit: dict[str, object] | None) -> str:
+        if not isinstance(hit, dict):
+            return ""
+        file_name = Path(str(hit.get("file") or "")).name
+        line = str(hit.get("line") or "")
+        text = self._signal_shorten(str(hit.get("text") or ""), 180)
+        return f"{file_name}:{line} {text}".strip()
+
+    def _signal_runtime_evidence_text(self, signal_payload: dict[str, object], keyword: str) -> str:
+        event = self._signal_find_runtime_event(signal_payload, "", "", keyword)
+        if event is None:
+            return ""
+        return self._signal_log_hit_text(event)
+
+    def _signal_source_fact_text(self, source_facts: dict[str, object], key: str) -> str:
+        values = source_facts.get(key, []) if isinstance(source_facts, dict) else []
+        if not isinstance(values, list):
+            return ""
+        return "；".join(str(item) for item in values[:3] if str(item).strip())
+
+    def _repo_relative_path(self, file_text: str) -> Path | None:
+        if not file_text:
+            return None
+        path = Path(file_text)
+        if path.is_absolute():
+            return path if path.exists() else None
+        candidate = self.config.guideengine_repo / file_text
+        return candidate if candidate.exists() else None
+
+    def _read_text_quiet(self, path: Path) -> str:
+        try:
+            return path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return ""
+
+    def _signal_repo_signal_references(self, signal_name: str, *, max_refs: int = 80) -> list[dict[str, str]]:
+        if not signal_name:
+            return []
+        repo = Path(self.config.guideengine_repo).expanduser()
+        if not repo.exists():
+            return []
+        try:
+            completed = subprocess.run(
+                ["rg", "-n", "--fixed-strings", signal_name, str(repo)],
+                capture_output=True,
+                text=True,
+                timeout=20,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return []
+        refs: list[dict[str, str]] = []
+        for raw_line in completed.stdout.splitlines():
+            if len(refs) >= max_refs:
+                break
+            match = re.match(r"(.+?):(\d+):(.*)", raw_line)
+            if not match:
+                continue
+            path = Path(match.group(1))
+            try:
+                file_text = str(path.relative_to(repo))
+            except ValueError:
+                file_text = str(path)
+            refs.append({"file": file_text, "line": match.group(2), "text": match.group(3).strip()})
+        return refs
+
+    def _signal_kotlin_class_from_file(self, file_text: str, class_name: str) -> str:
+        if not file_text or not class_name:
+            return ""
+        normalized = file_text.replace("\\", "/")
+        marker = "/src/main/java/"
+        if marker in normalized:
+            normalized = normalized.split(marker, 1)[1]
+        elif "src/main/java/" in normalized:
+            normalized = normalized.split("src/main/java/", 1)[1]
+        else:
+            return ""
+        normalized = re.sub(r"\.(kt|java)$", "", normalized)
+        dotted = normalized.replace("/", ".")
+        return dotted if dotted.endswith(f".{class_name}") or dotted == class_name else ""
+
+    def _signal_kotlin_string_constants(self, text: str) -> dict[str, str]:
+        constants: dict[str, str] = {}
+        for match in re.finditer(r"const\s+val\s+([A-Z0-9_]+)\s*(?::\s*String)?\s*=\s*\"([^\"]+)\"", text):
+            constants[match.group(1)] = match.group(2)
+        return constants
+
+    def _signal_callback_name_for_event(self, text: str, event_id: str) -> str:
+        match = re.search(rf"\b{re.escape(event_id)}\s+to\s+this::([A-Za-z0-9_]+)", text)
+        return match.group(1) if match else ""
+
+    def _signal_kotlin_function_block(self, lines: list[str], function_name: str, *, max_lines: int = 140) -> list[tuple[int, str]]:
+        start_index = -1
+        pattern = re.compile(rf"\bfun\s+{re.escape(function_name)}\b")
+        for index, line in enumerate(lines):
+            if pattern.search(line):
+                start_index = index
+                break
+        if start_index < 0:
+            return []
+        block: list[tuple[int, str]] = []
+        brace_depth = 0
+        opened = False
+        for index in range(start_index, min(len(lines), start_index + max_lines)):
+            line = lines[index]
+            block.append((index + 1, line))
+            brace_line = re.sub(r'"(?:\\.|[^"\\])*"', '""', line)
+            opens = brace_line.count("{")
+            closes = brace_line.count("}")
+            if opens:
+                opened = True
+            if opened:
+                brace_depth += opens - closes
+                if brace_depth <= 0 and index > start_index:
+                    break
+        return block
+
+    def _signal_kotlin_target_branch(self, callback_lines: list[tuple[int, str]], signal_name: str) -> list[tuple[int, str]]:
+        if not signal_name:
+            return callback_lines
+        target_indexes = [index for index, (_, line) in enumerate(callback_lines) if signal_name in line]
+        if not target_indexes:
+            return callback_lines
+        result: list[tuple[int, str]] = []
+        seen_lines: set[int] = set()
+        for target_index in target_indexes:
+            start_index = target_index
+            for index in range(target_index, -1, -1):
+                line = callback_lines[index][1]
+                if "->" in line and re.search(r"\b(?:EVENT_KEY|VALUE_KEY)_[A-Z0-9_]+\b|\"[^\"]+\"", line):
+                    start_index = index
+                    break
+            brace_depth = 0
+            opened = False
+            for index in range(start_index, len(callback_lines)):
+                line_no, line = callback_lines[index]
+                if line_no not in seen_lines:
+                    seen_lines.add(line_no)
+                    result.append((line_no, line))
+                brace_line = re.sub(r'"(?:\\.|[^"\\])*"', '""', line)
+                opens = brace_line.count("{")
+                closes = brace_line.count("}")
+                if opens:
+                    opened = True
+                if opened:
+                    brace_depth += opens - closes
+                    if brace_depth <= 0 and index > start_index:
+                        break
+                elif index > target_index:
+                    break
+        return result or callback_lines
+
+    def _signal_consumer_log_terms(self, path: Path, signal_name: str) -> list[str]:
+        text = self._read_text_quiet(path)
+        if not text:
+            return []
+        lines = text.splitlines()
+        terms: list[str] = []
+        for index, line in enumerate(lines):
+            if signal_name not in line:
+                continue
+            nearby_case = lines[max(0, index - 3) : min(len(lines), index + 4)]
+            if any("->" in item for item in nearby_case):
+                source_lines = [item for _, item in self._signal_kotlin_target_branch([(line_no + 1, value) for line_no, value in enumerate(lines)], signal_name)]
+            elif any("getSignalFlow" in item or ".collect" in item for item in lines[index : min(len(lines), index + 16)]):
+                source_lines = lines[index : min(len(lines), index + 40)]
+            else:
+                continue
+            for nearby in source_lines:
+                literal = self._signal_log_literal_from_source_line(nearby)
+                if literal and self._signal_log_literal_matches_signal(literal, signal_name):
+                    terms.append(literal)
+        return self._unique_nonempty(terms)
+
+    def _signal_log_literal_matches_signal(self, literal: str, signal_name: str) -> bool:
+        literal_key = re.sub(r"[^a-z0-9]+", "", literal.casefold())
+        if not literal_key:
+            return False
+        parts = [
+            part.casefold()
+            for part in re.split(r"[_\W]+", signal_name)
+            if len(part) >= 4 and part.casefold() not in {"signal", "powercenter", "change"}
+        ]
+        return any(part in literal_key for part in parts)
+
+    def _signal_log_literal_from_source_line(self, line: str) -> str:
+        match = re.search(r"L\.[idwe]\([^,]+,\s*\"([^\"]+)\"", line)
+        if not match:
+            return ""
+        literal = match.group(1).strip()
+        literal = re.split(r"\$\{?|\{", literal, maxsplit=1)[0].strip()
+        return literal if len(literal) >= 4 else ""
+
+    def _unique_nonempty(self, values: list[object]) -> list[str]:
+        result: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            text = str(value).strip()
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            result.append(text)
+        return result
+
     def _signal_stage_label(self, item: dict[str, object]) -> str:
         label = str(item.get("label") or item.get("title") or "")
         text = str(item.get("text") or "")
@@ -4790,10 +6730,10 @@ class BugAnalysisRunner:
     ) -> list[dict[str, object]]:
         log_report = signal_payload.get("log_report", {}) if isinstance(signal_payload, dict) else {}
         stages = log_report.get("stages", {}) if isinstance(log_report, dict) else {}
-        datacenter_hits = self._signal_stage_hits(stages, "datacenter")
-        business_hits = self._signal_stage_hits(stages, "android_business")
-        vhal_hits = self._signal_stage_hits(stages, "vhal")
-        unity_hits = self._signal_stage_hits(stages, "unity_received")
+        datacenter_hits = self._signal_target_stage_hits(signal_payload, stages, "datacenter")
+        business_hits = self._signal_target_stage_hits(signal_payload, stages, "android_business")
+        vhal_hits = self._signal_target_stage_hits(signal_payload, stages, "vhal")
+        unity_hits = self._signal_target_stage_hits(signal_payload, stages, "unity_received")
         alignment = self._signal_fault_alignment(fault_time, focus_scope)
         issues = [
             {
@@ -4834,26 +6774,55 @@ class BugAnalysisRunner:
     def _signal_visible_scope_text(self, signal_payload: dict[str, object], focus_scope: dict[str, object]) -> str:
         log_report = signal_payload.get("log_report", {}) if isinstance(signal_payload, dict) else {}
         stages = log_report.get("stages", {}) if isinstance(log_report, dict) else {}
-        datacenter_hits = self._signal_stage_hits(stages, "datacenter")
-        business_hits = self._signal_stage_hits(stages, "android_business")
+        datacenter_hits = self._signal_target_stage_hits(signal_payload, stages, "datacenter")
+        business_hits = self._signal_target_stage_hits(signal_payload, stages, "android_business")
         package = str(focus_scope.get("package") or "目标进程")
         pid = str(focus_scope.get("pid") or "未识别")
         chain = self._signal_coverage_note(signal_payload, focus_scope)
         if datacenter_hits and business_hits:
-            return f"已看到 {package} / PID {pid} 内的 {chain}。"
+            return f"已看到 {package} / PID {pid} 内的目标信号 {chain}。"
         if datacenter_hits:
-            return f"已看到 {package} / PID {pid} 内进入 DataCenter，但业务消费证据不足。"
+            return f"目标信号已进入 DataCenter，但业务消费证据不足（{package} / PID {pid}）。"
         return "当前样本还没有锁定到目标进程内的有效链路。"
 
     def _signal_coverage_note(self, signal_payload: dict[str, object], focus_scope: dict[str, object]) -> str:
         log_report = signal_payload.get("log_report", {}) if isinstance(signal_payload, dict) else {}
         stages = log_report.get("stages", {}) if isinstance(log_report, dict) else {}
         parts = ["DataCenter"]
-        if self._signal_stage_hits(stages, "android_business"):
+        if self._signal_target_stage_hits(signal_payload, stages, "android_business"):
             parts.append("业务消费")
         if self._signal_has_receiver_like_evidence(signal_payload):
             parts.append("状态消费")
         return " -> ".join(parts)
+
+    def _signal_scoped_summary_text(self, signal_payload: dict[str, object]) -> str:
+        raw_summary = str(signal_payload.get("summary") or "").strip()
+        log_report = signal_payload.get("log_report", {}) if isinstance(signal_payload, dict) else {}
+        stages = log_report.get("stages", {}) if isinstance(log_report, dict) else {}
+        signal = signal_payload.get("signal", {}) if isinstance(signal_payload, dict) else {}
+        code = str(signal.get("code") or "").strip()
+        name = str(signal.get("name") or "").strip()
+        target = " ".join(part for part in (code, name) if part).strip() or "目标信号"
+        datacenter_hits = self._signal_target_stage_hits(signal_payload, stages, "datacenter")
+        business_hits = self._signal_target_stage_hits(signal_payload, stages, "android_business")
+        android_unity_hits = self._signal_target_stage_hits(signal_payload, stages, "android_unity")
+        unity_hits = self._signal_target_stage_hits(signal_payload, stages, "unity_received")
+        if not any((datacenter_hits, business_hits, android_unity_hits, unity_hits)):
+            return raw_summary
+        if datacenter_hits and not any((business_hits, android_unity_hits, unity_hits)):
+            return (
+                f"目标信号 {target} 当前仅看到 DataCenter 取流/订阅命中，"
+                "未看到目标信号业务消费、AndroidUnityProxy 或 Unity 接收证据；"
+                "其它 signal 的业务日志不计入本链路。"
+            )
+        reached = ["DataCenter"] if datacenter_hits else []
+        if business_hits:
+            reached.append("业务消费")
+        if android_unity_hits:
+            reached.append("AndroidUnityProxy")
+        if unity_hits:
+            reached.append("Unity 接收")
+        return f"目标信号 {target} 当前已命中 {' -> '.join(reached)}，仍需按证据边界确认未覆盖段。"
 
     def _signal_has_receiver_like_evidence(self, signal_payload: dict[str, object]) -> bool:
         refs = signal_payload.get("source_references", []) if isinstance(signal_payload, dict) else []
@@ -4866,6 +6835,8 @@ class BugAnalysisRunner:
             return False
         for example in stage.get("examples", []) or []:
             if not isinstance(example, dict):
+                continue
+            if not self._signal_item_matches_target(signal_payload, example):
                 continue
             label = self._signal_log_semantic_label(str(example.get("text") or ""))
             if label == "状态消费":
@@ -4982,6 +6953,25 @@ class BugAnalysisRunner:
         hits = stage.get("hits")
         return int(hits) if isinstance(hits, int) else 0
 
+    def _signal_target_stage_hits(self, signal_payload: dict[str, object], stages: object, stage_key: str) -> int:
+        if not isinstance(stages, dict):
+            return 0
+        stage = stages.get(stage_key)
+        if not isinstance(stage, dict):
+            return 0
+        signal = signal_payload.get("signal", {}) if isinstance(signal_payload, dict) else {}
+        code = str(signal.get("code") or "").strip()
+        codes = stage.get("codes")
+        if code and isinstance(codes, dict):
+            value = codes.get(code)
+            if isinstance(value, int):
+                return value
+        count = 0
+        for example in stage.get("examples", []) or []:
+            if isinstance(example, dict) and self._signal_item_matches_target(signal_payload, example):
+                count += 1
+        return count
+
     def _signal_source_rows(
         self,
         signal_payload: dict[str, object],
@@ -5000,7 +6990,7 @@ class BugAnalysisRunner:
                     self._signal_shorten(str(ref.get("text") or ""), 90),
                 )
             )
-        business_entry = self._signal_select_business_entry(source_evidence_path, prompt_text="")
+        business_entry = self._signal_select_business_entry(source_evidence_path, prompt_text="", signal_payload=signal_payload)
         if business_entry is not None:
             rows.append(
                 (
@@ -5011,10 +7001,24 @@ class BugAnalysisRunner:
             )
         return rows[:6]
 
-    def _signal_select_business_entry(self, source_evidence_path: Path | None, *, prompt_text: str) -> dict[str, str] | None:
+    def _signal_select_business_entry(
+        self,
+        source_evidence_path: Path | None,
+        *,
+        prompt_text: str,
+        signal_payload: dict[str, object] | None = None,
+    ) -> dict[str, str] | None:
         entries = self._parse_source_evidence_entries(source_evidence_path)
         if not entries:
             return None
+        if signal_payload:
+            target_entries = [entry for entry in entries if self._signal_business_entry_matches_target(entry, signal_payload)]
+            if target_entries:
+                entries = target_entries
+            else:
+                entries = [entry for entry in entries if self._signal_business_entry_is_meaningful_fallback(entry)]
+                if not entries:
+                    return None
         prompt_terms = self._signal_prompt_terms(prompt_text)
         priority_tokens = ("dispatcher", "action", "viewmodel", "receiver", "fragment", "service", "scene")
 
@@ -5035,6 +7039,34 @@ class BugAnalysisRunner:
             )
         ranked = sorted(entries, key=score, reverse=True)
         return ranked[0] if ranked else None
+
+    def _signal_business_entry_matches_target(self, entry: dict[str, str], signal_payload: dict[str, object]) -> bool:
+        signal = signal_payload.get("signal", {}) if isinstance(signal_payload, dict) else {}
+        signal_name = str(signal.get("name") or "").strip()
+        signal_code = str(signal.get("code") or "").strip()
+        haystack = f"{entry.get('file') or ''}\n{entry.get('text') or ''}"
+        lower_file = str(entry.get("file") or "").casefold()
+        if lower_file.endswith(".xml") or "/res/" in lower_file:
+            return False
+        if "module_proto" in lower_file or "module_datacenter" in lower_file:
+            return False
+        return bool((signal_name and signal_name in haystack) or (signal_code and re.search(rf"\b{re.escape(signal_code)}\b", haystack)))
+
+    def _signal_business_entry_is_meaningful_fallback(self, entry: dict[str, str]) -> bool:
+        file_text = str(entry.get("file") or "")
+        line_text = str(entry.get("text") or "")
+        lower_file = file_text.casefold()
+        lower_line = line_text.strip().casefold()
+        if lower_file.endswith(".xml") or "/res/" in lower_file:
+            return False
+        if "module_proto" in lower_file or "module_datacenter" in lower_file:
+            return False
+        if lower_line.startswith(("import ", "package ", "see ", "*", "//")):
+            return False
+        haystack = f"{lower_file}\n{lower_line}"
+        if not any(token in haystack for token in ("collector", "receiver", "viewmodel", "dispatcher", "service", "scene", "action", "judge", "flow")):
+            return False
+        return any(token in lower_line for token in ("signal", "state", "flow", "collect", "register", "update", "value", "invalid"))
 
     def _parse_source_evidence_entries(self, source_evidence_path: Path | None) -> list[dict[str, str]]:
         if source_evidence_path is None or not source_evidence_path.exists():
@@ -5107,6 +7139,12 @@ class BugAnalysisRunner:
 
     def _signal_package_from_path(self, path_text: str) -> str:
         match = re.search(r"/app/([^/]+)/", path_text)
+        if match:
+            return match.group(1)
+        match = re.search(r"_app_([A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+){2,})_", path_text)
+        if match:
+            return match.group(1)
+        match = re.search(r"/([A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+){2,})(?:/|$)", path_text)
         return match.group(1) if match else ""
 
     def _signal_pid_from_text(self, text: str) -> str:
@@ -5210,6 +7248,8 @@ class BugAnalysisRunner:
         provider_session_id: str = "",
         followup_text: str = "",
         previous_summary_path: Path | None = None,
+        prefer_lightweight: bool = False,
+        bridge_session_id: str = "",
     ) -> dict[str, object]:
         invocation = self._build_bug_agent_summary_command(
             request_text=request_text,
@@ -5230,18 +7270,40 @@ class BugAnalysisRunner:
                 "resumed": False,
                 "usage_scope": "",
             }
+        if prefer_lightweight:
+            omlx_result = self._run_bug_agent_summary_omlx_fallback(
+                request_text=request_text,
+                request_artifact=request_artifact,
+                metadata_path=metadata_path,
+                output_path=output_path,
+                followup_text=followup_text,
+                previous_summary_path=previous_summary_path,
+                progress_callback=progress_callback,
+                reason="lightweight_first",
+            )
+            if omlx_result["message"]:
+                return omlx_result
+            self._emit_progress(
+                progress_callback,
+                stage="bug_agent_summary_lightweight_unavailable",
+                message="轻量总结不可用，切换主 Agent 整理最终结论",
+                primary_provider=str(invocation["provider"] or ""),
+                lightweight_provider="omlx",
+                lightweight_error=str(omlx_result.get("error") or ""),
+            )
         result = self._run_bug_agent_summary_once(
             invocation=invocation,
             output_path=output_path,
             progress_callback=progress_callback,
             timeout=timeout,
+            bridge_session_id=bridge_session_id,
         )
         if result["message"] and result["provider"]:
             return result
         if result["message"]:
             return result
         fallback_result = result
-        if provider_session_id.strip():
+        if provider_session_id.strip() and str(result.get("error") or "") != "agent_summary_timeout":
             self._emit_progress(
                 progress_callback,
                 stage="bug_agent_summary_retry",
@@ -5264,9 +7326,24 @@ class BugAnalysisRunner:
                     output_path=output_path,
                     progress_callback=progress_callback,
                     timeout=timeout,
+                    bridge_session_id=bridge_session_id,
                 )
                 if fallback_result["message"] and fallback_result["provider"]:
                     return fallback_result
+        if str(fallback_result.get("error") or "") == "agent_summary_timeout":
+            omlx_result = self._run_bug_agent_summary_omlx_fallback(
+                request_text=request_text,
+                request_artifact=request_artifact,
+                metadata_path=metadata_path,
+                output_path=output_path,
+                followup_text=followup_text,
+                previous_summary_path=previous_summary_path,
+                progress_callback=progress_callback,
+                reason="primary_timeout",
+            )
+            if omlx_result["message"]:
+                return omlx_result
+            return fallback_result
         provider_fallback = self._build_bug_agent_summary_fallback_command(
             request_text=request_text,
             request_artifact=request_artifact,
@@ -5289,7 +7366,220 @@ class BugAnalysisRunner:
             output_path=output_path,
             progress_callback=progress_callback,
             timeout=timeout,
+            bridge_session_id=bridge_session_id,
         )
+
+    def _agent_summary_timeout(
+        self,
+        operation_timeout_seconds: int,
+        *,
+        reference_seconds: float | None = None,
+    ) -> int:
+        configured = int(getattr(self.config.bug_analysis, "agent_summary_timeout_seconds", 90) or 0)
+        operation_limit = max(1, min(int(operation_timeout_seconds or 0), 1800))
+        if configured <= 0:
+            base_timeout = operation_limit
+        else:
+            base_timeout = max(1, min(operation_limit, configured))
+        if not isinstance(reference_seconds, (int, float)) or reference_seconds <= 0:
+            return base_timeout
+        reference_timeout = int(math.ceil(float(reference_seconds) * 1.25))
+        return max(1, min(operation_limit, max(base_timeout, reference_timeout)))
+
+    def _agent_summary_timeout_reference(self, previous_session: dict[str, object] | None) -> float | None:
+        if not isinstance(previous_session, dict):
+            return None
+        candidates: list[float] = []
+        for value in (previous_session.get("duration_seconds"), previous_session.get("elapsed_seconds")):
+            if isinstance(value, (int, float)) and value > 0:
+                candidates.append(float(value))
+        details = previous_session.get("details")
+        if isinstance(details, dict):
+            for key in ("agent_summary_duration_seconds", "agent_summary_timeout_seconds"):
+                value = details.get(key)
+                if isinstance(value, (int, float)) and value > 0:
+                    candidates.append(float(value))
+        return max(candidates) if candidates else None
+
+    def _run_bug_agent_summary_omlx_fallback(
+        self,
+        *,
+        request_text: str,
+        request_artifact: Path,
+        metadata_path: Path,
+        output_path: Path,
+        followup_text: str = "",
+        previous_summary_path: Path | None = None,
+        progress_callback: Callable[[dict[str, object]], None] | None,
+        reason: str = "primary_timeout",
+    ) -> dict[str, object]:
+        options = self.config.omlx_chat
+        provider = "omlx"
+        command = ["omlx", options.model]
+        if self._bug_summary_referenced_context_files(metadata_path):
+            return {
+                "message": "",
+                "command": command,
+                "error": "omlx_file_context_unsupported",
+                "provider": provider,
+                "session_id": "",
+                "resumed": False,
+                "usage": {},
+                "usage_scope": "",
+            }
+        if not options.enabled:
+            return {
+                "message": "",
+                "command": command,
+                "error": "omlx_disabled",
+                "provider": provider,
+                "session_id": "",
+                "resumed": False,
+                "usage": {},
+                "usage_scope": "",
+            }
+        prompt = self._build_omlx_bug_summary_prompt(
+            request_text=request_text,
+            request_artifact=request_artifact,
+            metadata_path=metadata_path,
+            followup_text=followup_text,
+            previous_summary_path=previous_summary_path,
+        )
+        if not prompt.strip():
+            return {
+                "message": "",
+                "command": command,
+                "error": "omlx_prompt_empty",
+                "provider": provider,
+                "session_id": "",
+                "resumed": False,
+                "usage": {},
+                "usage_scope": "",
+            }
+        self._emit_progress(
+            progress_callback,
+            stage="bug_agent_summary_omlx" if reason == "lightweight_first" else "bug_agent_summary_omlx_fallback",
+            message=(
+                "本地 omlx 基于已生成报告/元数据整理最终结论"
+                if reason == "lightweight_first"
+                else "主 Agent 超时，改用本地 omlx 基于现有材料做轻量总结"
+            ),
+            provider=provider,
+            model=options.model,
+            reason=reason,
+        )
+        started = time.monotonic()
+        result = OmlxChatClient(self.config)._chat(
+            mode="bug_agent_summary_omlx",
+            system_prompt=(
+                "你是本地轻量 bug 总结模型。只能基于用户提供的现有 request、metadata、报告摘录和历史摘要回答；"
+                "不要声称读取了文件系统或源码；如果材料不足，要明确写出缺口。输出中文 Markdown，结论先行。"
+            ),
+            messages=[{"role": "user", "content": prompt}],
+        )
+        if result.success and result.message.strip():
+            message = result.message.strip()
+            try:
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_text(message, encoding="utf-8")
+            except OSError:
+                pass
+            return {
+                "message": message,
+                "command": command,
+                "error": "",
+                "provider": provider,
+                "session_id": "",
+                "resumed": False,
+                "duration_seconds": result.duration_seconds
+                if isinstance(result.duration_seconds, (int, float))
+                else time.monotonic() - started,
+                "usage": {},
+                "usage_scope": "",
+            }
+        return {
+            "message": "",
+            "command": command,
+            "error": result.error_code or result.message or "omlx_fallback_failed",
+            "provider": provider,
+            "session_id": "",
+            "resumed": False,
+            "duration_seconds": result.duration_seconds
+            if isinstance(result.duration_seconds, (int, float))
+            else time.monotonic() - started,
+            "usage": {},
+            "usage_scope": "",
+        }
+
+    def _build_omlx_bug_summary_prompt(
+        self,
+        *,
+        request_text: str,
+        request_artifact: Path,
+        metadata_path: Path,
+        followup_text: str = "",
+        previous_summary_path: Path | None = None,
+    ) -> str:
+        budget = max(500, int(getattr(self.config.omlx_chat, "max_prompt_chars", 2000) or 2000))
+        sections = [
+            "请基于以下已生成材料给出轻量 bug 总结。不要编造未提供的日志/源码证据。",
+            "输出结构：## 结论摘要、## 关键证据、## 最可能原因、## 待确认项、## 建议动作。",
+            self._omlx_prompt_section("用户请求", request_text, 420),
+            self._omlx_prompt_section("本次追问", followup_text, 240),
+            self._omlx_prompt_section("请求文件摘录", self._read_text_excerpt(request_artifact, 500), 500),
+            self._omlx_prompt_section("元数据摘录", self._read_text_excerpt(metadata_path, 900), 900),
+        ]
+        if previous_summary_path is not None:
+            sections.append(
+                self._omlx_prompt_section("上一轮摘要摘录", self._read_text_excerpt(previous_summary_path, 700), 700)
+            )
+        for item in self._bug_summary_referenced_context_files(metadata_path)[:4]:
+            sections.append(
+                self._omlx_prompt_section(
+                    str(item["title"]),
+                    f"本地路径: {item['path']}\n轻量模型不能读取本地文件；需要读取该文件时必须切换 Codex/Claude Agent。",
+                    500,
+                )
+            )
+        prompt = "\n\n".join(section for section in sections if section.strip()).strip()
+        if len(prompt) > budget:
+            prompt = prompt[: budget - 1].rstrip() + "…"
+        return prompt
+
+    def _omlx_prompt_section(self, title: str, text: str, max_chars: int) -> str:
+        body = (text or "").strip()
+        if not body:
+            return ""
+        if len(body) > max_chars:
+            body = body[: max_chars - 1].rstrip() + "…"
+        return f"### {title}\n{body}"
+
+    def _read_text_excerpt(self, path: Path, max_chars: int) -> str:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return ""
+        text = text.strip()
+        if len(text) > max_chars:
+            text = text[: max_chars - 1].rstrip() + "…"
+        return text
+
+    def _path_mtime(self, path: Path) -> float | None:
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            return None
+
+    def _read_fresh_agent_summary_message(self, output_path: Path, *, previous_mtime: float | None) -> str:
+        current_mtime = self._path_mtime(output_path)
+        if current_mtime is None:
+            return ""
+        if previous_mtime is not None and current_mtime <= previous_mtime:
+            return ""
+        try:
+            return output_path.read_text(encoding="utf-8").strip()
+        except OSError:
+            return ""
 
     def _run_bug_agent_summary_once(
         self,
@@ -5298,33 +7588,111 @@ class BugAnalysisRunner:
         output_path: Path,
         progress_callback: Callable[[dict[str, object]], None] | None,
         timeout: int,
+        bridge_session_id: str = "",
     ) -> dict[str, object]:
         command = list(invocation["command"])
         provider = str(invocation["provider"] or "")
         session_id = str(invocation.get("session_id") or "")
         resumed = bool(invocation.get("resumed"))
         started = time.monotonic()
+        previous_output_mtime = self._path_mtime(output_path)
+        prompt_file, context_file = self._write_bug_agent_summary_audit(invocation, output_path)
         self._emit_progress(
             progress_callback,
             stage="bug_agent_summary",
-            message="调用本地 Agent 继续整理最终结论" if resumed else "调用本地 Agent 整理最终结论",
+            message=(
+                "深度分析中：调用本地 Agent 继续整理最终结论"
+                if resumed and provider == "codex"
+                else "深度分析中：调用本地 Agent 整理最终结论"
+                if provider == "codex"
+                else "调用本地 Agent 继续整理最终结论"
+                if resumed
+                else "调用本地 Agent 整理最终结论"
+            ),
             output_path=str(output_path),
             provider=provider,
             resumed=resumed,
             provider_session_id=session_id,
+            timeout_seconds=timeout,
         )
         try:
-            completed = run_tracked_process(
-                command,
-                watchdog=self.process_watchdog,
-                name=f"bug-agent-summary-{provider or 'agent'}",
-                cwd=self._working_dir(),
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                check=False,
+            if provider == "codex" and progress_callback is not None:
+                completed = self._run_bug_agent_summary_streaming_process(
+                    command=command,
+                    provider=provider,
+                    progress_callback=progress_callback,
+                    timeout=timeout,
+                    bridge_session_id=bridge_session_id,
+                )
+            else:
+                completed = run_tracked_process(
+                    command,
+                    watchdog=self.process_watchdog,
+                    name=f"bug-agent-summary-{provider or 'agent'}",
+                    cwd=self._working_dir(),
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    check=False,
+                    session_id=bridge_session_id,
+                )
+        except subprocess.TimeoutExpired as exc:
+            fresh_message = self._read_fresh_agent_summary_message(output_path, previous_mtime=previous_output_mtime)
+            if fresh_message:
+                self._emit_progress(
+                    progress_callback,
+                    stage="bug_agent_summary_completed",
+                    message=f"本地 Agent 静默超过 {timeout} 秒但已写出总结，直接采用已生成结果",
+                    provider=provider,
+                    output_path=str(output_path),
+                    resumed=resumed,
+                    provider_session_id=session_id,
+                )
+                usage, usage_scope = self._extract_bug_agent_usage(
+                    provider,
+                    str(getattr(exc, "output", "") or ""),
+                    str(getattr(exc, "stderr", "") or ""),
+                )
+                return {
+                    "message": fresh_message,
+                    "command": command,
+                    "error": "",
+                    "provider": provider,
+                    "session_id": session_id,
+                    "resumed": resumed,
+                    "duration_seconds": time.monotonic() - started,
+                    "usage": usage,
+                    "usage_scope": usage_scope,
+                    "prompt_file": str(prompt_file) if prompt_file is not None else "",
+                    "context_file": str(context_file) if context_file is not None else "",
+                    "timeout_seconds": timeout,
+                    "timed_out": True,
+                }
+            self._emit_progress(
+                progress_callback,
+                stage="bug_agent_summary_timeout",
+                message=f"本地 Agent 静默超过 {timeout} 秒，准备切换轻量总结",
+                provider=provider,
+                resumed=resumed,
+                provider_session_id=session_id,
             )
-        except (subprocess.TimeoutExpired, OSError) as exc:
+            return {
+                "message": "",
+                "command": command,
+                "error": "agent_summary_timeout",
+                "provider": provider,
+                "session_id": session_id,
+                "resumed": resumed,
+                "duration_seconds": time.monotonic() - started,
+                "usage": {},
+                "usage_scope": "",
+                "prompt_file": str(prompt_file) if prompt_file is not None else "",
+                "context_file": str(context_file) if context_file is not None else "",
+                "timeout_seconds": timeout,
+                "timed_out": True,
+                "stderr": str(exc),
+            }
+        except OSError as exc:
             self._emit_progress(
                 progress_callback,
                 stage="bug_agent_summary_failed",
@@ -5343,6 +7711,9 @@ class BugAnalysisRunner:
                 "duration_seconds": time.monotonic() - started,
                 "usage": {},
                 "usage_scope": "",
+                "prompt_file": str(prompt_file) if prompt_file is not None else "",
+                "context_file": str(context_file) if context_file is not None else "",
+                "timeout_seconds": timeout,
             }
         if completed.returncode != 0:
             error = completed.stderr.strip() or completed.stdout.strip() or f"returncode={completed.returncode}"
@@ -5364,6 +7735,8 @@ class BugAnalysisRunner:
                 "duration_seconds": time.monotonic() - started,
                 "usage": {},
                 "usage_scope": "",
+                "prompt_file": str(prompt_file) if prompt_file is not None else "",
+                "context_file": str(context_file) if context_file is not None else "",
             }
         if output_path.exists():
             message = output_path.read_text(encoding="utf-8").strip()
@@ -5384,6 +7757,8 @@ class BugAnalysisRunner:
                         "duration_seconds": time.monotonic() - started,
                         "usage": {},
                         "usage_scope": "",
+                        "prompt_file": str(prompt_file) if prompt_file is not None else "",
+                        "context_file": str(context_file) if context_file is not None else "",
                     }
         if not message:
             return {
@@ -5396,6 +7771,8 @@ class BugAnalysisRunner:
                 "duration_seconds": time.monotonic() - started,
                 "usage": {},
                 "usage_scope": "",
+                "prompt_file": str(prompt_file) if prompt_file is not None else "",
+                "context_file": str(context_file) if context_file is not None else "",
             }
         resolved_session_id = self._extract_bug_agent_session_id(provider, completed.stdout, fallback=session_id)
         usage, usage_scope = self._extract_bug_agent_usage(provider, completed.stdout, completed.stderr)
@@ -5418,7 +7795,256 @@ class BugAnalysisRunner:
             "duration_seconds": time.monotonic() - started,
             "usage": usage,
             "usage_scope": usage_scope,
+            "prompt_file": str(prompt_file) if prompt_file is not None else "",
+            "context_file": str(context_file) if context_file is not None else "",
         }
+
+    def _run_bug_agent_summary_streaming_process(
+        self,
+        *,
+        command: list[str],
+        provider: str,
+        progress_callback: Callable[[dict[str, object]], None],
+        timeout: int,
+        bridge_session_id: str = "",
+    ) -> subprocess.CompletedProcess[str]:
+        kwargs: dict[str, object] = {
+            "cwd": self._working_dir(),
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "text": True,
+        }
+        if sys.platform != "win32":
+            kwargs["start_new_session"] = True
+        process = subprocess.Popen(command, **kwargs)
+        if self.process_watchdog is not None:
+            self.process_watchdog.track(
+                process.pid,
+                f"bug-agent-summary-{provider or 'agent'}",
+                max_idle_seconds=timeout,
+                session_id=bridge_session_id,
+            )
+        started = time.monotonic()
+        last_activity = started
+        last_heartbeat = started
+        stdout_parts: list[str] = []
+        stderr_parts: list[str] = []
+        try:
+            assert process.stdout is not None
+            assert process.stderr is not None
+            streams = [process.stdout, process.stderr]
+            while True:
+                now = time.monotonic()
+                if timeout and now - last_activity > timeout:
+                    _safe_terminate(process.pid)
+                    try:
+                        stdout, stderr = process.communicate(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        _safe_terminate(process.pid, sig=signal.SIGKILL)
+                        stdout, stderr = process.communicate()
+                    if stdout:
+                        stdout_parts.append(stdout)
+                    if stderr:
+                        stderr_parts.append(stderr)
+                    raise subprocess.TimeoutExpired(
+                        command,
+                        timeout,
+                        output="".join(stdout_parts),
+                        stderr="".join(stderr_parts),
+                    )
+
+                if streams:
+                    readable, _, _ = select.select(streams, [], [], 1.0)
+                else:
+                    if process.poll() is not None:
+                        break
+                    time.sleep(1.0)
+                    readable = []
+                if readable:
+                    for stream in readable:
+                        line = stream.readline()
+                        if line:
+                            if stream is process.stdout:
+                                stdout_parts.append(line)
+                                self._emit_agent_summary_stream_progress(
+                                    progress_callback,
+                                    provider=provider,
+                                    line=line,
+                                    elapsed_seconds=time.monotonic() - started,
+                                )
+                            else:
+                                stderr_parts.append(line)
+                            last_activity = time.monotonic()
+                            if self.process_watchdog is not None:
+                                self.process_watchdog.record_activity(process.pid)
+                        elif stream in streams:
+                            streams.remove(stream)
+                elif process.poll() is not None:
+                    break
+                if process.poll() is not None and not streams:
+                    break
+
+                now = time.monotonic()
+                if now - last_heartbeat >= 15:
+                    last_heartbeat = now
+                    idle_seconds = int(now - last_activity)
+                    self._emit_progress(
+                        progress_callback,
+                        stage="bug_agent_summary_stream",
+                        message=f"深度分析中，已运行 {int(now - started)} 秒，距离上次 Agent 输出 {idle_seconds} 秒",
+                        provider=provider,
+                        stream_preview=f"等待 Agent 输出... idle={idle_seconds}s total={int(now - started)}s",
+                    )
+
+            remaining_stdout, stderr = process.communicate(timeout=2)
+            if remaining_stdout:
+                stdout_parts.append(remaining_stdout)
+            if stderr:
+                stderr_parts.append(stderr)
+            return subprocess.CompletedProcess(command, process.returncode, "".join(stdout_parts), "".join(stderr_parts))
+        finally:
+            if self.process_watchdog is not None:
+                self.process_watchdog.untrack(process.pid)
+
+    def _emit_agent_summary_stream_progress(
+        self,
+        progress_callback: Callable[[dict[str, object]], None],
+        *,
+        provider: str,
+        line: str,
+        elapsed_seconds: float,
+    ) -> None:
+        preview = self._codex_stream_preview(line)
+        if not preview:
+            return
+        self._emit_progress(
+            progress_callback,
+            stage="bug_agent_summary_stream",
+            message=f"深度分析输出更新：{preview}",
+            provider=provider,
+            elapsed_seconds=round(elapsed_seconds, 1),
+            stream_preview=preview,
+        )
+
+    def _codex_stream_preview(self, line: str) -> str:
+        raw = line.strip()
+        if not raw:
+            return ""
+        try:
+            event = json.loads(raw)
+        except json.JSONDecodeError:
+            return raw[:240]
+        event_type = str(event.get("type") or "").strip()
+        if event_type == "thread.started":
+            thread_id = str(event.get("thread_id") or "").strip()
+            return f"Codex 会话已创建 {thread_id}" if thread_id else "Codex 会话已创建"
+        if event_type == "turn.started":
+            return "Codex 已开始深度分析"
+        if event_type == "turn.completed":
+            usage = event.get("usage")
+            if isinstance(usage, dict):
+                total = usage.get("total_tokens")
+                if total is None:
+                    total = sum(value for value in usage.values() if isinstance(value, int))
+                return f"Codex 深度分析完成，token≈{total}" if total else "Codex 深度分析完成"
+            return "Codex 深度分析完成"
+        if event_type in {"item.started", "item.updated", "item.completed"}:
+            item = event.get("item")
+            if isinstance(item, dict):
+                preview = self._codex_item_preview(item, event_type=event_type)
+                if preview:
+                    return preview
+            return "" if event_type == "item.completed" else "Codex 工具调用更新"
+        return f"{event_type}: {raw[:220]}" if event_type else raw[:240]
+
+    def _codex_item_preview(self, item: dict[str, object], *, event_type: str) -> str:
+        item_type = str(item.get("type") or "").strip()
+        if item_type == "command_execution":
+            command = str(item.get("command") or "").strip()
+            if event_type == "item.completed":
+                return ""
+            if command:
+                return f"工具调用：执行命令 {self._compact_tool_preview(self._unwrap_shell_command(command), 200)}"
+            return "工具调用：执行命令"
+        if item_type in {"error", "error_message"}:
+            message = str(item.get("message") or item.get("text") or item.get("error") or "").strip()
+            message = self._compact_tool_preview(message, 180)
+            return f"Agent 错误：{message}" if message else ""
+        if item_type in {"tool_call", "function_call"}:
+            name = str(
+                item.get("name")
+                or item.get("tool_name")
+                or item.get("function_name")
+                or item.get("recipient_name")
+                or ""
+            ).strip()
+            args = item.get("arguments")
+            if args is None:
+                args = item.get("input")
+            if args is None:
+                args = item.get("parameters")
+            args_text = self._compact_tool_preview(args, 120)
+            label = "工具调用" if event_type == "item.started" else "工具调用更新"
+            if name and args_text:
+                return f"{label}：{name} {args_text}"
+            if name:
+                return f"{label}：{name}"
+            return label
+        text = str(item.get("text") or item.get("name") or "").strip()
+        text = re.sub(r"\s+", " ", text)
+        if text:
+            return f"{item_type or 'item'}: {text[:240]}"
+        if event_type == "item.completed":
+            return ""
+        return f"开始处理 {item_type}" if item_type else ""
+
+    def _unwrap_shell_command(self, command: str) -> str:
+        text = " ".join(command.replace("\\n", " ").split())
+        try:
+            parts = shlex.split(text)
+        except ValueError:
+            parts = []
+        if len(parts) >= 3 and parts[0] in {"/bin/zsh", "/bin/bash", "zsh", "bash"} and parts[1] == "-lc":
+            return " ".join(parts[2:]).strip()
+        return text
+
+    def _compact_tool_preview(self, value: object, max_chars: int) -> str:
+        if isinstance(value, (dict, list)):
+            text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        else:
+            text = str(value or "")
+        text = " ".join(text.replace("\\n", " ").split())
+        if len(text) > max_chars:
+            return text[: max_chars - 1].rstrip() + "…"
+        return text
+
+    def _write_bug_agent_summary_audit(
+        self,
+        invocation: dict[str, object],
+        output_path: Path,
+    ) -> tuple[Path | None, Path | None]:
+        prompt = str(invocation.get("prompt") or "")
+        embedded_files = invocation.get("embedded_files")
+        if not isinstance(embedded_files, list):
+            embedded_files = []
+        try:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            prompt_file = output_path.parent / "bug_agent_summary_prompt.md"
+            context_file = output_path.parent / "bug_agent_summary_context.json"
+            prompt_file.write_text(prompt, encoding="utf-8")
+            manifest = {
+                "provider": str(invocation.get("provider") or ""),
+                "resumed": bool(invocation.get("resumed")),
+                "session_id": str(invocation.get("session_id") or ""),
+                "output_path": str(output_path),
+                "prompt_file": str(prompt_file),
+                "prompt_chars": len(prompt),
+                "embedded_files": self._embedded_file_manifest(embedded_files),
+            }
+            context_file.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+            return prompt_file, context_file
+        except OSError:
+            return None, None
 
     def _extract_bug_agent_session_id(self, provider: str, output: str, *, fallback: str = "") -> str:
         if fallback.strip():
@@ -5606,6 +8232,14 @@ class BugAnalysisRunner:
             details["agent_summary_resumed"] = True
         if agent_summary_result.get("usage_scope"):
             details["agent_summary_usage_scope"] = str(agent_summary_result["usage_scope"])
+        if agent_summary_result.get("prompt_file"):
+            details["agent_summary_prompt_file"] = str(agent_summary_result["prompt_file"])
+        if agent_summary_result.get("context_file"):
+            details["agent_summary_context_file"] = str(agent_summary_result["context_file"])
+        if agent_summary_result.get("timeout_seconds"):
+            details["agent_summary_timeout_seconds"] = agent_summary_result["timeout_seconds"]
+        if agent_summary_result.get("timed_out"):
+            details["agent_summary_timed_out"] = True
         duration = agent_summary_result.get("duration_seconds")
         if isinstance(duration, (int, float)):
             details["agent_summary_duration_seconds"] = float(duration)
@@ -5649,6 +8283,14 @@ class BugAnalysisRunner:
                 )
         if isinstance(duration, (int, float)):
             lines.append(f"- Agent 耗时: `{float(duration):.1f} 秒`")
+        if agent_summary_result.get("timeout_seconds"):
+            lines.append(f"- Agent 总结超时: `{agent_summary_result['timeout_seconds']} 秒`")
+        if agent_summary_result.get("timed_out") and agent_summary_result.get("message"):
+            lines.append("- 超时处理: `已采用 Agent 写出的总结文件，未再切换重型备用 Agent`")
+        if agent_summary_result.get("prompt_file"):
+            lines.append(f"- Agent Prompt: `{agent_summary_result['prompt_file']}`")
+        if agent_summary_result.get("context_file"):
+            lines.append(f"- Agent 输入清单: `{agent_summary_result['context_file']}`")
         lines.append(f"- 总耗时: `{total_duration_seconds:.1f} 秒`")
         try:
             original = metadata_path.read_text(encoding="utf-8")
@@ -5679,10 +8321,47 @@ class BugAnalysisRunner:
         ]
         metadata_path.write_text(original.rstrip() + "\n" + "\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
+    def _append_evidence_log_metadata(self, metadata_path: Path, evidence_log_bundle: dict[str, object] | None) -> None:
+        if not evidence_log_bundle:
+            return
+        try:
+            original = metadata_path.read_text(encoding="utf-8")
+        except OSError:
+            original = ""
+        focus_logs = evidence_log_bundle.get("focus_logs")
+        if isinstance(focus_logs, list) and focus_logs:
+            focus_text = ", ".join(str(item) for item in focus_logs)
+        else:
+            focus_text = "未识别"
+        lines = [
+            "",
+            "## 证据日志保留包",
+            "",
+            f"- 目录: `{evidence_log_bundle.get('bundle_dir') or ''}`",
+            f"- 清单: `{evidence_log_bundle.get('manifest_path') or ''}`",
+            f"- 命中日志: `{focus_text}`",
+            f"- 文件数: `{evidence_log_bundle.get('file_count') or 0}`",
+        ]
+        metadata_path.write_text(original.rstrip() + "\n" + "\n".join(lines).rstrip() + "\n", encoding="utf-8")
+
     def _should_collect_source_evidence(self, *texts: str) -> bool:
         source_terms = ("源码", "源代码", "根据源码", "基于源码", "信号定义", "链路")
         merged = "\n".join(texts).casefold()
         return any(term.casefold() in merged for term in source_terms)
+
+    def _should_prefer_lightweight_bug_summary(
+        self,
+        *,
+        request_text: str,
+        followup_text: str,
+        provider_session_id: str,
+    ) -> bool:
+        if provider_session_id.strip():
+            return False
+        # Bug summaries must be produced by a file-capable agent. The lightweight
+        # local chat model cannot read report/log paths and has previously turned
+        # truncated HTML/CSS excerpts into false "信息不足" conclusions.
+        return False
 
     def _annotate_html_reports(
         self,
@@ -5909,10 +8588,44 @@ class BugAnalysisRunner:
             "不能",
             "开启",
         )
+        ascii_stopwords = {
+            "http",
+            "https",
+            "project",
+            "feishu",
+            "meegle",
+            "buglo",
+            "detail",
+            "cli",
+            "bug",
+            "code",
+            "html",
+            "report",
+        }
+        search_text = re.sub(r"https?://\S+", " ", text or "")
         terms: list[str] = []
+        for match in re.finditer(r"(?<![A-Za-z0-9_])([A-Za-z][A-Za-z0-9_]{1,16}[\u4e00-\u9fff]{1,8})", search_text):
+            term = match.group(1)
+            self._append_unique(terms, term)
+            ascii_part = re.match(r"[A-Za-z][A-Za-z0-9_]{1,16}", term)
+            if ascii_part:
+                token = ascii_part.group(0)
+                chinese_part = term[len(token) :]
+                for suffix in suffixes:
+                    suffix_index = chinese_part.find(suffix)
+                    if suffix_index >= 0:
+                        compact = token + chinese_part[: suffix_index + len(suffix)]
+                        if compact != term:
+                            self._append_unique(terms, compact)
+                if token.casefold() not in ascii_stopwords:
+                    self._append_unique(terms, token)
+        for match in re.finditer(r"(?<![A-Za-z0-9_])([A-Za-z][A-Za-z0-9_]{2,31})(?![A-Za-z0-9_])", search_text):
+            token = match.group(1)
+            if token.casefold() not in ascii_stopwords and not token.isdigit():
+                self._append_unique(terms, token)
         for suffix in suffixes:
             pattern = re.compile(rf"[\u4e00-\u9fff]{{2,14}}{re.escape(suffix)}")
-            for match in pattern.finditer(text):
+            for match in pattern.finditer(search_text):
                 term = match.group(0)
                 changed = True
                 while changed:
@@ -5943,6 +8656,7 @@ class BugAnalysisRunner:
             "--no-heading",
             "--color",
             "never",
+            "--ignore-case",
             "--max-count",
             "3",
             "--glob",
@@ -6103,7 +8817,7 @@ class BugAnalysisRunner:
             "优先复用已经下载/解密/分析过的日志与报告，不要重新要求用户上传材料。\n\n"
             f"- 本次追问:\n\n```text\n{followup_text}\n```\n"
             f"- 上一轮摘要:\n\n```text\n{summary_text or '无'}\n```\n"
-            f"- 上一轮报告摘录:\n\n```text\n{report_excerpt or '无'}\n```\n"
+            "- 上一轮报告摘录: 不在请求文件中嵌入正文；请从 metadata 中列出的本地报告路径读取。\n"
             "- 最近对话历史:\n"
             f"{history_block}\n"
             "- 用户原始请求:\n\n```text\n"
@@ -6257,6 +8971,12 @@ class BugAnalysisRunner:
             followup_text=followup_text,
             previous_summary_path=previous_summary_path,
         )
+        embedded_files = self._bug_agent_summary_context_files(
+            followup_text=followup_text,
+            request_artifact=request_artifact,
+            metadata_path=metadata_path,
+            previous_summary_path=previous_summary_path,
+        )
         session_id = provider_session_id.strip()
         if provider == "codex":
             if session_id:
@@ -6290,6 +9010,8 @@ class BugAnalysisRunner:
                 "provider": provider,
                 "session_id": session_id,
                 "resumed": bool(session_id),
+                "prompt": prompt,
+                "embedded_files": embedded_files,
             }
         if provider in {"claude", "claude-code", "claude_code"}:
             allowed_tools = self.config.claude_agent.allowed_tools or ["Read", "Grep", "Glob", "LS"]
@@ -6322,8 +9044,10 @@ class BugAnalysisRunner:
                 "provider": provider,
                 "session_id": session_id,
                 "resumed": bool(provider_session_id.strip()),
+                "prompt": prompt,
+                "embedded_files": embedded_files,
             }
-        return {"command": [], "provider": provider, "session_id": session_id, "resumed": False}
+        return {"command": [], "provider": provider, "session_id": session_id, "resumed": False, "prompt": prompt, "embedded_files": embedded_files}
 
     def _build_bug_agent_summary_fallback_command(
         self,
@@ -6374,7 +9098,7 @@ class BugAnalysisRunner:
                 "1. 本次是全新 bug 分析请求，不是续聊/修正；不要虚构“上一轮分析”“本次修正”“延续上一轮”这类诉求或标题。\n"
                 "2. 必须完整覆盖用户原始请求里的所有诉求，不要只回答其中一部分。\n"
                 "3. 只读分析，不修改任何文件。\n"
-                "4. 输出中文 Markdown，结论先行，随后按“诉求 -> 结论 -> 证据”组织；诉求标题只能来自用户原始请求，不要自行添加不存在的诉求。\n"
+                "4. 输出中文 Markdown，结论先行；若有多个诉求，按诉求分组说明结论和证据；若只有一个诉求，只在开头说明一次，不要在每条结论或证据前重复写相同的诉求。诉求标题只能来自用户原始请求，不要自行添加不存在的诉求。\n"
                 "5. 如果脚本结果无法覆盖用户某个诉求，要明确指出缺口。\n"
                 "6. metadata 中的“本轮脚本初步摘要”只是当前自动脚本输出，不要把它写成“上一轮结论”；只有显式提供 followup/previous summary 时，才能讨论修正上一轮结论。\n"
                 "7. 如果 metadata 或报告里已经明确给出故障时间对应的主会话 / 主 PID / focus session，请优先围绕该主会话分析，不要展开无关会话；只有在需要证明时间不匹配时才提及其他会话。\n\n"
@@ -6399,24 +9123,154 @@ class BugAnalysisRunner:
             "可读取路径：\n"
             f"- 工作区根目录：{self._working_dir()}\n"
             f"- 业务源码根目录：{self.config.guideengine_repo}\n\n"
-            "以下是首批本地文件内容。你可以继续只读读取上述目录下与当前问题直接相关的源码、日志和报告，"
-            "但不要修改文件，不要编造未看到的证据：\n\n"
+            "以下是首批本地文件入口。请按需读取这些本地文件，优先读取 JSON/Markdown 结构化产物；"
+            "HTML 只作为可视化报告入口，不要把 CSS/style/script 当作分析证据。"
+            "只读分析，不修改文件，不要编造未看到的证据：\n\n"
         )
         if followup_text.strip():
             prompt += (
                 "续聊性能约束：优先根据下面的精简上下文回答。"
                 "只有精简上下文无法证明时，才读取 metadata 中列出的报告、日志或源码路径。\n\n"
             )
-            if previous_summary_path is not None:
-                prompt += self._render_embedded_file(previous_summary_path, title="上一轮 Agent 总结", max_chars=2500)
-            prompt += self._render_embedded_file(request_artifact, title="Bug Agent Follow-up Request", max_chars=3500)
-            prompt += self._render_embedded_file(metadata_path, title="Bug Follow-up Metadata", max_chars=3500)
+            for item in self._bug_agent_summary_context_files(
+                followup_text=followup_text,
+                request_artifact=request_artifact,
+                metadata_path=metadata_path,
+                previous_summary_path=previous_summary_path,
+            ):
+                prompt += self._render_bug_summary_context_item(item)
         else:
-            if previous_summary_path is not None:
-                prompt += self._render_embedded_file(previous_summary_path, title="上一轮 Agent 总结")
-            prompt += self._render_embedded_file(request_artifact, title="Bug Agent Request")
-            prompt += self._render_embedded_file(metadata_path, title="Bug Metadata")
+            for item in self._bug_agent_summary_context_files(
+                followup_text=followup_text,
+                request_artifact=request_artifact,
+                metadata_path=metadata_path,
+                previous_summary_path=previous_summary_path,
+            ):
+                prompt += self._render_bug_summary_context_item(item)
         return prompt
+
+    def _bug_agent_summary_context_files(
+        self,
+        *,
+        followup_text: str = "",
+        request_artifact: Path,
+        metadata_path: Path,
+        previous_summary_path: Path | None = None,
+    ) -> list[dict[str, object]]:
+        files: list[dict[str, object]] = []
+        if followup_text.strip():
+            if previous_summary_path is not None:
+                files.append({"title": "上一轮 Agent 总结", "path": str(previous_summary_path), "max_chars": 0})
+            files.append({"title": "Bug Agent Follow-up Request", "path": str(request_artifact), "max_chars": 0})
+            files.append({"title": "Bug Follow-up Metadata", "path": str(metadata_path), "max_chars": 0})
+            files.extend(self._bug_summary_referenced_context_files(metadata_path))
+            return files
+        if previous_summary_path is not None:
+            files.append({"title": "上一轮 Agent 总结", "path": str(previous_summary_path), "max_chars": 0})
+        files.append({"title": "Bug Agent Request", "path": str(request_artifact), "max_chars": 0})
+        files.append({"title": "Bug Metadata", "path": str(metadata_path), "max_chars": 0})
+        files.extend(self._bug_summary_referenced_context_files(metadata_path))
+        return files
+
+    def _bug_summary_referenced_context_files(self, metadata_path: Path) -> list[dict[str, object]]:
+        try:
+            metadata_text = metadata_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return []
+        metadata_resolved = metadata_path.expanduser().resolve()
+        candidates: list[tuple[int, int, dict[str, object]]] = []
+        seen: set[Path] = {metadata_resolved}
+        raw_paths: list[tuple[int, str]] = []
+        for index, raw in enumerate(re.findall(r"`([^`]+)`", metadata_text)):
+            if re.match(r"^(?:/|~/)", raw.strip()):
+                raw_paths.append((index, raw))
+        offset = len(raw_paths)
+        for index, raw in enumerate(re.findall(r"((?:/|~/)[^\s`]+?\.(?:md|json|html))", metadata_text)):
+            raw_paths.append((offset + index, raw))
+        for index, raw in raw_paths:
+            path_text = raw.strip().rstrip(".,;:)）]}>，。；")
+            path = Path(path_text).expanduser()
+            if path.suffix.lower() not in {".md", ".json", ".html"}:
+                continue
+            if not path.exists() or not path.is_file():
+                continue
+            resolved = path.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            title, priority, max_chars = self._bug_summary_context_file_profile(path)
+            if not title:
+                continue
+            candidates.append(
+                (
+                    priority,
+                    index,
+                    {
+                        "title": title,
+                        "path": str(path),
+                        "max_chars": max_chars,
+                    },
+                )
+            )
+        return [item for _priority, _index, item in sorted(candidates, key=lambda value: (value[0], value[1]))[:5]]
+
+    def _bug_summary_context_file_profile(self, path: Path) -> tuple[str, int, int]:
+        name = path.name
+        lowered = name.casefold()
+        if lowered == "bug_source_evidence.md":
+            return "Bug Source Evidence", 0, 0
+        if lowered.endswith(".json") and "_report" in lowered:
+            return f"Report JSON: {name}", 1, 0
+        if lowered.endswith(".html") and "_report" in lowered:
+            return f"Report HTML: {name}", 2, 0
+        return "", 9, 0
+
+    def _render_bug_summary_context_item(self, item: dict[str, object]) -> str:
+        title = str(item.get("title") or "Context File")
+        path = Path(str(item.get("path") or ""))
+        lowered = path.name.casefold()
+        if lowered.endswith(".json") and "_report" in lowered:
+            note = "结构化分析结果，必须优先读取，用于结论、时间窗、PID、证据行号。"
+        elif lowered.endswith(".html") and "_report" in lowered:
+            note = "可视化 HTML 报告；只有 JSON/Markdown 不足时再读取，读取时忽略 CSS/style/script。"
+        elif lowered == "bug_source_evidence.md":
+            note = "源码证据文件；需要源码链路时读取。"
+        elif "metadata" in lowered:
+            note = "元数据索引文件；先读取它获取日志、报告、output 目录、主 PID 和故障时间等入口。"
+        elif "request" in lowered:
+            note = "用户请求文件；读取它确认原始诉求和本轮追问边界。"
+        else:
+            note = "本地上下文文件；按需读取。"
+        return (
+            f"## {title}\n"
+            f"路径: `{path}`\n"
+            f"读取要求: {note}\n\n"
+        )
+
+    def _embedded_file_manifest(self, embedded_files: list[object]) -> list[dict[str, object]]:
+        manifest: list[dict[str, object]] = []
+        for item in embedded_files:
+            if not isinstance(item, dict):
+                continue
+            path = Path(str(item.get("path") or ""))
+            max_chars = int(item.get("max_chars") or 0)
+            entry: dict[str, object] = {
+                "title": str(item.get("title") or ""),
+                "path": str(path),
+                "max_chars": max_chars,
+                "exists": path.exists(),
+            }
+            if path.exists():
+                try:
+                    content = path.read_text(encoding="utf-8")
+                    stripped = content.strip()
+                    entry["source_chars"] = len(stripped)
+                    entry["embedded_chars"] = min(len(stripped), max_chars) if max_chars > 0 else 0
+                    entry["truncated"] = max_chars > 0 and len(stripped) > max_chars
+                except OSError as exc:
+                    entry["read_error"] = str(exc)
+            manifest.append(entry)
+        return manifest
 
     def _bug_summary_add_dirs(self) -> list[Path]:
         candidates = [self._working_dir(), self.config.guideengine_repo, *self.config.claude_agent.add_dirs]
@@ -6445,6 +9299,27 @@ class BugAnalysisRunner:
 class BugAnalysisPlan:
     kind: str
     signal_code: str | None = None
+
+
+@dataclass(slots=True)
+class BugTimeContext:
+    fault_time: str
+    source: str
+    note: str
+    has_full_datetime: bool
+    candidates: list[dict[str, str]]
+
+
+@dataclass(slots=True)
+class LogCoverage:
+    has_time_evidence: bool
+    covers_fault_time: bool
+    start_time: str = ""
+    end_time: str = ""
+    scanned_files: int = 0
+    scanned_lines: int = 0
+    sample_file: str = ""
+    reason: str = ""
 
 
 @dataclass(slots=True)
@@ -6528,6 +9403,63 @@ SIGNAL_ROUTE_TERMS = (
     "vhalhelper",
 )
 
+SCENE_SIGNAL_ROUTE_TERMS = (
+    "3d场景信号",
+    "3d 场景信号",
+    "场景信号",
+    "scenetype",
+    "scene type",
+    "unityscenetypeservice",
+    "signal_sr_scene_type",
+    "signal_custom_gear_st",
+    "signal_custom_pk_hmi_mode",
+    "signal_custom_special_scene_type",
+    "上电p",
+    "上电 p",
+    "临停p",
+    "临停 p",
+    "特殊场景",
+    "场景管理",
+    "小憩",
+    "露营",
+    "洗车",
+    "充电场景",
+    "放电场景",
+    "场景选择",
+    "离车舒享",
+    "行车场景",
+    "泊车场景",
+    "onhandlecustomspecialscenetype",
+    "pkhmimode",
+    "onhandlecustomgearst",
+    "xsrscenestatebase",
+    "xsrscenestatemachine",
+    "xsrscenenmanager",
+    "getpkhmimodemsg",
+    "getmeterdatamsg",
+    "set_ready",
+    "onldstatechange",
+)
+
+SCENE_SIGNAL_CONTEXT_TERMS = (
+    "3d场景",
+    "3d 场景",
+    "sr场景",
+    "sr 场景",
+    "大车模",
+)
+
+SCENE_SIGNAL_HINT_TERMS = (
+    "信号",
+    "链路",
+    "源码",
+    "日志",
+    "scene",
+    "scenetype",
+    "unity",
+    "sr",
+)
+
 PERCEPTION_ROUTE_TERMS = (
     "当前感知数据",
     "感知数据总结",
@@ -6566,8 +9498,48 @@ XTHEME_ROUTE_TERMS = (
     "黄昏",
     "日出日落",
     "主题切换",
+    "黑白夜",
     "xuiconditionhelper",
 )
+
+
+CORE_SCENE_SIGNALS = {
+    "100002",
+    "100008",
+    "100009",
+    "100010",
+    "signal_sr_scene_type",
+    "signal_custom_gear_st",
+    "signal_custom_pk_hmi_mode",
+    "signal_custom_special_scene_type",
+}
+
+STRONG_SCENE_SIGNAL_INTENT_TERMS = (
+    "3d场景信号",
+    "3d 场景信号",
+    "场景信号",
+    "scenetype",
+    "scene type",
+    "unityscenetypeservice",
+    "场景管理",
+)
+
+
+def _is_core_scene_signal(signal: str) -> bool:
+    return signal.strip().casefold() in CORE_SCENE_SIGNALS
+
+
+def _has_strong_scene_signal_intent(lowered_text: str) -> bool:
+    return any(term in lowered_text for term in STRONG_SCENE_SIGNAL_INTENT_TERMS)
+
+
+def looks_like_scene_signal_request(text: str) -> bool:
+    lowered = (text or "").casefold()
+    if any(term in lowered for term in SCENE_SIGNAL_ROUTE_TERMS):
+        return True
+    return any(term in lowered for term in SCENE_SIGNAL_CONTEXT_TERMS) and any(
+        hint in lowered for hint in SCENE_SIGNAL_HINT_TERMS
+    )
 
 
 class PerceptionSummaryRunner:

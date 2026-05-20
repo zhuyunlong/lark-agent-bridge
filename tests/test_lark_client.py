@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from lark_agent_bridge.lark_client import EventConsumerError, LarkClient
+from lark_agent_bridge.lark_client import CommandResult, EventConsumerError, LarkClient
 from lark_agent_bridge.models import BridgeConfig, EventConsumerOptions, LarkEvent, LarkOptions
 
 
@@ -350,6 +350,83 @@ class LarkClientTests(unittest.TestCase):
             ],
         )
         self.assertEqual(Path(cwd).resolve(), html_path.parent.resolve())
+
+    def test_download_resource_uses_relative_output_from_parent_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client = LarkClient(BridgeConfig(dry_run=False, data_dir=Path(tmp)))
+            target = Path(tmp) / "jobs" / "job1" / "input" / "file_v3_0011s_abc.zip"
+            target.parent.mkdir(parents=True)
+
+            with mock.patch.object(
+                client,
+                "_run",
+                return_value=CommandResult(command=[], returncode=0),
+            ) as mocked_run:
+                client.download_resource(
+                    message_id="om_file_msg",
+                    file_key="file_v3_0011s_abc",
+                    resource_type="file",
+                    output=target,
+                )
+
+        mocked_run.assert_called_once()
+        command = mocked_run.call_args.args[0]
+        cwd = mocked_run.call_args.kwargs["cwd"]
+        self.assertEqual(
+            command,
+            [
+                "lark-cli",
+                "im",
+                "+messages-resources-download",
+                "--as",
+                "bot",
+                "--message-id",
+                "om_file_msg",
+                "--file-key",
+                "file_v3_0011s_abc",
+                "--type",
+                "file",
+                "--output",
+                "./file_v3_0011s_abc.zip",
+            ],
+        )
+        self.assertEqual(Path(cwd).resolve(), target.parent.resolve())
+
+    def test_download_drive_folder_uses_relative_local_dir_from_parent_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client = LarkClient(BridgeConfig(dry_run=False, data_dir=Path(tmp)))
+            target_dir = Path(tmp) / "jobs" / "job1" / "input" / "fldcnlog123"
+            target_dir.parent.mkdir(parents=True)
+
+            with mock.patch.object(
+                client,
+                "_run",
+                return_value=CommandResult(command=[], returncode=0),
+            ) as mocked_run:
+                client.download_drive_folder(folder_token="fldcnlog123", output_dir=target_dir)
+
+        mocked_run.assert_called_once()
+        command = mocked_run.call_args.args[0]
+        cwd = mocked_run.call_args.kwargs["cwd"]
+        self.assertEqual(
+            command,
+            [
+                "lark-cli",
+                "drive",
+                "+pull",
+                "--as",
+                "bot",
+                "--folder-token",
+                "fldcnlog123",
+                "--local-dir",
+                "./fldcnlog123",
+                "--if-exists",
+                "smart",
+                "--on-duplicate-remote",
+                "rename",
+            ],
+        )
+        self.assertEqual(Path(cwd).resolve(), target_dir.parent.resolve())
 
 
 class FakeProcess:

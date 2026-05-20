@@ -132,9 +132,9 @@ class CaseRecord:
 class CaseStore:
     """Persistent case library backed by a JSON file."""
 
-    def __init__(self, state_file: str | Path, *, max_cases: int = 5000) -> None:
+    def __init__(self, state_file: str | Path, *, max_cases: int = 0) -> None:
         self.state_file = Path(state_file)
-        self.max_cases = max(10, int(max_cases))
+        self.max_cases = max(0, int(max_cases))
         self._cases: dict[str, CaseRecord] = self._load()
 
     @property
@@ -279,6 +279,30 @@ class CaseStore:
         cases.sort(key=lambda c: c.updated_at or c.created_at, reverse=True)
         return cases[:limit]
 
+    def delete(self, case_id: str) -> CaseRecord | None:
+        """Delete one case by id and return the deleted record."""
+        normalized = case_id.strip()
+        if not normalized:
+            return None
+        case = self._cases.pop(normalized, None)
+        if case is None:
+            return None
+        self._persist()
+        return case
+
+    def delete_by_job_id(self, job_id: str) -> CaseRecord | None:
+        """Delete the case that points at a job id."""
+        normalized = job_id.strip()
+        if not normalized:
+            return None
+        for case_id, case in list(self._cases.items()):
+            if case.job_id != normalized:
+                continue
+            del self._cases[case_id]
+            self._persist()
+            return case
+        return None
+
     def clear(self) -> int:
         count = len(self._cases)
         self._cases = {}
@@ -307,6 +331,8 @@ class CaseStore:
         return removed
 
     def _enforce_limit(self) -> None:
+        if self.max_cases <= 0:
+            return
         if len(self._cases) <= self.max_cases:
             return
         sorted_cases = sorted(self._cases.values(), key=lambda c: c.updated_at or c.created_at)

@@ -24,13 +24,13 @@ The project intentionally uses Python standard library modules only and requires
 
 ## Configure
 
-Copy the example and edit allowlists before real use:
+Copy the example before real use:
 
 ```bash
 cp config.example.toml config.toml
 ```
 
-`dry_run = true` is the safe default. Group access is controlled by `allowed_chats`; users inside an allowed group are all supported. `p2p` private chats are also supported directly.
+`dry_run = true` is the safe default. By default `allowed_chats = []`, which means group access is not restricted: any group can `@` the bot for bug analysis, direct analysis, skill analysis, follow-up, and ordinary chat. If you later need group access control, fill `allowed_chats`; users inside an allowed group are all supported. `p2p` private chats are also supported directly.
 
 Recommended local setup:
 
@@ -41,7 +41,6 @@ cp config.example.toml config.toml
 Then keep sensitive values in either `config.toml` or environment variables:
 
 ```bash
-export LARK_AGENT_BRIDGE_ALLOWED_CHATS="oc_xxx,oc_yyy"
 export LARK_AGENT_BRIDGE_BOT_NAME="My Feishu CLI Bot"
 export LARK_AGENT_BRIDGE_OMLX_API_KEY="your-local-api-key"
 ```
@@ -58,7 +57,7 @@ Reply behavior:
 - when a user replies to the previous HTML result and `@` this bot, the bridge continues with the stored analysis context; simple follow-ups can answer from existing report metadata, while reanalysis reuses the previous Bug job, downloaded logs, extracted logs, skill decision, and source-repo paths. Agent summary runs start a fresh session by default; old Agent session resume is an explicit opt-in for rare diagnostic cases.
 - rejected requests: still send back a clear error message
 - addressed but unsupported requests: reply `not a handled request`
-- job retention: `listen` startup purges old `data/jobs/*`; while the service keeps running, a background cleanup loop removes job directories older than 6 hours by default
+- job retention: triggered log-analysis jobs, published reports, activity timelines, follow-up context, and case history are preserved by default; cleanup only ages out temporary Bug cache
 
 Claude Code routing is deliberately prefix-based by default:
 
@@ -81,7 +80,7 @@ Bug analysis routing is URL-based, and the short description controls the route:
 
 The default Claude Code tool allowlist is read-only: `Read`, `Grep`, `Glob`, `LS`. It does not grant edit or shell execution permissions unless you change `config.toml`.
 
-Bug analysis uses `[bug_analysis]` for timeout and working directory, `[intent_analysis]` for optional agent-based message routing, and `[report_server]` for HTML publication. The current implementation does not depend on a local agent to complete the heavy bug-fetch/decode/report pipeline; it executes the local scripts directly for better stability, then hands the final conclusion to the configured Bug agent (`codex` / `claude`) when available. When intent routing is enabled, a local agent can help classify ambiguous addressed messages; clear bug replies bypass that slow path, and reanalysis starts from cached logs plus current skill/source evidence rather than an old Agent session.
+Bug analysis uses `[bug_analysis]` for timeout and working directory, `[intent_analysis]` for optional agent-based message routing, and `[report_server]` for HTML publication. The current implementation does not depend on a local agent to complete the heavy bug-fetch/decode/report pipeline; it executes the local scripts directly for better stability, then hands the final conclusion to the configured Bug agent (`codex` / `claude`) when available. The final Agent summary is bounded by `agent_summary_timeout_seconds`; if that enhancement step is slow, the bridge falls back to the script summary and still returns the generated report. Each bug job writes `bug_agent_summary_prompt.md` and `bug_agent_summary_context.json` under its output directory so the exact Agent prompt and embedded context can be audited. When intent routing is enabled, a local agent can help classify ambiguous addressed messages; clear bug replies bypass that slow path, and reanalysis starts from cached logs plus current skill/source evidence rather than an old Agent session.
 
 Current Bug routing rules:
 
@@ -102,7 +101,8 @@ Current Bug routing rules:
   - trigger words such as `信号` `数据链` `链路` `没到Unity` plus a concrete signal code like `132002` or enum like `SIGNAL_X3D_LD_NORMAL_OVER_ALL_DATA`
   - output files: `bug_signal_chain_report.html` and `.json`
 - fallback:
-  - if none of the above match, the bridge falls back to startup analysis
+  - if none of the above match and the request has no concrete direction, the bridge asks the user to补充分析方向 instead of guessing a root cause
+  - if the user provides concrete code/log scope, such as a class, function, package, PID, file path, or log keyword, the bridge may produce a bounded general triage report
 
 Ordinary short questions that do not look like signal/log/code-analysis tasks go to omlx in private chat. In group chats, mention this bot first and then use `chat` or `/chat` as the first keyword:
 
@@ -121,7 +121,7 @@ model = "gemma-4-26b-a4b-it-4bit"
 api_key = ""
 ```
 
-HTML links are served by the built-in report server. If `[report_server].public_base_url` is empty, or still points at loopback, the bridge will automatically switch to the current LAN IP. `listen` starts the local HTTP server in the background. The same server also exposes the local admin console at `/admin` and keeps `/sessions` as a compatibility alias. JSON APIs under `/api/sessions`, `/api/cases`, `/api/skills`, `/api/daemon`, and `/api/health` let you inspect Bot conversations, latest report per Bug, skill definitions, job IDs, report links, and agent progress stages from a browser.
+HTML links are served by the built-in report server. If `[report_server].public_base_url` is empty, or still points at loopback, the bridge will automatically switch to the current LAN IP. `listen` starts the local HTTP server in the background. The same server also exposes the local admin console at `/admin` and keeps `/sessions` as a compatibility alias. JSON APIs under `/api/sessions`, `/api/analysis-history`, `/api/cases`, `/api/skills`, `/api/daemon`, and `/api/health` let you inspect Bot conversations, previous investigations, latest report per Bug, skill definitions, job IDs, report links, and agent progress stages from a browser.
 
 `listen` also manages `lark-cli event consume` as a daemon-style subprocess: it waits for the official `[event] ready event_key=...` stderr marker, keeps stdin open so the consumer does not exit from EOF under supervisors, records the latest listener health in `data/state/agent_activity.json`, exposes it in `check` and `/api/daemon`, and restarts non-zero consumer failures with configurable backoff.
 
@@ -147,9 +147,11 @@ Sensitive or machine-specific settings should stay out of Git:
 
 Job retention is controlled by `[job_retention]`. The default local policy is:
 
-- `purge_all_on_listen_start = true`: every real `listen` start clears prior `data/jobs/*`
-- `max_age_hours = 6`: no job output is meant to be kept beyond 6 hours
-- `cleanup_interval_seconds = 60`: the running listener checks once per minute and removes expired job directories
+- `purge_all_on_listen_start = false`: real `listen` restarts preserve prior `data/jobs/*`
+- `max_age_hours = 6`: only temporary Bug cache uses age-based cleanup; historical job output and published reports are preserved until explicitly deleted
+- `cleanup_interval_seconds = 60`: the running listener checks once per minute and cleans temporary cache
+- `/admin` includes an analysis-history page backed by `/api/analysis-history`; deleting a record removes the activity session, linked case, job directory, published report, follow-up context, and report-version entry when present
+- completed Bug/direct log analysis also writes `output/evidence_logs/manifest.json`, preserving the focused navigation log directory, its `logd`, and vehicle-related sibling logs when referenced by the investigation
 
 ## Dry-run examples
 

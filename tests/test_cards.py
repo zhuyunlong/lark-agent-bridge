@@ -129,13 +129,17 @@ class TestBuildFollowupResultCard:
 
         rendered = str(card)
         assert "打开报告" in rendered
-        assert "基于当前报告回答" in rendered
-        assert "基于已有日志重新分析" in rendered
-        assert "继续原 Agent" in rendered
-        assert "有用" in rendered
-        assert "不准" in rendered
+        assert "先输入追问" in rendered
+        assert "上次追问" in rendered
+        assert "followup_prompt" in rendered
+        assert "按输入从报告回答" in rendered
+        assert "按输入重跑日志" in rendered
+        assert "按输入续 Agent" in rendered
+        assert "有用(记录)" in rendered
+        assert "不准(记录)" in rendered
         assert "'action': 'answer_from_report'" in rendered
         assert "'action': 'continue_agent'" in rendered
+        assert "'tag': 'form'" in rendered
         assert "'followup_text': '问题时刻系统主题是白天还是黑夜'" in rendered
 
 
@@ -212,3 +216,209 @@ class DynamicStatusCardTests(unittest.TestCase):
         self.assertIn("12.4 秒", rendered)
         self.assertIn("1200", rendered)
         self.assertIn("打开报告", rendered)
+
+    def test_status_card_progress_lines_include_time(self):
+        card = build_status_card(
+            title="Bug 分析",
+            status="analyzing",
+            progress=[
+                {
+                    "timestamp": "2026-05-19T12:34:56",
+                    "stage": "bug_fetch_data",
+                    "message": "拉取 bug 详情",
+                },
+            ],
+        )
+
+        rendered = str(card)
+        self.assertIn("后台进度", rendered)
+        self.assertIn("12:34:56", rendered)
+        self.assertIn("bug_fetch_data", rendered)
+
+    def test_status_card_progress_lines_include_executor(self):
+        card = build_status_card(
+            title="Bug 分析",
+            status="analyzing",
+            progress=[
+                {
+                    "timestamp": "2026-05-19T12:34:56",
+                    "stage": "bug_agent_summary",
+                    "message": "调用本地 Agent",
+                    "details": {"executor": "本地 Agent(codex)", "provider": "codex"},
+                },
+            ],
+        )
+
+        rendered = str(card)
+        self.assertIn("本地 Agent(codex)", rendered)
+        self.assertIn("bug_agent_summary", rendered)
+
+    def test_status_card_shows_stream_preview_and_live_url(self):
+        card = build_status_card(
+            title="Bug 分析",
+            status="analyzing",
+            progress=[
+                {
+                    "timestamp": "2026-05-19T12:34:56",
+                    "stage": "bug_fetch_data",
+                    "message": "拉取 bug 详情",
+                },
+                {
+                    "timestamp": "2026-05-19T12:35:00",
+                    "stage": "bug_agent_summary_stream",
+                    "message": "深度分析输出更新：Codex 已开始深度分析",
+                    "details": {"stream_preview": "Codex 已开始深度分析"},
+                },
+            ],
+            live_url="http://127.0.0.1:8765/sessions?session=om_1",
+        )
+
+        rendered = str(card)
+        self.assertIn("后台进度", rendered)
+        self.assertIn("bug_fetch_data", rendered)
+        self.assertIn("深度分析输出", rendered)
+        self.assertIn("Codex 已开始深度分析", rendered)
+        self.assertIn("实时进度", rendered)
+        self.assertIn("http://127.0.0.1:8765/sessions?session=om_1", rendered)
+        self.assertNotIn("`bug_agent_summary_stream`", rendered)
+
+    def test_status_card_compacts_raw_item_started_as_tool_call(self):
+        card = build_status_card(
+            title="Bug 分析",
+            status="analyzing",
+            progress=[
+                {
+                    "timestamp": "2026-05-19T12:35:00",
+                    "stage": "bug_agent_summary_stream",
+                    "details": {
+                        "stream_preview": (
+                            'item.started: {"item":{"type":"command_execution",'
+                            '"command":"/bin/zsh -lc \\"rg -n tool_call lark_agent_bridge\\""}}'
+                        )
+                    },
+                },
+            ],
+        )
+
+        rendered = str(card)
+        self.assertIn("工具调用：执行命令 rg -n tool_call lark_agent_bridge", rendered)
+        self.assertNotIn("item.started", rendered)
+
+    def test_status_card_does_not_show_empty_error_completed_stream_event(self):
+        card = build_status_card(
+            title="Bug 分析",
+            status="analyzing",
+            progress=[
+                {
+                    "timestamp": "2026-05-19T12:35:00",
+                    "stage": "bug_agent_summary_stream",
+                    "details": {"stream_preview": "error 已完成"},
+                },
+                {
+                    "timestamp": "2026-05-19T12:35:01",
+                    "stage": "bug_agent_summary_stream",
+                    "details": {"stream_preview": "Codex 已开始深度分析"},
+                },
+            ],
+        )
+
+        rendered = str(card)
+        self.assertNotIn("error 已完成", rendered)
+        self.assertIn("Codex 已开始深度分析", rendered)
+
+    def test_status_card_keeps_progress_when_stream_events_are_latest(self):
+        card = build_status_card(
+            title="Bug 分析",
+            status="analyzing",
+            progress=[
+                {"stage": "bug_fetch_data", "message": "拉取 bug 详情"},
+                *[
+                    {
+                        "stage": "bug_agent_summary_stream",
+                        "message": f"stream {index}",
+                        "details": {"stream_preview": f"stream {index}"},
+                    }
+                    for index in range(8)
+                ],
+            ],
+        )
+
+        rendered = str(card)
+        self.assertIn("bug_fetch_data", rendered)
+        self.assertIn("stream 7", rendered)
+        self.assertNotIn("stream 0", rendered)
+
+    def test_status_card_compacts_progress_and_stream_preview(self):
+        card = build_status_card(
+            title="Bug 分析",
+            status="completed",
+            progress=[
+                *[
+                    {"stage": f"stage_{index}", "message": f"阶段 {index}"}
+                    for index in range(6)
+                ],
+                *[
+                    {
+                        "timestamp": "2026-05-19T12:35:00",
+                        "stage": "bug_agent_summary_stream",
+                        "details": {
+                            "stream_preview": (
+                                'item.started: {"type":"item.started","item":{"type":"command_execution",'
+                                '"command":"/bin/zsh -lc \\"nl -ba /tmp/example.log\\""}}'
+                            )
+                        },
+                    },
+                    {
+                        "timestamp": "2026-05-19T12:35:01",
+                        "stage": "bug_agent_summary_stream",
+                        "details": {"stream_preview": "command_execution 已完成"},
+                    },
+                    {
+                        "timestamp": "2026-05-19T12:35:02",
+                        "stage": "bug_agent_summary_stream",
+                        "details": {"stream_preview": "已经定位到候选证据"},
+                    },
+                    {
+                        "timestamp": "2026-05-19T12:35:03",
+                        "stage": "bug_agent_summary_stream",
+                        "details": {"stream_preview": "开始整理结论"},
+                    },
+                ],
+            ],
+            note="## 结论摘要\n当前结论更像是业务策略问题。",
+        )
+
+        rendered = str(card)
+        self.assertIn("结论摘要", rendered)
+        self.assertIn("当前结论更像是业务策略问题", rendered)
+        self.assertNotIn("stage_0", rendered)
+        self.assertNotIn("stage_1", rendered)
+        self.assertIn("stage_5", rendered)
+        self.assertIn("深度分析输出（最近 3 条）", rendered)
+        self.assertNotIn("命令执行完成", rendered)
+        self.assertIn("开始整理结论", rendered)
+        self.assertNotIn("item.started", rendered)
+
+    def test_completed_status_card_can_keep_followup_actions(self):
+        card = build_status_card(
+            title="直传文件分析",
+            status="completed",
+            report_url="http://127.0.0.1:8765/reports/job_1/",
+            live_url="http://127.0.0.1:8765/sessions?session=om_1",
+            job_id="job_1",
+            root_message_id="om_1",
+            show_followup_actions=True,
+        )
+
+        rendered = str(card)
+        self.assertIn("打开报告", rendered)
+        self.assertIn("实时进度", rendered)
+        self.assertIn("followup_prompt", rendered)
+        self.assertIn("按输入从报告回答", rendered)
+        self.assertIn("按输入重跑日志", rendered)
+        self.assertIn("按输入续 Agent", rendered)
+        self.assertIn("'action': 'answer_from_report'", rendered)
+        self.assertIn("'action': 'reanalyze'", rendered)
+        self.assertIn("'action': 'continue_agent'", rendered)
+        self.assertIn("有用(记录)", rendered)
+        self.assertIn("不准(记录)", rendered)

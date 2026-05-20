@@ -35,6 +35,7 @@ def render_admin_page() -> str:
     button, input, textarea, select { font: inherit; }
     button { border: 1px solid var(--line); border-radius: 6px; padding: 7px 10px; background: #fff; color: var(--text); cursor: pointer; }
     button:hover { border-color: #94a3b8; }
+    button:disabled { opacity: .55; cursor: not-allowed; }
     button.primary { background: var(--blue); border-color: var(--blue); color: #fff; }
     button.danger { background: #fff; border-color: #fecaca; color: var(--red); }
     button.ghost { background: transparent; color: #dbeafe; border-color: #334155; }
@@ -66,6 +67,7 @@ def render_admin_page() -> str:
     .item.running { border-left: 4px solid var(--blue); }
     .item.pending { border-left: 4px solid var(--amber); }
     .item.succeeded { border-left: 4px solid var(--green); }
+    .item.cancelled { border-left: 4px solid #64748b; }
     .row { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
     .title { font-weight: 750; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .meta, .muted { color: var(--muted); font-size: 12px; }
@@ -74,6 +76,7 @@ def render_admin_page() -> str:
     .badge.failed { background: #fee2e2; color: #991b1b; }
     .badge.running { background: #dbeafe; color: #1d4ed8; }
     .badge.pending { background: #fef3c7; color: #92400e; }
+    .badge.cancelled { background: #e2e8f0; color: #475569; }
     .badge.skipped { background: #f1f5f9; color: #475569; }
     .badge.primary { background: #dbeafe; color: #1d4ed8; }
     .badge.auxiliary { background: #ede9fe; color: #5b21b6; }
@@ -90,11 +93,13 @@ def render_admin_page() -> str:
     .step.failed::before { background: var(--red); }
     .step.succeeded::before { background: var(--green); }
     pre { white-space: pre-wrap; word-break: break-word; background: #111827; color: #e5e7eb; border-radius: 8px; padding: 12px; overflow: auto; font-size: 12px; line-height: 1.5; }
+    pre.stream-log { max-height: 320px; }
     table { width: 100%; border-collapse: collapse; }
     th, td { border-bottom: 1px solid var(--line); padding: 10px; text-align: left; vertical-align: top; font-size: 13px; }
     th { color: var(--muted); background: #f8fafc; font-size: 12px; }
     .case-actions, .skill-actions { display: flex; gap: 8px; flex-wrap: wrap; }
     .filters { display: grid; grid-template-columns: minmax(180px, 1fr) 150px 150px auto; gap: 8px; align-items: center; }
+    .history-layout { grid-template-columns: minmax(360px, 520px) minmax(0, 1fr); align-items: start; }
     .skill-layout { grid-template-columns: 330px minmax(0, 1fr); align-items: start; }
     .form-grid { display: grid; grid-template-columns: 170px 220px minmax(220px, 1fr) auto; gap: 8px; align-items: end; }
     .checks { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; }
@@ -102,7 +107,7 @@ def render_admin_page() -> str:
     .check.ok { border-color: #bbf7d0; }
     .check.bad { border-color: #fecaca; }
     .empty { padding: 18px; color: var(--muted); }
-    @media (max-width: 1040px) { .metrics { grid-template-columns: repeat(3, 1fr); } .split, .skill-layout, .filters, .form-grid { grid-template-columns: 1fr; } .scroll { max-height: none; } }
+    @media (max-width: 1040px) { .metrics { grid-template-columns: repeat(3, 1fr); } .split, .history-layout, .skill-layout, .filters, .form-grid { grid-template-columns: 1fr; } .scroll { max-height: none; } }
     @media (max-width: 640px) { header { height: auto; padding: 14px; align-items: flex-start; flex-direction: column; } main, .tabs { padding-left: 12px; padding-right: 12px; } .metrics { grid-template-columns: repeat(2, 1fr); } }
   </style>
 </head>
@@ -116,7 +121,7 @@ def render_admin_page() -> str:
   </header>
   <nav class="tabs">
     <button class="tab active" data-view="sessions-view">多会话进度</button>
-    <button class="tab" data-view="cases-view">历史案件</button>
+    <button class="tab" data-view="cases-view">分析历史</button>
     <button class="tab" data-view="skills-view">Skill 管理</button>
     <button class="tab" data-view="daemon-view">运行状态</button>
   </nav>
@@ -126,7 +131,7 @@ def render_admin_page() -> str:
       <div class="metric"><div class="label">待确认</div><div id="metric-pending" class="value">0</div></div>
       <div class="metric"><div class="label">失败</div><div id="metric-failed" class="value">0</div></div>
       <div class="metric"><div class="label">今日会话</div><div id="metric-sessions" class="value">0</div></div>
-      <div class="metric"><div class="label">历史 Bug</div><div id="metric-cases" class="value">0</div></div>
+      <div class="metric"><div class="label">分析记录</div><div id="metric-cases" class="value">0</div></div>
       <div class="metric"><div class="label">Skill</div><div id="metric-skills" class="value">0</div></div>
     </section>
 
@@ -144,18 +149,24 @@ def render_admin_page() -> str:
     </section>
 
     <section id="cases-view" class="view">
-      <section class="panel">
-        <div class="panel-head"><h2>历史案件</h2><span class="muted">默认每个 Bug 只展示最后一次报告</span></div>
-        <div class="panel-body">
-          <div class="filters">
-            <input id="case-keyword" placeholder="搜索结论、请求、标签" />
-            <select id="case-mode"><option value="">全部类型</option><option value="bug_analysis">Bug分析</option><option value="signal_lifecycle">信号链路</option><option value="direct_analysis">日志分析</option><option value="perception_summary">感知总结</option></select>
-            <select id="case-scope"><option value="latest">每个 Bug 最后报告</option><option value="all">全部记录</option></select>
-            <button id="case-search" class="primary">查询</button>
+      <div class="grid history-layout">
+        <section class="panel">
+          <div class="panel-head"><h2>分析历史</h2><span id="history-count" class="muted"></span></div>
+          <div class="panel-body">
+            <div class="filters">
+              <input id="case-keyword" placeholder="搜索请求、结论、job、会话" />
+              <select id="case-mode"><option value="">全部类型</option><option value="bug_analysis">Bug 分析</option><option value="direct_analysis">日志分析</option><option value="signal_lifecycle">信号链路</option><option value="perception_summary">感知总结</option></select>
+              <select id="case-scope"><option value="">全部状态</option><option value="succeeded">成功</option><option value="failed">失败</option><option value="running">运行中</option><option value="cancelled">已取消</option></select>
+              <button id="case-search" class="primary">查询</button>
+            </div>
           </div>
-        </div>
-        <div class="scroll"><table><thead><tr><th>Bug / 请求</th><th>结论</th><th>类型</th><th>报告</th><th>确认</th></tr></thead><tbody id="cases"></tbody></table></div>
-      </section>
+          <div class="scroll" id="cases"></div>
+        </section>
+        <section class="panel">
+          <div class="panel-head"><h2>调查详情</h2><span id="history-status"></span></div>
+          <div class="panel-body scroll" id="case-detail"><p class="muted">选择左侧记录查看调查过程、结论和证据日志。</p></div>
+        </section>
+      </div>
     </section>
 
     <section id="skills-view" class="view">
@@ -201,7 +212,9 @@ def render_admin_page() -> str:
     </section>
   </main>
   <script>
-    let selectedSession = "";
+    const initialSession = new URLSearchParams(window.location.search).get("session") || "";
+    let selectedSession = initialSession;
+    let selectedHistory = "";
     let selectedSkill = "";
     let sessionsData = [];
     let casesData = [];
@@ -238,9 +251,14 @@ def render_admin_page() -> str:
 
     function statusProgress(session) {
       if (session.status === "succeeded") return 100;
-      if (session.status === "failed" || session.status === "skipped") return 100;
+      if (session.status === "failed" || session.status === "skipped" || session.status === "cancelled") return 100;
       const count = Number(session.progress_count || (session.progress || []).length || 0);
       return Math.max(10, Math.min(92, 12 + count * 12));
+    }
+
+    function canTerminate(session) {
+      if (session.can_terminate === true) return true;
+      return String(session.status || "") === "running";
     }
 
     function lastStage(session) {
@@ -297,12 +315,18 @@ def render_admin_page() -> str:
       root.appendChild(cards);
       const actions = el("div", { class: "case-actions" });
       if (session.report_url) actions.appendChild(el("a", { href: session.report_url, target: "_blank", rel: "noreferrer", text: "打开报告" }));
+      if (canTerminate(session)) actions.appendChild(el("button", { class: "danger", onclick: () => terminateSession(session.session_id), text: "终止任务" }));
       if (session.job_dir) actions.appendChild(el("span", { class: "muted", text: "job_dir: " + session.job_dir }));
       root.appendChild(actions);
       root.appendChild(el("h3", { text: "用户请求" }));
       root.appendChild(el("pre", { text: text(session.content) }));
       root.appendChild(el("h3", { text: "回复结果" }));
       root.appendChild(el("pre", { text: text(session.message) }));
+      const stream = streamText(session);
+      if (stream) {
+        root.appendChild(el("h3", { text: "深度分析输出" }));
+        root.appendChild(el("pre", { class: "stream-log", text: stream }));
+      }
       root.appendChild(el("h3", { text: "后台过程" }));
       const timeline = el("div", { class: "timeline" });
       for (const step of session.progress || []) {
@@ -330,26 +354,57 @@ def render_admin_page() -> str:
     }
 
     function renderCases() {
-      const body = $("cases");
-      body.textContent = "";
+      const root = $("cases");
+      root.textContent = "";
+      $("history-count").textContent = casesData.length + " 条";
       if (!casesData.length) {
-        body.appendChild(el("tr", {}, el("td", { colspan: "5", class: "empty", text: "暂无历史案件。" })));
+        root.appendChild(el("div", { class: "empty", text: "暂无分析历史。" }));
         return;
       }
       for (const item of casesData) {
-        const title = item.bug_url || item.request_text || item.case_id;
-        const reportCell = el("td");
-        if (item.report_url) reportCell.appendChild(el("a", { href: item.report_url, target: "_blank", rel: "noreferrer", text: "打开最后报告" }));
-        else reportCell.textContent = "-";
-        const confirm = el("button", { text: item.human_confirmed ? "取消确认" : "人工确认", onclick: () => confirmCase(item.case_id, !item.human_confirmed) });
-        body.appendChild(el("tr", {},
-          el("td", {}, el("div", { class: "title", text: title }), el("div", { class: "meta", text: item.updated_at || item.created_at || "" })),
-          el("td", { text: clip(item.conclusion, 180) }),
-          el("td", {}, badge("", item.problem_type || item.analysis_mode || "未分类")),
-          reportCell,
-          el("td", {}, confirm)
-        ));
+        const button = el("button", { class: "item " + (item.status || "") + (item.session_id === selectedHistory ? " active" : ""), onclick: () => loadHistoryDetail(item.session_id) });
+        button.appendChild(el("div", { class: "row" }, el("div", { class: "title", text: item.content || item.message || item.session_id }), badge(item.status)));
+        button.appendChild(el("div", { class: "meta", text: [item.mode || "unknown", item.job_id || "-", item.updated_at || item.started_at || ""].join(" · ") }));
+        button.appendChild(el("div", { class: "muted", text: clip(item.message || "", 130) }));
+        root.appendChild(button);
       }
+    }
+
+    function renderHistoryDetail(item) {
+      selectedHistory = item.session_id || "";
+      $("history-status").replaceChildren(badge(item.status));
+      const root = $("case-detail");
+      root.textContent = "";
+      root.appendChild(el("div", { class: "cards" },
+        card("session", item.session_id),
+        card("job", item.job_id),
+        card("类型", item.mode),
+        card("耗时", item.duration_seconds ? item.duration_seconds + "s" : "-"),
+        card("更新", item.updated_at),
+        card("证据文件", item.details && item.details.evidence_log_file_count)
+      ));
+      const actions = el("div", { class: "case-actions" });
+      if (item.report_url) actions.appendChild(el("a", { href: item.report_url, target: "_blank", rel: "noreferrer", text: "打开报告" }));
+      if (item.details && item.details.evidence_log_bundle) actions.appendChild(el("span", { class: "muted", text: "证据日志: " + item.details.evidence_log_bundle }));
+      actions.appendChild(el("button", { class: "danger", onclick: () => deleteHistory(item.session_id), text: "删除记录" }));
+      actions.appendChild(el("span", { class: "muted", text: "权限占位: analysis_history.delete" }));
+      root.appendChild(actions);
+      root.appendChild(el("h3", { text: "用户请求" }));
+      root.appendChild(el("pre", { text: text(item.content) }));
+      root.appendChild(el("h3", { text: "最终结论" }));
+      root.appendChild(el("pre", { text: text(item.message) }));
+      root.appendChild(el("h3", { text: "调查过程" }));
+      const timeline = el("div", { class: "timeline" });
+      for (const step of item.progress || []) {
+        const cls = /fail|error|失败/.test(step.stage || step.message || "") ? "step failed" : /done|完成|succeed/.test(step.stage || step.message || "") ? "step succeeded" : "step";
+        const row = el("div", { class: "row" }, el("strong", { text: step.stage || "progress" }), el("span", { class: "meta", text: step.timestamp || "" }));
+        const node = el("div", { class: cls }, row, el("div", { text: step.message || "" }));
+        if (step.details && Object.keys(step.details).length) node.appendChild(el("pre", { text: JSON.stringify(step.details, null, 2) }));
+        timeline.appendChild(node);
+      }
+      if (!(item.progress || []).length) timeline.appendChild(el("p", { class: "muted", text: "暂无过程记录。" }));
+      root.appendChild(timeline);
+      renderCases();
     }
 
     function renderSkills() {
@@ -394,6 +449,18 @@ def render_admin_page() -> str:
       return raw.length > limit ? raw.slice(0, limit - 1) + "…" : raw;
     }
 
+    function streamText(session) {
+      const lines = [];
+      for (const step of session.progress || []) {
+        if (!String(step.stage || "").startsWith("bug_agent_summary_stream")) continue;
+        const details = step.details || {};
+        const body = details.stream_preview || details.stream_text || step.message || "";
+        if (!body) continue;
+        lines.push([step.timestamp || "", body].filter(Boolean).join("  "));
+      }
+      return lines.join("\\n");
+    }
+
     async function loadAll() {
       await Promise.all([loadSessions(), loadCases(), loadSkills(), loadDaemon()]);
       renderMetrics();
@@ -404,7 +471,11 @@ def render_admin_page() -> str:
       const data = await response.json();
       sessionsData = data.sessions || [];
       renderSessions();
-      if (!selectedSession && sessionsData.length) await loadDetail(sessionsData[0].session_id);
+      if (selectedSession && sessionsData.some(item => item.session_id === selectedSession)) {
+        await loadDetail(selectedSession);
+      } else if (!selectedSession && sessionsData.length) {
+        await loadDetail(sessionsData[0].session_id);
+      }
     }
 
     async function loadDetail(id) {
@@ -419,18 +490,67 @@ def render_admin_page() -> str:
       renderDetail(data.session || {});
     }
 
+    async function terminateSession(id) {
+      if (!id) return;
+      if (!window.confirm("确认终止这个后台任务？已完成或已失败的任务不会被终止。")) return;
+      const response = await fetch("/api/sessions/" + encodeURIComponent(id) + "/terminate", { method: "POST" });
+      let data = {};
+      try { data = await response.json(); } catch (error) { data = {}; }
+      if (!response.ok || data.ok === false) {
+        window.alert(data.error || "终止任务失败");
+        return;
+      }
+      await loadSessions();
+      await loadDetail(id);
+      renderMetrics();
+    }
+
     async function loadCases() {
       const params = new URLSearchParams();
       const keyword = $("case-keyword").value.trim();
       const mode = $("case-mode").value;
-      const scope = $("case-scope").value;
+      const status = $("case-scope").value;
       if (keyword) params.set("keyword", keyword);
-      if (mode) params.set("analysis_mode", mode);
-      if (scope === "all") params.set("all", "1");
-      const response = await fetch("/api/cases?" + params.toString(), { cache: "no-store" });
+      if (mode) params.set("mode", mode);
+      if (status) params.set("status", status);
+      const response = await fetch("/api/analysis-history?" + params.toString(), { cache: "no-store" });
       const data = await response.json();
-      casesData = data.cases || [];
+      casesData = data.items || [];
       renderCases();
+      if (selectedHistory && casesData.some(item => item.session_id === selectedHistory)) {
+        await loadHistoryDetail(selectedHistory);
+      } else if (!selectedHistory && casesData.length) {
+        await loadHistoryDetail(casesData[0].session_id);
+      }
+    }
+
+    async function loadHistoryDetail(id) {
+      if (!id) return;
+      selectedHistory = id;
+      const response = await fetch("/api/analysis-history/" + encodeURIComponent(id), { cache: "no-store" });
+      if (!response.ok) {
+        $("case-detail").textContent = "记录不存在或已删除。";
+        return;
+      }
+      const data = await response.json();
+      renderHistoryDetail(data.item || {});
+    }
+
+    async function deleteHistory(id) {
+      if (!id) return;
+      if (!window.confirm("确认删除这条调查记录？会同步删除后台过程、job 目录和已发布报告。")) return;
+      const response = await fetch("/api/analysis-history/" + encodeURIComponent(id), { method: "DELETE" });
+      let data = {};
+      try { data = await response.json(); } catch (error) { data = {}; }
+      if (!response.ok || data.ok === false) {
+        window.alert(data.error || "删除记录失败");
+        return;
+      }
+      selectedHistory = "";
+      $("case-detail").innerHTML = '<p class="muted">记录已删除。</p>';
+      await loadCases();
+      await loadSessions();
+      renderMetrics();
     }
 
     async function confirmCase(caseId, confirmed) {

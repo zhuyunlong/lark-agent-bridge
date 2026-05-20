@@ -28,12 +28,20 @@ class SignalLifecycleHandler:
                 success=False,
                 message="缺少 signal：请提供 132002 或 SIGNAL_... 形式的信号。",
                 error_code="missing_signal",
+                details={
+                    "mode": "signal_lifecycle",
+                    "resources": _resource_descriptors(request),
+                },
             )
         if not request.resources:
             return TaskResult(
                 success=False,
                 message="缺少日志输入：请在消息中提供日志 URL 或飞书附件。",
                 error_code="missing_log",
+                details={
+                    "mode": "signal_lifecycle",
+                    "resources": [],
+                },
             )
 
         context = create_job_context(self.config.data_dir, event=event)
@@ -137,3 +145,13 @@ class SignalLifecycleHandler:
         }
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
+
+def _resource_descriptors(request: SignalRequest) -> list[dict[str, str]]:
+    return [
+        {
+            "kind": item.kind,
+            "value": item.value,
+            "source_message_id": item.source_message_id,
+        }
+        for item in request.resources
+    ]

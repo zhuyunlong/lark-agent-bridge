@@ -25,6 +25,8 @@ class SkillManagerTests(unittest.TestCase):
             self.assertEqual(skills["custom-check"].role, "custom")
             self.assertIn("xtheme-analyzer", skills)
             self.assertEqual(skills["xtheme-analyzer"].role, "primary")
+            self.assertIn("scene-signal-diagnosis", skills)
+            self.assertEqual(skills["scene-signal-diagnosis"].role, "primary")
 
     def test_skill_manager_crud_and_debug(self):
         with tempfile.TemporaryDirectory() as tmp:

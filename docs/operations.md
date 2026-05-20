@@ -7,17 +7,17 @@ cd /path/to/workspace/tools/lark-agent-bridge
 python3.11 -m lark_agent_bridge listen --config config.toml
 ```
 
-Use `config.example.toml` only for dry-run checks. For real Feishu traffic, copy it to `config.toml`, keep `dry_run = false`, and configure `allowed_chats` for **group** access control.
+Use `config.example.toml` only for dry-run checks. For real Feishu traffic, copy it to `config.toml` and keep `dry_run = false`. By default `allowed_chats = []`, so group access is not restricted: any group can `@` the bot for bug analysis, direct analysis, skill analysis, follow-up, and ordinary chat. Configure `allowed_chats` only when you want to turn on group access control.
 
 Real deployments usually keep these values in local `config.toml` or environment variables:
 
-- allowed groups: `allowed_chats = ["oc_xxx", "oc_yyy"]`
+- allowed groups: `allowed_chats = []` means no group restriction; `allowed_chats = ["oc_xxx", "oc_yyy"]` restricts full behavior to those groups
 - super users: `allowed_users = ["ou_xxx"]`; these users bypass group allowlists and can use the Bot in any group
 - `p2p` private chats: allowed for any user unless policy is tightened in code
 - reply mode: private chat direct send; group messages only reply after a leading mention to this bot, then direct send with `@sender`
 - group messages that do not mention this bot: silently skipped, no reply
 - addressed but unsupported requests: reply `not a handled request`
-- job retention: real `listen` startup clears existing `data/jobs/*`; while running, expired job directories are removed automatically
+- job retention: real `listen` startup preserves existing `data/jobs/*`; historical jobs, reports, activity timelines, follow-up context, and cases stay until explicitly deleted from the admin history page
 - HTML analysis delivery: signal / bug / direct-analysis / perception flows reply to the triggering message with a dynamic progress card, update the same card with backend progress nodes, elapsed time, Agent token usage when available, and the final LAN-accessible HTML link; in group chats they also upload the HTML report file, but still do not upload JSON files
 - dynamic progress cards are best-effort: updates use `lark-cli api PATCH /open-apis/im/v1/messages/{message_id}`; if the deployed bot cannot update card messages, the analysis still completes and the bridge falls back to the final result reply
 - intent routing: when `[intent_analysis]` is enabled, a local `codex` / `claude` first classifies each addressed message as ordinary chat, a fresh analysis request, or a follow-up; for bug follow-up messages it also decides whether to continue the existing Bug agent session directly or trigger a reanalysis on the same saved job/log context
@@ -44,6 +44,7 @@ Example:
 [bug_analysis]
 provider = "codex"
 command = "codex"
+agent_summary_timeout_seconds = 90
 ```
 
 or:
@@ -58,6 +59,8 @@ Behavior:
 
 - the configured provider is the startup default
 - if that provider cannot start or fails during the summary/continuation step, the bridge automatically tries the other provider
+- `agent_summary_timeout_seconds` bounds only the final Agent summary; when it expires, generated reports are still delivered using the script summary
+- each bug job keeps `bug_agent_summary_prompt.md` and `bug_agent_summary_context.json` in `data/jobs/<job_id>/output/` for prompt/context audit
 
 `[intent_analysis]` is optional. If enabled, it lets a local Agent classify each addressed message first:
 
@@ -72,9 +75,21 @@ If `provider` / `command` are left empty there, intent routing reuses `[bug_anal
 
 ## Behavior permissions
 
-### Full-permission groups
+### Default group behavior
 
-If `chat_id` is in `allowed_chats`, the Bot supports full behavior in that group:
+If `allowed_chats = []`, the Bot supports full behavior in any group where it is explicitly mentioned:
+
+- ordinary chat
+- bug analysis
+- direct file analysis
+- signal analysis
+- perception summary
+- `/skill` read-only analysis
+- reply follow-up / reanalysis
+
+### Restricted full-permission groups
+
+If `allowed_chats` is non-empty, only `chat_id` values in `allowed_chats` get full behavior:
 
 - ordinary chat
 - bug analysis
@@ -92,9 +107,9 @@ If `sender_id` is in `allowed_users`, that user has super permission:
 - all abilities are allowed
 - addressed messages still go through `[intent_analysis]` first when that classifier is enabled
 
-### External-group ordinary members
+### Non-allowlisted groups when restrictions are enabled
 
-If a group is not authorized and the sender is not a super user, the Bot still allows only log-analysis-oriented requests:
+If `allowed_chats` is non-empty, and a group is not authorized and the sender is not a super user, the Bot still allows only log-analysis-oriented requests:
 
 - bug links
 - reply-to-file direct analysis
@@ -155,7 +170,7 @@ Restart after config changes by unloading and loading the plist again.
 - Follow-up context state: `data/state/conversation_contexts.json`
 - Session console state: `data/state/agent_activity.json`
 - launchd stdout/stderr in the example plist: `data/logs/bridge.out.log` and `data/logs/bridge.err.log`
-- Retention policy: `[job_retention] max_age_hours = 6`, `purge_all_on_listen_start = true`, `cleanup_interval_seconds = 60`
+- Retention policy: `[job_retention] max_age_hours = 6`, `purge_all_on_listen_start = false`, `cleanup_interval_seconds = 60`; cleanup only ages out temporary Bug cache, not historical investigations
 - Event consumer restart policy: `[event_consumer] restart_on_failure = true`, `max_restarts = 0`, `restart_initial_delay_seconds = 1`, `restart_max_delay_seconds = 60`
 
 ## Common errors

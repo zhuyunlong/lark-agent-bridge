@@ -5,6 +5,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+import zipfile
 
 
 SCRIPT_PATH = (
@@ -107,6 +108,80 @@ class UnityStartupSkillTests(unittest.TestCase):
         self.assertEqual(selected, [decoded_log])
         self.assertTrue(warnings)
         self.assertIn("main_*.log", warnings[0])
+
+    def test_collect_inputs_skips_raw_alog_when_decoded_companion_exists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "logs"
+            target_dir = root / "data" / "Log" / "log0" / "app" / "com.xiaopeng.montecarlo"
+            target_dir.mkdir(parents=True)
+            raw_log = target_dir / "main_2026-04-26_17-00.alog"
+            decoded_log = target_dir / "main_2026-04-26_17-00.alog.log"
+            raw_log.write_bytes(b"touch Max size of zip file!")
+            decoded_log.write_text("decoded text log\n", encoding="utf-8")
+            workspace = Path(tmp) / "workspace"
+
+            copied, warnings = self.mod.collect_and_materialize_inputs(root, workspace)
+
+        rel_paths = {path.relative_to(workspace / "collected").as_posix() for path in copied}
+        self.assertFalse(warnings)
+        self.assertIn("data/Log/log0/app/com.xiaopeng.montecarlo/main_2026-04-26_17-00.alog.log", rel_paths)
+        self.assertNotIn("data/Log/log0/app/com.xiaopeng.montecarlo/main_2026-04-26_17-00.alog", rel_paths)
+
+    def test_collect_inputs_keeps_raw_alog_when_decoded_companion_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "logs"
+            target_dir = root / "data" / "Log" / "log0" / "app" / "com.xiaopeng.montecarlo"
+            target_dir.mkdir(parents=True)
+            raw_log = target_dir / "main_2026-04-26_16-00.alog"
+            raw_log.write_bytes(b"encrypted")
+            workspace = Path(tmp) / "workspace"
+
+            copied, warnings = self.mod.collect_and_materialize_inputs(root, workspace)
+
+        rel_paths = {path.relative_to(workspace / "collected").as_posix() for path in copied}
+        self.assertFalse(warnings)
+        self.assertIn("data/Log/log0/app/com.xiaopeng.montecarlo/main_2026-04-26_16-00.alog", rel_paths)
+
+    def test_collect_inputs_skips_raw_alog_zip_member_when_decoded_companion_exists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            zip_path = Path(tmp) / "logs.zip"
+            raw_member = "data/Log/log0/app/com.xiaopeng.montecarlo/main_2026-04-26_17-00.alog"
+            decoded_member = f"{raw_member}.log"
+            with zipfile.ZipFile(zip_path, "w") as zf:
+                zf.writestr(raw_member, b"touch Max size of zip file!")
+                zf.writestr(decoded_member, "decoded text log\n")
+            workspace = Path(tmp) / "workspace"
+
+            copied, warnings = self.mod.collect_and_materialize_inputs(zip_path, workspace)
+
+        rel_paths = {path.relative_to(workspace / "collected").as_posix() for path in copied}
+        self.assertFalse(warnings)
+        self.assertIn(decoded_member, rel_paths)
+        self.assertNotIn(raw_member, rel_paths)
+
+    def test_decode_warning_uses_collected_relative_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            raw_log = (
+                workspace
+                / "collected"
+                / "data"
+                / "Log"
+                / "log1"
+                / "app"
+                / "com.xiaopeng.montecarlo"
+                / "main_2026-04-26_17-00.alog"
+            )
+            raw_log.parent.mkdir(parents=True)
+            raw_log.write_bytes(b"touch Max size of zip file!")
+            decoder = Path(tmp) / "decoder.py"
+            decoder.write_text("lastseq = 0\n\ndef ParseFile(src, dst):\n    return False\n", encoding="utf-8")
+
+            decoded, warnings = self.mod.decode_raw_logs([raw_log], decoder)
+
+        self.assertEqual(decoded, [])
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("data/Log/log1/app/com.xiaopeng.montecarlo/main_2026-04-26_17-00.alog", warnings[0])
 
     def test_select_report_sessions_prefers_focus_pid_and_nearby_window(self):
         stale = self.mod.Session(

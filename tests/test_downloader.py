@@ -20,6 +20,16 @@ class FakeLarkClient:
             returncode=0,
         )
 
+    def download_drive_folder(self, **kwargs):
+        self.calls.append(kwargs)
+        output = Path(kwargs["output_dir"])
+        output.mkdir(parents=True, exist_ok=True)
+        (output / "log.txt").write_text("ok", encoding="utf-8")
+        return __import__("lark_agent_bridge.lark_client", fromlist=["CommandResult"]).CommandResult(
+            command=["pull"],
+            returncode=0,
+        )
+
 
 class DownloaderTests(unittest.TestCase):
     def test_safe_filename_from_url(self):
@@ -64,6 +74,23 @@ class DownloaderTests(unittest.TestCase):
 
         self.assertEqual(fake_lark.calls[0]["message_id"], "om_file_msg")
         self.assertEqual(result.path.name, "file_abc123")
+
+    def test_folder_resource_pulls_drive_folder_to_input_subdirectory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=False, data_dir=Path(tmp))
+            context = create_job_context(config.data_dir, job_id="job1")
+            fake_lark = FakeLarkClient()
+            downloader = LogDownloader(config, fake_lark)
+
+            result = downloader.download(
+                DownloadResource(kind="folder", value="fldcnlog123", source_message_id="om_folder_msg"),
+                context=context,
+                message_id="om_followup_msg",
+            )
+
+            self.assertEqual(fake_lark.calls[0]["folder_token"], "fldcnlog123")
+            self.assertEqual(result.path.name, "fldcnlog123")
+            self.assertTrue((result.path / "log.txt").exists())
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ from __future__ import annotations
 PRIMARY_BUG_SKILL_MAP: dict[str, tuple[str, str, bool]] = {
     "unity-startup-lifecycle-check": ("startup", "3D启动时序分析", True),
     "3d-stuck-investigate": ("stuck", "3D卡顿分析", True),
+    "scene-signal-diagnosis": ("scene_signal", "3D场景信号分析", True),
     "signal-chain-analyzer": ("signal", "信号链路分析", False),
     "perception-data-summary": ("perception", "当前感知数据总结", True),
     "xtheme-analyzer": ("xtheme", "XTheme时光主题分析", True),

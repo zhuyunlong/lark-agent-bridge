@@ -182,6 +182,26 @@ class ReportVersionStore:
         )
         return sorted_groups[:limit]
 
+    def delete_by_job_id(self, job_id: str) -> int:
+        normalized = job_id.strip()
+        if not normalized:
+            return 0
+        removed = 0
+        now = datetime.now(timezone.utc).isoformat()
+        for group_key, group in list(self._groups.items()):
+            kept = [version for version in group.versions if version.job_id != normalized]
+            removed += len(group.versions) - len(kept)
+            if len(kept) == len(group.versions):
+                continue
+            if not kept:
+                del self._groups[group_key]
+                continue
+            group.versions = kept
+            group.updated_at = now
+        if removed:
+            self._persist()
+        return removed
+
     def compare_versions(
         self,
         group_key: str,

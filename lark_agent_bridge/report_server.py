@@ -17,8 +17,10 @@ from urllib.parse import parse_qs, quote, unquote, urlsplit, urlunsplit
 
 from .admin_ui import render_admin_page
 from .case_store import CaseStore
+from .health import ProcessWatchdog
 from .models import BridgeConfig, TaskResult
-from .state import AgentActivityStore
+from .report_version import ReportVersionStore
+from .state import AgentActivityStore, ConversationContextStore
 from .skill_manager import SkillManager, SkillManagerError
 
 
@@ -264,12 +266,18 @@ class ReportHttpServer:
         case_store: CaseStore | None = None,
         skill_manager: SkillManager | None = None,
         health_monitor: object | None = None,
+        process_watchdog: ProcessWatchdog | None = None,
+        conversation_store: ConversationContextStore | None = None,
+        version_store: ReportVersionStore | None = None,
     ) -> None:
         self.config = config
         self.activity_store = activity_store
         self.case_store = case_store
         self.skill_manager = skill_manager
         self.health_monitor = health_monitor
+        self.process_watchdog = process_watchdog
+        self.conversation_store = conversation_store
+        self.version_store = version_store
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
 
@@ -291,6 +299,9 @@ class ReportHttpServer:
             self.case_store,
             self.skill_manager,
             self.health_monitor,
+            self.process_watchdog,
+            self.conversation_store,
+            self.version_store,
         )
         self._server = ThreadingHTTPServer(
             (resolve_bind_host(self.config.report_server.bind_host), self.config.report_server.port),
@@ -336,6 +347,9 @@ def _build_handler(
     case_store: CaseStore | None = None,
     skill_manager: SkillManager | None = None,
     health_monitor: object | None = None,
+    process_watchdog: ProcessWatchdog | None = None,
+    conversation_store: ConversationContextStore | None = None,
+    version_store: ReportVersionStore | None = None,
 ):
     class _ReportHandler(SimpleHTTPRequestHandler):
         def __init__(self, *args, **kwargs):
@@ -358,6 +372,9 @@ def _build_handler(
             if request_path == "/api/cases":
                 self._send_json({"cases": self._list_cases(parsed.query)})
                 return
+            if request_path == "/api/analysis-history":
+                self._send_json({"items": self._list_analysis_history(parsed.query)})
+                return
             if request_path == "/api/skills":
                 self._send_json({"skills": self._list_skills()})
                 return
@@ -374,6 +391,14 @@ def _build_handler(
                     self._send_json({"error": "case not found"}, status=404)
                     return
                 self._send_json({"case": case})
+                return
+            if request_path.startswith("/api/analysis-history/"):
+                session_id = request_path.removeprefix("/api/analysis-history/").strip("/")
+                item = self._get_analysis_history_item(unquote(session_id))
+                if item is None:
+                    self._send_json({"error": "analysis history not found"}, status=404)
+                    return
+                self._send_json({"item": item})
                 return
             if request_path.startswith("/api/skills/"):
                 skill_name = request_path.removeprefix("/api/skills/").strip("/")
@@ -408,6 +433,8 @@ def _build_handler(
                 or request_path.startswith("/api/sessions/")
                 or request_path == "/api/cases"
                 or request_path.startswith("/api/cases/")
+                or request_path == "/api/analysis-history"
+                or request_path.startswith("/api/analysis-history/")
                 or request_path == "/api/skills"
                 or request_path.startswith("/api/skills/")
                 or request_path == "/api/daemon"
@@ -456,6 +483,11 @@ def _build_handler(
                 except ValueError as exc:
                     self._send_json({"error": str(exc)}, status=400)
                 return
+            if request_path.startswith("/api/sessions/") and request_path.endswith("/terminate"):
+                session_id = request_path.removeprefix("/api/sessions/").removesuffix("/terminate").strip("/")
+                payload, status = self._terminate_session(unquote(session_id))
+                self._send_json(payload, status=status)
+                return
             self._send_json({"error": "unsupported endpoint"}, status=404)
 
         def do_PUT(self) -> None:
@@ -467,6 +499,11 @@ def _build_handler(
         def do_DELETE(self) -> None:
             parsed = urlsplit(self.path)
             request_path = unquote(parsed.path).rstrip("/")
+            if request_path.startswith("/api/analysis-history/"):
+                session_id = request_path.removeprefix("/api/analysis-history/").strip("/")
+                payload, status = self._delete_analysis_history(unquote(session_id))
+                self._send_json(payload, status=status)
+                return
             if not request_path.startswith("/api/skills/"):
                 self._send_json({"error": "unsupported endpoint"}, status=404)
                 return
@@ -519,6 +556,81 @@ def _build_handler(
             else:
                 cases = case_store.list_latest_by_bug(limit=limit)
             return [case.to_dict() for case in cases]
+
+        def _list_analysis_history(self, query: str) -> list[dict[str, object]]:
+            if activity_store is None:
+                return []
+            params = parse_qs(query)
+            limit = _query_int(params, "limit", 200)
+            keyword = _query_str(params, "keyword").casefold()
+            mode = _query_str(params, "mode")
+            status = _query_str(params, "status")
+            items: list[dict[str, object]] = []
+            for session in activity_store.list_sessions(limit=None):
+                session_mode = str(session.get("mode") or "")
+                if not _is_analysis_history_mode(session_mode):
+                    continue
+                if mode and session_mode != mode:
+                    continue
+                if status and str(session.get("status") or "") != status:
+                    continue
+                if keyword and keyword not in _history_search_text(session).casefold():
+                    continue
+                items.append(session)
+                if len(items) >= limit:
+                    break
+            return items
+
+        def _get_analysis_history_item(self, session_id: str) -> dict[str, object] | None:
+            if activity_store is None:
+                return None
+            session = activity_store.get_session(session_id)
+            if session is None:
+                return None
+            if not _is_analysis_history_mode(str(session.get("mode") or "")):
+                return None
+            return session
+
+        def _delete_analysis_history(self, session_id: str) -> tuple[dict[str, object], int]:
+            if activity_store is None:
+                return {"ok": False, "error": "activity store not configured"}, 503
+            session = activity_store.get_session(session_id)
+            if session is None:
+                return {"ok": False, "error": "analysis history not found"}, 404
+            if not _is_analysis_history_mode(str(session.get("mode") or "")):
+                return {"ok": False, "error": "not an analysis history record"}, 409
+            authorization = _delete_authorization_placeholder()
+            deleted_session = activity_store.delete_session(session_id) or session
+            job_id = str(session.get("job_id") or "").strip()
+            deleted_case: dict[str, object] | None = None
+            if case_store is not None:
+                case = case_store.delete_by_job_id(job_id) if job_id else None
+                if case is None:
+                    case_id = str(session.get("case_id") or "").strip()
+                    case = case_store.delete(case_id) if case_id else None
+                deleted_case = case.to_dict() if case is not None else None
+            removed_contexts = 0
+            if conversation_store is not None:
+                removed_contexts += conversation_store.delete(session_id)
+                details = session.get("details")
+                if isinstance(details, dict):
+                    root_message_id = str(details.get("conversation_root_message_id") or "").strip()
+                    if root_message_id and root_message_id != session_id:
+                        removed_contexts += conversation_store.delete(root_message_id)
+            removed_versions = version_store.delete_by_job_id(job_id) if version_store is not None and job_id else 0
+            removed_paths: list[str] = []
+            for path in _history_paths_to_delete(session, root_dir=root_dir):
+                if _remove_history_path(path):
+                    removed_paths.append(str(path))
+            return {
+                "ok": True,
+                "item": deleted_session,
+                "case": deleted_case,
+                "removed_paths": removed_paths,
+                "removed_contexts": removed_contexts,
+                "removed_versions": removed_versions,
+                "authorization": authorization,
+            }, 200
 
         def _get_case(self, case_id: str) -> dict[str, object] | None:
             if case_store is None:
@@ -581,6 +693,28 @@ def _build_handler(
             if activity_store is None:
                 return None
             return activity_store.get_session(session_id)
+
+        def _terminate_session(self, session_id: str) -> tuple[dict[str, object], int]:
+            if activity_store is None:
+                return {"ok": False, "error": "activity store not configured"}, 503
+            session = activity_store.get_session(session_id)
+            if session is None:
+                return {"ok": False, "error": "session not found"}, 404
+            if not bool(session.get("can_terminate")):
+                return {
+                    "ok": False,
+                    "error": "session is not running",
+                    "session": session,
+                }, 409
+            terminated: list[dict[str, object]] = []
+            if process_watchdog is not None:
+                terminated = process_watchdog.terminate_session(session_id)
+            cancelled = activity_store.cancel_session(
+                session_id,
+                reason="后台管理页请求终止任务。",
+                terminated_processes=terminated,
+            )
+            return {"ok": True, "terminated": terminated, "session": cancelled or session}, 200
 
         def _get_daemon_status(self) -> dict[str, object]:
             if activity_store is None:
@@ -659,6 +793,100 @@ def _query_int(params: dict[str, list[str]], key: str, default: int) -> int:
         return max(1, min(int(raw), 1000))
     except ValueError:
         return default
+
+
+_ANALYSIS_HISTORY_MODES = {
+    "bug_analysis",
+    "direct_analysis",
+    "signal_lifecycle",
+    "perception_summary",
+}
+
+
+def _is_analysis_history_mode(mode: str) -> bool:
+    return mode.strip() in _ANALYSIS_HISTORY_MODES
+
+
+def _history_search_text(session: dict[str, object]) -> str:
+    values = [
+        session.get("session_id"),
+        session.get("event_id"),
+        session.get("chat_id"),
+        session.get("mode"),
+        session.get("status"),
+        session.get("content"),
+        session.get("message"),
+        session.get("job_id"),
+        session.get("report_url"),
+    ]
+    return "\n".join(str(value or "") for value in values)
+
+
+def _delete_authorization_placeholder() -> dict[str, object]:
+    return {
+        "checked": False,
+        "actor_id": "",
+        "actor_role": "",
+        "scope": "analysis_history.delete",
+        "note": "权限管理暂未启用，后续可在此接入角色/用户校验。",
+    }
+
+
+def _history_paths_to_delete(session: dict[str, object], *, root_dir: Path) -> list[Path]:
+    data_dir = root_dir.parent
+    jobs_root = data_dir / "jobs"
+    raw_candidates: list[Path] = []
+    job_dir = str(session.get("job_dir") or "").strip()
+    job_id = str(session.get("job_id") or "").strip()
+    if job_dir:
+        raw_candidates.append(Path(job_dir))
+    if job_id:
+        raw_candidates.append(jobs_root / job_id)
+        raw_candidates.append(root_dir / _safe_slug(job_id))
+    for key in ("published_report_index", "published_report_dir"):
+        details = session.get("details")
+        if isinstance(details, dict):
+            value = str(details.get(key) or "").strip()
+            if value:
+                raw_candidates.append(Path(value))
+
+    candidates: list[Path] = []
+    seen: set[Path] = set()
+    for path in raw_candidates:
+        try:
+            resolved = path.expanduser().resolve()
+        except OSError:
+            resolved = path.expanduser()
+        if not (_path_within(resolved, jobs_root) or _path_within(resolved, root_dir)):
+            continue
+        if resolved in {jobs_root.resolve(), root_dir.resolve()}:
+            continue
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        candidates.append(resolved)
+    return candidates
+
+
+def _path_within(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _remove_history_path(path: Path) -> bool:
+    try:
+        if not path.exists():
+            return False
+        if path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+        return True
+    except OSError:
+        return False
 
 
 def _render_sessions_page() -> str:
@@ -770,10 +998,14 @@ def _summary_preview_text(summary_text: str) -> str:
     for line in lines:
         if line == "Bug 分析完成":
             continue
+        if line.startswith("## "):
+            if filtered:
+                break
+            continue
+        normalized = line.lstrip("-*• \t")
+        if normalized.startswith("诉求：") or normalized.startswith("诉求:"):
+            continue
         filtered.append(line)
-        if line.startswith("## ") and len(filtered) >= 3:
-            filtered.pop()
-            break
         if len(filtered) >= 4:
             break
     if not filtered:

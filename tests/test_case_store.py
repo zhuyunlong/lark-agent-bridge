@@ -195,6 +195,23 @@ class TestCaseStore:
             assert removed == 1
             assert store.count == 0
 
+    def test_delete_by_case_id_and_job_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = CaseStore(Path(tmp) / "cases.json")
+            store.save(CaseRecord(case_id="c1", job_id="job_1"))
+            store.save(CaseRecord(case_id="c2", job_id="job_2"))
+
+            deleted = store.delete("c1")
+            deleted_by_job = store.delete_by_job_id("job_2")
+            missing = store.delete_by_job_id("job_missing")
+
+            assert deleted is not None
+            assert deleted.case_id == "c1"
+            assert deleted_by_job is not None
+            assert deleted_by_job.case_id == "c2"
+            assert missing is None
+            assert store.count == 0
+
     def test_prune_expired(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = CaseStore(Path(tmp) / "cases.json")

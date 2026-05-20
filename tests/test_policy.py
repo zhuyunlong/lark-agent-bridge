@@ -27,6 +27,12 @@ class PolicyTests(unittest.TestCase):
 
         self.assertTrue(decision.allowed)
 
+    def test_group_is_allowed_by_default_when_no_chat_allowlist_configured(self):
+        decision = evaluate_event_policy(BridgeConfig(dry_run=False, allowed_chats=[]), event(chat_id="oc_any"))
+
+        self.assertTrue(decision.allowed)
+        self.assertEqual(decision.reason, "allowed")
+
     def test_p2p_bypasses_group_and_user_allowlists(self):
         decision = evaluate_event_policy(
             BridgeConfig(

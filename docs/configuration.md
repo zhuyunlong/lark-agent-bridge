@@ -73,6 +73,7 @@ enabled = true
 provider = "codex"
 command = "codex"
 working_dir = "../.."
+agent_summary_timeout_seconds = 90
 resume_followup_sessions = false
 ```
 
@@ -91,8 +92,11 @@ Behavior:
 - `provider = "codex"` means prefer Codex first
 - `provider = "claude"` means prefer Claude Code first
 - if the preferred provider cannot start or returns non-zero, the bridge automatically tries the other provider
+- `agent_summary_timeout_seconds` only limits the final Agent-written conclusion; if it times out, the bridge falls back to the script summary and still returns the generated report
+- leave `default_prompt` empty unless you intentionally want a configured fallback; generic bug links should ask for a concrete analysis direction instead of silently defaulting to startup
 - follow-ups and reanalysis create a fresh Agent session by default, while reusing the previous bug link, downloaded logs, extracted logs, report metadata, skill decision, and source-repo paths
 - set `resume_followup_sessions = true` only if you explicitly want a follow-up to resume the old Agent session; reanalysis still uses a fresh Agent summary session so the new prompt and current skill/source evidence are not biased by stale private context
+- each bug job writes `bug_agent_summary_prompt.md` and `bug_agent_summary_context.json` in the output directory so the exact Agent prompt and embedded local context can be audited
 
 ### Intent routing default agent
 
@@ -165,9 +169,19 @@ Notes:
 - `bind_host` uses `0.0.0.0` by default so peers inside the same LAN can open the generated report link
 - published pages are stored under `data/published_reports/`
 - reply-context state for follow-up questions is stored under `data/state/conversation_contexts.json`
-- the same listener serves the local admin console at `/admin` (`/sessions` is an alias) and JSON APIs under `/api/sessions`, `/api/cases`, `/api/skills`
+- the same listener serves the local admin console at `/admin` (`/sessions` is an alias) and JSON APIs under `/api/sessions`, `/api/analysis-history`, `/api/cases`, `/api/skills`
 - listener daemon health is exposed in `check` output and at `/api/daemon`
 - agent timeline state for the console is stored under `data/state/agent_activity.json`
+
+## Analysis history retention
+
+Triggered log-analysis records are kept by default:
+
+- `[job_retention].purge_all_on_listen_start = false`, so service restarts do not clear `data/jobs/*`
+- periodic cleanup no longer removes historical job output, published reports, activity timelines, follow-up context, or case history
+- cleanup still removes temporary Bug cache according to `bug_cache_max_age_hours`
+- `/admin` exposes an analysis-history page backed by `/api/analysis-history`; deleting a record removes the linked activity session, case entry, job directory, published report, follow-up context, and report-version entry when present
+- Bug/direct log analysis writes a focused `output/evidence_logs/manifest.json` bundle that preserves the selected navigation log (`log0`/`log1`/`log2`), its `logd`, and vehicle-related sibling logs when referenced by the investigation
 
 ## Event consumer health
 
@@ -282,7 +296,7 @@ Notes:
 
 ## Behavior permissions
 
-Current behavior is intentionally permissioned by chat type, group authorization, sender identity, and request class.
+Current behavior keeps group restrictions available, but does not restrict groups by default.
 
 ### Permission layers
 
@@ -290,16 +304,20 @@ Current behavior is intentionally permissioned by chat type, group authorization
    - private chats are allowed by default
 2. `allowed_users`
    - super users; they bypass group allowlists
-3. `allowed_chats`
-   - fully authorized groups
-4. external groups
+3. `allowed_chats = []`
+   - default: all groups are fully authorized when the bot is explicitly mentioned
+4. `allowed_chats = ["oc_xxx"]`
+   - restricted mode: only listed groups are fully authorized
+5. external groups in restricted mode
    - only limited log-analysis behavior is allowed for ordinary members
 
 ### What `allowed_chats` means
 
-`allowed_chats` means the Bot is explicitly authorized for full use in those groups.
+`allowed_chats = []` means no group restriction. In this default mode, any group can `@` the Bot for full use.
 
-Inside those groups, addressed messages can use:
+When `allowed_chats` is non-empty, it becomes a group allowlist. Only those groups are explicitly authorized for full use.
+
+Inside unrestricted groups, or inside groups listed in `allowed_chats`, addressed messages can use:
 
 - ordinary chat
 - bug analysis
@@ -319,9 +337,9 @@ If `sender_id` is in `allowed_users`:
 - all abilities are available, not only log analysis
 - if `[intent_analysis]` is enabled, those addressed messages still go through the local Agent route-classifier first
 
-### External-group ordinary members
+### External-group ordinary members in restricted mode
 
-If a group is **not** in `allowed_chats`, and the sender is **not** in `allowed_users`, the bridge only allows log-analysis-oriented behavior:
+If `allowed_chats` is non-empty, a group is **not** in `allowed_chats`, and the sender is **not** in `allowed_users`, the bridge only allows log-analysis-oriented behavior:
 
 - bug link analysis
 - reply-to-file direct analysis
@@ -351,6 +369,25 @@ This is what enables:
 reply 某条文件消息
 @bot 分析启动和卡顿
 ```
+
+### Local download-directory files
+
+The bridge may resolve a bare filename from the configured local download directories only through the guarded `[local_resources]` path.
+
+Default behavior:
+
+- `enabled = true`
+- `require_allowed_user = true`
+- `allowed_dirs = ["~/Downloads"]`
+
+All of the following must be true before a chat message can become a local file resource:
+
+1. the sender is in `allowed_users`
+2. the text explicitly mentions `下载目录`, `Downloads`, or `服务器下载目录`
+3. the text contains a safe filename such as `Log.zip`
+4. the file exists under one of `allowed_dirs`
+
+Messages from other senders, or messages that contain only a filename without the download-directory authorization phrase, are not allowed to access local paths.
 
 ## Verification
 

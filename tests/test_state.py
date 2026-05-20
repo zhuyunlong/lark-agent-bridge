@@ -77,6 +77,75 @@ class AgentActivityStoreTests(unittest.TestCase):
         self.assertEqual(status["event_key"], "im.message.receive_v1")
         self.assertTrue(status["ready"])
 
+    def test_list_sessions_hides_silent_skipped_sessions_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "activity.json"
+            store = AgentActivityStore(path)
+            not_addressed = LarkEvent(
+                event_id="evt_silent",
+                message_id="om_silent",
+                chat_id="oc_1",
+                chat_type="group",
+                sender_id="ou_1",
+                message_type="text",
+                content="普通群消息",
+            )
+            duplicate = LarkEvent(
+                event_id="evt_duplicate",
+                message_id="om_duplicate",
+                chat_id="oc_1",
+                chat_type="group",
+                sender_id="ou_1",
+                message_type="text",
+                content="@bot 重复事件",
+            )
+            unsupported = LarkEvent(
+                event_id="evt_unsupported",
+                message_id="om_unsupported",
+                chat_id="oc_1",
+                chat_type="group",
+                sender_id="ou_1",
+                message_type="text",
+                content="@bot 未支持请求",
+            )
+
+            store.record_result(
+                not_addressed,
+                TaskResult(
+                    success=True,
+                    message="group message not addressed to this bot",
+                    skipped=True,
+                    details={"mode": "not_addressed"},
+                ),
+            )
+            store.record_result(
+                duplicate,
+                TaskResult(
+                    success=True,
+                    message="duplicate event skipped: evt_duplicate",
+                    skipped=True,
+                ),
+            )
+            store.record_result(
+                unsupported,
+                TaskResult(
+                    success=True,
+                    message="not a handled request",
+                    skipped=True,
+                    details={"mode": "unsupported"},
+                ),
+            )
+
+            visible = store.list_sessions()
+            all_sessions = store.list_sessions(include_hidden=True)
+            silent_detail = store.get_session("om_silent")
+
+        self.assertEqual([item["session_id"] for item in visible], ["om_unsupported"])
+        self.assertEqual({item["session_id"] for item in all_sessions}, {"om_silent", "om_duplicate", "om_unsupported"})
+        self.assertIsNotNone(silent_detail)
+        assert silent_detail is not None
+        self.assertFalse(silent_detail["visible_in_admin"])
+
     def test_find_session_by_job_id(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "activity.json"
@@ -107,6 +176,91 @@ class AgentActivityStoreTests(unittest.TestCase):
         self.assertIsNotNone(detail)
         assert detail is not None
         self.assertEqual(detail["session_id"], "om_1")
+
+    def test_delete_session_removes_persisted_history_record(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "activity.json"
+            store = AgentActivityStore(path)
+            event = LarkEvent(
+                event_id="evt_1",
+                message_id="om_1",
+                chat_id="oc_1",
+                chat_type="group",
+                sender_id="ou_1",
+                message_type="text",
+                content="@bot 分析 bug",
+            )
+            store.record_event(event)
+            store.record_progress({"message_id": "om_1", "stage": "bug_run_analysis", "message": "执行日志分析"})
+            store.record_result(
+                event,
+                TaskResult(
+                    success=True,
+                    message="分析完成",
+                    job_id="job_1",
+                    details={"mode": "bug_analysis"},
+                ),
+            )
+
+            deleted = store.delete_session("om_1", actor_id="ou_admin", actor_role="admin")
+            reloaded = AgentActivityStore(path)
+
+        self.assertIsNotNone(deleted)
+        assert deleted is not None
+        self.assertEqual(deleted["session_id"], "om_1")
+        self.assertEqual(deleted["job_id"], "job_1")
+        self.assertEqual(deleted["delete_authorization"]["actor_id"], "ou_admin")
+        self.assertEqual(deleted["delete_authorization"]["actor_role"], "admin")
+        self.assertEqual(deleted["delete_authorization"]["scope"], "analysis_history.delete")
+        self.assertIsNone(reloaded.get_session("om_1"))
+
+    def test_cancel_session_marks_running_session_and_preserves_cancelled_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "activity.json"
+            store = AgentActivityStore(path)
+            event = LarkEvent(
+                event_id="evt_1",
+                message_id="om_1",
+                chat_id="oc_1",
+                chat_type="group",
+                sender_id="ou_1",
+                message_type="text",
+                content="@bot 分析 bug",
+            )
+
+            store.record_event(event)
+            store.record_progress(
+                {
+                    "event_id": "evt_1",
+                    "message_id": "om_1",
+                    "chat_id": "oc_1",
+                    "chat_type": "group",
+                    "stage": "bug_run_analysis",
+                    "message": "执行日志分析",
+                }
+            )
+            cancelled = store.cancel_session(
+                "om_1",
+                reason="后台管理页请求终止任务。",
+                terminated_processes=[{"pid": 123, "terminated": True}],
+            )
+            store.record_result(
+                event,
+                TaskResult(
+                    success=False,
+                    message="Bug 分析失败：子进程被终止",
+                    error_code="bug_analysis_failed",
+                    details={"mode": "bug_analysis"},
+                ),
+            )
+            detail = store.get_session("om_1")
+
+        self.assertIsNotNone(cancelled)
+        assert detail is not None
+        self.assertEqual(detail["status"], "cancelled")
+        self.assertEqual(detail["error_code"], "cancelled_by_admin")
+        self.assertFalse(detail["can_terminate"])
+        self.assertEqual(detail["progress"][-1]["stage"], "admin_task_terminate_requested")
 
 
 if __name__ == "__main__":

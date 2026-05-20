@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -15,6 +16,7 @@ from lark_agent_bridge.health import (
     ProcessWatchdog,
     TrackedProcess,
     _process_alive,
+    _safe_terminate,
     run_tracked_process,
 )
 
@@ -75,11 +77,12 @@ class TestProcessWatchdog:
 
     def test_list_tracked(self):
         wd = ProcessWatchdog()
-        wd.track(os.getpid(), "test-process")
+        wd.track(os.getpid(), "test-process", session_id="om_1")
         listed = wd.list_tracked()
         assert len(listed) == 1
         assert listed[0]["pid"] == os.getpid()
         assert listed[0]["name"] == "test-process"
+        assert listed[0]["session_id"] == "om_1"
         assert listed[0]["alive"] is True
         assert listed[0]["uptime_seconds"] >= 0
 
@@ -89,6 +92,23 @@ class TestProcessWatchdog:
         stuck = wd.check_stuck()
         assert wd.tracked_count == 0
         assert len(stuck) == 0
+
+    def test_terminate_session_only_targets_matching_session(self):
+        wd = ProcessWatchdog()
+        wd.track(11111, "target", session_id="om_target")
+        wd.track(22222, "other", session_id="om_other")
+        with (
+            mock.patch("lark_agent_bridge.health._process_alive", return_value=True),
+            mock.patch("lark_agent_bridge.health._safe_terminate", return_value=True) as terminate,
+        ):
+            result = wd.terminate_session("om_target")
+
+        assert len(result) == 1
+        assert result[0]["pid"] == 11111
+        assert result[0]["session_id"] == "om_target"
+        terminate.assert_called_once_with(11111)
+        assert 11111 not in wd._tracked
+        assert 22222 in wd._tracked
 
 
 class TestHealthMonitor:
@@ -228,7 +248,10 @@ class RunTrackedProcessTests(unittest.TestCase):
         watchdog = ProcessWatchdog(max_idle_seconds=60)
         process = RaceProcess()
 
-        with mock.patch("lark_agent_bridge.health.subprocess.Popen", return_value=process):
+        with (
+            mock.patch("lark_agent_bridge.health.subprocess.Popen", return_value=process),
+            mock.patch("lark_agent_bridge.health._safe_terminate", return_value=False),
+        ):
             with self.assertRaises(subprocess.TimeoutExpired):
                 run_tracked_process(
                     ["cmd"],
@@ -241,3 +264,70 @@ class RunTrackedProcessTests(unittest.TestCase):
                 )
 
         self.assertEqual(watchdog.tracked_count, 0)
+
+    def test_tracked_process_starts_new_session_for_process_group_cleanup(self):
+        class FakeProcess:
+            pid = os.getpid()
+            returncode = 0
+
+            def communicate(self, input=None, timeout=None):
+                return "ok", ""
+
+        watchdog = ProcessWatchdog(max_idle_seconds=60)
+        with mock.patch("lark_agent_bridge.health.subprocess.Popen", return_value=FakeProcess()) as popen:
+            completed = run_tracked_process(
+                ["cmd"],
+                watchdog=watchdog,
+                name="group-process",
+                capture_output=True,
+                text=True,
+                timeout=1,
+                check=False,
+            )
+
+        self.assertEqual(completed.stdout, "ok")
+        if os.name == "posix":
+            self.assertTrue(popen.call_args.kwargs.get("start_new_session"))
+
+    def test_timeout_terminates_process_group(self):
+        class TimeoutProcess:
+            pid = 12345
+            returncode = None
+
+            def __init__(self):
+                self.calls = 0
+
+            def communicate(self, input=None, timeout=None):
+                self.calls += 1
+                if self.calls == 1:
+                    raise subprocess.TimeoutExpired(["cmd"], timeout=timeout)
+                return "", ""
+
+        watchdog = ProcessWatchdog(max_idle_seconds=60)
+        with (
+            mock.patch("lark_agent_bridge.health.subprocess.Popen", return_value=TimeoutProcess()),
+            mock.patch("lark_agent_bridge.health._safe_terminate", return_value=True) as terminate,
+        ):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                run_tracked_process(
+                    ["cmd"],
+                    watchdog=watchdog,
+                    name="timeout-process",
+                    capture_output=True,
+                    text=True,
+                    timeout=1,
+                    check=False,
+                )
+
+        terminate.assert_called_once_with(12345)
+
+    def test_safe_terminate_prefers_process_group_for_session_leader(self):
+        with (
+            mock.patch("lark_agent_bridge.health.os.getpgid", return_value=12345),
+            mock.patch("lark_agent_bridge.health.os.killpg") as killpg,
+            mock.patch("lark_agent_bridge.health.os.kill") as kill,
+        ):
+            self.assertTrue(_safe_terminate(12345))
+
+        killpg.assert_called_once_with(12345, signal.SIGTERM)
+        kill.assert_not_called()

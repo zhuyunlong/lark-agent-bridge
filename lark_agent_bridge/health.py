@@ -91,6 +91,7 @@ class TrackedProcess:
     started_at: float
     last_activity_at: float
     max_idle_seconds: float = 3600.0
+    session_id: str = ""
 
 
 class ProcessWatchdog:
@@ -107,7 +108,14 @@ class ProcessWatchdog:
         self.max_idle_seconds = max(60.0, float(max_idle_seconds))
         self._tracked: dict[int, TrackedProcess] = {}
 
-    def track(self, pid: int, name: str, *, max_idle_seconds: float | None = None) -> None:
+    def track(
+        self,
+        pid: int,
+        name: str,
+        *,
+        max_idle_seconds: float | None = None,
+        session_id: str = "",
+    ) -> None:
         """Start tracking a subprocess."""
         now = time.time()
         self._tracked[pid] = TrackedProcess(
@@ -116,6 +124,7 @@ class ProcessWatchdog:
             started_at=now,
             last_activity_at=now,
             max_idle_seconds=max_idle_seconds if max_idle_seconds is not None else self.max_idle_seconds,
+            session_id=session_id.strip(),
         )
 
     def record_activity(self, pid: int) -> None:
@@ -156,6 +165,32 @@ class ProcessWatchdog:
                 self._tracked.pop(proc.pid, None)
         return results
 
+    def terminate_session(self, session_id: str) -> list[dict[str, Any]]:
+        """Terminate tracked subprocesses associated with a bridge session."""
+        normalized = session_id.strip()
+        if not normalized:
+            return []
+        results: list[dict[str, Any]] = []
+        for proc in list(self._tracked.values()):
+            if proc.session_id != normalized:
+                continue
+            alive = _process_alive(proc.pid)
+            terminated = _safe_terminate(proc.pid) if alive else False
+            results.append(
+                {
+                    "pid": proc.pid,
+                    "name": proc.name,
+                    "session_id": proc.session_id,
+                    "uptime_seconds": time.time() - proc.started_at,
+                    "idle_seconds": time.time() - proc.last_activity_at,
+                    "alive": alive,
+                    "terminated": terminated,
+                }
+            )
+            if terminated or not alive:
+                self._tracked.pop(proc.pid, None)
+        return results
+
     @property
     def tracked_count(self) -> int:
         return len(self._tracked)
@@ -167,6 +202,7 @@ class ProcessWatchdog:
             {
                 "pid": proc.pid,
                 "name": proc.name,
+                "session_id": proc.session_id,
                 "uptime_seconds": now - proc.started_at,
                 "idle_seconds": now - proc.last_activity_at,
                 "alive": _process_alive(proc.pid),
@@ -181,6 +217,7 @@ def run_tracked_process(
     watchdog: ProcessWatchdog | None,
     name: str,
     max_idle_seconds: float | None = None,
+    session_id: str = "",
     **kwargs: Any,
 ) -> subprocess.CompletedProcess[str]:
     """Run a subprocess and register its PID with the watchdog when available.
@@ -202,21 +239,29 @@ def run_tracked_process(
         kwargs["stdout"] = subprocess.PIPE
         kwargs["stderr"] = subprocess.PIPE
 
+    if os.name == "posix" and "start_new_session" not in kwargs:
+        kwargs["start_new_session"] = True
+
     process = subprocess.Popen(command, **kwargs)
     watchdog.track(
         process.pid,
         name,
         max_idle_seconds=max_idle_seconds if max_idle_seconds is not None else timeout,
+        session_id=session_id,
     )
     try:
         try:
             stdout, stderr = process.communicate(input=input_data, timeout=timeout)
         except subprocess.TimeoutExpired as exc:
             try:
-                process.kill()
+                _safe_terminate(process.pid)
             except ProcessLookupError:
                 pass
-            stdout, stderr = process.communicate()
+            try:
+                stdout, stderr = process.communicate(timeout=2)
+            except subprocess.TimeoutExpired:
+                _safe_terminate(process.pid, sig=signal.SIGKILL)
+                stdout, stderr = process.communicate()
             raise subprocess.TimeoutExpired(
                 command,
                 timeout,
@@ -404,10 +449,18 @@ def _process_alive(pid: int) -> bool:
         return False
 
 
-def _safe_terminate(pid: int) -> bool:
-    """Send SIGTERM to a process. Returns True if signal was sent."""
+def _safe_terminate(pid: int, *, sig: signal.Signals = signal.SIGTERM) -> bool:
+    """Send a signal to a process or its process group when it is a leader."""
     try:
-        os.kill(pid, signal.SIGTERM)
+        if os.name == "posix":
+            try:
+                pgid = os.getpgid(pid)
+            except OSError:
+                pgid = None
+            if pgid == pid:
+                os.killpg(pgid, sig)
+                return True
+        os.kill(pid, sig)
         return True
     except (ProcessLookupError, PermissionError):
         return False

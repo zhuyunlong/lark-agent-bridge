@@ -11,7 +11,7 @@ from lark_agent_bridge.models import BridgeConfig, JobRetentionOptions
 
 
 class RetentionTests(unittest.TestCase):
-    def test_cleanup_expired_jobs_removes_only_old_directories(self):
+    def test_cleanup_expired_jobs_preserves_historical_job_outputs(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = BridgeConfig(
                 dry_run=False,
@@ -36,9 +36,60 @@ class RetentionTests(unittest.TestCase):
             os.utime(fresh_file, (fresh_ts, fresh_ts))
 
             removed = app.cleanup_expired_jobs(now=now)
-            self.assertEqual(removed, 1)
-            self.assertFalse(expired.exists())
+            self.assertEqual(removed, 0)
+            self.assertTrue(expired.exists())
             self.assertTrue(fresh.exists())
+
+    def test_cleanup_expired_jobs_preserves_reports_activity_and_conversations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(
+                dry_run=False,
+                data_dir=Path(tmp),
+                job_retention=JobRetentionOptions(max_age_hours=6),
+            )
+            app = BridgeApp(config)
+            now = datetime.now(timezone.utc)
+            event = LarkEvent(
+                event_id="evt_1",
+                message_id="om_1",
+                chat_id="oc_1",
+                chat_type="group",
+                sender_id="ou_1",
+                message_type="text",
+                content="@bot 分析 bug",
+            )
+            app.activity_store.record_event(event)
+            app.activity_store.record_result(
+                event,
+                TaskResult(
+                    success=True,
+                    message="分析完成",
+                    job_id="job_1",
+                    details={"mode": "bug_analysis", "published_report_url": "http://127.0.0.1:8765/reports/job_1/"},
+                ),
+            )
+            app.conversation_store.remember(
+                root_message_id="om_1",
+                chat_id="oc_1",
+                mode="bug_analysis",
+                request_text="分析 bug",
+                summary_text="上一轮结论",
+                report_url="http://127.0.0.1:8765/reports/job_1/",
+                report_excerpt="报告摘录",
+            )
+            report_dir = config.data_dir / "published_reports" / "job_1"
+            report_dir.mkdir(parents=True)
+            report_file = report_dir / "index.html"
+            report_file.write_text("report", encoding="utf-8")
+            old_ts = (now - timedelta(hours=7)).timestamp()
+            os.utime(report_file, (old_ts, old_ts))
+
+            removed = app.cleanup_expired_jobs(now=now)
+
+            self.assertEqual(removed, 0)
+            self.assertTrue(report_file.exists())
+            self.assertIsNotNone(app.activity_store.get_session("om_1"))
+            self.assertIsNotNone(app.conversation_store.lookup("om_1"))
 
     def test_purge_all_jobs_removes_entire_history(self):
         with tempfile.TemporaryDirectory() as tmp:

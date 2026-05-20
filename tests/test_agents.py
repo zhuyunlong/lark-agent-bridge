@@ -1,18 +1,30 @@
 from pathlib import Path
 import json
 import subprocess
+import sys
 import tempfile
 import unittest
+import zipfile
 from unittest import mock
 
 from lark_agent_bridge.agents import (
+    BugAnalysisPlan,
     BugAnalysisRunner,
     ClaudeSkillRunner,
     IntentAnalysisRunner,
     OmlxChatClient,
     PerceptionSummaryRunner,
 )
-from lark_agent_bridge.models import BridgeConfig, BugRequest, DownloadResource, LarkEvent, PerceptionSummaryRequest
+from lark_agent_bridge.models import (
+    BridgeConfig,
+    BugRequest,
+    DirectAnalysisRequest,
+    DownloadedResource,
+    DownloadResource,
+    LarkEvent,
+    PerceptionSummaryRequest,
+    TaskResult,
+)
 from lark_agent_bridge.reporting import ReportComposition
 
 
@@ -27,6 +39,12 @@ class AgentTests(unittest.TestCase):
 
     def tearDown(self):
         self._bug_decision_patcher.stop()
+
+    def _write_matching_log(self, root: Path, timestamp: str = "2026-05-16 10:01:00") -> Path:
+        path = root / "time_anchor.log"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"{timestamp} I TestTag: time anchor\n", encoding="utf-8")
+        return path
 
     def test_omlx_chat_posts_to_chat_completions(self):
         response_payload = {"choices": [{"message": {"content": "本地模型回复"}}]}
@@ -191,6 +209,32 @@ class AgentTests(unittest.TestCase):
             self.assertTrue(artifact.exists())
             self.assertEqual(artifact.read_text(encoding="utf-8"), "分析完成\n证据")
 
+    def test_claude_skill_prompt_is_passed_via_stdin_not_after_add_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=False, data_dir=Path(tmp), workspace_root=Path(tmp))
+            config.claude_agent.add_dirs = [Path(tmp)]
+            completed = subprocess.CompletedProcess(
+                args=["claude"],
+                returncode=0,
+                stdout="分析完成",
+                stderr="",
+            )
+            with mock.patch("subprocess.run", return_value=completed) as run_mock:
+                result = ClaudeSkillRunner(config).run_skill_analysis(
+                    __import__("lark_agent_bridge.models", fromlist=["ClaudeSkillRequest"]).ClaudeSkillRequest(
+                        prompt="根据导航源码分析",
+                        raw_text="/skill 根据导航源码分析",
+                        triggered=True,
+                    )
+                )
+
+            self.assertTrue(result.success)
+            command = run_mock.call_args.args[0]
+            kwargs = run_mock.call_args.kwargs
+            self.assertIn("--add-dir", command)
+            self.assertEqual(command[-1], str(Path(tmp)))
+            self.assertIn("根据导航源码分析", kwargs["input"])
+
     def test_claude_skill_failure_does_not_include_files_to_send(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = BridgeConfig(dry_run=False, data_dir=Path(tmp), workspace_root=Path(tmp))
@@ -211,6 +255,7 @@ class AgentTests(unittest.TestCase):
 
             self.assertFalse(result.success)
             self.assertNotIn("files_to_send", result.details)
+            self.assertEqual((Path(result.job_dir) / "logs" / "claude_skill.stderr.log").read_text(encoding="utf-8"), "boom")
 
     def test_bug_analysis_dry_run_returns_command_and_artifacts(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -363,6 +408,78 @@ class AgentTests(unittest.TestCase):
         self.assertLess(len(prompt), 18000)
         self.assertNotIn("S" * 4000, prompt)
 
+    def test_bug_agent_summary_followup_prompt_embeds_referenced_report_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=True, data_dir=Path(tmp), workspace_root=Path(tmp))
+            runner = BugAnalysisRunner(config)
+            output_dir = Path(tmp) / "jobs" / "job_1" / "output"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            request_artifact = output_dir / "bug_agent_reanalysis_request.md"
+            metadata_path = output_dir / "bug_reanalysis_metadata.md"
+            source_evidence = output_dir / "bug_source_evidence.md"
+            report_json = output_dir / "bug_3d_stuck_report.json"
+            request_artifact.write_text("本次追问: 基于源码分析 unity场景", encoding="utf-8")
+            source_evidence.write_text(
+                "module_scene/UnitySceneRouter.kt:42 fun chooseUnityScene() = \"SR\"",
+                encoding="utf-8",
+            )
+            report_json.write_text('{"summary":"P挡时 Unity 场景没有进入 SR"}', encoding="utf-8")
+            metadata_path.write_text(
+                f"- 本轮源码证据: `{source_evidence}`\n"
+                "- 最新 JSON 报告:\n"
+                f"  - `stuck` -> `{report_json}`\n",
+                encoding="utf-8",
+            )
+
+            prompt = runner._build_bug_agent_summary_prompt(
+                request_text="分析3D生命周期",
+                request_artifact=request_artifact,
+                metadata_path=metadata_path,
+                followup_text="基于源码分析 unity场景",
+            )
+
+        self.assertIn("Bug Source Evidence", prompt)
+        self.assertIn(str(source_evidence), prompt)
+        self.assertIn(str(report_json), prompt)
+        self.assertIn("源码证据文件；需要源码链路时读取", prompt)
+        self.assertIn("结构化分析结果，必须优先读取", prompt)
+        self.assertNotIn("UnitySceneRouter.kt", prompt)
+        self.assertNotIn("P挡时 Unity 场景没有进入 SR", prompt)
+
+    def test_omlx_bug_summary_prompt_embeds_referenced_report_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=True, data_dir=Path(tmp), workspace_root=Path(tmp))
+            config.omlx_chat.max_prompt_chars = 9000
+            runner = BugAnalysisRunner(config)
+            output_dir = Path(tmp) / "jobs" / "job_1" / "output"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            request_artifact = output_dir / "bug_agent_reanalysis_request.md"
+            metadata_path = output_dir / "bug_reanalysis_metadata.md"
+            source_evidence = output_dir / "bug_source_evidence.md"
+            report_json = output_dir / "bug_3d_startup_report.json"
+            request_artifact.write_text("本次追问: 基于源码分析 unity场景", encoding="utf-8")
+            source_evidence.write_text("UnitySceneRouter.kt:42 P挡选择 ParkingScene", encoding="utf-8")
+            report_json.write_text('{"summary":"主 PID 2466，Unity 场景切换缺少完成日志"}', encoding="utf-8")
+            metadata_path.write_text(
+                f"- 本轮源码证据: `{source_evidence}`\n"
+                "- 最新 JSON 报告:\n"
+                f"  - `startup` -> `{report_json}`\n",
+                encoding="utf-8",
+            )
+
+            prompt = runner._build_omlx_bug_summary_prompt(
+                request_text="分析3D生命周期",
+                request_artifact=request_artifact,
+                metadata_path=metadata_path,
+                followup_text="基于源码分析 unity场景",
+            )
+
+        self.assertIn(str(source_evidence), prompt)
+        self.assertIn(str(report_json), prompt)
+        self.assertIn("轻量模型不能读取本地文件", prompt)
+        self.assertNotIn("UnitySceneRouter.kt", prompt)
+        self.assertNotIn("主 PID 2466", prompt)
+
     def test_bug_agent_summary_prompt_biases_to_fault_time_focus_session(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = BridgeConfig(dry_run=True, data_dir=Path(tmp), workspace_root=Path(tmp))
@@ -379,8 +496,10 @@ class AgentTests(unittest.TestCase):
 
         self.assertIn("主会话", prompt)
         self.assertIn("不要展开无关会话", prompt)
-        self.assertIn("故障时间: 2026-05-11 23:10", prompt)
-        self.assertIn("主会话 PID: 2577", prompt)
+        self.assertIn(str(metadata_path), prompt)
+        self.assertIn("元数据索引文件", prompt)
+        self.assertNotIn("故障时间: 2026-05-11 23:10", prompt)
+        self.assertNotIn("主会话 PID: 2577", prompt)
 
     def test_bug_agent_summary_prompt_for_new_bug_forbids_followup_language(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -417,9 +536,10 @@ class AgentTests(unittest.TestCase):
 
         for heading in ["结论摘要", "关键证据", "最可能原因", "待确认项", "建议动作"]:
             self.assertIn(heading, prompt)
+        self.assertIn("不要在每条结论或证据前重复写相同的诉求", prompt)
         self.assertNotIn("rawTmcData", prompt)
 
-    def test_bug_agent_summary_command_for_claude_enables_repo_read_tools_and_embeds_files(self):
+    def test_bug_agent_summary_command_for_claude_enables_repo_read_tools_and_lists_files(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = BridgeConfig(dry_run=True, data_dir=Path(tmp), workspace_root=Path(tmp))
             config.bug_analysis.provider = "claude"
@@ -441,8 +561,10 @@ class AgentTests(unittest.TestCase):
         self.assertIn("--allowedTools", invocation["command"])
         self.assertIn("Read,Grep,Glob,LS", invocation["command"])
         self.assertIn("--add-dir", invocation["command"])
-        self.assertTrue(any("request-body" in part for part in invocation["command"]))
-        self.assertTrue(any("metadata-body" in part for part in invocation["command"]))
+        self.assertTrue(any(str(request_artifact) in part for part in invocation["command"]))
+        self.assertTrue(any(str(metadata_path) in part for part in invocation["command"]))
+        self.assertFalse(any("request-body" in part for part in invocation["command"]))
+        self.assertFalse(any("metadata-body" in part for part in invocation["command"]))
         self.assertTrue(any(str(config.workspace_root.resolve()) == part for part in invocation["command"]))
 
     def test_bug_agent_summary_falls_back_to_claude_when_codex_unavailable(self):
@@ -504,12 +626,116 @@ class AgentTests(unittest.TestCase):
         )
         self.assertEqual(scope, "cumulative")
 
+    def test_codex_stream_preview_formats_jsonl_events(self):
+        runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
+
+        self.assertEqual(
+            runner._codex_stream_preview(json.dumps({"type": "thread.started", "thread_id": "sess_1"})),
+            "Codex 会话已创建 sess_1",
+        )
+        self.assertEqual(
+            runner._codex_stream_preview(json.dumps({"type": "turn.started"})),
+            "Codex 已开始深度分析",
+        )
+        self.assertEqual(
+            runner._codex_stream_preview(
+                json.dumps({"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 3}})
+            ),
+            "Codex 深度分析完成，token≈13",
+        )
+        self.assertEqual(
+            runner._codex_stream_preview(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "结论 A\n证据 B"}})),
+            "agent_message: 结论 A 证据 B",
+        )
+        self.assertEqual(
+            runner._codex_stream_preview(
+                json.dumps(
+                    {
+                        "type": "item.started",
+                        "item": {
+                            "type": "command_execution",
+                            "command": '/bin/zsh -lc "nl -ba /repo/log.txt | sed -n \'1,20p\'"',
+                        },
+                    }
+                )
+            ),
+            "工具调用：执行命令 nl -ba /repo/log.txt | sed -n '1,20p'",
+        )
+        self.assertEqual(
+            runner._codex_stream_preview(
+                json.dumps({"type": "item.completed", "item": {"type": "command_execution"}})
+            ),
+            "",
+        )
+        self.assertEqual(
+            runner._codex_stream_preview(
+                json.dumps({"type": "item.completed", "item": {"type": "error", "message": "tool failed"}})
+            ),
+            "Agent 错误：tool failed",
+        )
+        self.assertEqual(
+            runner._codex_stream_preview(json.dumps({"type": "item.completed", "item": {"type": "error"}})),
+            "",
+        )
+
+    def test_streaming_agent_summary_does_not_timeout_while_tool_calls_continue(self):
+        runner = BugAnalysisRunner(BridgeConfig(dry_run=False))
+        events = []
+        script = (
+            "import json, time\n"
+            "for i in range(8):\n"
+            "    print(json.dumps({'type':'item.started','item':{'type':'command_execution','command':f'echo {i}'}}), flush=True)\n"
+            "    time.sleep(0.25)\n"
+            "print('done', flush=True)\n"
+        )
+
+        completed = runner._run_bug_agent_summary_streaming_process(
+            command=[sys.executable, "-c", script],
+            provider="codex",
+            progress_callback=events.append,
+            timeout=1,
+        )
+
+        self.assertEqual(completed.returncode, 0)
+        self.assertIn("done", completed.stdout)
+        self.assertTrue(any("工具调用：执行命令 echo" in item["details"]["stream_preview"] for item in events))
+
+    def test_streaming_agent_summary_times_out_when_agent_is_idle(self):
+        runner = BugAnalysisRunner(BridgeConfig(dry_run=False))
+
+        with self.assertRaises(subprocess.TimeoutExpired):
+            runner._run_bug_agent_summary_streaming_process(
+                command=[sys.executable, "-c", "import time; time.sleep(2)"],
+                provider="codex",
+                progress_callback=lambda _event: None,
+                timeout=1,
+            )
+
+    def test_emit_agent_summary_stream_progress_records_preview(self):
+        runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
+        events = []
+
+        runner._emit_agent_summary_stream_progress(
+            events.append,
+            provider="codex",
+            line=json.dumps({"type": "turn.started"}),
+            elapsed_seconds=1.26,
+        )
+
+        self.assertEqual(events[0]["stage"], "bug_agent_summary_stream")
+        self.assertEqual(events[0]["message"], "深度分析输出更新：Codex 已开始深度分析")
+        self.assertEqual(events[0]["details"]["provider"], "codex")
+        self.assertEqual(events[0]["details"]["stream_preview"], "Codex 已开始深度分析")
+        self.assertEqual(events[0]["details"]["elapsed_seconds"], 1.3)
+
     def test_bug_analysis_metadata_appends_agent_runtime_summary(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = BridgeConfig(dry_run=False, data_dir=Path(tmp), workspace_root=Path(tmp))
             runner = BugAnalysisRunner(config)
             log_root = Path(tmp) / "logs"
             log_root.mkdir(parents=True, exist_ok=True)
+            self._write_matching_log(log_root, "2026-05-16 10:01:00")
+            self._write_matching_log(log_root, "2026-05-16 10:01:00")
             report_html = Path(tmp) / "bug_signal_chain_report.html"
             report_json = Path(tmp) / "bug_signal_chain_report.json"
             report_html.write_text("<html>signal</html>", encoding="utf-8")
@@ -528,6 +754,7 @@ class AgentTests(unittest.TestCase):
                         "create_by": "tester",
                         "fields": {},
                         "attachments": [],
+                        "description": "问题时间: 2026-05-16 10:01\n信号异常",
                     }
                 if command[:3] == ["meegle", "workitem", "get"]:
                     return {"data": {}}
@@ -577,8 +804,8 @@ class AgentTests(unittest.TestCase):
                 result = runner.run_bug_analysis(
                     BugRequest(
                         bug_url="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6986570719",
-                        prompt="分析信号链路 主要是VCU_ELECTRICIT_PERCENT",
-                        raw_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6986570719 分析信号链路 主要是VCU_ELECTRICIT_PERCENT",
+                        prompt="分析信号链路 SIGNAL_VCU_ELECTRICIT_PERCENT",
+                        raw_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6986570719 分析信号链路 SIGNAL_VCU_ELECTRICIT_PERCENT",
                         triggered=True,
                     )
                 )
@@ -603,6 +830,7 @@ class AgentTests(unittest.TestCase):
             runner = BugAnalysisRunner(config)
             log_root = Path(tmp) / "logs"
             log_root.mkdir(parents=True, exist_ok=True)
+            self._write_matching_log(log_root, "2026-05-16 10:01:00")
 
             def fake_run_json_command(command, timeout):
                 if "check-env" in command:
@@ -617,7 +845,7 @@ class AgentTests(unittest.TestCase):
                         "create_by": "tester",
                         "fields": {},
                         "attachments": [],
-                        "description": "VCU_ELECTRICIT_PERCENT 相关",
+                        "description": "问题时间: 2026-05-16 10:01\nVCU_ELECTRICIT_PERCENT 相关",
                     }
                 if command[:3] == ["meegle", "workitem", "get"]:
                     return {"data": {}}
@@ -709,14 +937,14 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(selection.plans[0].kind, "xtheme")
         self.assertEqual(selection.provider, "claude")
 
-    def test_bug_analysis_general_request_without_logs_falls_back_to_static_source_analysis(self):
+    def test_bug_analysis_general_request_with_logs_collects_source_evidence(self):
         with tempfile.TemporaryDirectory() as tmp:
             guideengine_repo = Path(tmp) / "guideengine"
-            source_file = guideengine_repo / "module_display/theme/ThemeSceneMode.kt"
+            source_file = guideengine_repo / "module_display/theme/ThemeConfig.kt"
             source_file.parent.mkdir(parents=True, exist_ok=True)
             source_file.write_text(
-                "class ThemeSceneMode {\n"
-                "    // 场景模式需要跟随黑白夜切换\n"
+                "class ThemeConfig {\n"
+                "    // 主题配置需要跟随用户设置刷新\n"
                 "}\n",
                 encoding="utf-8",
             )
@@ -728,6 +956,8 @@ class AgentTests(unittest.TestCase):
                 guideengine_repo=guideengine_repo,
             )
             runner = BugAnalysisRunner(config)
+            log_root = Path(tmp) / "logs"
+            self._write_matching_log(log_root, "2026-05-14 17:56:00")
 
             def fake_run_json_command(command, timeout):
                 if "check-env" in command:
@@ -736,13 +966,13 @@ class AgentTests(unittest.TestCase):
                     return {"project_key": "xpfailuremgmt", "work_item_id": "6991604970"}
                 if "fetch-data" in command:
                     return {
-                        "title": "临停P档，切换黑白夜，场景模式没有更随黑白夜",
+                        "title": "主题配置切换后页面状态没有刷新",
                         "status": "处理中",
                         "create_time": "2026-05-17 18:54",
                         "create_by": "tester",
                         "fields": {},
                         "attachments": [],
-                        "description": "问题时间: 2026-05-14 17:56\n切换黑白夜后场景模式没有跟随变化",
+                        "description": "问题时间: 2026-05-14 17:56\n用户切换主题配置后页面状态没有刷新",
                     }
                 if command[:3] == ["meegle", "workitem", "get"]:
                     return {"work_item_current_node": []}
@@ -751,6 +981,8 @@ class AgentTests(unittest.TestCase):
             with (
                 mock.patch.object(runner, "_run_json_command", side_effect=fake_run_json_command),
                 mock.patch.object(runner, "_load_option_map", return_value={}),
+                mock.patch.object(runner, "_select_log_input", return_value=log_root),
+                mock.patch.object(runner, "_prepare_log_input", return_value=log_root),
                 mock.patch.object(
                     runner,
                     "_download_bug_attachments",
@@ -781,8 +1013,8 @@ class AgentTests(unittest.TestCase):
                 result = runner.run_bug_analysis(
                     BugRequest(
                         bug_url="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6991604970",
-                        prompt="分析主题相关",
-                        raw_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6991604970 分析主题相关",
+                        prompt="根据 ThemeConfig 源码分析主题刷新链路",
+                        raw_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6991604970 根据 ThemeConfig 源码分析主题刷新链路",
                         triggered=True,
                     )
                 )
@@ -794,13 +1026,74 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(result.details["analysis_kind"], "general")
         self.assertEqual(result.details["analysis_skill"], "general")
         self.assertEqual(result.details["classification_source"], "manual_fallback")
-        self.assertEqual(result.details["selected_log_input"], "")
+        self.assertEqual(result.details["selected_log_input"], str(log_root))
         self.assertIn("通用问题分析", metadata_body)
         self.assertIn("命中 Skill: `general`", metadata_body)
         self.assertIn("分类来源: `manual_fallback`", metadata_body)
-        self.assertIn("无，可静态分析", metadata_body)
+        self.assertIn(str(log_root), metadata_body)
         self.assertIn("源码证据", metadata_body)
-        self.assertIn("场景模式", evidence_body)
+        self.assertIn("主题配置", evidence_body)
+
+    def test_bug_analysis_general_request_without_clear_direction_asks_for_direction(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(
+                dry_run=False,
+                data_dir=Path(tmp),
+                workspace_root=Path(tmp),
+                guideengine_repo=Path(tmp) / "guideengine",
+            )
+            runner = BugAnalysisRunner(config)
+
+            def fake_run_json_command(command, timeout):
+                if "check-env" in command:
+                    return {"meegle_installed": True, "auth_ok": True}
+                if "resolve-url" in command:
+                    return {"project_key": "xpfailuremgmt", "work_item_id": "6991604970"}
+                if "fetch-data" in command:
+                    return {
+                        "title": "车辆偶现异常",
+                        "status": "处理中",
+                        "create_time": "2026-05-17 18:54",
+                        "create_by": "tester",
+                        "fields": {},
+                        "attachments": [],
+                        "description": "用户反馈车辆状态异常，但未提供具体页面、模块、信号或时间。",
+                    }
+                if command[:3] == ["meegle", "workitem", "get"]:
+                    return {"work_item_current_node": []}
+                raise AssertionError(f"unexpected command: {command}")
+
+            with (
+                mock.patch.object(runner, "_run_json_command", side_effect=fake_run_json_command),
+                mock.patch.object(runner, "_load_option_map", return_value={}),
+                mock.patch.object(runner, "_classify_bug_request_with_agent", return_value=None),
+                mock.patch.object(
+                    runner,
+                    "_download_bug_attachments",
+                    side_effect=AssertionError("generic unclear bug request should not download logs"),
+                ),
+                mock.patch.object(
+                    runner,
+                    "_run_bug_agent_summary",
+                    side_effect=AssertionError("generic unclear bug request should not call agent summary"),
+                ),
+            ):
+                result = runner.run_bug_analysis(
+                    BugRequest(
+                        bug_url="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6991604970",
+                        prompt="分析下",
+                        raw_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6991604970 分析下",
+                        triggered=True,
+                    )
+                )
+
+        self.assertTrue(result.success)
+        self.assertTrue(result.skipped)
+        self.assertEqual(result.details["mode"], "bug_clarification")
+        self.assertEqual(result.details["analysis_skill"], "general")
+        self.assertIn("没有命中专用分析预设", result.message)
+        self.assertIn("请补充", result.message)
+        self.assertIn("目前能力不足", result.message)
 
     def test_general_bug_report_uses_structured_summary_sections(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -855,7 +1148,7 @@ class AgentTests(unittest.TestCase):
                         "create_by": "tester",
                         "fields": {},
                         "attachments": [{"name": "data_Log_log0.zip", "size": "47.56MB"}],
-                        "description": "启动黑屏只有 logo",
+                        "description": "问题时间: 2026-05-17 18:54\n启动黑屏只有 logo",
                     }
                 if command[:3] == ["meegle", "workitem", "get"]:
                     return {"work_item_current_node": []}
@@ -896,6 +1189,7 @@ class AgentTests(unittest.TestCase):
             runner = BugAnalysisRunner(BridgeConfig(dry_run=False, data_dir=Path(tmp), workspace_root=Path(tmp)))
             prepared_input = Path(tmp) / "logs"
             prepared_input.mkdir(parents=True, exist_ok=True)
+            self._write_matching_log(prepared_input, "2026-05-19 00:00:00")
             previous_context = type(
                 "Context",
                 (),
@@ -948,7 +1242,7 @@ class AgentTests(unittest.TestCase):
                 ),
             ):
                 result = runner.run_bug_reanalysis(
-                    followup_text="重新分析 xtheme",
+                    followup_text="2026-05-19 00:00 重新分析 xtheme",
                     previous_context=previous_context,
                     previous_session=previous_session,
                     plans_override=[__import__("lark_agent_bridge.agents", fromlist=["BugAnalysisPlan"]).BugAnalysisPlan(kind="xtheme")],
@@ -998,7 +1292,7 @@ class AgentTests(unittest.TestCase):
                 },
             ):
                 result = runner.run_bug_reanalysis(
-                    followup_text="重新分析 xtheme",
+                    followup_text="2026-05-19 00:00 重新分析 xtheme",
                     previous_context=previous_context,
                     previous_session=previous_session,
                     plans_override=[__import__("lark_agent_bridge.agents", fromlist=["BugAnalysisPlan"]).BugAnalysisPlan(kind="xtheme")],
@@ -1008,6 +1302,105 @@ class AgentTests(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertIn("meegle 未登录或授权已失效", result.message)
         self.assertEqual(result.details["download_retry"]["reason"], "AUTH_REQUIRED")
+
+    def test_bug_reanalysis_missing_problem_time_asks_before_retry_download(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = BugAnalysisRunner(BridgeConfig(dry_run=False, data_dir=Path(tmp), workspace_root=Path(tmp)))
+            previous_context = type(
+                "Context",
+                (),
+                {"request_text": "原始 bug 分析", "summary_text": "", "report_excerpt": "", "history": []},
+            )()
+            previous_session = {
+                "job_id": "job_1",
+                "job_dir": str(Path(tmp) / "jobs" / "job_1"),
+                "details": {
+                    "bug_url": "https://project.feishu.cn/xpfailuremgmt/buglo/detail/6991604970",
+                    "analysis_kinds": ["general"],
+                    "prepared_log_input": "",
+                    "selected_log_input": "",
+                    "user_request_text": "原始 bug 分析",
+                },
+            }
+
+            with mock.patch.object(
+                runner,
+                "_retry_bug_log_download",
+                side_effect=AssertionError("missing time should not retry log download"),
+            ):
+                result = runner.run_bug_reanalysis(
+                    followup_text="重新分析 xtheme",
+                    previous_context=previous_context,
+                    previous_session=previous_session,
+                    plans_override=[BugAnalysisPlan(kind="xtheme")],
+                    classification_skill="xtheme-analyzer",
+                )
+
+        self.assertTrue(result.success)
+        self.assertTrue(result.skipped)
+        self.assertEqual(result.details["mode"], "bug_time_clarification")
+        self.assertEqual(result.details["time_gate_status"], "missing_fault_time")
+
+    def test_bug_reanalysis_uses_local_log_resource_when_previous_logs_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = BugAnalysisRunner(BridgeConfig(dry_run=False, data_dir=Path(tmp), workspace_root=Path(tmp)))
+            local_log = Path(tmp) / "downloads" / "Log.log"
+            local_log.parent.mkdir()
+            local_log.write_text("05-19 00:00:00.000 I Demo: log line", encoding="utf-8")
+            previous_context = type(
+                "Context",
+                (),
+                {
+                    "request_text": "原始 bug 分析",
+                    "summary_text": "上一轮没有日志",
+                    "report_excerpt": "缺少日志",
+                    "history": [],
+                },
+            )()
+            previous_session = {
+                "job_id": "job_1",
+                "job_dir": str(Path(tmp) / "jobs" / "job_1"),
+                "details": {
+                    "bug_url": "https://project.feishu.cn/xpfailuremgmt/buglo/detail/6991604970",
+                    "analysis_kinds": ["general"],
+                    "prepared_log_input": "",
+                    "selected_log_input": "",
+                    "user_request_text": "原始 bug 分析",
+                },
+            }
+
+            with (
+                mock.patch.object(runner, "_retry_bug_log_download") as retry_mock,
+                mock.patch.object(runner, "_write_reanalysis_source_evidence", return_value=None),
+                mock.patch.object(runner, "_build_combined_report_artifacts", return_value=None),
+                mock.patch.object(
+                    runner,
+                    "_run_bug_agent_summary",
+                    return_value={
+                        "message": "agent summary",
+                        "command": None,
+                        "error": "",
+                        "provider": "codex",
+                        "session_id": "",
+                        "resumed": False,
+                        "duration_seconds": 1.0,
+                        "usage": {},
+                    },
+                ),
+            ):
+                result = runner.run_bug_reanalysis(
+                    followup_text="问题时间 2026-05-19 00:00，日志我下载到服务器的下载目录了 Log.log 基于这个日志分析",
+                    previous_context=previous_context,
+                    previous_session=previous_session,
+                    plans_override=[BugAnalysisPlan(kind="general")],
+                    local_log_resources=[DownloadResource(kind="local", value=str(local_log))],
+                )
+
+        self.assertTrue(result.success)
+        retry_mock.assert_not_called()
+        self.assertEqual(Path(result.details["selected_log_input"]), local_log.resolve())
+        self.assertEqual(Path(result.details["prepared_log_input"]), local_log.resolve())
+        self.assertEqual(result.details["local_log_resources"], [str(local_log)])
 
     def test_bug_outputs_marks_script_summary_as_current_run_not_previous_round(self):
         runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
@@ -1035,6 +1428,131 @@ class AgentTests(unittest.TestCase):
 
         self.assertIn("本轮脚本初步摘要", metadata)
         self.assertIn("不代表上一轮分析结论", metadata)
+
+    def test_bug_outputs_marks_cached_attachments_and_report_artifacts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
+            html_path = Path(tmp) / "bug_xtheme_analysis_report.html"
+            json_path = Path(tmp) / "bug_xtheme_analysis_report.json"
+            html_path.write_text("<html>xtheme</html>", encoding="utf-8")
+            json_path.write_text(
+                json.dumps(
+                    {
+                        "verdict": {"msg": "uiMode/ThemeMode 不一致且未修正 @ 05-18 14:02:53.330"},
+                        "counts": {"xtheme_msg": 8, "timer_checks": 5},
+                        "issues": [
+                            {
+                                "title": "uiMode/ThemeMode 不一致",
+                                "detail": "uiMode Night, themeMode Day [main_2026-05-18_14-00.alog.log:39722]",
+                            }
+                        ],
+                        "focus_snapshot": [
+                            {
+                                "kind": "UI Mode observer",
+                                "value": "mCurrentUiMode=1 themeMode=0",
+                                "ts": "05-18 14:03:33.485",
+                                "source": "main_2026-05-18_14-00.alog.log:47955",
+                            }
+                        ],
+                        "target_time": "2026-05-18 14:03",
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            metadata, summary = runner._build_bug_outputs(
+                plans=[BugAnalysisPlan(kind="xtheme")],
+                work_item_id="6994226322",
+                fetched={
+                    "title": "2026-05-18 14:03:01:457 黑夜模式 SR界面不显示黑夜模式",
+                    "status": "处理中",
+                    "create_time": "2026-05-18 17:02",
+                    "create_by": "tester",
+                    "fields": {},
+                    "attachments": [{"name": "data_Log.zip", "size": "74MB"}],
+                },
+                full_item={"work_item_current_node": []},
+                option_map={},
+                request_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6994226322 分析主题变化",
+                prompt_text="分析主题变化",
+                selected_input=Path(tmp) / "logs",
+                report_jsons={"xtheme": json_path},
+                download={"downloaded": [], "skipped": [], "errors": [], "reused": True},
+                html_paths=[html_path],
+            )
+
+        self.assertIn("已复用缓存日志", metadata)
+        self.assertIn(f"HTML `XTheme时光主题分析`: `{html_path}`", metadata)
+        self.assertIn(f"JSON `XTheme时光主题分析`: `{json_path}`", metadata)
+        self.assertIn("uiMode/ThemeMode 不一致且未修正", summary)
+        self.assertIn("问题时间证据", summary)
+        self.assertIn("UI Mode observer", summary)
+
+    def test_bug_agent_summary_context_embeds_unquoted_report_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
+            metadata_path = Path(tmp) / "bug_metadata.md"
+            request_path = Path(tmp) / "bug_agent_request.md"
+            request_path.write_text("request", encoding="utf-8")
+            html_path = Path(tmp) / "bug_xtheme_analysis_report.html"
+            json_path = Path(tmp) / "bug_xtheme_analysis_report.json"
+            html_path.write_text("<html>xtheme</html>", encoding="utf-8")
+            json_path.write_text('{"verdict":{"msg":"ok"}}', encoding="utf-8")
+            metadata_path.write_text(
+                f"HTML: {html_path}\nJSON: {json_path}\n",
+                encoding="utf-8",
+            )
+
+            files = runner._bug_agent_summary_context_files(
+                request_artifact=request_path,
+                metadata_path=metadata_path,
+            )
+
+        paths = {item["path"] for item in files}
+        self.assertIn(str(html_path), paths)
+        self.assertIn(str(json_path), paths)
+
+    def test_bug_agent_summary_prompt_lists_report_paths_without_html_css_noise(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
+            metadata_path = Path(tmp) / "bug_metadata.md"
+            request_path = Path(tmp) / "bug_agent_request.md"
+            html_path = Path(tmp) / "bug_3d_startup_report.html"
+            json_path = Path(tmp) / "bug_3d_startup_report.json"
+            request_path.write_text("# request\nrequest-only-body\n", encoding="utf-8")
+            html_path.write_text(
+                "<!doctype html><html><head><style>body{color:red}</style></head>"
+                "<body><h1>真实报告正文</h1></body></html>",
+                encoding="utf-8",
+            )
+            json_path.write_text(
+                '{"verdict":{"message":"启动链路完整"},"focus_session_pid":14941}',
+                encoding="utf-8",
+            )
+            metadata_path.write_text(
+                "# Bug Metadata\n"
+                f"- HTML `3D启动时序分析`: `{html_path}`\n"
+                f"- JSON `3D启动时序分析`: `{json_path}`\n",
+                encoding="utf-8",
+            )
+
+            prompt = runner._build_bug_agent_summary_prompt(
+                request_text="分析3D生命周期",
+                request_artifact=request_path,
+                metadata_path=metadata_path,
+            )
+
+        self.assertIn(str(html_path), prompt)
+        self.assertIn(str(json_path), prompt)
+        self.assertIn(str(request_path), prompt)
+        self.assertIn(str(metadata_path), prompt)
+        self.assertIn("请按需读取这些本地文件", prompt)
+        self.assertNotIn("<style>", prompt)
+        self.assertNotIn("body{color:red}", prompt)
+        self.assertNotIn("真实报告正文", prompt)
+        self.assertNotIn("request-only-body", prompt)
+        self.assertNotIn("Bug Metadata\n- HTML", prompt)
 
     def test_bug_analysis_reuses_cached_logs_for_same_bug_link(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1132,6 +1650,29 @@ class AgentTests(unittest.TestCase):
         self.assertIn("45.6 秒", html)
         self.assertIn("原始报告", html)
 
+    def test_agent_runtime_annotation_does_not_embed_raw_agent_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = BugAnalysisRunner(BridgeConfig(dry_run=True, data_dir=Path(tmp), workspace_root=Path(tmp)))
+            report_html = Path(tmp) / "bug_signal_chain_report.html"
+            report_html.write_text("<html><body><h1>原始报告</h1></body></html>", encoding="utf-8")
+
+            runner._annotate_html_reports(
+                [report_html],
+                agent_summary_result={
+                    "provider": "codex",
+                    "duration_seconds": 12.5,
+                    "usage": {},
+                    "message": "## 结论摘要\n- 诉求：`分析3D生命周期`\n结论：重复的 agent 原文",
+                },
+                total_duration_seconds=45.6,
+            )
+
+            html = report_html.read_text(encoding="utf-8")
+
+        self.assertIn("Agent 运行信息", html)
+        self.assertNotIn("Agent 最终结论", html)
+        self.assertNotIn("重复的 agent 原文", html)
+
     def test_bug_analysis_classifies_startup_request(self):
         runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
 
@@ -1198,6 +1739,30 @@ class AgentTests(unittest.TestCase):
 
         self.assertEqual(plan.kind, "signal")
         self.assertEqual(plan.signal_code, "132002")
+
+    def test_bug_analysis_classifies_scene_signal_before_generic_signal(self):
+        runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
+
+        plan = runner.classify_request(
+            prompt_text="分析3D场景信号",
+            title="",
+            description="",
+        )
+
+        self.assertEqual(plan.kind, "scene_signal")
+        self.assertIsNone(plan.signal_code)
+
+    def test_bug_analysis_core_scene_signal_uses_scene_signal_skill(self):
+        runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
+
+        plan = runner.classify_request(
+            prompt_text="分析 SIGNAL_SR_SCENE_TYPE 场景链路",
+            title="",
+            description="",
+        )
+
+        self.assertEqual(plan.kind, "scene_signal")
+        self.assertIsNone(plan.signal_code)
 
     def test_bug_analysis_does_not_treat_vin_suffix_as_signal(self):
         runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
@@ -1281,7 +1846,7 @@ class AgentTests(unittest.TestCase):
 
         self.assertEqual([plan.kind for plan in plans], ["startup", "stuck"])
 
-    def test_bug_analysis_classifies_unmatched_request_as_general(self):
+    def test_bug_analysis_classifies_black_white_theme_request_as_xtheme(self):
         runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
 
         plan = runner.classify_request(
@@ -1290,8 +1855,44 @@ class AgentTests(unittest.TestCase):
             description="",
         )
 
-        self.assertEqual(plan.kind, "general")
+        self.assertEqual(plan.kind, "xtheme")
         self.assertIsNone(plan.signal_code)
+
+    def test_bug_analysis_does_not_pick_signal_from_report_css_for_source_unity_followup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "guideengine"
+            signal_proto = repo / "module_floorcenter/module_proto/src/main/proto/signal.proto"
+            signal_proto.parent.mkdir(parents=True, exist_ok=True)
+            signal_proto.write_text("SIGNAL_CTL_DRIVE_SETTINGS_EPB = 14002;\n", encoding="utf-8")
+            runner = BugAnalysisRunner(BridgeConfig(dry_run=True, guideengine_repo=repo))
+
+            plans = runner.classify_requests(
+                prompt_text="基于源码分析 unity场景",
+                title=(
+                    "车机大屏在停车驻车状态下页面卡住,SR页面无法正常显示"
+                    " https://project.feishu.cn/xpfailuremgmt/buglo/detail/6979499593 分析3D生命周期"
+                ),
+                description=(
+                    "信号链路总览 CSS --green:#059669; "
+                    "报告链接 http://10.99.149.127:8765/reports/e1c56e6bb411636da68eea2e0c91f5cc/"
+                ),
+            )
+
+        self.assertNotIn("signal", [plan.kind for plan in plans])
+        self.assertTrue(any(plan.kind in {"startup", "stuck", "general"} for plan in plans))
+
+    def test_reanalysis_source_terms_keep_mixed_unity_and_sr_business_words(self):
+        runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
+
+        terms = runner._source_evidence_terms(
+            plans=[BugAnalysisPlan(kind="stuck")],
+            request_text="车机大屏 P挡时 SR页面无法显示",
+            followup_text="基于源码分析 unity场景",
+        )
+
+        self.assertIn("SR页面", terms)
+        self.assertIn("unity场景", terms)
+        self.assertIn("unity", [term.casefold() for term in terms])
 
     def test_bug_analysis_infers_startup_from_bug_context_when_prompt_only_mentions_stuck(self):
         runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
@@ -1324,6 +1925,148 @@ class AgentTests(unittest.TestCase):
 
         self.assertEqual(target_time, "2026-05-11 23:10")
         self.assertEqual(note, "从缺陷描述提取")
+
+    def test_bug_time_context_completes_user_short_time_from_description_date(self):
+        runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
+
+        context = runner._resolve_bug_time_context(
+            request_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/1 修正问题时间 23:12 重新分析",
+            title="车机页面卡住",
+            description="原始问题时间: 2026-05-11 23:10\n页面卡住",
+        )
+
+        self.assertEqual(context.fault_time, "2026-05-11 23:12")
+        self.assertEqual(context.source, "user")
+        self.assertTrue(context.has_full_datetime)
+
+    def test_bug_time_context_uses_bug_create_year_for_description_month_day_time(self):
+        runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
+
+        context = runner._resolve_bug_time_context(
+            request_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6995380113 分析3D生命周期",
+            title="sr底图黑屏，不显示内容",
+            description="车型：F57AES\n问题时间：05-19 14:33\n问题描述：sr底图黑屏",
+            reference_time="2026-05-20T15:24:24+08:00",
+        )
+
+        self.assertEqual(context.fault_time, "2026-05-19 14:33")
+        self.assertEqual(context.source, "description")
+        self.assertTrue(context.has_full_datetime)
+
+    def test_bug_log_coverage_detects_android_log_time_inside_window(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
+            log_path = Path(tmp) / "Log" / "log0" / "app" / "com.xiaopeng.montecarlo" / "main.log"
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.write_text(
+                "05-11 23:08:00.000 I MonteCarlo: before\n"
+                "05-11 23:12:30.000 I MonteCarlo: target\n",
+                encoding="utf-8",
+            )
+
+            coverage = runner._scan_log_time_coverage(Path(tmp), fault_time="2026-05-11 23:12")
+
+        self.assertTrue(coverage.has_time_evidence)
+        self.assertTrue(coverage.covers_fault_time)
+        self.assertEqual(coverage.start_time, "2026-05-11 23:08")
+        self.assertEqual(coverage.end_time, "2026-05-11 23:12")
+
+    def test_bug_analysis_missing_problem_time_asks_before_download(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=False, data_dir=Path(tmp), workspace_root=Path(tmp))
+            runner = BugAnalysisRunner(config)
+
+            def fake_run_json_command(command, timeout):
+                if "check-env" in command:
+                    return {"meegle_installed": True, "auth_ok": True}
+                if "resolve-url" in command:
+                    return {"project_key": "xpfailuremgmt", "work_item_id": "6991604970"}
+                if "fetch-data" in command:
+                    return {
+                        "title": "3D 页面卡顿",
+                        "status": "处理中",
+                        "fields": {},
+                        "attachments": [{"name": "Log.zip", "size": "12MB"}],
+                        "description": "用户反馈页面卡顿，但未写明几月几日几点几分。",
+                    }
+                if command[:3] == ["meegle", "workitem", "get"]:
+                    return {"work_item_current_node": []}
+                raise AssertionError(f"unexpected command: {command}")
+
+            with (
+                mock.patch.object(runner, "_run_json_command", side_effect=fake_run_json_command),
+                mock.patch.object(runner, "_load_option_map", return_value={}),
+                mock.patch.object(
+                    runner,
+                    "_download_bug_attachments",
+                    side_effect=AssertionError("missing problem time should stop before download"),
+                ),
+            ):
+                result = runner.run_bug_analysis(
+                    BugRequest(
+                        bug_url="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6991604970",
+                        prompt="分析3D卡顿",
+                        raw_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6991604970 分析3D卡顿",
+                        triggered=True,
+                    )
+                )
+
+        self.assertTrue(result.success)
+        self.assertTrue(result.skipped)
+        self.assertEqual(result.details["mode"], "bug_time_clarification")
+        self.assertEqual(result.details["time_gate_status"], "missing_fault_time")
+        self.assertIn("缺少明确问题时间", result.message)
+        self.assertIn("几月几日 几点几分", result.message)
+
+    def test_bug_analysis_log_time_mismatch_asks_for_matching_logs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=False, data_dir=Path(tmp), workspace_root=Path(tmp))
+            runner = BugAnalysisRunner(config)
+            log_root = Path(tmp) / "logs"
+            log_file = log_root / "Log" / "log0" / "app" / "com.xiaopeng.montecarlo" / "main.log"
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            log_file.write_text("05-10 10:00:00.000 I MonteCarlo: old log\n", encoding="utf-8")
+
+            def fake_run_json_command(command, timeout):
+                if "check-env" in command:
+                    return {"meegle_installed": True, "auth_ok": True}
+                if "resolve-url" in command:
+                    return {"project_key": "xpfailuremgmt", "work_item_id": "6991604970"}
+                if "fetch-data" in command:
+                    return {
+                        "title": "3D 页面卡顿",
+                        "status": "处理中",
+                        "fields": {},
+                        "attachments": [{"name": "Log.zip", "size": "12MB"}],
+                        "description": "问题时间: 2026-05-11 23:12\n用户反馈页面卡顿。",
+                    }
+                if command[:3] == ["meegle", "workitem", "get"]:
+                    return {"work_item_current_node": []}
+                raise AssertionError(f"unexpected command: {command}")
+
+            with (
+                mock.patch.object(runner, "_run_json_command", side_effect=fake_run_json_command),
+                mock.patch.object(runner, "_load_option_map", return_value={}),
+                mock.patch.object(runner, "_download_bug_attachments", return_value={"downloaded": ["Log.zip"], "unzipped": [], "errors": [], "skipped": [], "ok": True}),
+                mock.patch.object(runner, "_select_log_input", return_value=log_root),
+                mock.patch.object(runner, "_prepare_log_input", return_value=log_root),
+                mock.patch.object(runner, "_run_analysis", side_effect=AssertionError("log time mismatch should stop before analysis")),
+            ):
+                result = runner.run_bug_analysis(
+                    BugRequest(
+                        bug_url="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6991604970",
+                        prompt="分析3D卡顿",
+                        raw_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6991604970 分析3D卡顿",
+                        triggered=True,
+                    )
+                )
+
+        self.assertTrue(result.success)
+        self.assertTrue(result.skipped)
+        self.assertEqual(result.details["mode"], "bug_time_clarification")
+        self.assertEqual(result.details["time_gate_status"], "log_not_covering_fault_time")
+        self.assertIn("日志时间范围未覆盖问题时间", result.message)
+        self.assertIn("2026-05-11 23:12", result.message)
 
     def test_bug_analysis_classifies_perception_request(self):
         runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
@@ -1370,6 +2113,23 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(result.details["signal_code"], "132002")
         self.assertTrue(any("analyze_signal_chain.py" in part for part in result.command))
         self.assertIn("bug_signal_chain_report.html", result.message)
+
+    def test_bug_analysis_dry_run_routes_to_scene_signal_script(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=True, data_dir=Path(tmp), workspace_root=Path(tmp))
+            result = BugAnalysisRunner(config).run_bug_analysis(
+                BugRequest(
+                    bug_url="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722",
+                    prompt="分析3D场景信号",
+                    raw_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722 分析3D场景信号",
+                    triggered=True,
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.details["analysis_kind"], "scene_signal")
+        self.assertTrue(any("extract_scene_signal_events.py" in part for part in result.command))
+        self.assertIn("bug_scene_signal_report.html", result.message)
 
     def test_bug_analysis_dry_run_routes_to_crash_report(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1436,6 +2196,21 @@ class AgentTests(unittest.TestCase):
             selected = runner._select_startup_input(root, "2026-05-11 11:30")
 
         self.assertEqual(selected, newer)
+
+    def test_bug_analysis_selects_decoded_startup_log_over_raw_alog(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
+            root = Path(tmp) / "Log"
+            target_dir = root / "log0" / "app" / "com.xiaopeng.montecarlo"
+            target_dir.mkdir(parents=True, exist_ok=True)
+            raw = target_dir / "main_2026-05-11_11-00.alog"
+            decoded = target_dir / "main_2026-05-11_11-00.alog.log"
+            raw.write_text("", encoding="utf-8")
+            decoded.write_text("", encoding="utf-8")
+
+            selected = runner._select_startup_input(root, "2026-05-11 11:30")
+
+        self.assertEqual(selected, decoded)
 
     def test_bug_analysis_select_log_input_prefers_extracted_logs_over_invalid_zip_attachment(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1606,12 +2381,33 @@ class AgentTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "不是有效 zip"):
                 runner._prepare_log_input(invalid_zip)
 
+    def test_bug_analysis_selects_and_extracts_7z_log_attachment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
+            bug_dir = Path(tmp)
+            attachments_dir = bug_dir / "attachments"
+            attachments_dir.mkdir(parents=True, exist_ok=True)
+            archive = attachments_dir / "20260519.7z"
+            with zipfile.ZipFile(archive, "w") as zf:
+                zf.writestr("Log/log0/app/com.xiaopeng.montecarlo/main_2026-05-19_15-00.txt", "signal log")
+
+            selected = runner._select_log_input(
+                bug_dir,
+                fetched={"attachments": [{"name": "20260519.7z"}]},
+            )
+            prepared = runner._prepare_log_input(selected)
+
+            self.assertEqual(selected, archive)
+            self.assertTrue(prepared.is_dir())
+            self.assertTrue((prepared / "Log/log0/app/com.xiaopeng.montecarlo/main_2026-05-19_15-00.txt").exists())
+
     def test_bug_analysis_startup_uses_prepared_directory_context(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = BridgeConfig(dry_run=False, data_dir=Path(tmp), workspace_root=Path(tmp))
             runner = BugAnalysisRunner(config)
             log_root = Path(tmp) / "logs"
             log_root.mkdir(parents=True, exist_ok=True)
+            self._write_matching_log(log_root, "2026-05-11 23:10:00")
             startup_html = Path(tmp) / "bug_3d_startup_report.html"
             startup_json = Path(tmp) / "bug_3d_startup_report.json"
             analysis_inputs = []
@@ -1691,6 +2487,282 @@ class AgentTests(unittest.TestCase):
 
         self.assertEqual(result["message"], "Agent summary text")
         self.assertEqual(result["error"], "")
+
+    def test_bug_agent_summary_once_writes_prompt_audit_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=False, data_dir=Path(tmp), workspace_root=Path(tmp))
+            runner = BugAnalysisRunner(config)
+            output_path = Path(tmp) / "bug_agent_summary.md"
+            completed = subprocess.CompletedProcess(
+                args=["codex"],
+                returncode=0,
+                stdout="Agent summary text",
+                stderr="",
+            )
+            invocation = {
+                "command": ["codex", "exec", "PROMPT"],
+                "provider": "codex",
+                "session_id": "",
+                "resumed": False,
+                "prompt": "PROMPT BODY",
+                "embedded_files": [
+                    {
+                        "title": "Bug Metadata",
+                        "path": str(Path(tmp) / "bug_metadata.md"),
+                        "max_chars": 6000,
+                    }
+                ],
+            }
+
+            with mock.patch("lark_agent_bridge.agents.run_tracked_process", return_value=completed):
+                result = runner._run_bug_agent_summary_once(
+                    invocation=invocation,
+                    output_path=output_path,
+                    progress_callback=None,
+                    timeout=60,
+                )
+
+            prompt_file = Path(result["prompt_file"])
+            context_file = Path(result["context_file"])
+            prompt_text = prompt_file.read_text(encoding="utf-8")
+            context = json.loads(context_file.read_text(encoding="utf-8"))
+
+        self.assertEqual(prompt_file.name, "bug_agent_summary_prompt.md")
+        self.assertIn("PROMPT BODY", prompt_text)
+        self.assertEqual(context["provider"], "codex")
+        self.assertEqual(context["embedded_files"][0]["title"], "Bug Metadata")
+
+    def test_bug_agent_summary_once_timeout_returns_explicit_timeout_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=False, data_dir=Path(tmp), workspace_root=Path(tmp))
+            runner = BugAnalysisRunner(config)
+            output_path = Path(tmp) / "bug_agent_summary.md"
+            timeout_error = subprocess.TimeoutExpired(cmd=["codex"], timeout=3)
+
+            with mock.patch("lark_agent_bridge.agents.run_tracked_process", side_effect=timeout_error):
+                result = runner._run_bug_agent_summary_once(
+                    invocation={"command": ["codex"], "provider": "codex", "session_id": "", "resumed": False},
+                    output_path=output_path,
+                    progress_callback=None,
+                    timeout=3,
+                )
+
+        self.assertEqual(result["message"], "")
+        self.assertEqual(result["error"], "agent_summary_timeout")
+        self.assertEqual(result["timeout_seconds"], 3)
+
+    def test_bug_agent_summary_timeout_uses_fresh_output_without_provider_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=False, data_dir=Path(tmp), workspace_root=Path(tmp))
+            config.bug_analysis.provider = "codex"
+            config.bug_analysis.command = "codex"
+            runner = BugAnalysisRunner(config)
+            output_path = Path(tmp) / "bug_agent_summary.md"
+            request_artifact = Path(tmp) / "request.md"
+            metadata_path = Path(tmp) / "metadata.md"
+            request_artifact.write_text("request", encoding="utf-8")
+            metadata_path.write_text("metadata", encoding="utf-8")
+            calls = []
+
+            def timeout_after_writing_output(command, **kwargs):
+                calls.append(command)
+                output_path.write_text("fresh codex summary", encoding="utf-8")
+                raise subprocess.TimeoutExpired(cmd=command, timeout=3)
+
+            with mock.patch("lark_agent_bridge.agents.run_tracked_process", side_effect=timeout_after_writing_output):
+                result = runner._run_bug_agent_summary(
+                    request_text="根据导航源码分析",
+                    request_artifact=request_artifact,
+                    metadata_path=metadata_path,
+                    output_path=output_path,
+                    progress_callback=None,
+                    timeout=3,
+                )
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(result["message"], "fresh codex summary")
+        self.assertEqual(result["provider"], "codex")
+        self.assertEqual(result["error"], "")
+        self.assertTrue(result["timed_out"])
+        self.assertEqual(result["timeout_seconds"], 3)
+
+    def test_bug_agent_summary_timeout_without_output_uses_omlx_before_heavy_provider_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=False, data_dir=Path(tmp), workspace_root=Path(tmp))
+            config.bug_analysis.provider = "codex"
+            config.bug_analysis.command = "codex"
+            config.omlx_chat.enabled = True
+            config.omlx_chat.model = "local-small"
+            runner = BugAnalysisRunner(config)
+            output_path = Path(tmp) / "bug_agent_summary.md"
+            request_artifact = Path(tmp) / "request.md"
+            metadata_path = Path(tmp) / "metadata.md"
+            request_artifact.write_text("request summary", encoding="utf-8")
+            metadata_path.write_text("metadata summary", encoding="utf-8")
+
+            def timeout_without_output(command, **kwargs):
+                raise subprocess.TimeoutExpired(cmd=command, timeout=3)
+
+            with (
+                mock.patch("lark_agent_bridge.agents.run_tracked_process", side_effect=timeout_without_output) as run_mock,
+                mock.patch.object(
+                    OmlxChatClient,
+                    "_chat",
+                    return_value=TaskResult(
+                        success=True,
+                        message="omlx lightweight summary",
+                        duration_seconds=1.2,
+                        details={"mode": "bug_agent_summary_omlx"},
+                    ),
+                ) as chat_mock,
+            ):
+                result = runner._run_bug_agent_summary(
+                    request_text="根据导航源码分析",
+                    request_artifact=request_artifact,
+                    metadata_path=metadata_path,
+                    output_path=output_path,
+                    progress_callback=None,
+                    timeout=3,
+                )
+
+        self.assertEqual(run_mock.call_count, 1)
+        self.assertEqual(chat_mock.call_count, 1)
+        self.assertEqual(result["message"], "omlx lightweight summary")
+        self.assertEqual(result["provider"], "omlx")
+        self.assertEqual(result["command"], ["omlx", "local-small"])
+
+    def test_bug_agent_summary_prefer_lightweight_uses_omlx_before_primary_provider(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=False, data_dir=Path(tmp), workspace_root=Path(tmp))
+            config.bug_analysis.provider = "codex"
+            config.bug_analysis.command = "codex"
+            config.omlx_chat.enabled = True
+            config.omlx_chat.model = "local-small"
+            runner = BugAnalysisRunner(config)
+            output_path = Path(tmp) / "bug_agent_summary.md"
+            request_artifact = Path(tmp) / "request.md"
+            metadata_path = Path(tmp) / "metadata.md"
+            request_artifact.write_text("request summary", encoding="utf-8")
+            metadata_path.write_text("metadata summary", encoding="utf-8")
+            progress_events = []
+
+            with (
+                mock.patch("lark_agent_bridge.agents.run_tracked_process") as run_mock,
+                mock.patch.object(
+                    OmlxChatClient,
+                    "_chat",
+                    return_value=TaskResult(
+                        success=True,
+                        message="omlx first summary",
+                        duration_seconds=1.1,
+                        details={"mode": "bug_agent_summary_omlx"},
+                    ),
+                ) as chat_mock,
+            ):
+                result = runner._run_bug_agent_summary(
+                    request_text="重新分析",
+                    request_artifact=request_artifact,
+                    metadata_path=metadata_path,
+                    output_path=output_path,
+                    progress_callback=progress_events.append,
+                    timeout=90,
+                    prefer_lightweight=True,
+                )
+
+        self.assertEqual(run_mock.call_count, 0)
+        self.assertEqual(chat_mock.call_count, 1)
+        self.assertEqual(result["message"], "omlx first summary")
+        self.assertEqual(result["provider"], "omlx")
+        self.assertEqual(progress_events[0]["stage"], "bug_agent_summary_omlx")
+        self.assertEqual(progress_events[0]["details"]["reason"], "lightweight_first")
+
+    def test_bug_agent_summary_with_report_paths_skips_omlx_lightweight_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=False, data_dir=Path(tmp), workspace_root=Path(tmp))
+            config.bug_analysis.provider = "codex"
+            config.bug_analysis.command = "codex"
+            config.omlx_chat.enabled = True
+            runner = BugAnalysisRunner(config)
+            output_path = Path(tmp) / "bug_agent_summary.md"
+            request_artifact = Path(tmp) / "request.md"
+            metadata_path = Path(tmp) / "metadata.md"
+            report_json = Path(tmp) / "bug_3d_startup_report.json"
+            request_artifact.write_text("request summary", encoding="utf-8")
+            report_json.write_text('{"summary":"should be read by file-capable agent"}', encoding="utf-8")
+            metadata_path.write_text(f"JSON: `{report_json}`\n", encoding="utf-8")
+
+            def fake_file_agent(command, **kwargs):
+                output_path.write_text("file-capable agent summary", encoding="utf-8")
+                return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+
+            with (
+                mock.patch("lark_agent_bridge.agents.run_tracked_process", side_effect=fake_file_agent) as run_mock,
+                mock.patch.object(OmlxChatClient, "_chat") as chat_mock,
+            ):
+                result = runner._run_bug_agent_summary(
+                    request_text="分析3D生命周期",
+                    request_artifact=request_artifact,
+                    metadata_path=metadata_path,
+                    output_path=output_path,
+                    progress_callback=None,
+                    timeout=90,
+                    prefer_lightweight=True,
+                )
+
+        self.assertEqual(chat_mock.call_count, 0)
+        self.assertEqual(run_mock.call_count, 1)
+        self.assertEqual(result["message"], "file-capable agent summary")
+        self.assertEqual(result["provider"], "codex")
+
+    def test_bug_summary_lightweight_policy_keeps_source_and_resume_on_primary_agent(self):
+        config = BridgeConfig(dry_run=False)
+        runner = BugAnalysisRunner(config)
+
+        self.assertFalse(
+            runner._should_prefer_lightweight_bug_summary(
+                request_text="分析主题变化",
+                followup_text="重新分析",
+                provider_session_id="",
+            )
+        )
+        self.assertFalse(
+            runner._should_prefer_lightweight_bug_summary(
+                request_text="分析主题变化",
+                followup_text="基于源码重新分析",
+                provider_session_id="",
+            )
+        )
+        self.assertFalse(
+            runner._should_prefer_lightweight_bug_summary(
+                request_text="分析主题变化",
+                followup_text="继续看一下",
+                provider_session_id="sess_123",
+            )
+        )
+
+    def test_agent_summary_timeout_uses_previous_analysis_duration_as_floor(self):
+        config = BridgeConfig(dry_run=False)
+        config.bug_analysis.agent_summary_timeout_seconds = 90
+        runner = BugAnalysisRunner(config)
+
+        timeout = runner._agent_summary_timeout(
+            operation_timeout_seconds=5400,
+            reference_seconds=300.0,
+        )
+
+        self.assertEqual(timeout, 375)
+
+    def test_agent_summary_timeout_reference_reads_previous_session_duration(self):
+        runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
+
+        reference = runner._agent_summary_timeout_reference(
+            {
+                "duration_seconds": 420.0,
+                "details": {"agent_summary_duration_seconds": 90.0},
+            }
+        )
+
+        self.assertEqual(reference, 420.0)
 
     def test_bug_agent_summary_once_read_write_failure_falls_back_to_error(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1833,6 +2905,7 @@ class AgentTests(unittest.TestCase):
             runner = BugAnalysisRunner(config)
             log_root = Path(tmp) / "logs"
             log_root.mkdir(parents=True, exist_ok=True)
+            self._write_matching_log(log_root, "2026-05-09 19:00:00")
             combined_html = Path(tmp) / "bug_signal_overview_report.html"
             combined_json = Path(tmp) / "bug_signal_overview_report.json"
             combined_html.write_text("<html>merged</html>", encoding="utf-8")
@@ -1884,8 +2957,8 @@ class AgentTests(unittest.TestCase):
                 result = runner.run_bug_analysis(
                     BugRequest(
                         bug_url="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6986570719",
-                        prompt="分析信号链路",
-                        raw_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6986570719 分析信号链路",
+                        prompt="分析信号链路 SIGNAL_VCU_ELECTRICIT_PERCENT",
+                        raw_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6986570719 分析信号链路 SIGNAL_VCU_ELECTRICIT_PERCENT",
                         triggered=True,
                     )
                 )
@@ -2078,6 +3151,260 @@ class AgentTests(unittest.TestCase):
             self.assertNotIn("40018", html)
             self.assertNotIn("battery", html.casefold())
 
+    def test_signal_overview_does_not_count_other_signal_business_hits_as_target_flow(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = BugAnalysisRunner(BridgeConfig(dry_run=True, workspace_root=Path("/Users/zhuyl/Documents/workspace")))
+            output_dir = Path(tmp)
+            signal_json = output_dir / "bug_signal_chain_report.json"
+            signal_html = output_dir / "bug_signal_chain_report.html"
+            signal_html.write_text("<html>signal</html>", encoding="utf-8")
+            target_log = (
+                "/tmp/attachments/20260519/data_Log_log0_app_com.xiaopeng.montecarlo_/"
+                "com.xiaopeng.montecarlo/main_2026-05-19_15-00.alog.log"
+            )
+            signal_payload = {
+                "signal": {
+                    "code": "16042",
+                    "name": "SIGNAL_CTL_POWERCENTER_SYNTHESIS_REMAIN_DIS_CHANGE",
+                    "comment": "综合续航",
+                },
+                "summary": "日志中已命中 Android datacenter 相关阶段或业务消费端日志，可结合源码确认。",
+                "log_report": {
+                    "stages": {
+                        "datacenter": {
+                            "title": "Android DataCenter 分发",
+                            "hits": 3,
+                            "codes": {"16042": 3},
+                            "examples": [
+                                {
+                                    "code": "16042",
+                                    "file": target_log,
+                                    "line": 34033,
+                                    "text": "05-19 15:32:59.831 11311 11659 330578 I NAV_DataCenter: getSignalFlow: signalCode=SIGNAL_CTL_POWERCENTER_SYNTHESIS_REMAIN_DIS_CHANGE, isNeedCache=true, hasProvider=false",
+                                }
+                            ],
+                        },
+                        "android_business": {
+                            "title": "Android 业务消费日志",
+                            "hits": 12,
+                            "codes": {"16031": 12},
+                            "examples": [
+                                {
+                                    "code": "16031",
+                                    "file": target_log,
+                                    "line": 5828,
+                                    "text": "05-19 15:28:17.742 2531 3078 48489 I NAV_CarPowerChargeFlagAction: update: chargeFlag=0",
+                                }
+                            ],
+                        },
+                    }
+                },
+                "lifecycle_report": {
+                    "runtime": {
+                        "events": [
+                            {
+                                "label": "进程启动",
+                                "time": "05-19 15:32:57.000",
+                                "file": target_log,
+                                "line": 1,
+                                "text": "process begin^^^^^^^^^^[11311,3582][2026-05-19 +0800 15:32:57]",
+                            }
+                        ]
+                    }
+                },
+            }
+            signal_json.write_text(json.dumps(signal_payload, ensure_ascii=False), encoding="utf-8")
+
+            artifacts = runner._build_combined_report_artifacts(
+                plans=[BugAnalysisPlan(kind="signal", signal_code="16042")],
+                prompt_text="调查 SIGNAL_CTL_POWERCENTER_SYNTHESIS_REMAIN_DIS_CHANGE 2026-05-19 15:35:35",
+                fault_time="2026-05-19 15:35:35",
+                output_dir=output_dir,
+                html_paths=[signal_html],
+                report_jsons={"signal": signal_json},
+                selected_input=Path("/tmp/logs"),
+            )
+
+            html = Path(artifacts["html_path"]).read_text(encoding="utf-8")
+            payload = json.loads(Path(artifacts["json_path"]).read_text(encoding="utf-8"))
+        self.assertEqual(payload["focus_scope"]["pid"], "11311")
+        self.assertEqual(payload["focus_scope"]["package"], "com.xiaopeng.montecarlo")
+        self.assertIn("目标信号已进入 DataCenter，但业务消费证据不足", payload["summary"])
+        self.assertIn("目标信号已进入 DataCenter，但业务消费证据不足", html)
+        self.assertNotIn("DataCenter -&gt; 业务消费", html)
+        self.assertNotIn("业务消费端日志", html)
+        self.assertNotIn("业务消费端日志", json.dumps(payload, ensure_ascii=False))
+
+    def test_signal_overview_reports_android_datacenter_checkpoints(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            repo = workspace / "guideengine"
+            helper = repo / "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/helper/carcontrol/CarCtlPowerCenterHelper.kt"
+            helper.parent.mkdir(parents=True, exist_ok=True)
+            helper.write_text(
+                "\n".join(
+                    [
+                        "class CarCtlPowerCenterHelper {",
+                        "  private val carControlMap = mapOf(",
+                        "    // SignalCode.SIGNAL_CTL_POWERCENTER_SYNTHESIS_REMAIN_DIS_CHANGE",
+                        "    3500003 to SignalCode.SIGNAL_CTL_POWERCENTER_CRUISINGRANGE_COMBINE",
+                        "  )",
+                        "  private val callbackMap = mapOf(3500003 to this::cruisingRangeCallback)",
+                        "  private fun cruisingRangeCallback(eventValue: EventValue) {",
+                        "    when (state[EVENT_KEY]) {",
+                        "      EVENT_KEY_VALUE_VEHICLE_REMAINING_DISTANCE -> {",
+                        "        val synthesisRemainingDis = state[VALUE_KEY_REMAINING_DISTANCE_MILEAGE] as Float?",
+                        "        L.i(TAG, \"EVENT_KEY_VALUE_VEHICLE_REMAINING_DISTANCE $synthesisRemainingDis\")",
+                        "        onNextData(SignalCode.SIGNAL_CTL_POWERCENTER_SYNTHESIS_REMAIN_DIS_CHANGE, SignalFormat.Float, synthesisRemainingDis)",
+                        "      }",
+                        "    }",
+                        "  }",
+                        "  companion object {",
+                        "    const val EVENT_KEY_VALUE_VEHICLE_REMAINING_DISTANCE = \"vehicle_remaining_distance\"",
+                        "    const val VALUE_KEY_REMAINING_DISTANCE_MILEAGE = \"value_key_remaining_distance_mileage\"",
+                        "  }",
+                        "}",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            consumer = repo / "module_core/manager_carscene/src/main/java/demo/CarSceneExternalDischargeAction.kt"
+            consumer.parent.mkdir(parents=True, exist_ok=True)
+            consumer.write_text(
+                "\n".join(
+                    [
+                        "class CarSceneExternalDischargeAction {",
+                        "  fun getRegisterSignalCode() = setOf(SignalCode.SIGNAL_CTL_POWERCENTER_SYNTHESIS_REMAIN_DIS_CHANGE)",
+                        "  fun update(xDataPropertyValue: XDataPropertyValue) {",
+                        "    when (xDataPropertyValue.code) {",
+                        "      SignalCode.SIGNAL_CTL_POWERCENTER_SYNTHESIS_REMAIN_DIS_CHANGE -> {",
+                        "        L.i(TAG, \"update vehicle remainDis:${xDataPropertyValue.value}\")",
+                        "      }",
+                        "    }",
+                        "  }",
+                        "}",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            runner = BugAnalysisRunner(BridgeConfig(dry_run=True, workspace_root=workspace, guideengine_repo=repo, data_dir=workspace / "data"))
+            output_dir = workspace / "out"
+            output_dir.mkdir()
+            target_log = output_dir / "data_Log_log0_app_com.xiaopeng.montecarlo_" / "com.xiaopeng.montecarlo" / "main.log"
+            target_log.parent.mkdir(parents=True)
+            target_log.write_text(
+                "\n".join(
+                    [
+                        "05-19 15:32:57.000 11311 11311 1 I process begin^^^^^^^^^^[11311,3582][2026-05-19 +0800 15:32:57]",
+                        "05-19 15:32:57.200 11311 11311 2 I NAV_DataCenter: injectSignalProvider[com.xiaopeng.guideengine.helper.carcontrol.CarCtlPowerCenterHelper@1], number[43]",
+                        "05-19 15:32:58.000 11311 11389 3 I NAV_CarCtlPowerCenterHelper: register 3500003 indeed isNeedCache:true",
+                        "05-19 15:32:58.001 11311 11389 4 I EventManager_montecarlo: registerRemoteListener: event:3500003 service:com.xiaopeng.aicabin.IAiCabinService$Stub$a@1 listener:demo",
+                        "05-19 15:32:58.002 11311 11389 5 W NAV_XBaseSignalHelper: disposeFirstRegisterSignalCallback  signalCodeGetMap not contains SIGNAL_CTL_POWERCENTER_CRUISINGRANGE_COMBINE",
+                        "05-19 15:32:59.800 11311 11735 6 I NAV_CarSceneExternalDischargeAction: register",
+                        "05-19 15:32:59.831 11311 11659 7 I NAV_DataCenter: getSignalFlow: signalCode=SIGNAL_CTL_POWERCENTER_SYNTHESIS_REMAIN_DIS_CHANGE, isNeedCache=true, hasProvider=false",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            signal_json = output_dir / "bug_signal_chain_report.json"
+            signal_html = output_dir / "bug_signal_chain_report.html"
+            signal_html.write_text("<html>signal</html>", encoding="utf-8")
+            signal_payload = {
+                "signal": {
+                    "code": "16042",
+                    "name": "SIGNAL_CTL_POWERCENTER_SYNTHESIS_REMAIN_DIS_CHANGE",
+                    "comment": "综合续航",
+                },
+                "summary": "日志中已命中 Android datacenter 相关阶段或业务消费端日志，可结合源码确认。",
+                "source_references": [
+                    {
+                        "file": "module_floorcenter/module_proto/src/main/proto/signal.proto",
+                        "line": 243,
+                        "text": "SIGNAL_CTL_POWERCENTER_SYNTHESIS_REMAIN_DIS_CHANGE = 16042;// 综合续航",
+                    },
+                    {
+                        "file": "module_core/manager_carscene/src/main/java/demo/CarSceneExternalDischargeAction.kt",
+                        "line": 2,
+                        "text": "SignalCode.SIGNAL_CTL_POWERCENTER_SYNTHESIS_REMAIN_DIS_CHANGE",
+                    },
+                ],
+                "log_report": {
+                    "scanned_files": 1,
+                    "scanned_lines": 7,
+                    "truncated": False,
+                    "stages": {
+                        "datacenter": {
+                            "hits": 1,
+                            "codes": {"16042": 1},
+                            "examples": [
+                                {
+                                    "code": "16042",
+                                    "file": str(target_log),
+                                    "line": 7,
+                                    "text": "05-19 15:32:59.831 11311 11659 7 I NAV_DataCenter: getSignalFlow: signalCode=SIGNAL_CTL_POWERCENTER_SYNTHESIS_REMAIN_DIS_CHANGE, isNeedCache=true, hasProvider=false",
+                                }
+                            ],
+                        },
+                        "android_business": {"hits": 0, "codes": {}, "examples": []},
+                        "android_unity": {"hits": 0, "codes": {}, "examples": []},
+                        "unity_received": {"hits": 0, "codes": {}, "examples": []},
+                        "vhal": {"hits": 0, "codes": {}, "examples": []},
+                    },
+                },
+                "lifecycle_report": {
+                    "context": {
+                        "provider_type": "CarControl",
+                        "helper_class": "CarCtlPowerCenterHelper",
+                        "helper_file": "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/helper/carcontrol/CarCtlPowerCenterHelper.kt",
+                        "controller_class": "SmartCtlController",
+                    },
+                    "runtime": {
+                        "events": [
+                            {
+                                "label": "进程启动",
+                                "time": "05-19 15:32:57.000",
+                                "file": str(target_log),
+                                "line": 1,
+                                "text": "process begin^^^^^^^^^^[11311,3582][2026-05-19 +0800 15:32:57]",
+                            },
+                            {
+                                "label": "DataCenter 注入 CarCtlPowerCenterHelper",
+                                "time": "05-19 15:32:57.200",
+                                "file": str(target_log),
+                                "line": 2,
+                                "text": "05-19 15:32:57.200 11311 11311 2 I NAV_DataCenter: injectSignalProvider[com.xiaopeng.guideengine.helper.carcontrol.CarCtlPowerCenterHelper@1], number[43]",
+                            },
+                        ]
+                    },
+                },
+            }
+            signal_json.write_text(json.dumps(signal_payload, ensure_ascii=False), encoding="utf-8")
+
+            artifacts = runner._build_combined_report_artifacts(
+                plans=[BugAnalysisPlan(kind="signal", signal_code="16042")],
+                prompt_text="调查 SIGNAL_CTL_POWERCENTER_SYNTHESIS_REMAIN_DIS_CHANGE 2026-05-19 15:35:35",
+                fault_time="2026-05-19 15:35:35",
+                output_dir=output_dir,
+                html_paths=[signal_html],
+                report_jsons={"signal": signal_json},
+                selected_input=output_dir,
+            )
+
+            html = Path(artifacts["html_path"]).read_text(encoding="utf-8")
+            payload = json.loads(Path(artifacts["json_path"]).read_text(encoding="utf-8"))
+            cache_payload = json.loads((workspace / "data" / "signal_keyword_cache.json").read_text(encoding="utf-8"))
+
+        self.assertIn("Android 数据链路排查", html)
+        self.assertEqual([item["status"] for item in payload["android_data_link"]], ["通过", "通过", "未通过", "通过", "未通过"])
+        self.assertIn("3500003", html)
+        self.assertIn("未看到 3500003 回调数据进入 CarCtlPowerCenterHelper", html)
+        self.assertIn("业务已注册目标信号", html)
+        self.assertIn("业务未收到目标信号", html)
+        cached_keywords = cache_payload["16042"]
+        self.assertEqual(cached_keywords["event_ids"], ["3500003"])
+        self.assertIn("vehicle_remaining_distance", cached_keywords["producer_terms"])
+        self.assertNotIn("3500200", json.dumps(payload["android_data_link"], ensure_ascii=False))
+
     def test_signal_business_entry_prefers_dispatcher_over_constants(self):
         with tempfile.TemporaryDirectory() as tmp:
             runner = BugAnalysisRunner(BridgeConfig(dry_run=True, workspace_root=Path("/Users/zhuyl/Documents/workspace")))
@@ -2186,7 +3513,13 @@ class AgentTests(unittest.TestCase):
             config = BridgeConfig(dry_run=False, data_dir=Path(tmp), workspace_root=Path(tmp))
             runner = BugAnalysisRunner(config)
             log_root = Path(tmp) / "logs"
-            log_root.mkdir(parents=True, exist_ok=True)
+            nav_log = log_root / "Log" / "log1" / "app" / "com.xiaopeng.montecarlo" / "nav.log"
+            logd_log = log_root / "Log" / "log1" / "logd" / "main.txt"
+            vehicle_log = log_root / "Log" / "log1" / "app" / "vehicle" / "vehicle.log"
+            self._write_matching_log(log_root, "2026-05-11 23:10:00")
+            for path in (nav_log, logd_log, vehicle_log):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(path.name, encoding="utf-8")
             combined_html = Path(tmp) / "bug_startup_stuck_report.html"
             combined_json = Path(tmp) / "bug_startup_stuck_report.json"
             combined_html.write_text("<html>merged</html>", encoding="utf-8")
@@ -2207,7 +3540,7 @@ class AgentTests(unittest.TestCase):
 
             def fake_run_analysis(*, plan, input_path, html_path, json_path, analysis_dir, timeout, target_time, request_text=None):
                 html_path.write_text(f"<html>{plan.kind}</html>", encoding="utf-8")
-                json_path.write_text("{}", encoding="utf-8")
+                json_path.write_text(json.dumps({"evidence": [{"file": str(nav_log), "line": 7}]}), encoding="utf-8")
                 return subprocess.CompletedProcess(args=["python3"], returncode=0, stdout="", stderr="")
 
             with (
@@ -2237,10 +3570,121 @@ class AgentTests(unittest.TestCase):
                         triggered=True,
                     )
                 )
+            evidence_bundle = Path(result.details["evidence_log_bundle"])
+            evidence_manifest = Path(result.details["evidence_log_manifest"])
+            evidence_bundle_exists = evidence_bundle.exists()
+            evidence_manifest_exists = evidence_manifest.exists()
+            evidence_nav_exists = (evidence_bundle / "Log" / "log1" / "app" / "com.xiaopeng.montecarlo" / "nav.log").exists()
+            evidence_logd_exists = (evidence_bundle / "Log" / "log1" / "logd" / "main.txt").exists()
+            evidence_vehicle_exists = (evidence_bundle / "Log" / "log1" / "app" / "vehicle" / "vehicle.log").exists()
+            metadata_body = (Path(result.job_dir) / "output" / "bug_metadata.md").read_text(encoding="utf-8")
 
         self.assertTrue(result.success)
         self.assertEqual(result.details["analysis_kinds"], ["startup", "stuck"])
         self.assertEqual(result.details["files_to_send"], [combined_html])
+        self.assertTrue(evidence_bundle_exists, str(evidence_bundle))
+        self.assertTrue(evidence_manifest_exists, str(evidence_manifest))
+        self.assertTrue(evidence_nav_exists)
+        self.assertTrue(evidence_logd_exists)
+        self.assertTrue(evidence_vehicle_exists)
+        self.assertIn("证据日志保留包", metadata_body)
+
+    def test_direct_analysis_preserves_focused_evidence_logs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=False, data_dir=Path(tmp), workspace_root=Path(tmp))
+            runner = BugAnalysisRunner(config)
+            log_root = Path(tmp) / "direct_logs"
+            nav_log = log_root / "Log" / "log2" / "app" / "com.xiaopeng.montecarlo" / "nav.log"
+            logd_log = log_root / "Log" / "log2" / "logd" / "main.txt"
+            vehicle_log = log_root / "Log" / "log2" / "app" / "vehicle" / "vehicle.log"
+            other_log = log_root / "Log" / "log1" / "app" / "com.xiaopeng.montecarlo" / "nav.log"
+            self._write_matching_log(log_root, "2026-05-19 00:00:00")
+            for path in (nav_log, logd_log, vehicle_log, other_log):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(path.name, encoding="utf-8")
+
+            resource = DownloadResource(kind="file", value="log.zip")
+
+            class FakeDownloader:
+                def download_all(self, resources, *, context, message_id):
+                    return [DownloadedResource(resource=resource, path=log_root)]
+
+            runner._direct_downloader = FakeDownloader()
+
+            def fake_run_analysis(*, plan, input_path, html_path, json_path, analysis_dir, timeout, target_time, request_text=None):
+                html_path.write_text("<html>stuck</html>", encoding="utf-8")
+                json_path.write_text(json.dumps({"evidence": [{"file": str(nav_log), "line": 17}]}), encoding="utf-8")
+                return subprocess.CompletedProcess(args=["python3"], returncode=0, stdout="", stderr="")
+
+            with (
+                mock.patch.object(runner, "_prepare_log_input", return_value=log_root),
+                mock.patch.object(runner, "_run_analysis", side_effect=fake_run_analysis),
+                mock.patch.object(runner, "_build_combined_report_artifacts", return_value=None),
+            ):
+                result = runner.run_direct_analysis(
+                    DirectAnalysisRequest(
+                        prompt="问题时间: 2026-05-19 00:00 分析卡顿",
+                        resources=[resource],
+                        raw_text="问题时间: 2026-05-19 00:00 分析卡顿",
+                        triggered=True,
+                    )
+            )
+            evidence_bundle = Path(result.details["evidence_log_bundle"])
+            evidence_manifest = Path(result.details["evidence_log_manifest"])
+            evidence_bundle_exists = evidence_bundle.exists()
+            evidence_manifest_exists = evidence_manifest.exists()
+            copied_nav = (evidence_bundle / "Log" / "log2" / "app" / "com.xiaopeng.montecarlo" / "nav.log").exists()
+            copied_logd = (evidence_bundle / "Log" / "log2" / "logd" / "main.txt").exists()
+            copied_vehicle = (evidence_bundle / "Log" / "log2" / "app" / "vehicle" / "vehicle.log").exists()
+            copied_other = (evidence_bundle / "Log" / "log1" / "app" / "com.xiaopeng.montecarlo" / "nav.log").exists()
+            metadata_body = (Path(result.job_dir) / "output" / "direct_analysis_metadata.md").read_text(encoding="utf-8")
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.details["mode"], "direct_analysis")
+        self.assertTrue(evidence_bundle_exists, str(evidence_bundle))
+        self.assertTrue(evidence_manifest_exists, str(evidence_manifest))
+        self.assertTrue(copied_nav)
+        self.assertTrue(copied_logd)
+        self.assertTrue(copied_vehicle)
+        self.assertFalse(copied_other)
+        self.assertEqual(result.details["evidence_log_focus_logs"], ["log2"])
+        self.assertIn("证据日志保留包", metadata_body)
+
+    def test_direct_analysis_missing_problem_time_asks_before_run_analysis(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=False, data_dir=Path(tmp), workspace_root=Path(tmp))
+            runner = BugAnalysisRunner(config)
+            log_root = Path(tmp) / "direct_logs"
+            self._write_matching_log(log_root, "2026-05-19 00:00:00")
+            resource = DownloadResource(kind="file", value="log.zip")
+
+            class FakeDownloader:
+                def download_all(self, resources, *, context, message_id):
+                    return [DownloadedResource(resource=resource, path=log_root)]
+
+            runner._direct_downloader = FakeDownloader()
+
+            with (
+                mock.patch.object(runner, "_prepare_log_input", return_value=log_root),
+                mock.patch.object(
+                    runner,
+                    "_run_analysis",
+                    side_effect=AssertionError("missing problem time should not run analysis"),
+                ),
+            ):
+                result = runner.run_direct_analysis(
+                    DirectAnalysisRequest(
+                        prompt="分析卡顿",
+                        resources=[resource],
+                        raw_text="分析卡顿",
+                        triggered=True,
+                    )
+                )
+
+        self.assertTrue(result.success)
+        self.assertTrue(result.skipped)
+        self.assertEqual(result.details["mode"], "bug_time_clarification")
+        self.assertEqual(result.details["time_gate_status"], "missing_fault_time")
 
     def test_bug_reanalysis_uses_agent_summary_and_persisted_session(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2251,6 +3695,7 @@ class AgentTests(unittest.TestCase):
             output_dir.mkdir(parents=True, exist_ok=True)
             prepared_input = Path(tmp) / "logs"
             prepared_input.mkdir(parents=True, exist_ok=True)
+            self._write_matching_log(prepared_input, "2026-05-11 23:12:00")
             previous_summary = output_dir / "bug_agent_summary.md"
             previous_summary.write_text("old summary", encoding="utf-8")
             combined_html = output_dir / "bug_startup_stuck_report.html"
@@ -2272,17 +3717,18 @@ class AgentTests(unittest.TestCase):
             previous_session = {
                 "job_id": "job_1",
                 "job_dir": str(job_dir),
+                "duration_seconds": 400.0,
                 "details": {
                     "analysis_kinds": ["startup", "stuck"],
                     "prepared_log_input": str(prepared_input),
                     "selected_log_input": str(prepared_input / "selected.alog"),
-                    "user_request_text": "https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722 分析启动和卡顿",
+                    "user_request_text": "https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722 问题时间 2026-05-11 23:10 分析启动和卡顿",
                     "agent_summary_file": str(previous_summary),
                     "agent_summary_session_id": "sess_123",
                 },
             }
             previous_context = mock.Mock(
-                request_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722 分析启动和卡顿",
+                request_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722 问题时间 2026-05-11 23:10 分析启动和卡顿",
                 summary_text="上一轮摘要",
                 report_excerpt="上一轮摘录",
                 history=[{"role": "user", "content": "第一次分析"}, {"role": "assistant", "content": "第一次结论"}],
@@ -2322,9 +3768,152 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(result.details["reused_analysis_kinds"], ["stuck"])
         self.assertEqual(analysis_inputs[0][0], "startup")
         self.assertEqual(analysis_inputs[0][1], prepared_input)
-        self.assertEqual(analysis_inputs[0][2], "23:12")
+        self.assertEqual(analysis_inputs[0][2], "2026-05-11 23:12")
         self.assertEqual(summary_mock.call_args.kwargs["provider_session_id"], "")
         self.assertEqual(summary_mock.call_args.kwargs["previous_summary_path"], previous_summary)
+        self.assertEqual(summary_mock.call_args.kwargs["timeout"], 500)
+
+    def test_bug_reanalysis_recovers_original_request_time_and_cached_bug_logs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "data"
+            config = BridgeConfig(dry_run=False, data_dir=data_dir, workspace_root=Path(tmp), guideengine_repo=Path(tmp) / "guideengine")
+            runner = BugAnalysisRunner(config)
+            job_dir = data_dir / "jobs" / "job_1"
+            output_dir = job_dir / "output"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            bug_url = "https://project.feishu.cn/xpfailuremgmt/buglo/detail/6995163459?tab_key=comment"
+            request_text = (
+                f"{bug_url} 调查SIGNAL_CTL_POWERCENTER_SYNTHESIS_REMAIN_DIS_CHANGE "
+                "信号链路 2026-05-19 15:35:35"
+            )
+            bug_cache = data_dir / "bug_cache" / "xpfailuremgmt_6995163459"
+            log_file = (
+                bug_cache
+                / "attachments"
+                / "20260519"
+                / "2026-05-19-15-38-51"
+                / "data_Log_log0_app_com.xiaopeng.montecarlo_"
+                / "com.xiaopeng.montecarlo"
+                / "main_2026-05-19_15-00.alog.log"
+            )
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            log_file.write_text(
+                "05-19 15:35:35.000 11311 12000 1 I NAV_DataCenter: "
+                "getSignalFlow: signalCode=SIGNAL_CTL_POWERCENTER_SYNTHESIS_REMAIN_DIS_CHANGE, "
+                "isNeedCache=true, hasProvider=false\n",
+                encoding="utf-8",
+            )
+            (bug_cache / "cache.json").write_text(
+                json.dumps(
+                    {
+                        "bug_url": bug_url,
+                        "project_key": "xpfailuremgmt",
+                        "work_item_id": "6995163459",
+                        "selected_log_input": "",
+                        "prepared_log_input": "",
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            analysis_inputs = []
+
+            def fake_run_analysis(*, plan, input_path, html_path, json_path, analysis_dir, timeout, target_time, request_text=None):
+                analysis_inputs.append((plan.kind, input_path, target_time))
+                html_path.write_text("<html>signal</html>", encoding="utf-8")
+                json_path.write_text(
+                    json.dumps(
+                        {
+                            "signal": {
+                                "code": "16042",
+                                "name": "SIGNAL_CTL_POWERCENTER_SYNTHESIS_REMAIN_DIS_CHANGE",
+                                "comment": "综合续航",
+                            },
+                            "summary": "正确 bug 日志显示 16042 订阅时 hasProvider=false。",
+                            "log_report": {
+                                "stages": {
+                                    "datacenter": {
+                                        "title": "Android DataCenter 分发",
+                                        "hits": 1,
+                                        "examples": [
+                                            {
+                                                "code": "16042",
+                                                "file": str(log_file),
+                                                "line": 1,
+                                                "text": log_file.read_text(encoding="utf-8").strip(),
+                                            }
+                                        ],
+                                    }
+                                }
+                            },
+                            "lifecycle_report": {
+                                "runtime": {
+                                    "events": [
+                                        {
+                                            "label": "进程启动",
+                                            "time": "05-19 15:32:57.000",
+                                            "file": str(log_file),
+                                            "line": 1,
+                                            "text": "process begin^^^^^^^^^^[11311,3582][2026-05-19 +0800 15:32:57]",
+                                        }
+                                    ]
+                                }
+                            },
+                        },
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+                return subprocess.CompletedProcess(args=["python3"], returncode=0, stdout="", stderr="")
+
+            previous_session = {
+                "job_id": "job_1",
+                "job_dir": str(job_dir),
+                "details": {
+                    "bug_url": bug_url,
+                    "analysis_kinds": ["signal"],
+                    "signal_code": "SIGNAL_CTL_POWERCENTER_SYNTHESIS_REMAIN_DIS_CHANGE",
+                    "prepared_log_input": "",
+                    "selected_log_input": "",
+                    "user_request_text": request_text,
+                },
+            }
+            previous_context = mock.Mock(request_text=request_text, summary_text="", report_excerpt="", history=[])
+
+            with (
+                mock.patch.object(runner, "_retry_bug_log_download", side_effect=AssertionError("should reuse cached bug logs")),
+                mock.patch.object(runner, "_run_analysis", side_effect=fake_run_analysis),
+                mock.patch.object(runner, "_write_reanalysis_source_evidence", return_value=None),
+                mock.patch.object(
+                    runner,
+                    "_run_bug_agent_summary",
+                    return_value={
+                        "message": "agent final summary",
+                        "command": None,
+                        "error": "",
+                        "provider": "codex",
+                        "session_id": "sess_current",
+                        "resumed": False,
+                        "duration_seconds": 1.0,
+                        "usage": {},
+                    },
+                ),
+            ):
+                result = runner.run_bug_reanalysis(
+                    followup_text="重新分析下",
+                    previous_context=previous_context,
+                    previous_session=previous_session,
+                    force_rerun=True,
+                )
+                combined_html = Path(result.details["combined_report_html"]).read_text(encoding="utf-8")
+
+            self.assertTrue(result.success)
+            self.assertEqual(result.details["target_time"], "2026-05-19 15:35:35")
+            self.assertEqual(Path(result.details["prepared_log_input"]).resolve(), (bug_cache / "attachments").resolve())
+            self.assertEqual(analysis_inputs, [("signal", (bug_cache / "attachments").resolve(), None)])
+            self.assertIn("2026-05-19 15:35:35", combined_html)
+            self.assertNotIn("agent final summary", combined_html)
+            self.assertEqual(result.message, "agent final summary")
 
     def test_bug_reanalysis_signal_followup_overrides_target_and_collects_source_evidence(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2335,6 +3924,7 @@ class AgentTests(unittest.TestCase):
             output_dir.mkdir(parents=True, exist_ok=True)
             prepared_input = Path(tmp) / "logs"
             prepared_input.mkdir(parents=True, exist_ok=True)
+            self._write_matching_log(prepared_input, "2026-05-16 10:01:00")
             repo_file = config.guideengine_repo / "module_floorcenter/module_proto/src/main/proto/signal.proto"
             repo_file.parent.mkdir(parents=True, exist_ok=True)
             repo_file.write_text(
@@ -2361,6 +3951,7 @@ class AgentTests(unittest.TestCase):
             previous_session = {
                 "job_id": "job_1",
                 "job_dir": str(job_dir),
+                "duration_seconds": 420.0,
                 "details": {
                     "analysis_kinds": ["signal"],
                     "signal_code": "235082",
@@ -2368,7 +3959,7 @@ class AgentTests(unittest.TestCase):
                     "selected_log_input": str(prepared_input),
                     "user_request_text": (
                         "https://project.feishu.cn/xpfailuremgmt/buglo/detail/6986570719 "
-                        "分析信号链路 主要是VCU_ELECTRICIT_PERCENT，请参考源码分析"
+                        "问题时间 2026-05-16 10:01 分析信号链路 主要是VCU_ELECTRICIT_PERCENT，请参考源码分析"
                     ),
                     "agent_summary_file": str(previous_summary),
                     "agent_summary_session_id": "sess_123",
@@ -2449,6 +4040,7 @@ class AgentTests(unittest.TestCase):
             output_dir.mkdir(parents=True, exist_ok=True)
             prepared_input = Path(tmp) / "logs"
             prepared_input.mkdir(parents=True, exist_ok=True)
+            self._write_matching_log(prepared_input, "2026-05-16 10:01:00")
             repo_file = config.guideengine_repo / "module_core/manager_carscene/src/main/java/demo/CampingModeAction.kt"
             repo_file.parent.mkdir(parents=True, exist_ok=True)
             repo_file.write_text(
@@ -2462,12 +4054,13 @@ class AgentTests(unittest.TestCase):
             previous_session = {
                 "job_id": "job_1",
                 "job_dir": str(job_dir),
+                "duration_seconds": 420.0,
                 "details": {
                     "analysis_kinds": ["signal"],
                     "signal_code": "123456",
                     "prepared_log_input": str(prepared_input),
                     "selected_log_input": str(prepared_input),
-                    "user_request_text": "分析信号链路 主要是CAMPING_MODE_STATUS",
+                    "user_request_text": "问题时间 2026-05-16 10:01 分析信号链路 主要是CAMPING_MODE_STATUS",
                 },
             }
             previous_context = mock.Mock(
@@ -2555,6 +4148,7 @@ class AgentTests(unittest.TestCase):
             previous_session = {
                 "job_id": "job_1",
                 "job_dir": str(job_dir),
+                "duration_seconds": 420.0,
                 "details": {
                     "analysis_kinds": ["startup", "stuck"],
                     "prepared_log_input": str(prepared_input),
@@ -2603,6 +4197,7 @@ class AgentTests(unittest.TestCase):
         self.assertIn(str(combined_html), metadata_text)
         self.assertEqual(summary_mock.call_args.kwargs["provider_session_id"], "")
         self.assertEqual(summary_mock.call_args.kwargs["previous_summary_path"], previous_summary)
+        self.assertEqual(summary_mock.call_args.kwargs["timeout"], 525)
 
     def test_bug_agent_followup_can_opt_into_saved_agent_session_resume(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -34,6 +34,8 @@ class LogDownloader:
             return self._download_url(resource, context)
         if resource.kind in {"file", "image"}:
             return self._download_lark_resource(resource, context, message_id)
+        if resource.kind == "folder":
+            return self._download_drive_folder(resource, context)
         if resource.kind == "local":
             path = Path(resource.value).expanduser()
             if self.config.dry_run:
@@ -93,6 +95,16 @@ class LogDownloader:
         )
         if result.returncode != 0:
             raise DownloadError(result.stderr or "lark-cli resource download failed")
+        return DownloadedResource(resource=resource, path=target, dry_run=result.dry_run, command=result.command)
+
+    def _download_drive_folder(self, resource: DownloadResource, context: JobContext) -> DownloadedResource:
+        folder_token = resource.value.strip()
+        if not folder_token:
+            raise DownloadError("folder_token is required for Feishu Drive folder downloads")
+        target = context.input_dir / safe_filename(folder_token)
+        result = self.lark_client.download_drive_folder(folder_token=folder_token, output_dir=target)
+        if result.returncode != 0:
+            raise DownloadError(result.stderr or "lark-cli Drive folder pull failed")
         return DownloadedResource(resource=resource, path=target, dry_run=result.dry_run, command=result.command)
 
 

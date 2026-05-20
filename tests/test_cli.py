@@ -114,10 +114,32 @@ class CliTests(unittest.TestCase):
         self.assertIn('"message": "not a handled request"', output.getvalue())
         self.assertIn('"skipped": true', output.getvalue())
 
-    def test_listen_purges_jobs_on_start(self):
+    def test_listen_preserves_jobs_on_start_by_default(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / "config.toml"
             config.write_text(f'dry_run = false\ndata_dir = "{tmp}/data"\n', encoding="utf-8")
+            fake_app = mock.Mock()
+            fake_app.lark_client.consume_payloads.return_value = iter(())
+
+            with mock.patch("lark_agent_bridge.cli.BridgeApp", return_value=fake_app):
+                exit_code = main(["listen", "--config", str(config)])
+
+        self.assertEqual(exit_code, 0)
+        fake_app.purge_all_jobs.assert_not_called()
+
+    def test_listen_purges_jobs_on_start_when_configured(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config.toml"
+            config.write_text(
+                f"""
+dry_run = false
+data_dir = "{tmp}/data"
+
+[job_retention]
+purge_all_on_listen_start = true
+""",
+                encoding="utf-8",
+            )
             fake_app = mock.Mock()
             fake_app.lark_client.consume_payloads.return_value = iter(())
 

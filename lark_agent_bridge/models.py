@@ -17,11 +17,18 @@ class DownloadConfig:
 
 
 @dataclass(slots=True)
+class LocalResourceOptions:
+    enabled: bool = True
+    require_allowed_user: bool = True
+    allowed_dirs: list[Path] = field(default_factory=lambda: [Path("~/Downloads")])
+
+
+@dataclass(slots=True)
 class JobRetentionOptions:
     enabled: bool = True
     max_age_hours: int = 6
     bug_cache_max_age_hours: int = 24
-    purge_all_on_listen_start: bool = True
+    purge_all_on_listen_start: bool = False
     cleanup_interval_seconds: int = 60
 
 
@@ -72,9 +79,10 @@ class BugAnalysisOptions:
     command: str = "claude"
     working_dir: Path | None = None
     timeout_seconds: int = 5400
+    agent_summary_timeout_seconds: int = 90
     max_prompt_chars: int = 16000
     upload_result_files: bool = True
-    default_prompt: str = "调查3D启动时序"
+    default_prompt: str = ""
     resume_followup_sessions: bool = False
     force_reanalysis_terms: list[str] = field(
         default_factory=lambda: [
@@ -193,6 +201,7 @@ class BridgeConfig:
     command_prefixes: list[str] = field(default_factory=lambda: ["/signal"])
     signal_aliases: dict[str, str] = field(default_factory=dict)
     download: DownloadConfig = field(default_factory=DownloadConfig)
+    local_resources: LocalResourceOptions = field(default_factory=LocalResourceOptions)
     job_retention: JobRetentionOptions = field(default_factory=JobRetentionOptions)
     event_consumer: EventConsumerOptions = field(default_factory=EventConsumerOptions)
     lark: LarkOptions = field(default_factory=LarkOptions)
@@ -292,8 +301,19 @@ class CardActionEvent:
         event_body = payload.get("event") or payload
         action_body = event_body.get("action") or {}
         value = action_body.get("value") or payload.get("value") or {}
+        if isinstance(value, str):
+            try:
+                parsed_value = json.loads(value)
+            except json.JSONDecodeError:
+                parsed_value = {}
+            value = parsed_value
         if not isinstance(value, dict):
             value = {}
+        form_value = _card_action_form_value(payload, event_body, action_body)
+        typed_followup_text = (
+            _card_form_text(form_value, "followup_prompt", "followup_text", "prompt", "question")
+            or _card_action_input_text(payload, event_body, action_body)
+        )
         context = event_body.get("context") or {}
         operator = event_body.get("operator") or {}
         operator_id = event_body.get("operator_id") or ""
@@ -333,9 +353,64 @@ class CardActionEvent:
                 or ""
             ),
             operator_id=_safe_callback_identifier(operator_id),
-            followup_text=_safe_callback_text(value.get("followup_text") or ""),
+            followup_text=_safe_callback_text(typed_followup_text or value.get("followup_text") or ""),
             raw=payload,
         )
+
+
+def _card_action_form_value(
+    payload: dict[str, Any],
+    event_body: dict[str, Any],
+    action_body: dict[str, Any],
+) -> dict[str, Any]:
+    for container in (action_body, event_body, payload):
+        for key in ("form_value", "formValue", "form_values", "formValues", "input_values", "inputValues"):
+            value = container.get(key)
+            if isinstance(value, dict):
+                return value
+    return {}
+
+
+def _card_action_input_text(
+    payload: dict[str, Any],
+    event_body: dict[str, Any],
+    action_body: dict[str, Any],
+) -> str:
+    for container in (action_body, event_body, payload):
+        for key in ("input_value", "inputValue"):
+            text = _callback_text_value(container.get(key))
+            if text:
+                return text
+    return ""
+
+
+def _card_form_text(form_value: dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        text = _callback_text_value(form_value.get(key))
+        if text:
+            return text
+    for key, value in form_value.items():
+        if str(key).lower() in {"followup_prompt", "followup_text", "prompt", "question"}:
+            text = _callback_text_value(value)
+            if text:
+                return text
+    return ""
+
+
+def _callback_text_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        for key in ("value", "text", "content", "input_value", "inputValue"):
+            text = _callback_text_value(value.get(key))
+            if text:
+                return text
+        return ""
+    if isinstance(value, list):
+        return " ".join(part for item in value if (part := _callback_text_value(item)))
+    return str(value)
 
 
 def _coerce_message_content(content: Any) -> str:

@@ -10,6 +10,7 @@ from .signal_resolver import SignalResolver
 
 
 URL_RE = re.compile(r"https?://[^\s<>\"]+")
+DRIVE_FOLDER_URL_RE = re.compile(r"https?://[^\s<>\"]*/drive/folder/(?P<token>[^/?#\s<>\"]+)")
 BUG_URL_RE = re.compile(
     r"https?://(?:project\.feishu\.cn|(?:www\.)?meegle\.com)[^\s<>\"]*/buglo/detail/\d+"
     r"(?:[/?#][^\s<>\"，。；;、)）\]】}]*)?"
@@ -17,8 +18,9 @@ BUG_URL_RE = re.compile(
 SIGNAL_ENUM_RE = re.compile(r"(?<![A-Za-z0-9_])SIGNAL_[A-Z0-9_]+(?![A-Za-z0-9_])")
 SIGNAL_BARE_NAME_RE = re.compile(r"(?<![A-Za-z0-9_])([A-Z][A-Z0-9]+(?:_[A-Z0-9]+)+)(?![A-Za-z0-9_])")
 SIGNAL_CODE_RE = re.compile(r"(?<![A-Za-z0-9_])\d{5,6}(?![A-Za-z0-9_])")
-FILE_KEY_RE = re.compile(r"\bfile_[A-Za-z0-9_]+\b")
-IMAGE_KEY_RE = re.compile(r"\bimg_[A-Za-z0-9_]+\b")
+FILE_KEY_RE = re.compile(r"\bfile_[A-Za-z0-9_-]+\b")
+IMAGE_KEY_RE = re.compile(r"\bimg_[A-Za-z0-9_-]+\b")
+FOLDER_XML_RE = re.compile(r"<folder\b[^>]*\b(?:folder_token|token)=\"(?P<token>[A-Za-z0-9_-]+)\"", re.I)
 DATE_RANGE_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}\s+\d{1,2}\s*-\s*\d{1,2}\b")
 HOUR_RANGE_RE = re.compile(r"(?<!\d)(\d{1,2})\s*-\s*(\d{1,2})\s*点")
 
@@ -279,7 +281,12 @@ def parse_bug_request(text: str) -> BugRequest:
     if not match:
         return BugRequest(bug_url="", prompt="", raw_text=normalized_text, triggered=False)
     bug_url = match.group(0).rstrip(TRAILING_URL_PUNCTUATION)
-    prompt = (cleaned.replace(match.group(0), "", 1)).strip(" \t\r\n，。；;")
+    link_span = _markdown_link_span_for_url(cleaned, match.start(), match.end())
+    if link_span is not None:
+        prompt_source = f"{cleaned[:link_span[0]]}{cleaned[link_span[1]:]}"
+    else:
+        prompt_source = cleaned.replace(match.group(0), "", 1)
+    prompt = prompt_source.strip(" \t\r\n，。；;")
     return BugRequest(
         bug_url=bug_url,
         prompt=prompt,
@@ -287,6 +294,30 @@ def parse_bug_request(text: str) -> BugRequest:
         triggered=True,
         error=None if bug_url else "missing_bug_url",
     )
+
+
+def _markdown_link_span_for_url(text: str, url_start: int, url_end: int) -> tuple[int, int] | None:
+    label_end = text.rfind("](", 0, url_start)
+    if label_end < 0:
+        return None
+    if text[label_end + 2 : url_start].strip():
+        return None
+    link_end = url_end
+    while link_end < len(text) and text[link_end].isspace():
+        link_end += 1
+    if link_end >= len(text) or text[link_end] != ")":
+        return None
+    depth = 0
+    for index in range(label_end, -1, -1):
+        char = text[index]
+        if char == "]":
+            depth += 1
+        elif char == "[":
+            depth -= 1
+            if depth == 0:
+                start = index - 1 if index > 0 and text[index - 1] == "!" else index
+                return start, link_end + 1
+    return None
 
 
 def should_use_omlx_chat(text: str, *, max_chars: int = 2000) -> bool:
@@ -338,10 +369,15 @@ def _find_signal(text: str, aliases: dict[str, str], *, signal_resolver: SignalR
     for alias, signal in sorted(aliases.items(), key=lambda item: len(item[0]), reverse=True):
         if alias.casefold() in lowered:
             return signal
-    code_match = SIGNAL_CODE_RE.search(text)
+    code_match = SIGNAL_CODE_RE.search(_signal_code_search_text(text))
     if code_match:
         return _resolve_signal_value(code_match.group(0), signal_resolver)
     return None
+
+
+def _signal_code_search_text(text: str) -> str:
+    without_urls = URL_RE.sub(" ", text)
+    return re.sub(r"#[0-9A-Fa-f]{3,8}\b", " ", without_urls)
 
 
 def _resolve_signal_value(value: str, signal_resolver: SignalResolver | None) -> str:
@@ -361,17 +397,18 @@ def _resolve_bare_signal_name(value: str, signal_resolver: SignalResolver | None
 def find_resources(text: str, *, source_message_id: str = "") -> list[DownloadResource]:
     resources: list[DownloadResource] = []
     for match in URL_RE.findall(text):
-        resources.append(
-            DownloadResource(
-                kind="url",
-                value=match.rstrip(TRAILING_URL_PUNCTUATION),
-                source_message_id=source_message_id,
-            )
-        )
+        value = match.rstrip(TRAILING_URL_PUNCTUATION)
+        folder_match = DRIVE_FOLDER_URL_RE.match(value)
+        if folder_match:
+            resources.append(DownloadResource(kind="folder", value=folder_match.group("token"), source_message_id=source_message_id))
+            continue
+        resources.append(DownloadResource(kind="url", value=value, source_message_id=source_message_id))
     for match in FILE_KEY_RE.findall(text):
         resources.append(DownloadResource(kind="file", value=match, source_message_id=source_message_id))
     for match in IMAGE_KEY_RE.findall(text):
         resources.append(DownloadResource(kind="image", value=match, source_message_id=source_message_id))
+    for match in FOLDER_XML_RE.finditer(text):
+        resources.append(DownloadResource(kind="folder", value=match.group("token"), source_message_id=source_message_id))
     return resources
 
 

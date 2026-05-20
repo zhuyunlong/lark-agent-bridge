@@ -3,6 +3,7 @@ workspace_root = "../.."
 guideengine_repo = "../../xp/guideengine/.worktrees/os6_xpdev"
 data_dir = "data"
 
+# Empty means no group restriction. Fill this list only when you want a group allowlist.
 allowed_chats = []
 allowed_users = []
 command_prefixes = ["/signal"]
@@ -18,10 +19,22 @@ command_prefixes = ["/signal"]
 max_bytes = 5368709120
 timeout_seconds = 60
 
+[local_resources]
+# Security gate for local files mentioned in chat.
+# A local file is only resolved when:
+#   1. The sender is in `allowed_users` when `require_allowed_user = true`.
+#   2. The message explicitly mentions 下载目录 / Downloads / 服务器下载目录.
+#   3. The filename exists under one of the allowed_dirs.
+enabled = true
+require_allowed_user = true
+allowed_dirs = ["~/Downloads"]
+
 [job_retention]
 enabled = true
+# Historical analysis jobs/reports are preserved; this age only applies to temporary Bug cache.
 max_age_hours = 6
-purge_all_on_listen_start = true
+bug_cache_max_age_hours = 24
+purge_all_on_listen_start = false
 cleanup_interval_seconds = 60
 
 [event_consumer]
@@ -69,9 +82,14 @@ provider = "codex"
 command = "codex"
 working_dir = "../.."
 timeout_seconds = 5400
+# Final Agent summary is an enhancement step. Keep it short so generated HTML
+# and script summaries can be returned even if Codex/Claude is slow.
+agent_summary_timeout_seconds = 90
 max_prompt_chars = 16000
 upload_result_files = true
-default_prompt = "调查3D启动时序"
+# Leave empty so generic bug links ask for a concrete direction instead of
+# silently defaulting to a startup analysis.
+default_prompt = ""
 # Default false: follow-up and reanalysis create a fresh Agent session and reuse
 # cached bug/log/source metadata instead of resuming a large old Agent context.
 # Set true only when you explicitly need to continue the old Agent's private reasoning state.

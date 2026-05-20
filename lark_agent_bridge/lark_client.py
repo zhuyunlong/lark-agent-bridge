@@ -84,6 +84,12 @@ class LarkClient:
         resource_type: str,
         output: str | Path,
     ) -> CommandResult:
+        output_path = Path(output)
+        output_cwd: Path | None = None
+        output_arg = str(output_path)
+        if output_path.is_absolute():
+            output_cwd = output_path.parent
+            output_arg = f"./{output_path.name}"
         return self._run_or_plan(
             [
                 "lark-cli",
@@ -98,8 +104,35 @@ class LarkClient:
                 "--type",
                 resource_type,
                 "--output",
-                str(output),
-            ]
+                output_arg,
+            ],
+            cwd=output_cwd,
+        )
+
+    def download_drive_folder(self, *, folder_token: str, output_dir: str | Path) -> CommandResult:
+        output_path = Path(output_dir)
+        output_cwd: Path | None = None
+        local_dir_arg = str(output_path)
+        if output_path.is_absolute():
+            output_cwd = output_path.parent
+            local_dir_arg = f"./{output_path.name}"
+        return self._run_or_plan(
+            [
+                "lark-cli",
+                "drive",
+                "+pull",
+                "--as",
+                "bot",
+                "--folder-token",
+                folder_token,
+                "--local-dir",
+                local_dir_arg,
+                "--if-exists",
+                "smart",
+                "--on-duplicate-remote",
+                "rename",
+            ],
+            cwd=output_cwd,
         )
 
     def reply(self, message_id: str, text: str, *, markdown: bool = False) -> CommandResult:

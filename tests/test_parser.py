@@ -4,6 +4,7 @@ import unittest
 
 from lark_agent_bridge.parser import (
     build_basic_chat_reply,
+    find_resources,
     parse_bug_request,
     parse_claude_skill_request,
     parse_direct_analysis_request,
@@ -34,6 +35,14 @@ class ParserTests(unittest.TestCase):
 
         self.assertEqual(request.signal, "SIGNAL_X3D_LD_NORMAL_OVER_ALL_DATA")
         self.assertTrue(request.triggered)
+
+    def test_parse_signal_request_ignores_urls_and_css_hex_colors_as_signal_codes(self):
+        request = parse_signal_request(
+            "信号链路总览 http://10.99.149.127:8765/reports/e1c56e6bb411636da68eea2e0c91f5cc/ "
+            "CSS --green:#059669; bug https://project.feishu.cn/xpfailuremgmt/buglo/detail/6979499593"
+        )
+
+        self.assertIsNone(request.signal)
 
     def test_parse_bare_signal_name_without_forcing_signal_prefix(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -101,6 +110,18 @@ class ParserTests(unittest.TestCase):
         )
         self.assertEqual(request.prompt, "调查3D启动时序")
 
+    def test_parse_bug_request_removes_markdown_link_shell_from_prompt(self):
+        request = parse_bug_request(
+            "[ [缺陷] 【F01】车机大屏页面卡住-SB174577](https://project.feishu.cn/xpfailuremgmt/buglo/detail/6979499593) 分析3D生命周期"
+        )
+
+        self.assertTrue(request.triggered)
+        self.assertEqual(
+            request.bug_url,
+            "https://project.feishu.cn/xpfailuremgmt/buglo/detail/6979499593",
+        )
+        self.assertEqual(request.prompt, "分析3D生命周期")
+
     def test_parse_bug_request_stops_before_chinese_punctuation_prompt(self):
         request = parse_bug_request(
             "https://project.feishu.cn/xpfailuremgmt/buglo/detail/6993883118，调查 SIGNAL_CTL_XPILOT_ADAS_LD_STATE 信号链路和现状"
@@ -130,6 +151,25 @@ class ParserTests(unittest.TestCase):
 
         self.assertTrue(request.triggered)
         self.assertEqual(request.resources[0].kind, "file")
+
+    def test_parse_perception_summary_keeps_full_lark_file_v3_key(self):
+        request = parse_perception_summary_request(
+            '@bot /perception-summary 总结当前感知数据 <file key="file_v3_0011s_6d5d723c-ec0b-44f3-9908-a02be496b54g" name="Log.zip"/>'
+        )
+
+        self.assertTrue(request.triggered)
+        self.assertEqual(len(request.resources), 1)
+        self.assertEqual(
+            request.resources[0].value,
+            "file_v3_0011s_6d5d723c-ec0b-44f3-9908-a02be496b54g",
+        )
+
+    def test_find_resources_extracts_drive_folder_url_as_folder_resource(self):
+        resources = find_resources("日志目录 https://example.feishu.cn/drive/folder/fldcnlog123")
+
+        self.assertEqual(len(resources), 1)
+        self.assertEqual(resources[0].kind, "folder")
+        self.assertEqual(resources[0].value, "fldcnlog123")
 
     def test_parse_direct_analysis_request(self):
         request = parse_direct_analysis_request("@bot 分析启动和卡顿 file_abc123 11:30")
