@@ -1,0 +1,124 @@
+tests/test_cards.py
+  a1b50083a96604c6 47-98,101-103
+  707e777d2178f3a6 11,99-100,204-230
+lark_agent_bridge/agents/routing_terms.py
+  a1b50083a96604c6 1-200
+lark_agent_bridge/log.py
+  a1b50083a96604c6 1-100
+lark_agent_bridge/report_server.py
+  a1b50083a96604c6 19,23-25,56,290,299-302,307,321,371,388-395,491-510,537-546,577-578,582-583,587-588,591-597,777-789,913-991,993-1008,1071,1073,1155-1156,1160,1162-1163,1165-1167,1174,1291-1299
+  707e777d2178f3a6 22,204-205,241-242,279,289,320,370,415-420,476-477,520-533,846-882
+lark_agent_bridge/case_store.py
+  707e777d2178f3a6 361-383
+lark_agent_bridge/downloader.py
+  a1b50083a96604c6 92
+  707e777d2178f3a6 5,8,13,16,23-57,90,93,99,101
+config.example.toml
+  a1b50083a96604c6 21-24,59-63,99-101
+  e045d572d9c9d22d 75-76
+  707e777d2178f3a6 46-48,141-174,179-185
+lark_agent_bridge/agents/omlx_client.py
+  a1b50083a96604c6 1-183
+tests/test_report_server.py
+  707e777d2178f3a6 11-12,102-125,420-457
+  a1b50083a96604c6 23-28,290-297,325-329,340-342,344-347,462-548
+tests/test_app.py
+  707e777d2178f3a6 18,20,143-168,980-985,1557-1590,3407-3412,3624-3629,3663,3666,3669-3711
+  a1b50083a96604c6 2,8,11,25,209-254,323-335,948-970,1253-1256,1591-1715,1717,1756,1796,2076-2099,3545-3623,3630-3662,3664-3665,3667-3668,3712-3749,4336-4339,4358,4370-4372,4444-4447,4459,4466-4468,4570-4603
+  e045d572d9c9d22d 16,381,1385,1387-1405,1416,1443,1468,1814
+pyproject.toml
+  a1b50083a96604c6 6-8
+lark_agent_bridge/admin_ui.py
+  a1b50083a96604c6 5,7-8,11-15
+lark_agent_bridge/state.py
+  707e777d2178f3a6 12,15,19-20,43-44,51,57,65-69,77,80-100,321,721,849-870
+  a1b50083a96604c6 786
+lark_agent_bridge/agents/bug_runner.py
+  a1b50083a96604c6 1-8877
+lark_agent_bridge/config.py
+  a1b50083a96604c6 92,136-147
+  707e777d2178f3a6 21-22,71,164,182,205,244-247,270-283,347,351,359-389
+lark_agent_bridge/templates/admin.html
+  a1b50083a96604c6 1-963
+lark_agent_bridge/agents/_helpers.py
+  a1b50083a96604c6 1-65
+lark_agent_bridge/agents/perception_runner.py
+  a1b50083a96604c6 1-186
+lark_agent_bridge/agents/claude_runner.py
+  e045d572d9c9d22d 42
+  a1b50083a96604c6 1-41,43-208
+lark_agent_bridge/cli.py
+  a1b50083a96604c6 14,16,70,127,143
+  707e777d2178f3a6 13,39-63,85-124
+lark_agent_bridge/models.py
+  707e777d2178f3a6 198-217,242
+  e045d572d9c9d22d 60,134,226
+  a1b50083a96604c6 17,44-45,85,150,152-153,317,367,522-529
+lark_agent_bridge/agents/__init__.py
+  a1b50083a96604c6 1-121
+lark_agent_bridge/auth.py
+  a1b50083a96604c6 1-230
+tests/test_agents.py
+  a1b50083a96604c6 1620-1624,1842-1903,2022-2045,3489-3492,3603
+tests/test_integration.py
+  a1b50083a96604c6 1-382
+lark_agent_bridge/app.py
+  a1b50083a96604c6 22,28,71,235,251,301-306,312-315,402-403,462,514,527-528,537-540,576-581,599-614,698-699,715-723,974,1004-1010,1014-1021,1024-1035,1039-1040,1124-1191,1211-1213,1241-1243,1253-1267,1428-1438,1446-1484,1486-1487,1508-1513,1550,1560,1773-1783,1906-1928,2091-2159,2430-2448
+  707e777d2178f3a6 5,16-19,36,50,87-92,206-207,224-234,236-237,254,271,285,295,362-366,428-429,448,499,506-513,515-516,518-526,529-536,541-557,559,561-569,571-574,583-592,594-597,615-623,625-634,636-647,649-663,665-675,677-693,695-697,700-713,725-730,732-742,744-761,764-765,767,922,926,975-976,989,1013,1022-1023,1036-1038,1052-1057,1093,1305,1312,1340,1395,1402-1417,1424-1425,1439-1445,1485,1488-1489,1529-1532,1551,2598
+.coveragerc
+  a1b50083a96604c6 1-17
+lark_agent_bridge/cards.py
+  a1b50083a96604c6 31,59,170-171,208-213,244-266,268-290,447-466,802-854
+  707e777d2178f3a6 267,555-584
+lark_agent_bridge/agents/intent_runner.py
+  a1b50083a96604c6 1-186,188-202,204-356
+  e045d572d9c9d22d 187,203
+tests/test_downloader.py
+  a1b50083a96604c6 98-148
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.20",
+  "base_commit_sha": "9b7b73e0c716cee99f40ec91df0fa0b6d03330bf",
+  "prompts": {
+    "707e777d2178f3a6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e463b-5494-72e2-be09-4c961d0dc6c4",
+        "model": "gpt-5.5"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 994,
+      "total_deletions": 219,
+      "accepted_lines": 957,
+      "overriden_lines": 0
+    },
+    "a1b50083a96604c6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e299e-f532-77c2-b920-26faaf927612",
+        "model": "gpt-5.5"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 13589,
+      "total_deletions": 921,
+      "accepted_lines": 13409,
+      "overriden_lines": 0
+    },
+    "e045d572d9c9d22d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e48f1-9d49-7d10-9f1c-b3f5c88924c1",
+        "model": "gpt-5.5"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 40,
+      "total_deletions": 16,
+      "accepted_lines": 35,
+      "overriden_lines": 0
+    }
+  }
+}
