@@ -1,0 +1,963 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Lark Agent Bridge 后台</title>
+  <style>
+    :root {
+      --bg: #f5f7fb;
+      --panel: #ffffff;
+      --panel-soft: #f8fafc;
+      --text: #172033;
+      --muted: #667085;
+      --line: #dbe3ef;
+      --blue: #2563eb;
+      --green: #16a34a;
+      --amber: #d97706;
+      --red: #dc2626;
+      --violet: #6d28d9;
+      --cyan: #0891b2;
+      --shadow: 0 8px 26px rgba(15, 23, 42, 0.08);
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); }
+    header { height: 60px; padding: 0 20px; background: #111827; color: #fff; display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+    h1 { font-size: 18px; margin: 0; letter-spacing: 0; }
+    h2 { font-size: 17px; margin: 0 0 12px; }
+    h3 { font-size: 14px; margin: 18px 0 10px; }
+    button, input, textarea, select { font: inherit; }
+    button { border: 1px solid var(--line); border-radius: 6px; padding: 7px 10px; background: #fff; color: var(--text); cursor: pointer; }
+    button:hover { border-color: #94a3b8; }
+    button:disabled { opacity: .55; cursor: not-allowed; }
+    button.primary { background: var(--blue); border-color: var(--blue); color: #fff; }
+    button.danger { background: #fff; border-color: #fecaca; color: var(--red); }
+    button.ghost { background: transparent; color: #dbeafe; border-color: #334155; }
+    input, textarea, select { width: 100%; border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; color: var(--text); background: #fff; }
+    textarea { min-height: 340px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; line-height: 1.55; }
+    a { color: var(--blue); text-decoration: none; font-weight: 600; }
+    a:hover { text-decoration: underline; }
+    .toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .tabs { display: flex; gap: 8px; padding: 14px 20px 0; }
+    .tab { border: 0; background: transparent; padding: 9px 12px; color: var(--muted); }
+    .tab.active { color: var(--blue); border-bottom: 2px solid var(--blue); border-radius: 0; font-weight: 700; }
+    main { padding: 14px 20px 24px; }
+    .view { display: none; }
+    .view.active { display: block; }
+    .grid { display: grid; gap: 14px; }
+    .metrics { grid-template-columns: repeat(6, minmax(130px, 1fr)); margin-bottom: 14px; }
+    .metric, .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow); }
+    .metric { padding: 12px; min-height: 76px; }
+    .metric .label { color: var(--muted); font-size: 12px; margin-bottom: 8px; }
+    .metric .value { font-size: 24px; font-weight: 800; }
+    .split { grid-template-columns: minmax(320px, 430px) minmax(0, 1fr); align-items: start; }
+    .panel { overflow: hidden; }
+    .panel-head { padding: 13px 14px; border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .panel-body { padding: 14px; }
+    .scroll { max-height: calc(100vh - 218px); overflow: auto; }
+    .item { display: block; width: 100%; padding: 12px 14px; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: #fff; text-align: left; }
+    .item:hover, .item.active { background: #eff6ff; }
+    .item.failed { border-left: 4px solid var(--red); }
+    .item.running { border-left: 4px solid var(--blue); }
+    .item.pending { border-left: 4px solid var(--amber); }
+    .item.succeeded { border-left: 4px solid var(--green); }
+    .item.cancelled { border-left: 4px solid #64748b; }
+    .row { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
+    .title { font-weight: 750; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .meta, .muted { color: var(--muted); font-size: 12px; }
+    .badge { display: inline-flex; align-items: center; border-radius: 999px; padding: 2px 8px; font-size: 12px; font-weight: 700; background: #e2e8f0; color: #334155; white-space: nowrap; }
+    .badge.succeeded { background: #dcfce7; color: #166534; }
+    .badge.failed { background: #fee2e2; color: #991b1b; }
+    .badge.running { background: #dbeafe; color: #1d4ed8; }
+    .badge.pending { background: #fef3c7; color: #92400e; }
+    .badge.cancelled { background: #e2e8f0; color: #475569; }
+    .badge.skipped { background: #f1f5f9; color: #475569; }
+    .badge.primary { background: #dbeafe; color: #1d4ed8; }
+    .badge.auxiliary { background: #ede9fe; color: #5b21b6; }
+    .badge.custom { background: #cffafe; color: #0e7490; }
+    .badge.bug_primary { background: #dcfce7; color: #166534; }
+    .badge.custom_unrouted, .badge.configured_missing { background: #fef3c7; color: #92400e; }
+    .badge.fallback { background: #e2e8f0; color: #475569; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; margin-bottom: 14px; }
+    .card { border: 1px solid var(--line); border-radius: 8px; padding: 10px; background: var(--panel-soft); min-height: 68px; }
+    .card .name { color: var(--muted); font-size: 12px; margin-bottom: 5px; }
+    .card .body { font-weight: 700; word-break: break-word; }
+    .progress-bar { height: 8px; background: #e5e7eb; border-radius: 999px; overflow: hidden; margin: 10px 0 2px; }
+    .progress-bar span { display: block; height: 100%; width: 0; background: var(--blue); transition: width .25s ease; }
+    .timeline { border-left: 2px solid #dbeafe; margin-left: 9px; padding-left: 16px; }
+    .step { position: relative; padding: 0 0 14px; }
+    .step::before { content: ""; position: absolute; left: -22px; top: 4px; width: 10px; height: 10px; border-radius: 999px; background: var(--blue); }
+    .step.failed::before { background: var(--red); }
+    .step.succeeded::before { background: var(--green); }
+    pre { white-space: pre-wrap; word-break: break-word; background: #111827; color: #e5e7eb; border-radius: 8px; padding: 12px; overflow: auto; font-size: 12px; line-height: 1.5; }
+    pre.stream-log { max-height: 320px; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { border-bottom: 1px solid var(--line); padding: 10px; text-align: left; vertical-align: top; font-size: 13px; }
+    th { color: var(--muted); background: #f8fafc; font-size: 12px; }
+    .case-actions, .skill-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    .filters { display: grid; grid-template-columns: minmax(180px, 1fr) 150px 150px auto; gap: 8px; align-items: center; }
+    .history-layout { grid-template-columns: minmax(360px, 520px) minmax(0, 1fr); align-items: start; }
+    .skill-layout { grid-template-columns: 330px minmax(0, 1fr); align-items: start; }
+    .skill-controls { display: grid; gap: 10px; }
+    .skill-summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+    .summary-pill { border: 1px solid var(--line); border-radius: 8px; padding: 8px; background: var(--panel-soft); }
+    .summary-pill .num { font-size: 18px; font-weight: 800; }
+    .skill-filters { display: grid; grid-template-columns: minmax(0, 1fr) 150px; gap: 8px; }
+    .route-info { margin: 8px 0 12px; }
+    .form-grid { display: grid; grid-template-columns: 170px 220px minmax(220px, 1fr) auto; gap: 8px; align-items: end; }
+    .checks { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; }
+    .check { border: 1px solid var(--line); border-radius: 8px; padding: 9px; background: var(--panel-soft); }
+    .check.ok { border-color: #bbf7d0; }
+    .check.bad { border-color: #fecaca; }
+    .empty { padding: 18px; color: var(--muted); }
+    /* Auth overlay */
+    .auth-overlay { position: fixed; inset: 0; z-index: 1000; background: rgba(15, 23, 42, .55); display: flex; align-items: center; justify-content: center; backdrop-filter: blur(4px); }
+    .auth-box { background: #fff; border-radius: 16px; box-shadow: 0 20px 60px rgba(0,0,0,.2); padding: 32px; max-width: 380px; width: 90%; }
+    .auth-box h2 { font-size: 22px; margin: 0 0 8px; color: var(--blue); text-align: center; }
+    .auth-box .desc { color: var(--muted); font-size: 13px; text-align: center; margin-bottom: 20px; }
+    .auth-box .form-row { margin-bottom: 14px; }
+    .auth-box label { font-size: 13px; font-weight: 600; color: var(--text); display: block; margin-bottom: 4px; }
+    .auth-box .error { color: var(--red); font-size: 13px; margin-bottom: 10px; min-height: 20px; }
+    .auth-tabs { display: flex; gap: 0; margin-bottom: 18px; }
+    .auth-tabs button { flex: 1; border: 1px solid var(--line); padding: 8px; background: #f8fafc; color: var(--muted); cursor: pointer; }
+    .auth-tabs button:first-child { border-radius: 6px 0 0 6px; }
+    .auth-tabs button:last-child { border-radius: 0 6px 6px 0; }
+    .auth-tabs button.active { background: var(--blue); border-color: var(--blue); color: #fff; font-weight: 700; }
+    .user-item { display: flex; justify-content: space-between; align-items: center; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; margin-bottom: 6px; }
+    .user-item .uname { font-weight: 700; }
+    .user-item .urole { font-size: 12px; color: var(--muted); }
+    @media (max-width: 1040px) { .metrics { grid-template-columns: repeat(3, 1fr); } .split, .history-layout, .skill-layout, .filters, .form-grid { grid-template-columns: 1fr; } .scroll { max-height: none; } }
+    @media (max-width: 640px) { header { height: auto; padding: 14px; align-items: flex-start; flex-direction: column; } main, .tabs { padding-left: 12px; padding-right: 12px; } .metrics { grid-template-columns: repeat(2, 1fr); } }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Lark Agent Bridge 会话控制台 / 后台管理</h1>
+    <div class="toolbar">
+      <span id="auth-user" class="muted"></span>
+      <span id="clock" class="muted"></span>
+      <button id="refresh" class="ghost">刷新</button>
+      <button id="logout-btn" class="ghost" style="display:none">退出登录</button>
+    </div>
+  </header>
+  <nav class="tabs">
+    <button class="tab active" data-view="sessions-view">多会话进度</button>
+    <button class="tab" data-view="cases-view">分析历史</button>
+    <button class="tab" data-view="skills-view">Skill 管理</button>
+    <button class="tab" data-view="daemon-view">运行状态</button>
+    <button class="tab" data-view="users-view" id="users-tab" style="display:none">用户管理</button>
+  </nav>
+  <main>
+    <section class="grid metrics">
+      <div class="metric"><div class="label">运行中</div><div id="metric-running" class="value">0</div></div>
+      <div class="metric"><div class="label">待确认</div><div id="metric-pending" class="value">0</div></div>
+      <div class="metric"><div class="label">失败</div><div id="metric-failed" class="value">0</div></div>
+      <div class="metric"><div class="label">今日会话</div><div id="metric-sessions" class="value">0</div></div>
+      <div class="metric"><div class="label">分析记录</div><div id="metric-cases" class="value">0</div></div>
+      <div class="metric"><div class="label">Skill</div><div id="metric-skills" class="value">0</div></div>
+    </section>
+
+    <section id="sessions-view" class="view active">
+      <div class="grid split">
+        <section class="panel">
+          <div class="panel-head"><h2>会话列表</h2><span id="session-count" class="muted"></span></div>
+          <div class="scroll" id="sessions"></div>
+        </section>
+        <section class="panel">
+          <div class="panel-head"><h2>会话详情</h2><span id="selected-status"></span></div>
+          <div class="panel-body scroll" id="detail"><p class="muted">选择左侧会话查看后台 agent 过程。</p></div>
+        </section>
+      </div>
+    </section>
+
+    <section id="cases-view" class="view">
+      <div class="grid history-layout">
+        <section class="panel">
+          <div class="panel-head"><h2>分析历史</h2><span id="history-count" class="muted"></span></div>
+          <div class="panel-body">
+            <div class="filters">
+              <input id="case-keyword" placeholder="搜索请求、结论、job、会话" />
+              <select id="case-mode"><option value="">全部类型</option><option value="bug_analysis">Bug 分析</option><option value="direct_analysis">日志分析</option><option value="signal_lifecycle">信号链路</option><option value="perception_summary">感知总结</option></select>
+              <select id="case-scope"><option value="">全部状态</option><option value="succeeded">成功</option><option value="failed">失败</option><option value="running">运行中</option><option value="cancelled">已取消</option></select>
+              <button id="case-search" class="primary">查询</button>
+            </div>
+          </div>
+          <div class="scroll" id="cases"></div>
+        </section>
+        <section class="panel">
+          <div class="panel-head"><h2>调查详情</h2><span id="history-status"></span></div>
+          <div class="panel-body scroll" id="case-detail"><p class="muted">选择左侧记录查看调查过程、结论和证据日志。</p></div>
+        </section>
+      </div>
+    </section>
+
+    <section id="skills-view" class="view">
+      <div class="grid skill-layout">
+        <section class="panel">
+          <div class="panel-head"><h2>Skill 列表</h2><span id="skill-count" class="muted"></span></div>
+          <div class="panel-body skill-controls">
+            <div id="skill-summary" class="skill-summary"></div>
+            <div class="skill-filters">
+              <input id="skill-keyword" placeholder="搜索 skill、描述、kind" />
+              <select id="skill-route-filter">
+                <option value="">全部路由状态</option>
+                <option value="bug_primary">报告卡片可选</option>
+                <option value="custom_unrouted">未接入主路由</option>
+                <option value="configured_missing">主路由缺目录</option>
+                <option value="auxiliary">辅助 Skill</option>
+                <option value="fallback">兜底分诊</option>
+              </select>
+            </div>
+          </div>
+          <div class="scroll" id="skills"></div>
+        </section>
+        <section class="panel">
+          <div class="panel-head"><h2>编辑与调试</h2><span id="skill-status" class="muted"></span></div>
+          <div class="panel-body">
+            <div class="form-grid">
+              <input id="new-skill-name" placeholder="new-skill-name" />
+              <input id="new-skill-label" placeholder="显示名称" />
+              <input id="new-skill-desc" placeholder="description" />
+              <button id="create-skill" class="primary">新增</button>
+            </div>
+            <h3 id="editor-title">未选择 Skill</h3>
+            <div id="skill-route-info" class="route-info checks"></div>
+            <textarea id="skill-editor" spellcheck="false" placeholder="选择 skill 后编辑 SKILL.md"></textarea>
+            <div class="skill-actions">
+              <button id="save-skill" class="primary">保存</button>
+              <button id="debug-skill">调试</button>
+              <button id="route-primary-skill">进 Bug 分析</button>
+              <button id="route-aux-skill">设为辅助</button>
+              <button id="route-default-skill">恢复默认路由</button>
+              <button id="delete-skill" class="danger">删除</button>
+            </div>
+            <h3>调试输入</h3>
+            <input id="debug-sample" placeholder="粘贴一段用户描述，检查这个 skill 是否容易被命中" />
+            <h3>调试结果</h3>
+            <div id="debug-result" class="checks"></div>
+          </div>
+        </section>
+      </div>
+    </section>
+
+    <section id="daemon-view" class="view">
+      <section class="panel">
+        <div class="panel-head"><h2>Listener 与健康状态</h2><span id="daemon-stage"></span></div>
+        <div class="panel-body">
+          <div class="cards" id="daemon-cards"></div>
+          <h3>原始状态</h3>
+          <pre id="daemon-json">正在读取...</pre>
+        </div>
+      </section>
+    </section>
+
+    <section id="users-view" class="view">
+      <section class="panel" style="max-width:600px">
+        <div class="panel-head"><h2>用户管理</h2></div>
+        <div class="panel-body">
+          <div id="users-list"></div>
+          <h3>新建用户</h3>
+          <div style="display:grid; grid-template-columns:1fr 1fr 120px auto; gap:8px; align-items:end">
+            <div><label style="font-size:12px">用户名</label><input id="new-username" placeholder="username" /></div>
+            <div><label style="font-size:12px">密码</label><input id="new-password" type="password" placeholder="≥6位" /></div>
+            <div><label style="font-size:12px">角色</label><select id="new-role"><option value="admin">admin</option><option value="viewer">viewer</option></select></div>
+            <button id="create-user" class="primary">创建</button>
+          </div>
+          <div id="user-error" style="color:var(--red); font-size:13px; margin-top:8px"></div>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <!-- Login overlay (shown when auth is required) -->
+  <div id="auth-overlay" class="auth-overlay" style="display:none">
+    <div class="auth-box">
+      <h2>🔒 后台登录</h2>
+      <div class="desc">管理接口已启用鉴权保护</div>
+      <div class="auth-tabs">
+        <button id="login-mode-user" class="active" onclick="switchLoginMode('user')">用户登录</button>
+        <button id="login-mode-token" onclick="switchLoginMode('token')">Token 登录</button>
+      </div>
+      <div id="login-user-form">
+        <div class="form-row"><label>用户名</label><input id="login-username" autocomplete="username" /></div>
+        <div class="form-row"><label>密码</label><input id="login-password" type="password" autocomplete="current-password" /></div>
+      </div>
+      <div id="login-token-form" style="display:none">
+        <div class="form-row"><label>Admin Token</label><input id="login-token" type="password" placeholder="config 中的 admin_token" /></div>
+      </div>
+      <div id="login-error" class="error"></div>
+      <button id="login-submit" class="primary" style="width:100%; padding:10px">登录</button>
+    </div>
+  </div>
+  <script>
+    /* ---- Auth layer ---- */
+    let authToken = localStorage.getItem("bridge_auth_token") || "";
+    let authRequired = false;
+
+    /* ---- DOM helpers (must precede all usage) ---- */
+    const $ = (id) => document.getElementById(id);
+    const text = (value) => value === undefined || value === null || value === "" ? "-" : String(value);
+
+    function el(tag, props, ...children) {
+      const node = document.createElement(tag);
+      props = props || {};
+      for (const [key, value] of Object.entries(props)) {
+        if (key === "class") node.className = value;
+        else if (key === "text") node.textContent = value;
+        else if (key === "dataset") Object.assign(node.dataset, value);
+        else if (key.startsWith("on")) node.addEventListener(key.slice(2), value);
+        else if (value !== undefined && value !== null) node.setAttribute(key, value);
+      }
+      for (const child of children) {
+        if (child === undefined || child === null) continue;
+        node.appendChild(typeof child === "string" ? document.createTextNode(child) : child);
+      }
+      return node;
+    }
+
+    function authHeaders() {
+      const h = {};
+      if (authToken) h["Authorization"] = "Bearer " + authToken;
+      return h;
+    }
+    async function authFetch(url, opts) {
+      opts = opts || {};
+      opts.headers = Object.assign({}, opts.headers || {}, authHeaders());
+      const res = await fetch(url, opts);
+      if (res.status === 401 && authRequired) {
+        authToken = "";
+        localStorage.removeItem("bridge_auth_token");
+        showLogin();
+      }
+      return res;
+    }
+    function switchLoginMode(mode) {
+      $("login-user-form").style.display = mode === "user" ? "" : "none";
+      $("login-token-form").style.display = mode === "token" ? "" : "none";
+      $("login-mode-user").className = mode === "user" ? "active" : "";
+      $("login-mode-token").className = mode === "token" ? "active" : "";
+      $("login-error").textContent = "";
+    }
+    function showLogin() { $("auth-overlay").style.display = ""; }
+    function hideLogin() { $("auth-overlay").style.display = "none"; }
+    async function doLogin() {
+      $("login-error").textContent = "";
+      const tokenMode = $("login-token-form").style.display !== "none";
+      let body;
+      if (tokenMode) {
+        body = { token: $("login-token").value.trim() };
+      } else {
+        body = { username: $("login-username").value.trim(), password: $("login-password").value };
+      }
+      const res = await fetch("/api/auth/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      const data = await res.json();
+      if (res.ok && data.ok) {
+        authToken = data.token;
+        localStorage.setItem("bridge_auth_token", authToken);
+        hideLogin();
+        updateAuthUI(data.username || data.role || "admin");
+        loadAll();
+      } else {
+        $("login-error").textContent = data.error || "认证失败";
+      }
+    }
+    function doLogout() {
+      authFetch("/api/auth/logout", { method: "POST" });
+      authToken = "";
+      localStorage.removeItem("bridge_auth_token");
+      if (authRequired) showLogin();
+      updateAuthUI("");
+    }
+    function updateAuthUI(username) {
+      $("auth-user").textContent = username ? "👤 " + username : "";
+      $("logout-btn").style.display = authToken ? "" : "none";
+      $("users-tab").style.display = authToken ? "" : "none";
+    }
+    async function checkAuth() {
+      const res = await fetch("/api/auth/status", { cache: "no-store" });
+      const data = await res.json();
+      authRequired = data.required;
+      if (!authRequired) { hideLogin(); updateAuthUI(""); return; }
+      // Validate existing token
+      if (authToken) {
+        const check = await fetch("/api/auth/users", { headers: authHeaders(), cache: "no-store" });
+        if (check.ok) { hideLogin(); updateAuthUI("已认证"); return; }
+        authToken = "";
+        localStorage.removeItem("bridge_auth_token");
+      }
+      // Show token-only mode if no users configured
+      if (!data.has_users && data.has_token) {
+        switchLoginMode("token");
+      }
+      showLogin();
+    }
+    $("login-submit").onclick = doLogin;
+    $("login-password").addEventListener("keydown", e => { if (e.key === "Enter") doLogin(); });
+    $("login-token").addEventListener("keydown", e => { if (e.key === "Enter") doLogin(); });
+    $("logout-btn").onclick = doLogout;
+
+    /* ---- User management ---- */
+    async function loadUsers() {
+      const res = await authFetch("/api/auth/users", { cache: "no-store" });
+      if (!res.ok) return;
+      const data = await res.json();
+      const root = $("users-list");
+      root.textContent = "";
+      for (const u of data.users || []) {
+        const item = el("div", { class: "user-item" },
+          el("span", null, el("span", { class: "uname", text: u.username }), " ", el("span", { class: "urole", text: u.role })),
+          el("button", { class: "danger", text: "删除", onclick: () => deleteUser(u.username) })
+        );
+        root.appendChild(item);
+      }
+      if (!(data.users || []).length) root.appendChild(el("div", { class: "muted", text: "暂无用户，请通过下方表单创建。" }));
+    }
+    async function deleteUser(username) {
+      if (!confirm("确认删除用户 " + username + "？")) return;
+      await authFetch("/api/auth/users/" + encodeURIComponent(username), { method: "DELETE" });
+      loadUsers();
+    }
+    $("create-user").onclick = async () => {
+      $("user-error").textContent = "";
+      const body = { username: $("new-username").value.trim(), password: $("new-password").value, role: $("new-role").value };
+      const res = await authFetch("/api/auth/users", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      const data = await res.json();
+      if (!res.ok) { $("user-error").textContent = data.error || "创建失败"; return; }
+      $("new-username").value = "";
+      $("new-password").value = "";
+      loadUsers();
+    };
+
+    const initialSession = new URLSearchParams(window.location.search).get("session") || "";
+    let selectedSession = initialSession;
+    let selectedHistory = "";
+    let selectedSkill = "";
+    let sessionsData = [];
+    let casesData = [];
+    let skillsData = [];
+    let daemonData = {};
+
+    function badge(status, label) {
+      return el("span", { class: "badge " + (status || ""), text: label || status || "unknown" });
+    }
+
+    function card(name, value) {
+      return el("div", { class: "card" }, el("div", { class: "name", text: name }), el("div", { class: "body", text: text(value) }));
+    }
+
+    function statusProgress(session) {
+      if (session.status === "succeeded") return 100;
+      if (session.status === "failed" || session.status === "skipped" || session.status === "cancelled") return 100;
+      const count = Number(session.progress_count || (session.progress || []).length || 0);
+      return Math.max(10, Math.min(92, 12 + count * 12));
+    }
+
+    function canTerminate(session) {
+      if (session.can_terminate === true) return true;
+      return String(session.status || "") === "running";
+    }
+
+    function lastStage(session) {
+      const progress = session.progress || [];
+      if (progress.length) return progress[progress.length - 1].stage || session.status || "running";
+      return session.status || "unknown";
+    }
+
+    function renderMetrics() {
+      const running = sessionsData.filter(x => x.status === "running").length;
+      const pending = sessionsData.filter(x => x.status === "pending").length;
+      const failed = sessionsData.filter(x => x.status === "failed").length;
+      $("metric-running").textContent = running;
+      $("metric-pending").textContent = pending;
+      $("metric-failed").textContent = failed;
+      $("metric-sessions").textContent = sessionsData.length;
+      $("metric-cases").textContent = casesData.length;
+      $("metric-skills").textContent = skillsData.length;
+      $("clock").textContent = new Date().toLocaleTimeString();
+    }
+
+    function renderSessions() {
+      const root = $("sessions");
+      root.textContent = "";
+      $("session-count").textContent = sessionsData.length + " 条";
+      if (!sessionsData.length) {
+        root.appendChild(el("div", { class: "empty", text: "暂无会话。" }));
+        return;
+      }
+      for (const item of sessionsData) {
+        const button = el("button", { class: "item " + (item.status || "") + (item.session_id === selectedSession ? " active" : ""), dataset: { sessionId: item.session_id || "" }, onclick: () => loadDetail(item.session_id) });
+        button.appendChild(el("div", { class: "row" }, el("div", { class: "title", text: item.content || item.message || item.session_id }), badge(item.status)));
+        button.appendChild(el("div", { class: "meta", text: [item.mode || "unknown", lastStage(item), item.updated_at || item.started_at || ""].join(" · ") }));
+        const bar = el("div", { class: "progress-bar" }, el("span"));
+        bar.firstChild.style.width = statusProgress(item) + "%";
+        button.appendChild(bar);
+        root.appendChild(button);
+      }
+    }
+
+    function renderDetail(session) {
+      selectedSession = session.session_id || "";
+      $("selected-status").replaceChildren(badge(session.status));
+      const root = $("detail");
+      root.textContent = "";
+      const cards = el("div", { class: "cards" },
+        card("session", session.session_id),
+        card("event", session.event_id),
+        card("chat", session.chat_id),
+        card("job", session.job_id),
+        card("耗时", session.duration_seconds ? session.duration_seconds + "s" : "-"),
+        card("更新", session.updated_at)
+      );
+      root.appendChild(cards);
+      const actions = el("div", { class: "case-actions" });
+      if (session.report_url) actions.appendChild(el("a", { href: session.report_url, target: "_blank", rel: "noreferrer", text: "打开报告" }));
+      if (canTerminate(session)) actions.appendChild(el("button", { class: "danger", onclick: () => terminateSession(session.session_id), text: "终止任务" }));
+      if (session.job_dir) actions.appendChild(el("span", { class: "muted", text: "job_dir: " + session.job_dir }));
+      root.appendChild(actions);
+      root.appendChild(el("h3", { text: "用户请求" }));
+      root.appendChild(el("pre", { text: text(session.content) }));
+      root.appendChild(el("h3", { text: "回复结果" }));
+      root.appendChild(el("pre", { text: text(session.message) }));
+      const stream = streamText(session);
+      if (stream) {
+        root.appendChild(el("h3", { text: "深度分析输出" }));
+        root.appendChild(el("pre", { class: "stream-log", text: stream }));
+      }
+      root.appendChild(el("h3", { text: "后台过程" }));
+      const timeline = el("div", { class: "timeline" });
+      for (const step of session.progress || []) {
+        const cls = /fail|error|失败/.test(step.stage || step.message || "") ? "step failed" : /done|完成|succeed/.test(step.stage || step.message || "") ? "step succeeded" : "step";
+        const row = el("div", { class: "row" }, el("strong", { text: step.stage || "progress" }), el("span", { class: "meta", text: step.timestamp || "" }));
+        const node = el("div", { class: cls }, row, el("div", { text: step.message || "" }));
+        if (step.details && Object.keys(step.details).length) node.appendChild(el("pre", { text: JSON.stringify(step.details, null, 2) }));
+        timeline.appendChild(node);
+      }
+      if (!(session.progress || []).length) timeline.appendChild(el("p", { class: "muted", text: "暂无进度事件。" }));
+      root.appendChild(timeline);
+      renderSessions();
+    }
+
+    function renderDaemon() {
+      $("daemon-stage").replaceChildren(badge(daemonData.stage || "unknown"));
+      const cards = $("daemon-cards");
+      cards.textContent = "";
+      cards.appendChild(card("event_key", daemonData.event_key));
+      cards.appendChild(card("pid", daemonData.process_id));
+      cards.appendChild(card("ready", daemonData.ready));
+      cards.appendChild(card("restarts", daemonData.restart_count));
+      cards.appendChild(card("updated", daemonData.updated_at));
+      $("daemon-json").textContent = JSON.stringify(daemonData, null, 2);
+    }
+
+    function renderCases() {
+      const root = $("cases");
+      root.textContent = "";
+      $("history-count").textContent = casesData.length + " 条";
+      if (!casesData.length) {
+        root.appendChild(el("div", { class: "empty", text: "暂无分析历史。" }));
+        return;
+      }
+      for (const item of casesData) {
+        const button = el("button", { class: "item " + (item.status || "") + (item.session_id === selectedHistory ? " active" : ""), onclick: () => loadHistoryDetail(item.session_id) });
+        button.appendChild(el("div", { class: "row" }, el("div", { class: "title", text: item.content || item.message || item.session_id }), badge(item.status)));
+        button.appendChild(el("div", { class: "meta", text: [item.mode || "unknown", item.job_id || "-", item.updated_at || item.started_at || ""].join(" · ") }));
+        button.appendChild(el("div", { class: "muted", text: clip(item.message || "", 130) }));
+        root.appendChild(button);
+      }
+    }
+
+    function renderHistoryDetail(item) {
+      selectedHistory = item.session_id || "";
+      $("history-status").replaceChildren(badge(item.status));
+      const root = $("case-detail");
+      root.textContent = "";
+      root.appendChild(el("div", { class: "cards" },
+        card("session", item.session_id),
+        card("job", item.job_id),
+        card("类型", item.mode),
+        card("耗时", item.duration_seconds ? item.duration_seconds + "s" : "-"),
+        card("更新", item.updated_at),
+        card("证据文件", item.details && item.details.evidence_log_file_count)
+      ));
+      const actions = el("div", { class: "case-actions" });
+      if (item.report_url) actions.appendChild(el("a", { href: item.report_url, target: "_blank", rel: "noreferrer", text: "打开报告" }));
+      if (item.details && item.details.evidence_log_bundle) actions.appendChild(el("span", { class: "muted", text: "证据日志: " + item.details.evidence_log_bundle }));
+      actions.appendChild(el("button", { class: "danger", onclick: () => deleteHistory(item.session_id), text: "删除记录" }));
+      actions.appendChild(el("span", { class: "muted", text: "权限占位: analysis_history.delete" }));
+      root.appendChild(actions);
+      root.appendChild(el("h3", { text: "用户请求" }));
+      root.appendChild(el("pre", { text: text(item.content) }));
+      root.appendChild(el("h3", { text: "最终结论" }));
+      root.appendChild(el("pre", { text: text(item.message) }));
+      root.appendChild(el("h3", { text: "调查过程" }));
+      const timeline = el("div", { class: "timeline" });
+      for (const step of item.progress || []) {
+        const cls = /fail|error|失败/.test(step.stage || step.message || "") ? "step failed" : /done|完成|succeed/.test(step.stage || step.message || "") ? "step succeeded" : "step";
+        const row = el("div", { class: "row" }, el("strong", { text: step.stage || "progress" }), el("span", { class: "meta", text: step.timestamp || "" }));
+        const node = el("div", { class: cls }, row, el("div", { text: step.message || "" }));
+        if (step.details && Object.keys(step.details).length) node.appendChild(el("pre", { text: JSON.stringify(step.details, null, 2) }));
+        timeline.appendChild(node);
+      }
+      if (!(item.progress || []).length) timeline.appendChild(el("p", { class: "muted", text: "暂无过程记录。" }));
+      root.appendChild(timeline);
+      renderCases();
+    }
+
+    function renderSkills() {
+      const root = $("skills");
+      root.textContent = "";
+      renderSkillSummary();
+      const items = filteredSkills();
+      $("skill-count").textContent = items.length + " / " + skillsData.length + " 个";
+      if (!items.length) {
+        root.appendChild(el("div", { class: "empty", text: "暂无 skill。" }));
+        return;
+      }
+      for (const item of items) {
+        const button = el("button", { class: "item" + (item.name === selectedSkill ? " active" : ""), onclick: () => loadSkill(item.name) });
+        button.appendChild(
+          el(
+            "div",
+            { class: "row" },
+            el("div", { class: "title", text: item.label || item.name }),
+            badge(item.route_status || item.role, item.route_status_label || item.role)
+          )
+        );
+        button.appendChild(el("div", { class: "meta", text: [item.name, item.kind || "custom", item.status, item.selectable_in_report_card ? "报告卡片可选" : "不可选"].join(" · ") }));
+        if (item.routing_note) button.appendChild(el("div", { class: "meta", text: item.routing_note }));
+        root.appendChild(button);
+      }
+    }
+
+    function renderSkillEditor(skill) {
+      selectedSkill = skill.name || "";
+      $("editor-title").textContent = (skill.label || skill.name) + " / " + skill.name;
+      $("skill-status").textContent = [skill.role, skill.kind || "custom", skill.status, skill.route_status_label || ""].filter(Boolean).join(" · ");
+      $("skill-editor").value = skill.content || "";
+      $("debug-result").textContent = "";
+      renderSkillRouteInfo(skill);
+      renderSkills();
+    }
+
+    function filteredSkills() {
+      const keyword = $("skill-keyword").value.trim().toLowerCase();
+      const route = $("skill-route-filter").value;
+      return skillsData.filter(item => {
+        if (route && item.route_status !== route) return false;
+        if (!keyword) return true;
+        const body = [item.name, item.label, item.description, item.kind, item.role, item.route_status_label, item.routing_note].join(" ").toLowerCase();
+        return body.includes(keyword);
+      });
+    }
+
+    function renderSkillSummary() {
+      const root = $("skill-summary");
+      root.textContent = "";
+      const selectable = skillsData.filter(item => item.selectable_in_report_card).length;
+      const custom = skillsData.filter(item => item.route_status === "custom_unrouted").length;
+      const missing = skillsData.filter(item => item.route_status === "configured_missing").length;
+      const auxiliary = skillsData.filter(item => item.route_status === "auxiliary").length;
+      root.appendChild(summaryPill("报告卡片可选", selectable));
+      root.appendChild(summaryPill("未接入主路由", custom));
+      root.appendChild(summaryPill("主路由缺目录", missing));
+      root.appendChild(summaryPill("辅助 Skill", auxiliary));
+    }
+
+    function summaryPill(label, value) {
+      return el("div", { class: "summary-pill" }, el("div", { class: "num", text: value }), el("div", { class: "meta", text: label }));
+    }
+
+    function renderSkillRouteInfo(skill) {
+      const root = $("skill-route-info");
+      root.textContent = "";
+      if (!skill || !skill.name) return;
+      root.appendChild(
+        el(
+          "div",
+          { class: "check " + (skill.selectable_in_report_card ? "ok" : "bad") },
+          el("strong", { text: "路由状态：" + (skill.route_status_label || skill.route_status || "-") }),
+          el("div", { class: "meta", text: skill.routing_note || "-" })
+        )
+      );
+      root.appendChild(
+        el(
+          "div",
+          { class: "check " + (skill.selectable_in_report_card ? "ok" : "bad") },
+          el("strong", { text: "报告卡片可选：" + (skill.selectable_in_report_card ? "是" : "否") }),
+          el("div", { class: "meta", text: [skill.role, skill.kind || "custom", skill.requires_logs ? "需要日志" : "不强制日志"].join(" · ") })
+        )
+      );
+    }
+
+    function renderDebug(result) {
+      const root = $("debug-result");
+      root.textContent = "";
+      root.appendChild(el("div", { class: "check ok" }, el("strong", { text: "总结" }), el("div", { text: result.summary || "-" })));
+      for (const check of result.checks || []) {
+        root.appendChild(el("div", { class: "check " + (check.ok ? "ok" : "bad") }, el("strong", { text: check.label || check.key }), el("div", { class: "meta", text: check.message || (check.ok ? "通过" : "未通过") })));
+      }
+      if (result.sample && result.sample.provided) {
+        root.appendChild(el("div", { class: "check" }, el("strong", { text: "示例命中" }), el("div", { text: "score=" + result.sample.score + " / terms=" + (result.sample.matched_terms || []).join(", ") })));
+      }
+    }
+
+    function clip(value, limit) {
+      const raw = text(value);
+      return raw.length > limit ? raw.slice(0, limit - 1) + "…" : raw;
+    }
+
+    function streamText(session) {
+      const lines = [];
+      for (const step of session.progress || []) {
+        if (!String(step.stage || "").startsWith("bug_agent_summary_stream")) continue;
+        const details = step.details || {};
+        const body = details.stream_preview || details.stream_text || step.message || "";
+        if (!body) continue;
+        lines.push([step.timestamp || "", body].filter(Boolean).join("  "));
+      }
+      return lines.join("\n");
+    }
+
+    async function loadAll() {
+      await Promise.all([loadSessions(), loadCases(), loadSkills(), loadDaemon()]);
+      renderMetrics();
+    }
+
+    async function loadSessions() {
+      const response = await authFetch("/api/sessions", { cache: "no-store" });
+      const data = await response.json();
+      sessionsData = data.sessions || [];
+      renderSessions();
+      if (selectedSession && sessionsData.some(item => item.session_id === selectedSession)) {
+        await loadDetail(selectedSession);
+      } else if (!selectedSession && sessionsData.length) {
+        await loadDetail(sessionsData[0].session_id);
+      }
+    }
+
+    async function loadDetail(id) {
+      if (!id) return;
+      selectedSession = id;
+      const response = await authFetch("/api/sessions/" + encodeURIComponent(id), { cache: "no-store" });
+      if (!response.ok) {
+        $("detail").textContent = "会话不存在或已过期。";
+        return;
+      }
+      const data = await response.json();
+      renderDetail(data.session || {});
+    }
+
+    async function terminateSession(id) {
+      if (!id) return;
+      if (!window.confirm("确认终止这个后台任务？已完成或已失败的任务不会被终止。")) return;
+      const response = await authFetch("/api/sessions/" + encodeURIComponent(id) + "/terminate", { method: "POST" });
+      let data = {};
+      try { data = await response.json(); } catch (error) { data = {}; }
+      if (!response.ok || data.ok === false) {
+        window.alert(data.error || "终止任务失败");
+        return;
+      }
+      await loadSessions();
+      await loadDetail(id);
+      renderMetrics();
+    }
+
+    async function loadCases() {
+      const params = new URLSearchParams();
+      const keyword = $("case-keyword").value.trim();
+      const mode = $("case-mode").value;
+      const status = $("case-scope").value;
+      if (keyword) params.set("keyword", keyword);
+      if (mode) params.set("mode", mode);
+      if (status) params.set("status", status);
+      const response = await authFetch("/api/analysis-history?" + params.toString(), { cache: "no-store" });
+      const data = await response.json();
+      casesData = data.items || [];
+      renderCases();
+      if (selectedHistory && casesData.some(item => item.session_id === selectedHistory)) {
+        await loadHistoryDetail(selectedHistory);
+      } else if (!selectedHistory && casesData.length) {
+        await loadHistoryDetail(casesData[0].session_id);
+      }
+    }
+
+    async function loadHistoryDetail(id) {
+      if (!id) return;
+      selectedHistory = id;
+      const response = await authFetch("/api/analysis-history/" + encodeURIComponent(id), { cache: "no-store" });
+      if (!response.ok) {
+        $("case-detail").textContent = "记录不存在或已删除。";
+        return;
+      }
+      const data = await response.json();
+      renderHistoryDetail(data.item || {});
+    }
+
+    async function deleteHistory(id) {
+      if (!id) return;
+      if (!window.confirm("确认删除这条调查记录？会同步删除后台过程、job 目录和已发布报告。")) return;
+      const response = await authFetch("/api/analysis-history/" + encodeURIComponent(id), { method: "DELETE" });
+      let data = {};
+      try { data = await response.json(); } catch (error) { data = {}; }
+      if (!response.ok || data.ok === false) {
+        window.alert(data.error || "删除记录失败");
+        return;
+      }
+      selectedHistory = "";
+      $("case-detail").innerHTML = '<p class="muted">记录已删除。</p>';
+      await loadCases();
+      await loadSessions();
+      renderMetrics();
+    }
+
+    async function confirmCase(caseId, confirmed) {
+      await authFetch("/api/cases/" + encodeURIComponent(caseId) + "/confirm", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirmed })
+      });
+      await loadCases();
+      renderMetrics();
+    }
+
+    async function loadSkills() {
+      const response = await authFetch("/api/skills", { cache: "no-store" });
+      const data = await response.json();
+      skillsData = data.skills || [];
+      renderSkills();
+    }
+
+    async function loadSkill(name) {
+      selectedSkill = name;
+      const response = await authFetch("/api/skills/" + encodeURIComponent(name), { cache: "no-store" });
+      const data = await response.json();
+      if (!response.ok) {
+        $("skill-status").textContent = data.error || "读取失败";
+        return;
+      }
+      renderSkillEditor(data.skill || {});
+    }
+
+    async function createSkill() {
+      const name = $("new-skill-name").value.trim();
+      if (!name) return;
+      const response = await authFetch("/api/skills", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, label: $("new-skill-label").value, description: $("new-skill-desc").value })
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        $("skill-status").textContent = data.error || "新增失败";
+        return;
+      }
+      $("new-skill-name").value = "";
+      $("new-skill-label").value = "";
+      $("new-skill-desc").value = "";
+      await loadSkills();
+      renderMetrics();
+      renderSkillEditor(data.skill);
+    }
+
+    async function saveSkill() {
+      if (!selectedSkill) return;
+      const response = await authFetch("/api/skills/" + encodeURIComponent(selectedSkill), {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content: $("skill-editor").value })
+      });
+      const data = await response.json();
+      $("skill-status").textContent = response.ok ? "已保存" : (data.error || "保存失败");
+      if (response.ok) {
+        await loadSkills();
+        renderSkillEditor(data.skill);
+      }
+    }
+
+    async function deleteSkill() {
+      if (!selectedSkill) return;
+      if (!window.confirm("确认删除 " + selectedSkill + "？")) return;
+      const response = await authFetch("/api/skills/" + encodeURIComponent(selectedSkill), { method: "DELETE" });
+      const data = await response.json();
+      $("skill-status").textContent = response.ok ? "已删除 " + selectedSkill : (data.error || "删除失败");
+      if (response.ok) {
+        selectedSkill = "";
+        $("skill-editor").value = "";
+        $("editor-title").textContent = "未选择 Skill";
+        await loadSkills();
+        renderMetrics();
+      }
+    }
+
+    async function routeSkill(role) {
+      if (!selectedSkill) return;
+      const kind = "";
+      const response = await authFetch("/api/skills/" + encodeURIComponent(selectedSkill) + "/route", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ role, kind, requires_logs: role === "primary" })
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        $("skill-status").textContent = data.error || "路由设置失败";
+        return;
+      }
+      $("skill-status").textContent = "路由已更新";
+      await loadSkills();
+      renderSkillEditor(data.skill);
+      renderMetrics();
+    }
+
+    async function debugSkill() {
+      if (!selectedSkill) return;
+      const response = await authFetch("/api/skills/" + encodeURIComponent(selectedSkill) + "/debug", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sample_text: $("debug-sample").value })
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        $("debug-result").textContent = data.error || "调试失败";
+        return;
+      }
+      renderDebug(data);
+    }
+
+    async function loadDaemon() {
+      const response = await authFetch("/api/daemon", { cache: "no-store" });
+      const data = await response.json();
+      daemonData = data.daemon || {};
+      renderDaemon();
+    }
+
+    $("refresh").onclick = loadAll;
+    $("case-search").onclick = async () => { await loadCases(); renderMetrics(); };
+    $("create-skill").onclick = createSkill;
+    $("save-skill").onclick = saveSkill;
+    $("delete-skill").onclick = deleteSkill;
+    $("debug-skill").onclick = debugSkill;
+    $("route-primary-skill").onclick = () => routeSkill("primary");
+    $("route-aux-skill").onclick = () => routeSkill("auxiliary");
+    $("route-default-skill").onclick = () => routeSkill("custom");
+    $("skill-keyword").addEventListener("input", renderSkills);
+    $("skill-route-filter").addEventListener("change", renderSkills);
+
+    for (const tab of document.querySelectorAll(".tab")) {
+      tab.addEventListener("click", () => {
+        for (const item of document.querySelectorAll(".tab")) item.classList.remove("active");
+        for (const view of document.querySelectorAll(".view")) view.classList.remove("active");
+        tab.classList.add("active");
+        $(tab.dataset.view).classList.add("active");
+        if (tab.dataset.view === "users-view") loadUsers();
+      });
+    }
+
+    checkAuth().then(() => loadAll());
+    setInterval(async () => {
+      await loadSessions();
+      await loadDaemon();
+      renderMetrics();
+    }, 3000);
+  </script>
+</body>
+</html>

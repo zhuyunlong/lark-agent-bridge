@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import json
 import re
 import shutil
 from pathlib import Path
@@ -14,6 +15,18 @@ from .skill_registry import AUX_BUG_SKILLS, PRIMARY_BUG_SKILL_MAP, extract_skill
 
 
 _SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
+_ROUTE_ROLES = {"primary", "auxiliary", "custom"}
+_ROUTE_KINDS = {
+    "general",
+    "startup",
+    "stuck",
+    "crash",
+    "scene_signal",
+    "signal",
+    "perception",
+    "xtheme",
+    "custom_skill",
+}
 
 
 class SkillManagerError(ValueError):
@@ -36,6 +49,10 @@ class SkillRecord:
     status: str = "ok"
     updated_at: str = ""
     scripts: list[str] = field(default_factory=list)
+    route_status: str = ""
+    route_status_label: str = ""
+    selectable_in_report_card: bool = False
+    routing_note: str = ""
     content: str = ""
 
     def to_dict(self, *, include_content: bool = False) -> dict[str, Any]:
@@ -52,6 +69,10 @@ class SkillRecord:
             "status": self.status,
             "updated_at": self.updated_at,
             "scripts": self.scripts,
+            "route_status": self.route_status,
+            "route_status_label": self.route_status_label,
+            "selectable_in_report_card": self.selectable_in_report_card,
+            "routing_note": self.routing_note,
         }
         if include_content:
             payload["content"] = self.content
@@ -66,6 +87,10 @@ class SkillManager:
     def root_dir(self) -> Path:
         return self.config.workspace_root / ".ai" / "skills"
 
+    @property
+    def route_file(self) -> Path:
+        return self.config.data_dir / "state" / "skill_routes.json"
+
     def list_skills(self) -> list[SkillRecord]:
         records: list[SkillRecord] = []
         seen: set[str] = set()
@@ -76,7 +101,7 @@ class SkillManager:
                 record = self._record_for(path.name, include_content=False, allow_virtual=False)
                 records.append(record)
                 seen.add(record.name)
-        for name in PRIMARY_BUG_SKILL_MAP:
+        for name in self.primary_skill_map():
             if name not in seen:
                 records.append(self._virtual_record(name))
         records.sort(key=lambda item: (_role_order(item.role), item.name))
@@ -125,7 +150,83 @@ class SkillManager:
         if not directory.exists():
             raise SkillManagerError(f"skill 不存在: {normalized}", status_code=404)
         shutil.rmtree(directory)
+        self._remove_route_override(normalized)
         return record
+
+    def set_skill_route(
+        self,
+        name: str,
+        *,
+        role: str,
+        kind: str = "",
+        requires_logs: bool | None = None,
+    ) -> SkillRecord:
+        normalized = self._normalize_name(name)
+        normalized_role = str(role or "").strip()
+        if normalized_role not in _ROUTE_ROLES:
+            raise SkillManagerError("route role 只能是 primary、auxiliary 或 custom", status_code=400)
+        if normalized == "general" and normalized_role != "custom":
+            raise SkillManagerError("general 是内置兜底 skill，不能改成专用路由", status_code=400)
+        directory = self._skill_dir(normalized)
+        if not directory.exists() and normalized not in PRIMARY_BUG_SKILL_MAP and normalized not in AUX_BUG_SKILLS:
+            raise SkillManagerError(f"skill 不存在: {normalized}", status_code=404)
+        routes = self._load_routes()
+        if normalized_role == "custom":
+            routes.pop(normalized, None)
+            self._save_routes(routes)
+            return self.get_skill(normalized, include_content=True)
+        default_kind, default_label, default_requires_logs, _default_role = self._default_metadata_for(normalized)
+        if not default_label and directory.exists():
+            skill_md = directory / "SKILL.md"
+            try:
+                frontmatter_name, _description = extract_skill_frontmatter(
+                    skill_md.read_text(encoding="utf-8", errors="replace")
+                )
+            except OSError:
+                frontmatter_name = ""
+            default_label = frontmatter_name or normalized
+        route_kind = self._normalize_primary_route_kind(normalized, str(kind or "").strip(), default_kind)
+        if normalized_role == "auxiliary":
+            route_kind = ""
+        elif route_kind not in _ROUTE_KINDS:
+            raise SkillManagerError("analysis kind 不支持", status_code=400)
+        if requires_logs is None:
+            effective_requires_logs = bool(default_requires_logs if default_kind else normalized_role == "primary")
+        else:
+            effective_requires_logs = bool(requires_logs)
+        routes[normalized] = {
+            "role": normalized_role,
+            "kind": route_kind,
+            "label": default_label,
+            "requires_logs": effective_requires_logs,
+        }
+        self._save_routes(routes)
+        return self.get_skill(normalized, include_content=True)
+
+    def primary_skill_map(self) -> dict[str, tuple[str, str, bool]]:
+        mapping = dict(PRIMARY_BUG_SKILL_MAP)
+        for name, route in self._load_routes().items():
+            role = str(route.get("role") or "")
+            if role == "auxiliary":
+                mapping.pop(name, None)
+            elif role == "primary":
+                default_kind, _default_label, _default_requires_logs, _default_role = self._default_metadata_for(name)
+                mapping[name] = (
+                    self._normalize_primary_route_kind(name, str(route.get("kind") or "").strip(), default_kind),
+                    str(route.get("label") or name),
+                    bool(route.get("requires_logs", True)),
+                )
+        return mapping
+
+    def auxiliary_skill_names(self) -> set[str]:
+        names = set(AUX_BUG_SKILLS)
+        for name, route in self._load_routes().items():
+            role = str(route.get("role") or "")
+            if role == "primary":
+                names.discard(name)
+            elif role == "auxiliary":
+                names.add(name)
+        return names
 
     def debug_skill(self, name: str, *, sample_text: str = "") -> dict[str, Any]:
         record = self.get_skill(name, include_content=True)
@@ -151,7 +252,23 @@ class SkillManager:
         elif record.role == "auxiliary":
             checks.append(_check("auxiliary_route", "已纳入辅助 skill 展示", True))
         elif record.role == "custom":
-            checks.append(_check("custom_route", "自定义 skill 已存在", True, "不会自动进入 Bug 主路由，除非路由逻辑显式支持"))
+            checks.append(
+                _check(
+                    "custom_route",
+                    "自定义 skill 已存在",
+                    True,
+                    "不会自动进入 Bug 主路由或报告卡片 Skill 选择列表，除非路由逻辑显式支持",
+                )
+            )
+        if not record.selectable_in_report_card:
+            checks.append(
+                _check(
+                    "card_choice",
+                    "报告卡片可选",
+                    False,
+                    record.routing_note or "当前不会出现在报告完成后的 Skill 纠偏按钮里",
+                )
+            )
         checks.append(
             _check(
                 "scripts",
@@ -172,7 +289,7 @@ class SkillManager:
         normalized = self._normalize_name(name)
         directory = self._skill_dir(normalized)
         if not directory.exists():
-            if allow_virtual and normalized in PRIMARY_BUG_SKILL_MAP:
+            if allow_virtual and normalized in self.primary_skill_map():
                 return self._virtual_record(normalized)
             raise SkillManagerError(f"skill 不存在: {normalized}", status_code=404)
         return self._record_from_directory(directory, include_content=include_content)
@@ -191,6 +308,11 @@ class SkillManager:
             status = "missing_skill_md"
         kind, label, requires_logs, role = self._metadata_for(name)
         scripts = _script_paths(directory)
+        route_status, route_status_label, selectable, routing_note = _route_metadata(
+            name=name,
+            role=role,
+            status=status,
+        )
         return SkillRecord(
             name=name,
             label=label or frontmatter_name or name,
@@ -204,28 +326,69 @@ class SkillManager:
             status=status,
             updated_at=_updated_at(skill_md if skill_md.exists() else directory),
             scripts=scripts,
+            route_status=route_status,
+            route_status_label=route_status_label,
+            selectable_in_report_card=selectable,
+            routing_note=routing_note,
             content=content if include_content else "",
         )
 
     def _virtual_record(self, name: str) -> SkillRecord:
-        kind, label, requires_logs = PRIMARY_BUG_SKILL_MAP[name]
+        kind, label, requires_logs, role = self._metadata_for(name)
+        route_status, route_status_label, selectable, routing_note = _route_metadata(
+            name=name,
+            role=role,
+            status="virtual",
+        )
         return SkillRecord(
             name=name,
             label=label,
             description="内置路由候选；当前工作区没有对应 .ai/skills 目录。",
-            role="primary",
+            role=role,
             kind=kind,
             requires_logs=requires_logs,
             status="virtual",
+            route_status=route_status,
+            route_status_label=route_status_label,
+            selectable_in_report_card=selectable,
+            routing_note=routing_note,
         )
 
     def _metadata_for(self, name: str) -> tuple[str, str, bool, str]:
+        route = self._load_routes().get(name)
+        if isinstance(route, dict):
+            role = str(route.get("role") or "")
+            if role == "primary":
+                default_kind, default_label, default_requires_logs, _default_role = self._default_metadata_for(name)
+                return (
+                    self._normalize_primary_route_kind(name, str(route.get("kind") or "").strip(), default_kind),
+                    str(route.get("label") or default_label or name),
+                    bool(route.get("requires_logs", default_requires_logs)),
+                    "primary",
+                )
+            if role == "auxiliary":
+                return "", "", False, "auxiliary"
+        return self._default_metadata_for(name)
+
+    def _default_metadata_for(self, name: str) -> tuple[str, str, bool, str]:
         if name in PRIMARY_BUG_SKILL_MAP:
             kind, label, requires_logs = PRIMARY_BUG_SKILL_MAP[name]
             return kind, label, requires_logs, "primary"
         if name in AUX_BUG_SKILLS:
             return "", "", False, "auxiliary"
         return "", "", False, "custom"
+
+    def _normalize_primary_route_kind(self, name: str, route_kind: str, default_kind: str) -> str:
+        normalized = route_kind.strip()
+        if not normalized:
+            normalized = default_kind.strip()
+        if name in PRIMARY_BUG_SKILL_MAP:
+            if normalized == "general" and default_kind and default_kind != "general":
+                return default_kind
+            return normalized or "general"
+        if normalized == "general" or not normalized:
+            return "custom_skill"
+        return normalized
 
     def _skill_dir(self, name: str) -> Path:
         root = self.root_dir
@@ -241,6 +404,35 @@ class SkillManager:
         if not normalized or not _SKILL_NAME_RE.fullmatch(normalized):
             raise SkillManagerError("skill 名称只能包含字母、数字、点、下划线和中划线，且长度不超过 80", status_code=400)
         return normalized
+
+    def _load_routes(self) -> dict[str, dict[str, object]]:
+        try:
+            raw = json.loads(self.route_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        if not isinstance(raw, dict):
+            return {}
+        routes: dict[str, dict[str, object]] = {}
+        for name, value in raw.items():
+            try:
+                normalized = self._normalize_name(name)
+            except SkillManagerError:
+                continue
+            if isinstance(value, dict) and str(value.get("role") or "") in _ROUTE_ROLES:
+                routes[normalized] = dict(value)
+        return routes
+
+    def _save_routes(self, routes: dict[str, dict[str, object]]) -> None:
+        self.route_file.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.route_file.with_suffix(self.route_file.suffix + ".tmp")
+        tmp.write_text(json.dumps(routes, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        tmp.replace(self.route_file)
+
+    def _remove_route_override(self, name: str) -> None:
+        routes = self._load_routes()
+        if name in routes:
+            routes.pop(name, None)
+            self._save_routes(routes)
 
 
 def _default_skill_body(name: str, *, label: str, description: str) -> str:
@@ -330,6 +522,43 @@ def _updated_at(path: Path) -> str:
 
 def _role_order(role: str) -> int:
     return {"primary": 0, "auxiliary": 1, "custom": 2}.get(role, 3)
+
+
+def _route_metadata(*, name: str, role: str, status: str) -> tuple[str, str, bool, str]:
+    if role == "primary":
+        if name == "general":
+            return (
+                "fallback",
+                "兜底分诊",
+                False,
+                "general 只作为兜底分诊，不作为报告卡片里的专用 Skill 选择。",
+            )
+        if status == "virtual":
+            return (
+                "configured_missing",
+                "主路由缺目录",
+                False,
+                "已在主路由表中配置，但当前工作区没有对应 .ai/skills 目录，需补齐 SKILL.md 和脚本后才能稳定执行。",
+            )
+        return (
+            "bug_primary",
+            "Bug 主路由",
+            True,
+            "会进入 Bug 意图分类候选，并会出现在报告完成后的 Skill 纠偏按钮里。",
+        )
+    if role == "auxiliary":
+        return (
+            "auxiliary",
+            "辅助 Skill",
+            False,
+            "用于下载、解码、取版本等辅助流程，不作为用户可选的主分析方向。",
+        )
+    return (
+        "custom_unrouted",
+        "未接入主路由",
+        False,
+        "目录存在但未接入 Bug 主路由，因此不会出现在报告完成后的 Skill 纠偏按钮里。",
+    )
 
 
 def _check(key: str, label: str, ok: bool, message: str = "") -> dict[str, Any]:

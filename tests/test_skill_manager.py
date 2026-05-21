@@ -17,16 +17,48 @@ class SkillManagerTests(unittest.TestCase):
                 "---\nname: Custom Check\ndescription: 自定义检查\n---\n\n# Custom Check\n",
                 encoding="utf-8",
             )
+            primary_dir = root / ".ai" / "skills" / "xtheme-analyzer"
+            primary_dir.mkdir(parents=True)
+            (primary_dir / "SKILL.md").write_text(
+                "---\nname: XTheme Analyzer\ndescription: 主题分析\n---\n\n# XTheme\n",
+                encoding="utf-8",
+            )
 
             manager = SkillManager(BridgeConfig(workspace_root=root))
             skills = {item.name: item for item in manager.list_skills()}
 
             self.assertIn("custom-check", skills)
             self.assertEqual(skills["custom-check"].role, "custom")
+            self.assertEqual(skills["custom-check"].route_status, "custom_unrouted")
+            self.assertFalse(skills["custom-check"].selectable_in_report_card)
             self.assertIn("xtheme-analyzer", skills)
             self.assertEqual(skills["xtheme-analyzer"].role, "primary")
+            self.assertEqual(skills["xtheme-analyzer"].route_status, "bug_primary")
+            self.assertTrue(skills["xtheme-analyzer"].selectable_in_report_card)
             self.assertIn("scene-signal-diagnosis", skills)
             self.assertEqual(skills["scene-signal-diagnosis"].role, "primary")
+            self.assertEqual(skills["scene-signal-diagnosis"].route_status, "configured_missing")
+            self.assertFalse(skills["scene-signal-diagnosis"].selectable_in_report_card)
+
+            routed = manager.set_skill_route("custom-check", role="primary")
+            self.assertEqual(routed.role, "primary")
+            self.assertEqual(routed.route_status, "bug_primary")
+            self.assertTrue(routed.selectable_in_report_card)
+            self.assertIn("custom-check", manager.primary_skill_map())
+            self.assertEqual(manager.primary_skill_map()["custom-check"][0], "custom_skill")
+
+            legacy_routed = manager.set_skill_route("custom-check", role="primary", kind="general")
+            self.assertEqual(legacy_routed.kind, "custom_skill")
+            self.assertEqual(manager.primary_skill_map()["custom-check"][0], "custom_skill")
+
+            auxiliary = manager.set_skill_route("custom-check", role="auxiliary")
+            self.assertEqual(auxiliary.role, "auxiliary")
+            self.assertIn("custom-check", manager.auxiliary_skill_names())
+            self.assertNotIn("custom-check", manager.primary_skill_map())
+
+            restored = manager.set_skill_route("custom-check", role="custom")
+            self.assertEqual(restored.role, "custom")
+            self.assertFalse(restored.selectable_in_report_card)
 
     def test_skill_manager_crud_and_debug(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -52,6 +84,7 @@ class SkillManagerTests(unittest.TestCase):
             debug = manager.debug_skill("traffic-skill", sample_text="请分析 traffic 路况数据")
             self.assertIs(debug["sample"]["would_consider"], True)
             self.assertIs(debug["checks"][1]["ok"], True)
+            self.assertIn("报告卡片可选", [item["label"] for item in debug["checks"]])
 
             deleted = manager.delete_skill("traffic-skill")
             self.assertEqual(deleted.name, "traffic-skill")

@@ -1,10 +1,11 @@
-"""Local agent integrations for Claude Code, Codex, and omlx chat."""
+"""Bug analysis runner and related models."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import hashlib
+import importlib
 import json
 import math
 import re
@@ -17,29 +18,27 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 import zipfile
-import time
+from typing import Callable
 import urllib.error
 import urllib.request
-from typing import Callable
 
-from .downloader import DownloadError, LogDownloader
-from .evidence_logs import preserve_evidence_log_bundle
-from .health import ProcessWatchdog, _safe_terminate, run_tracked_process
-from .models import (
+from ..downloader import DownloadError, LogDownloader
+from ..evidence_logs import preserve_evidence_log_bundle
+from ..health import ProcessWatchdog, _safe_terminate
+from ..log import get_logger
+from ..models import (
     BridgeConfig,
     BugRequest,
-    ClaudeSkillRequest,
     DownloadResource,
-    IntentDecision,
     LarkEvent,
-    PerceptionSummaryRequest,
     TaskResult,
     create_job_context,
 )
-from .parser import parse_signal_request
-from .reporting import (
+from ..parser import parse_signal_request
+from ..reporting import (
     ReportComposition,
     ReportSection,
     ReportVerdict,
@@ -49,8 +48,33 @@ from .reporting import (
     plan_signal_report,
     plan_startup_stuck_report,
 )
-from .signal_resolver import SignalResolver
-from .skill_registry import AUX_BUG_SKILLS, PRIMARY_BUG_SKILL_MAP, extract_skill_frontmatter
+from ..signal_resolver import SignalResolver
+from ..skill_registry import AUX_BUG_SKILLS, PRIMARY_BUG_SKILL_MAP, extract_skill_frontmatter
+from ..skill_manager import SkillManager
+from ._helpers import (
+    _default_command_for_provider,
+    _normalize_provider_name,
+    _provider_candidates,
+)
+from .omlx_client import OmlxChatClient
+from .routing_terms import (
+    CRASH_ROUTE_TERMS,
+    PERCEPTION_ROUTE_TERMS,
+    SIGNAL_ROUTE_TERMS,
+    STARTUP_BLOCK_ROUTE_TERMS,
+    STARTUP_ROUTE_TERMS,
+    STUCK_ROUTE_TERMS,
+    XTHEME_ROUTE_TERMS,
+    _has_strong_scene_signal_intent,
+    _is_core_scene_signal,
+    looks_like_scene_signal_request,
+)
+
+logger = get_logger("agents")
+
+
+def _run_tracked_process(*args, **kwargs):
+    return importlib.import_module("lark_agent_bridge.agents").run_tracked_process(*args, **kwargs)
 
 
 _NON_LOG_XP_MAGIC_HEADERS = (
@@ -156,774 +180,31 @@ _GENERAL_SCOPE_PATTERNS = (
     re.compile(r"进程(?:号)?\s*[:=]?\s*\d+"),
 )
 
-
-class OmlxChatClient:
-    def __init__(self, config: BridgeConfig) -> None:
-        self.config = config
-
-    def reply(self, prompt: str) -> TaskResult:
-        options = self.config.omlx_chat
-        if not options.enabled:
-            return TaskResult(
-                success=True,
-                message="omlx chat is disabled",
-                skipped=True,
-                details={"mode": "omlx_chat"},
-            )
-        if len(prompt) > options.max_prompt_chars:
-            return TaskResult(
-                success=False,
-                message=f"普通聊天内容过长，请压缩到 {options.max_prompt_chars} 字以内。",
-                error_code="omlx_prompt_too_long",
-                details={"mode": "omlx_chat"},
-            )
-        return self._chat(
-            mode="omlx_chat",
-            system_prompt=options.system_prompt,
-            messages=[{"role": "user", "content": prompt.strip()}],
-        )
-
-    def reply_with_context(
-        self,
-        question: str,
-        *,
-        request_text: str,
-        summary_text: str,
-        report_excerpt: str,
-        history: list[dict[str, str]] | None = None,
-        report_url: str = "",
-    ) -> TaskResult:
-        options = self.config.omlx_chat
-        cleaned_question = question.strip()
-        if not cleaned_question:
-            return TaskResult(
-                success=False,
-                message="请直接补充你想继续追问的问题。",
-                error_code="analysis_followup_missing_prompt",
-                details={"mode": "analysis_followup"},
-            )
-        if len(cleaned_question) > options.max_prompt_chars:
-            return TaskResult(
-                success=False,
-                message=f"追问内容过长，请压缩到 {options.max_prompt_chars} 字以内。",
-                error_code="analysis_followup_prompt_too_long",
-                details={"mode": "analysis_followup"},
-            )
-        context_sections = []
-        if request_text.strip():
-            context_sections.append("原始请求：\n" + request_text.strip())
-        if summary_text.strip():
-            context_sections.append("结果摘要：\n" + summary_text.strip())
-        if report_excerpt.strip():
-            context_sections.append("报告摘录：\n" + report_excerpt.strip())
-        if report_url.strip():
-            context_sections.append("报告链接：\n" + report_url.strip())
-        context_block = "\n\n".join(context_sections).strip()
-        if len(context_block) > options.followup_max_context_chars:
-            context_block = context_block[: options.followup_max_context_chars - 1].rstrip() + "…"
-        messages: list[dict[str, str]] = []
-        for item in history or []:
-            role = str(item.get("role", "")).strip()
-            content = str(item.get("content", "")).strip()
-            if role not in {"user", "assistant"} or not content:
-                continue
-            messages.append({"role": role, "content": content})
-        messages.append(
-            {
-                "role": "user",
-                "content": (
-                    "以下是上一轮分析结果的上下文，请只基于这些信息继续回答。\n\n"
-                    f"{context_block}\n\n"
-                    f"用户追问：{cleaned_question}"
-                ),
-            }
-        )
-        return self._chat(
-            mode="analysis_followup",
-            system_prompt=options.followup_system_prompt,
-            messages=messages,
-        )
-
-    def _chat(self, *, mode: str, system_prompt: str, messages: list[dict[str, str]]) -> TaskResult:
-        options = self.config.omlx_chat
-        url = options.base_url.rstrip("/") + "/chat/completions"
-        payload = {
-            "model": options.model,
-            "messages": [{"role": "system", "content": system_prompt}, *messages],
-            "temperature": options.temperature,
-            "max_tokens": options.max_tokens,
-            "stream": False,
-        }
-        if self.config.dry_run:
-            return TaskResult(
-                success=True,
-                message="dry-run: omlx chat request planned",
-                details={"mode": mode, "url": url, "model": options.model},
-            )
-
-        request = urllib.request.Request(
-            url,
-            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {options.api_key}",
-            },
-            method="POST",
-        )
-        started = time.monotonic()
-        evidence_log_bundle: dict[str, object] | None = None
-        try:
-            with urllib.request.urlopen(request, timeout=options.timeout_seconds) as response:
-                body = response.read().decode("utf-8")
-        except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
-            return TaskResult(
-                success=False,
-                message=f"本地 omlx 模型请求失败: HTTP {exc.code}",
-                duration_seconds=time.monotonic() - started,
-                error_code="omlx_http_error",
-                stderr=body[:1000],
-                details={"mode": mode, "url": url, "model": options.model},
-            )
-        except urllib.error.URLError as exc:
-            return TaskResult(
-                success=False,
-                message=f"本地 omlx 模型不可用: {exc.reason}",
-                duration_seconds=time.monotonic() - started,
-                error_code="omlx_unavailable",
-                details={"mode": mode, "url": url, "model": options.model},
-            )
-        except TimeoutError as exc:
-            return TaskResult(
-                success=False,
-                message="本地 omlx 模型请求超时",
-                duration_seconds=time.monotonic() - started,
-                error_code="omlx_timeout",
-                stderr=str(exc),
-                details={"mode": mode, "url": url, "model": options.model},
-            )
-
-        try:
-            parsed = json.loads(body)
-            answer = _extract_chat_answer(parsed)
-        except (json.JSONDecodeError, KeyError, TypeError) as exc:
-            return TaskResult(
-                success=False,
-                message="本地 omlx 模型返回格式无法解析",
-                duration_seconds=time.monotonic() - started,
-                error_code="omlx_bad_response",
-                stdout=body[:1000],
-                stderr=str(exc),
-                details={"mode": mode, "url": url, "model": options.model},
-            )
-
-        return TaskResult(
-            success=True,
-            message=answer.strip(),
-            duration_seconds=time.monotonic() - started,
-            stdout=body,
-            details={"mode": mode, "url": url, "model": options.model},
-        )
-
-
-class IntentAnalysisFailure(RuntimeError):
-    def __init__(
-        self,
-        message: str,
-        *,
-        error_code: str,
-        command: list[str] | None = None,
-        stdout: str = "",
-        stderr: str = "",
-    ) -> None:
-        super().__init__(message)
-        self.error_code = error_code
-        self.command = command
-        self.stdout = stdout
-        self.stderr = stderr
-
-
-class IntentAnalysisRunner:
-    ROUTES = {
-        "signal",
-        "claude_skill",
-        "bug",
-        "direct_analysis",
-        "perception_summary",
-        "analysis_followup",
-        "chat",
-        "unsupported",
-    }
-    FOLLOWUP_ACTIONS = {"continue_agent", "reanalysis", "context_chat", "none"}
-    CONTEXT_SOURCES = {"explicit", "latest_chat", "none"}
-
-    def __init__(self, config: BridgeConfig, process_watchdog: ProcessWatchdog | None = None) -> None:
-        self.config = config
-        self.process_watchdog = process_watchdog
-
-    def is_enabled(self) -> bool:
-        options = self.config.intent_analysis
-        return bool(options.enabled and self._provider_candidates())
-
-    def classify(
-        self,
-        *,
-        event: LarkEvent,
-        route_content: str,
-        explicit_followup_context: object | None = None,
-        latest_chat_context: object | None = None,
-    ) -> IntentDecision:
-        if not self.is_enabled():
-            raise IntentAnalysisFailure("intent analysis is disabled", error_code="intent_analysis_disabled")
-        prompt = self._build_prompt(
-            event=event,
-            route_content=route_content,
-            explicit_followup_context=explicit_followup_context,
-            latest_chat_context=latest_chat_context,
-        )
-        primary_command, primary_output_path = self._build_command(prompt)
-        if not primary_command:
-            raise IntentAnalysisFailure("intent analysis command is not configured", error_code="intent_analysis_not_configured")
-        if self.config.dry_run:
-            return IntentDecision(
-                route="unsupported",
-                reason="dry-run: intent analysis command planned but not executed",
-                confidence="low",
-                followup_action="none",
-                context_source="none",
-            )
-        last_failure: IntentAnalysisFailure | None = None
-        attempts: list[tuple[list[str], Path | None]] = [(primary_command, primary_output_path)]
-        fallback_invocation = self._fallback_intent_invocation(prompt)
-        if fallback_invocation[0]:
-            attempts.append(fallback_invocation)
-        for index, (command, output_path) in enumerate(attempts):
-            try:
-                completed = run_tracked_process(
-                    command,
-                    watchdog=self.process_watchdog,
-                    name="intent-analysis-agent",
-                    cwd=self._working_dir(),
-                    capture_output=True,
-                    text=True,
-                    timeout=self.config.intent_analysis.timeout_seconds,
-                    check=False,
-                )
-            except subprocess.TimeoutExpired as exc:
-                if output_path is not None:
-                    output_path.unlink(missing_ok=True)
-                last_failure = IntentAnalysisFailure(
-                    "消息意图分析超时",
-                    error_code="intent_analysis_timeout",
-                    command=command,
-                    stdout=exc.stdout or "",
-                    stderr=exc.stderr or "",
-                )
-                if index + 1 < len(attempts):
-                    continue
-                raise last_failure from exc
-            except OSError as exc:
-                if output_path is not None:
-                    output_path.unlink(missing_ok=True)
-                last_failure = IntentAnalysisFailure(
-                    f"消息意图分析启动失败: {exc}",
-                    error_code="intent_analysis_failed_to_start",
-                    command=command,
-                    stderr=str(exc),
-                )
-                if index + 1 < len(attempts):
-                    continue
-                raise last_failure from exc
-            raw_response = self._read_response(completed=completed, output_path=output_path)
-            if completed.returncode != 0:
-                last_failure = IntentAnalysisFailure(
-                    "消息意图分析失败",
-                    error_code="intent_analysis_failed",
-                    command=command,
-                    stdout=completed.stdout,
-                    stderr=completed.stderr or raw_response,
-                )
-                if index + 1 < len(attempts):
-                    continue
-                raise last_failure
-            try:
-                decision = self._parse_decision(raw_response)
-            except ValueError as exc:
-                last_failure = IntentAnalysisFailure(
-                    f"消息意图分析结果无法解析: {exc}",
-                    error_code="intent_analysis_bad_response",
-                    command=command,
-                    stdout=raw_response,
-                    stderr=str(exc),
-                )
-                if index + 1 < len(attempts):
-                    continue
-                raise last_failure from exc
-            decision.raw_response = raw_response
-            return decision
-        if last_failure is not None:
-            raise last_failure
-        raise IntentAnalysisFailure("intent analysis command is not configured", error_code="intent_analysis_not_configured")
-
-    def _build_prompt(
-        self,
-        *,
-        event: LarkEvent,
-        route_content: str,
-        explicit_followup_context: object | None,
-        latest_chat_context: object | None,
-    ) -> str:
-        payload = {
-            "event": {
-                "chat_type": event.chat_type,
-                "chat_id": event.chat_id,
-                "message_type": event.message_type,
-                "has_reply_link": bool(event.reply_to or event.parent_id or event.root_id or event.thread_id),
-            },
-            "message_text": self._clip(route_content.strip(), 2000),
-            "explicit_followup_context": self._context_snapshot(explicit_followup_context),
-            "latest_chat_context": self._context_snapshot(latest_chat_context),
-        }
-        prompt = (
-            "请根据下面输入，判断这条飞书消息应该走哪条桥接路径。\n"
-            "只输出一个 JSON 对象，字段必须完整：\n"
-            '- "route": "signal" | "claude_skill" | "bug" | "direct_analysis" | "perception_summary" | "analysis_followup" | "chat" | "unsupported"\n'
-            '- "followup_action": "continue_agent" | "reanalysis" | "context_chat" | "none"\n'
-            '- "context_source": "explicit" | "latest_chat" | "none"\n'
-            '- "confidence": "high" | "medium" | "low"\n'
-            '- "reason": 一句简短中文说明\n\n'
-            "判断规则：\n"
-            "1. analysis_followup 表示用户在继续同一个已有分析会话。\n"
-            "   群聊里如果没有 has_reply_link，不能仅因 latest_chat_context 主题相似就选 analysis_followup；"
-            "看起来像新的分析命令时应选择对应的新请求路径。\n"
-            "2. 对 bug 续聊，如果用户是在修正时间、要求重跑、要求基于同一份已下载日志重新生成结论/报告，选 reanalysis；"
-            "如果是基于现有日志/报告继续追问、补充搜索、要求继续分析，选 continue_agent。\n"
-            "3. 非 bug 的历史分析追问，若只是基于已有摘要/报告继续问答，选 context_chat。\n"
-            "4. 如果消息是普通闲聊、问候、解释型问题，选 chat。\n"
-            "5. 如果消息是在发新的 bug 链接分析请求，选 bug；如果是带附件/URL 的日志分析请求但不是 bug 链接，选 direct_analysis；"
-            "如果是信号生命周期调查，只有在用户明确给出单个 SignalCode / SIGNAL_... 并询问信号来源、是否送达或链路时才选 signal；"
-            "3D场景信号、SceneType、上电P、临停P、特殊场景等属于更专一的场景信号分析，带 bug 链接选 bug，带附件/URL 日志选 direct_analysis，不能因为含“信号”二字就选 signal。"
-            "如果是感知总结，选 perception_summary；如果是 /skill 一类代码分析，选 claude_skill。\n"
-            "6. 只有在没有合适路径时才选 unsupported。\n\n"
-            "输入 JSON：\n"
-            f"{json.dumps(payload, ensure_ascii=False, indent=2)}"
-        )
-        max_chars = max(2000, int(self.config.intent_analysis.max_prompt_chars))
-        if len(prompt) <= max_chars:
-            return prompt
-        return prompt[: max_chars - 1].rstrip() + "…"
-
-    def _context_snapshot(self, context: object | None) -> dict[str, object] | None:
-        if context is None:
-            return None
-        history = getattr(context, "history", None)
-        if not isinstance(history, list):
-            history = []
-        history_items: list[dict[str, str]] = []
-        for item in history[-4:]:
-            if not isinstance(item, dict):
-                continue
-            role = str(item.get("role") or "").strip()
-            content = str(item.get("content") or "").strip()
-            if not role or not content:
-                continue
-            history_items.append({"role": role, "content": self._clip(content, 500)})
-        return {
-            "root_message_id": str(getattr(context, "root_message_id", "") or ""),
-            "chat_id": str(getattr(context, "chat_id", "") or ""),
-            "mode": str(getattr(context, "mode", "") or ""),
-            "request_text": self._clip(str(getattr(context, "request_text", "") or ""), 1200),
-            "summary_text": self._clip(str(getattr(context, "summary_text", "") or ""), 1200),
-            "report_excerpt": self._clip(str(getattr(context, "report_excerpt", "") or ""), 1200),
-            "report_url": self._clip(str(getattr(context, "report_url", "") or ""), 500),
-            "updated_at": str(getattr(context, "updated_at", "") or ""),
-            "history": history_items,
-        }
-
-    def _build_command(self, prompt: str) -> tuple[list[str], Path | None]:
-        provider, command_name, _ = self._resolved_provider()
-        return self._build_command_for_provider(provider, command_name, prompt)
-
-    def _build_command_for_provider(self, provider: str, command_name: str, prompt: str) -> tuple[list[str], Path | None]:
-        system_prompt = self.config.intent_analysis.system_prompt
-        if provider == "codex":
-            with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json", prefix="lark-intent-", delete=False) as fh:
-                output_path = Path(fh.name)
-            command = [
-                command_name,
-                "exec",
-                "--skip-git-repo-check",
-                "-s",
-                "read-only",
-                "-C",
-                str(self._working_dir()),
-                "--output-last-message",
-                str(output_path),
-                f"{system_prompt}\n\n{prompt}",
-            ]
-            return command, output_path
-        if provider in {"claude", "claude-code", "claude_code"}:
-            command = [
-                command_name,
-                "--print",
-                "--output-format",
-                "text",
-                "--no-session-persistence",
-                "--permission-mode",
-                "dontAsk",
-                "--tools",
-                "",
-                "--append-system-prompt",
-                system_prompt,
-                prompt,
-            ]
-            return command, None
-        return [], None
-
-    def _read_response(self, *, completed: subprocess.CompletedProcess[str], output_path: Path | None) -> str:
-        try:
-            if output_path is not None and output_path.exists():
-                content = output_path.read_text(encoding="utf-8").strip()
-                if content:
-                    return content
-            return completed.stdout.strip()
-        finally:
-            if output_path is not None:
-                output_path.unlink(missing_ok=True)
-
-    def _parse_decision(self, raw_response: str) -> IntentDecision:
-        payload = self._extract_json_payload(raw_response)
-        try:
-            parsed = json.loads(payload)
-        except json.JSONDecodeError as exc:
-            raise ValueError("response is not valid JSON") from exc
-        if not isinstance(parsed, dict):
-            raise ValueError("response must be a JSON object")
-        route = str(parsed.get("route") or "").strip()
-        followup_action = str(parsed.get("followup_action") or "none").strip()
-        context_source = str(parsed.get("context_source") or "none").strip()
-        confidence = str(parsed.get("confidence") or "").strip()
-        reason = str(parsed.get("reason") or "").strip()
-        if route not in self.ROUTES:
-            raise ValueError(f"unknown route: {route}")
-        if followup_action not in self.FOLLOWUP_ACTIONS:
-            raise ValueError(f"unknown followup_action: {followup_action}")
-        if context_source not in self.CONTEXT_SOURCES:
-            raise ValueError(f"unknown context_source: {context_source}")
-        return IntentDecision(
-            route=route,
-            followup_action=followup_action,
-            context_source=context_source,
-            confidence=confidence,
-            reason=reason,
-        )
-
-    def _extract_json_payload(self, raw_response: str) -> str:
-        cleaned = raw_response.strip()
-        if cleaned.startswith("```"):
-            cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
-            cleaned = re.sub(r"\s*```$", "", cleaned)
-        if cleaned.startswith("{") and cleaned.endswith("}"):
-            return cleaned
-        start = cleaned.find("{")
-        end = cleaned.rfind("}")
-        if start == -1 or end == -1 or end <= start:
-            raise ValueError("no JSON object found")
-        return cleaned[start : end + 1]
-
-    def _resolved_provider(self) -> tuple[str, str, Path]:
-        options = self.config.intent_analysis
-        provider = (options.provider or self.config.bug_analysis.provider or "").strip().casefold()
-        command_name = (options.command or self.config.bug_analysis.command or "").strip()
-        return provider, command_name, self._working_dir()
-
-    def _provider_candidates(self) -> list[tuple[str, str]]:
-        options = self.config.intent_analysis
-        provider = (options.provider or self.config.bug_analysis.provider or "").strip().casefold()
-        command_name = (options.command or self.config.bug_analysis.command or "").strip()
-        return _provider_candidates(provider, command_name)
-
-    def _fallback_intent_invocation(self, prompt: str) -> tuple[list[str], Path | None]:
-        candidates = self._provider_candidates()
-        if len(candidates) < 2:
-            return [], None
-        provider, command_name = candidates[1]
-        return self._build_command_for_provider(provider, command_name, prompt)
-
-    def _working_dir(self) -> Path:
-        return self.config.intent_analysis.working_dir or self.config.bug_analysis.working_dir or self.config.workspace_root
-
-    def _clip(self, text: str, limit: int) -> str:
-        if len(text) <= limit:
-            return text
-        return text[: limit - 1].rstrip() + "…"
-
-
-class ClaudeSkillRunner:
-    def __init__(self, config: BridgeConfig, process_watchdog: ProcessWatchdog | None = None) -> None:
-        self.config = config
-        self.process_watchdog = process_watchdog
-
-    def run_skill_analysis(self, request: ClaudeSkillRequest, *, event: LarkEvent | None = None) -> TaskResult:
-        options = self.config.claude_agent
-        if not options.enabled:
-            return TaskResult(
-                success=True,
-                message="Claude Code skill agent is disabled",
-                skipped=True,
-                details={"mode": "claude_skill"},
-            )
-        if request.error == "missing_prompt" or not request.prompt.strip():
-            return TaskResult(
-                success=False,
-                message="缺少分析内容：请在 /skill 后面写清楚要分析的问题。",
-                error_code="missing_skill_prompt",
-                details={"mode": "claude_skill"},
-            )
-        if len(request.prompt) > options.max_prompt_chars:
-            return TaskResult(
-                success=False,
-                message=f"Claude Code 分析内容过长，请压缩到 {options.max_prompt_chars} 字以内。",
-                error_code="claude_prompt_too_long",
-                details={"mode": "claude_skill"},
-            )
-
-        context = create_job_context(self.config.data_dir, event=event)
-        bridge_session_id = (event.root_id or event.message_id or event.event_id).strip() if event is not None else ""
-        artifact_path = context.output_dir / "claude_skill_result.md"
-        prompt = self._build_prompt(request)
-        command = self.build_command()
-        self._write_request_file(context.job_dir / "claude_skill_request.json", request)
-        if self.config.dry_run:
-            return TaskResult(
-                success=True,
-                message=(
-                    "dry-run: Claude Code skill 分析命令已规划\n"
-                    f"结果文件: {artifact_path}"
-                ),
-                skipped=False,
-                job_id=context.job_id,
-                job_dir=context.job_dir,
-                command=command,
-                details={"mode": "claude_skill"},
-            )
-
-        started = time.monotonic()
-        try:
-            completed = run_tracked_process(
-                command,
-                watchdog=self.process_watchdog,
-                name="claude-skill-agent",
-                cwd=self._working_dir(),
-                capture_output=True,
-                text=True,
-                input=prompt,
-                timeout=options.timeout_seconds,
-                check=False,
-                session_id=bridge_session_id,
-            )
-        except subprocess.TimeoutExpired as exc:
-            self._write_process_logs(context.logs_dir, stdout=exc.stdout or "", stderr=exc.stderr or "")
-            return TaskResult(
-                success=False,
-                message="Claude Code skill 分析超时",
-                job_id=context.job_id,
-                job_dir=context.job_dir,
-                command=command,
-                duration_seconds=time.monotonic() - started,
-                error_code="claude_timeout",
-                stdout=exc.stdout or "",
-                stderr=exc.stderr or "",
-                details={"mode": "claude_skill"},
-            )
-        except OSError as exc:
-            self._write_process_logs(context.logs_dir, stderr=str(exc))
-            return TaskResult(
-                success=False,
-                message=f"Claude Code 启动失败: {exc}",
-                job_id=context.job_id,
-                job_dir=context.job_dir,
-                command=command,
-                duration_seconds=time.monotonic() - started,
-                error_code="claude_failed_to_start",
-                stderr=str(exc),
-                details={"mode": "claude_skill"},
-            )
-
-        if completed.returncode != 0:
-            self._write_process_logs(context.logs_dir, stdout=completed.stdout, stderr=completed.stderr)
-            return TaskResult(
-                success=False,
-                message="Claude Code skill 分析失败",
-                job_id=context.job_id,
-                job_dir=context.job_dir,
-                command=command,
-                duration_seconds=time.monotonic() - started,
-                error_code="claude_failed",
-                stdout=completed.stdout,
-                stderr=completed.stderr,
-                details={"mode": "claude_skill"},
-            )
-
-        artifact_path.write_text(completed.stdout, encoding="utf-8")
-        details = {"mode": "claude_skill"}
-        if options.upload_result_file:
-            details["files_to_send"] = [artifact_path]
-        return TaskResult(
-            success=True,
-            message=self._summary_message(artifact_path, completed.stdout),
-            job_id=context.job_id,
-            job_dir=context.job_dir,
-            command=command,
-            duration_seconds=time.monotonic() - started,
-            stdout=completed.stdout,
-            stderr=completed.stderr,
-            details=details,
-        )
-
-    def build_command(self, prompt: str = "") -> list[str]:
-        options = self.config.claude_agent
-        command = [
-            options.command,
-            "--print",
-            "--output-format",
-            "text",
-            "--no-session-persistence",
-            "--permission-mode",
-            options.permission_mode,
-            "--append-system-prompt",
-            options.system_prompt,
-        ]
-        if options.model:
-            command.extend(["--model", options.model])
-        if options.agent:
-            command.extend(["--agent", options.agent])
-        if options.allowed_tools:
-            command.extend(["--allowedTools", ",".join(options.allowed_tools)])
-        else:
-            command.extend(["--tools", ""])
-        for directory in self._add_dirs():
-            command.extend(["--add-dir", str(directory)])
-        return command
-
-    def _build_prompt(self, request: ClaudeSkillRequest) -> str:
-        return (
-            "请对下面这段飞书消息做一次 Claude Code skill 分析。\n"
-            "要求：\n"
-            "1. 只读分析，不修改文件。\n"
-            "2. 需要用到代码或文档时，只读取必要上下文。\n"
-            "3. 输出中文 Markdown，结论先行。\n\n"
-            f"飞书消息原文：\n{request.raw_text or request.prompt}\n\n"
-            f"需要分析的问题：\n{request.prompt}\n"
-        )
-
-    def _summary_message(self, artifact_path: Path, output: str) -> str:
-        excerpt = output.strip()
-        if len(excerpt) > 3000:
-            excerpt = excerpt[:3000].rstrip() + "\n...(结果较长，完整内容见附件)"
-        return f"Claude Code skill 分析完成\n结果文件: {artifact_path}\n\n{excerpt}"
-
-    def _working_dir(self) -> Path:
-        return self.config.claude_agent.working_dir or self.config.workspace_root
-
-    def _add_dirs(self) -> list[Path]:
-        options = self.config.claude_agent
-        return options.add_dirs or [self.config.workspace_root]
-
-    def _write_request_file(self, path: Path, request: ClaudeSkillRequest) -> None:
-        payload = {
-            "prompt": request.prompt,
-            "raw_text": request.raw_text,
-            "triggered": request.triggered,
-            "error": request.error,
-        }
-        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    def _write_process_logs(self, logs_dir: Path, *, stdout: str = "", stderr: str = "") -> None:
-        logs_dir.mkdir(parents=True, exist_ok=True)
-        (logs_dir / "claude_skill.stdout.log").write_text(stdout or "", encoding="utf-8")
-        (logs_dir / "claude_skill.stderr.log").write_text(stderr or "", encoding="utf-8")
-
-
-def _extract_chat_answer(payload: dict[str, object]) -> str:
-    choices = payload["choices"]
-    if not isinstance(choices, list) or not choices:
-        raise KeyError("choices")
-    first = choices[0]
-    if not isinstance(first, dict):
-        raise TypeError("choice must be an object")
-    message = first.get("message")
-    if isinstance(message, dict) and isinstance(message.get("content"), str):
-        return message["content"]
-    if isinstance(first.get("text"), str):
-        return first["text"]
-    raise KeyError("choices[0].message.content")
-
-
-def _default_command_for_provider(provider: str) -> str:
-    normalized = (provider or "").strip().casefold()
-    if normalized == "codex":
-        return "codex"
-    if normalized in {"claude", "claude-code", "claude_code"}:
-        return "claude"
-    return ""
-
-
-def _normalize_provider_name(provider: str) -> str:
-    normalized = (provider or "").strip().casefold()
-    if normalized in {"claude", "claude-code", "claude_code"}:
-        return "claude"
-    if normalized == "codex":
-        return "codex"
-    return normalized
-
-
-def _alternate_provider(provider: str) -> str:
-    normalized = _normalize_provider_name(provider)
-    if normalized == "codex":
-        return "claude"
-    if normalized == "claude":
-        return "codex"
-    return ""
-
-
-def _provider_candidates(provider: str, command_name: str) -> list[tuple[str, str]]:
-    primary_provider = _normalize_provider_name(provider)
-    primary_command = command_name.strip() or _default_command_for_provider(primary_provider)
-    alternate_provider = _alternate_provider(primary_provider)
-    alternate_command = _default_command_for_provider(alternate_provider)
-    candidates: list[tuple[str, str]] = []
-    seen: set[tuple[str, str]] = set()
-    for current_provider, current_command in (
-        (primary_provider, primary_command),
-        (alternate_provider, alternate_command),
-    ):
-        if not current_provider or not current_command:
-            continue
-        key = (current_provider, current_command)
-        if key in seen:
-            continue
-        seen.add(key)
-        candidates.append(key)
-    return candidates
-
-
 _PRIMARY_BUG_SKILL_MAP = PRIMARY_BUG_SKILL_MAP
 _AUX_BUG_SKILLS = AUX_BUG_SKILLS
 _extract_skill_frontmatter = extract_skill_frontmatter
 
-
 class BugAnalysisRunner:
-    def __init__(self, config: BridgeConfig, process_watchdog: ProcessWatchdog | None = None) -> None:
+    def __init__(
+        self,
+        config: BridgeConfig,
+        process_watchdog: ProcessWatchdog | None = None,
+        lark_client: object | None = None,
+        skill_manager: SkillManager | None = None,
+    ) -> None:
         self.config = config
         self.process_watchdog = process_watchdog
         self.signal_resolver = SignalResolver(config.guideengine_repo)
+        self._lark_client = lark_client
+        self.skill_manager = skill_manager or SkillManager(config)
 
     def _available_bug_skills(self) -> list[dict[str, object]]:
         skills_dir = self.config.workspace_root / ".ai/skills"
         entries: list[dict[str, object]] = []
+        primary_skill_map = self.skill_manager.primary_skill_map()
+        auxiliary_skill_names = self.skill_manager.auxiliary_skill_names()
         if not skills_dir.exists():
-            for skill_name, (kind, label, requires_logs) in _PRIMARY_BUG_SKILL_MAP.items():
+            for skill_name, (kind, label, requires_logs) in primary_skill_map.items():
                 if skill_name == "general":
                     continue
                 entries.append(
@@ -955,8 +236,8 @@ class BugAnalysisRunner:
             except OSError:
                 continue
             frontmatter_name, description = _extract_skill_frontmatter(body)
-            if skill_name in _PRIMARY_BUG_SKILL_MAP:
-                kind, label, requires_logs = _PRIMARY_BUG_SKILL_MAP[skill_name]
+            if skill_name in primary_skill_map:
+                kind, label, requires_logs = primary_skill_map[skill_name]
                 entries.append(
                     {
                         "name": skill_name,
@@ -967,7 +248,7 @@ class BugAnalysisRunner:
                         "description": description or frontmatter_name or "",
                     }
                 )
-            elif skill_name in _AUX_BUG_SKILLS:
+            elif skill_name in auxiliary_skill_names:
                 entries.append(
                     {
                         "name": skill_name,
@@ -989,6 +270,35 @@ class BugAnalysisRunner:
             }
         )
         return entries
+
+    def supported_primary_bug_skills(self) -> list[dict[str, object]]:
+        return [
+            item
+            for item in self._available_bug_skills()
+            if item.get("role") == "primary" and item.get("name") != "general"
+        ]
+
+    def selection_for_skill_name(
+        self,
+        skill_name: str,
+        *,
+        source: str,
+        reason: str = "",
+        provider: str = "",
+    ) -> "BugAnalysisSelection | None":
+        normalized = skill_name.strip()
+        primary_skill_map = self.skill_manager.primary_skill_map()
+        if normalized == "general" or normalized not in primary_skill_map:
+            return None
+        kind, label, _requires_logs = primary_skill_map[normalized]
+        return BugAnalysisSelection(
+            plans=[BugAnalysisPlan(kind=kind)],
+            skill_name=normalized,
+            skill_label=label,
+            source=source,
+            reason=reason or f"用户选择专用 skill：{label}",
+            provider=provider,
+        )
 
     def _manual_bug_selection(self, *, prompt_text: str, title: str, description: str) -> BugAnalysisSelection:
         plans = self.classify_requests(prompt_text=prompt_text, title=title, description=description)
@@ -1088,6 +398,7 @@ class BugAnalysisRunner:
                 "bug_url": bug_url,
                 "user_request_text": request_text,
                 "needs_user_direction": True,
+                "supported_bug_skills": self.supported_primary_bug_skills(),
             },
         )
 
@@ -1181,10 +492,16 @@ class BugAnalysisRunner:
         )
 
     def _skill_name_for_kind(self, kind: str) -> str:
-        for skill_name, (mapped_kind, _label, _requires_logs) in _PRIMARY_BUG_SKILL_MAP.items():
+        for skill_name, (mapped_kind, _label, _requires_logs) in self.skill_manager.primary_skill_map().items():
             if mapped_kind == kind:
                 return skill_name
         return "general"
+
+    def _skill_label_for_name(self, skill_name: str, fallback_kind: str = "general") -> str:
+        route = self.skill_manager.primary_skill_map().get(skill_name)
+        if route is not None:
+            return route[1]
+        return self._analysis_label(fallback_kind)
 
     def _resolve_bug_plans(self, *, analysis_kind: str, signal_hint: str, combined_text: str) -> list["BugAnalysisPlan"]:
         kind = (analysis_kind or "").strip()
@@ -1196,7 +513,7 @@ class BugAnalysisRunner:
                 signal_resolver=self.signal_resolver,
             )
             return [BugAnalysisPlan(kind="signal", signal_code=signal_request.signal)]
-        if kind in {"startup", "stuck", "crash", "scene_signal", "perception", "xtheme", "general"}:
+        if kind in {"startup", "stuck", "crash", "scene_signal", "perception", "xtheme", "general", "custom_skill"}:
             return [BugAnalysisPlan(kind=kind)]
         return [BugAnalysisPlan(kind="general")]
 
@@ -1211,6 +528,8 @@ class BugAnalysisRunner:
     ) -> BugAnalysisSelection | None:
         primary_skills = [item for item in self._available_bug_skills() if item.get("role") == "primary"]
         aux_skills = [item for item in self._available_bug_skills() if item.get("role") == "auxiliary"]
+        primary_skill_names = [str(item.get("name") or "") for item in primary_skills if item.get("name")]
+        analysis_kinds = sorted({str(item.get("kind") or "general") for item in primary_skills if item.get("kind")})
         payload = {
             "user_prompt": prompt_text,
             "bug_title": title,
@@ -1231,8 +550,8 @@ class BugAnalysisRunner:
             "3D场景信号 / SceneType / 上电P / 临停P / 特殊场景 / 小憩 / 露营 / 洗车 / 充电场景 / 放电场景 / 场景选择 / 离车舒享 / 行车场景 / 泊车场景 优先考虑 scene-signal-diagnosis。"
             "xtheme / 105004 / 105009 / 晨曦 / 傍晚 / 主题切换 / XuiConditionHelper 应优先考虑 xtheme-analyzer。"
             "只输出一个 JSON 对象，字段必须完整："
-            '{"analysis_kind":"startup|stuck|crash|scene_signal|signal|perception|xtheme|general",'
-            '"skill":"unity-startup-lifecycle-check|3d-stuck-investigate|scene-signal-diagnosis|signal-chain-analyzer|perception-data-summary|xtheme-analyzer|general",'
+            f'{{"analysis_kind":"{"|".join(analysis_kinds or ["general"])}",'
+            f'"skill":"{"|".join(primary_skill_names or ["general"])}",'
             '"signal_hint":"可为空",'
             '"reason":"一句中文理由"}'
             "\n输入 JSON：\n"
@@ -1245,6 +564,9 @@ class BugAnalysisRunner:
         skill = str(parsed.get("skill") or "").strip()
         reason = str(parsed.get("reason") or "").strip()
         signal_hint = str(parsed.get("signal_hint") or "").strip()
+        primary_skill_map = self.skill_manager.primary_skill_map()
+        if skill in primary_skill_map:
+            kind = primary_skill_map[skill][0] or kind
         plans = self._resolve_bug_plans(
             analysis_kind=kind,
             signal_hint=signal_hint,
@@ -1258,6 +580,7 @@ class BugAnalysisRunner:
         )
         if skill:
             selection.skill_name = skill
+            selection.skill_label = self._skill_label_for_name(skill, plans[0].kind if plans else "general")
         return selection
 
     def decide_bug_followup(
@@ -1276,6 +599,8 @@ class BugAnalysisRunner:
         prepared_log_input = str(details.get("prepared_log_input") or "")
         selected_log_input = str(details.get("selected_log_input") or "")
         primary_skills = [item for item in self._available_bug_skills() if item.get("role") == "primary"]
+        primary_skill_names = [str(item.get("name") or "") for item in primary_skills if item.get("name")]
+        analysis_kinds = sorted({str(item.get("kind") or "general") for item in primary_skills if item.get("kind")})
         payload = {
             "request_text": request_text,
             "followup_text": followup_text,
@@ -1297,8 +622,8 @@ class BugAnalysisRunner:
             "如果选择的 skill 需要日志，而当前 prepared_log_input / selected_log_input 为空，请把 retry_download_if_missing 设为 true。"
             "只输出一个 JSON 对象，字段必须完整："
             '{"action":"answer_from_existing|reanalyze",'
-            '"analysis_kind":"startup|stuck|crash|scene_signal|signal|perception|xtheme|general",'
-            '"skill":"unity-startup-lifecycle-check|3d-stuck-investigate|scene-signal-diagnosis|signal-chain-analyzer|perception-data-summary|xtheme-analyzer|general",'
+            f'"analysis_kind":"{"|".join(analysis_kinds or ["general"])}",'
+            f'"skill":"{"|".join(primary_skill_names or ["general"])}",'
             '"signal_hint":"可为空",'
             '"retry_download_if_missing":true,'
             '"reason":"一句中文理由"}'
@@ -1314,6 +639,9 @@ class BugAnalysisRunner:
         signal_hint = str(parsed.get("signal_hint") or "").strip()
         reason = str(parsed.get("reason") or "").strip()
         retry_download = bool(parsed.get("retry_download_if_missing"))
+        primary_skill_map = self.skill_manager.primary_skill_map()
+        if skill in primary_skill_map:
+            kind = primary_skill_map[skill][0] or kind
         plans = self._resolve_bug_plans(
             analysis_kind=kind,
             signal_hint=signal_hint,
@@ -1329,6 +657,7 @@ class BugAnalysisRunner:
         )
         if skill:
             selection.skill_name = skill
+            selection.skill_label = self._skill_label_for_name(skill, plans[0].kind if plans else "general")
         return BugFollowupSelection(
             should_reanalyze=action == "reanalyze",
             force_rerun=action == "reanalyze",
@@ -1348,7 +677,7 @@ class BugAnalysisRunner:
             if not command:
                 continue
             try:
-                completed = run_tracked_process(
+                completed = _run_tracked_process(
                     command,
                     watchdog=self.process_watchdog,
                     name="bug-analysis-classifier",
@@ -1746,7 +1075,7 @@ class BugAnalysisRunner:
                 output_dir=context.output_dir,
                 enabled=self._should_collect_source_evidence(request_text, prompt_text)
                 or (
-                    any(plan.kind == "general" for plan in plans)
+                    any(plan.kind in {"general", "custom_skill"} for plan in plans)
                     and self._has_explicit_general_scope(prompt_text)
                 ),
                 extra_texts=(title, description),
@@ -1780,6 +1109,22 @@ class BugAnalysisRunner:
                 )
                 if current_plan.kind == "general":
                     self._write_general_bug_report(
+                        html_path=current_html,
+                        json_path=current_json,
+                        title=title,
+                        description=description,
+                        prompt_text=prompt_text,
+                        request_text=request_text,
+                        fault_time=fault_time,
+                        selected_input=selected_input,
+                        source_evidence_path=source_evidence_path,
+                        classification_skill=selection.skill_name,
+                        classification_source=selection.source,
+                        classification_reason=selection.reason,
+                    )
+                    completed = subprocess.CompletedProcess(args=current_command, returncode=0, stdout="", stderr="")
+                elif current_plan.kind == "custom_skill":
+                    self._write_custom_skill_bug_report(
                         html_path=current_html,
                         json_path=current_json,
                         title=title,
@@ -1887,7 +1232,10 @@ class BugAnalysisRunner:
                 progress_callback=progress_callback,
                 timeout=self._agent_summary_timeout(
                     options.timeout_seconds,
-                    reference_seconds=time.monotonic() - started,
+                    reference_seconds=max(
+                        time.monotonic() - started,
+                        240.0 if any(item.kind == "custom_skill" for item in plans) else 0.0,
+                    ),
                 ),
                 bridge_session_id=bridge_session_id,
             )
@@ -2187,7 +1535,7 @@ class BugAnalysisRunner:
             request_text=request_text,
             followup_text=followup_text,
             output_dir=output_dir,
-            enabled=any(plan.kind == "general" for plan in plans)
+            enabled=any(plan.kind in {"general", "custom_skill"} for plan in plans)
             or bool(force_rerun_kinds.intersection({"signal"}))
             or self._should_collect_source_evidence(request_text, followup_text),
         )
@@ -2261,6 +1609,22 @@ class BugAnalysisRunner:
                 )
                 if plan.kind == "general":
                     self._write_general_bug_report(
+                        html_path=html_path,
+                        json_path=json_path,
+                        title="",
+                        description="",
+                        prompt_text=followup_text,
+                        request_text=request_text,
+                        fault_time=target_time,
+                        selected_input=selected_input,
+                        source_evidence_path=source_evidence_path,
+                        classification_skill=classification_skill or self._skill_name_for_kind(plan.kind),
+                        classification_source=classification_source or "manual_fallback",
+                        classification_reason=classification_reason or "",
+                    )
+                    completed = subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+                elif plan.kind == "custom_skill":
+                    self._write_custom_skill_bug_report(
                         html_path=html_path,
                         json_path=json_path,
                         title="",
@@ -2543,6 +1907,7 @@ class BugAnalysisRunner:
                 previous_summary_path=previous_summary_path,
                 report_files=report_files,
                 report_url=str(getattr(previous_context, "report_url", "") or ""),
+                analysis_skill=str(details.get("analysis_skill") or ""),
             ),
             encoding="utf-8",
         )
@@ -2740,7 +2105,8 @@ class BugAnalysisRunner:
             request_text=request_text,
             followup_text=request.prompt,
             output_dir=context.output_dir,
-            enabled=self._should_collect_source_evidence(request_text, request.prompt) or any(plan.kind == "general" for plan in plans),
+            enabled=self._should_collect_source_evidence(request_text, request.prompt)
+            or any(plan.kind in {"general", "custom_skill"} for plan in plans),
         )
 
         for current_plan in plans:
@@ -2781,6 +2147,23 @@ class BugAnalysisRunner:
                         classification_skill=self._skill_name_for_kind(current_plan.kind),
                         classification_source="manual_fallback",
                         classification_reason="直传文件分析未命中专用 skill，退回通用问题分析。",
+                    )
+                    completed = subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+                elif current_plan.kind == "custom_skill":
+                    classification_skill = self._skill_name_for_kind(current_plan.kind)
+                    self._write_custom_skill_bug_report(
+                        html_path=current_html,
+                        json_path=current_json,
+                        title="",
+                        description="",
+                        prompt_text=request.prompt,
+                        request_text=request_text,
+                        fault_time=fault_time,
+                        selected_input=selected_input,
+                        source_evidence_path=source_evidence_path,
+                        classification_skill=classification_skill,
+                        classification_source="manual_fallback",
+                        classification_reason="直传文件分析命中自定义专用 skill，交由 Agent 按 Skill 规范分析。",
                     )
                     completed = subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
                 else:
@@ -3002,7 +2385,7 @@ class BugAnalysisRunner:
                 str(self._stuck_script()),
                 str(input_path),
             ]
-        if plan.kind == "general":
+        if plan.kind in {"general", "custom_skill"}:
             return []
         command = [
             sys.executable,
@@ -3023,7 +2406,7 @@ class BugAnalysisRunner:
         return options.working_dir or self.config.workspace_root
 
     def _plan_requires_log_input(self, plan: "BugAnalysisPlan") -> bool:
-        return plan.kind in {"startup", "stuck", "crash", "scene_signal", "perception", "xtheme", "signal", "general"}
+        return plan.kind in {"startup", "stuck", "crash", "scene_signal", "perception", "xtheme", "signal", "general", "custom_skill"}
 
     def _bug_fetcher_script(self) -> Path:
         return self.config.workspace_root / ".ai/skills/feishu-bug-fetcher/scripts/bug-fetcher.sh"
@@ -3070,7 +2453,7 @@ class BugAnalysisRunner:
                 signal_code=str(details.get("signal_code") or "") or None,
             )
             for kind in kinds
-            if kind in {"startup", "stuck", "crash", "scene_signal", "signal", "perception", "xtheme", "general"}
+            if kind in {"startup", "stuck", "crash", "scene_signal", "signal", "perception", "xtheme", "general", "custom_skill"}
         ]
         if plans:
             return plans
@@ -3153,6 +2536,7 @@ class BugAnalysisRunner:
             "signal": f"bug_signal_chain_report.{suffix}",
             "xtheme": f"bug_xtheme_analysis_report.{suffix}",
             "general": f"bug_general_analysis_report.{suffix}",
+            "custom_skill": f"bug_custom_skill_report.{suffix}",
         }[kind]
 
     def _combined_report_name(self, suffix: str) -> str:
@@ -3168,6 +2552,7 @@ class BugAnalysisRunner:
             "signal": "信号链路分析",
             "xtheme": "XTheme时光主题分析",
             "general": "通用问题分析",
+            "custom_skill": "专用 Skill 分析",
         }[kind]
 
     def _run_json_command(
@@ -3177,7 +2562,7 @@ class BugAnalysisRunner:
         timeout: int,
         bridge_session_id: str = "",
     ) -> dict[str, object]:
-        completed = run_tracked_process(
+        completed = _run_tracked_process(
             command,
             watchdog=self.process_watchdog,
             name="bug-json-command",
@@ -3500,7 +2885,7 @@ class BugAnalysisRunner:
                 error_details.append({"name": name, "reason": "missing_attachment_url"})
                 continue
             output_path = (attachments_dir / name).expanduser().resolve()
-            completed = run_tracked_process(
+            completed = _run_tracked_process(
                 [
                     "meegle",
                     "attachment",
@@ -3640,7 +3025,7 @@ class BugAnalysisRunner:
         command = self._archive_extract_command(archive_path, extract_dir)
         if command is None:
             raise RuntimeError(f"无法解压日志附件 {archive_path.name}: 未找到 bsdtar/7z/unar")
-        completed = run_tracked_process(
+        completed = _run_tracked_process(
             command,
             watchdog=self.process_watchdog,
             name="bug-log-archive-extract",
@@ -3802,7 +3187,7 @@ class BugAnalysisRunner:
 
     def _expand_xp_file(self, xp_path: Path) -> Path:
         jar_path = self.config.workspace_root / ".ai/skills/log-decoder/tools/decryptFile.jar"
-        completed = run_tracked_process(
+        completed = _run_tracked_process(
             ["java", "-jar", str(jar_path), str(xp_path)],
             watchdog=self.process_watchdog,
             name="xp-log-decrypt",
@@ -3850,7 +3235,6 @@ class BugAnalysisRunner:
             path
             for path in input_path.rglob("main_*")
             if path.is_file()
-            and "com.xiaopeng.montecarlo" in str(path)
             and path.suffix.lower() in {".alog", ".xlog", ".log", ".txt"}
         ]
         ranked: list[tuple[float, int, Path]] = []
@@ -3866,21 +3250,18 @@ class BugAnalysisRunner:
         return ranked[0][2]
 
     def _startup_analysis_input(self, input_path: Path, fault_time: str) -> Path:
-        if input_path.is_dir():
+        if input_path.is_file():
             return input_path
         return self._select_startup_input(input_path, fault_time)
 
     def _parse_fault_datetime(self, fault_time: str) -> "time.struct_time | None":
         short_match = re.search(r"(?<!\d)(\d{1,2}):(\d{2})(?!\d)", fault_time)
         if short_match and "20" not in fault_time:
-            now = time.localtime()
-            try:
-                return time.strptime(
-                    f"{now.tm_year:04d}-{now.tm_mon:02d}-{now.tm_mday:02d} {int(short_match.group(1)):02d}:{int(short_match.group(2)):02d}",
-                    "%Y-%m-%d %H:%M",
-                )
-            except ValueError:
-                return None
+            # Bare HH:MM without a date cannot be reliably resolved —
+            # using the current date would silently mis-select logs when
+            # analysing historical bugs.  Return None so callers fall back
+            # to the original input directory.
+            return None
         match = re.search(
             r"(20\d{2})[-_/年](\d{1,2})[-_/月](\d{1,2})[日_\s-]*(\d{1,2}):(\d{2})",
             fault_time,
@@ -3949,7 +3330,7 @@ class BugAnalysisRunner:
             target_time=target_time,
             request_text=request_text,
         )
-        completed = run_tracked_process(
+        completed = _run_tracked_process(
             command,
             watchdog=self.process_watchdog,
             name=f"bug-analysis-{plan.kind}",
@@ -3961,7 +3342,7 @@ class BugAnalysisRunner:
             session_id=bridge_session_id,
         )
         if completed.returncode != 0 and plan.kind == "startup":
-            completed = run_tracked_process(
+            completed = _run_tracked_process(
                 command,
                 watchdog=self.process_watchdog,
                 name=f"bug-analysis-{plan.kind}-retry",
@@ -4103,6 +3484,7 @@ class BugAnalysisRunner:
             f"- 分类来源: `{classification_source or 'manual_fallback'}`\n"
             f"- 分类 Agent: `{classification_provider or '无'}`\n"
             f"- 分类理由: `{classification_reason or '未记录'}`\n"
+            f"- Skill 规范:\n{self._render_skill_context_lines(classification_skill)}"
             f"- 信号代码: `{', '.join(plan.signal_code for plan in plans if plan.signal_code) or '无'}`\n"
             f"- 故障时间: `{fault_time or '未识别'}`\n"
             f"  说明: {fault_time_note}\n"
@@ -4121,6 +3503,31 @@ class BugAnalysisRunner:
             f"{summary}\n"
         )
         return metadata, summary
+
+    def _skill_context_paths(self, skill_name: str) -> list[Path]:
+        normalized = skill_name.strip()
+        if not normalized or normalized == "general":
+            return []
+        try:
+            record = self.skill_manager.get_skill(normalized, include_content=False)
+        except Exception:
+            return []
+        paths: list[Path] = []
+        skill_md = Path(record.skill_md_path).expanduser() if record.skill_md_path else Path()
+        if skill_md and skill_md.exists() and skill_md.is_file():
+            paths.append(skill_md)
+            references_dir = skill_md.parent / "references"
+            if references_dir.exists():
+                for path in sorted(references_dir.glob("*.md"))[:4]:
+                    if path.is_file():
+                        paths.append(path)
+        return paths
+
+    def _render_skill_context_lines(self, skill_name: str) -> str:
+        paths = self._skill_context_paths(skill_name)
+        if not paths:
+            return "  - 无\n"
+        return "".join(f"  - `{path}`\n" for path in paths)
 
     def _extract_owner(self, full_item: dict[str, object]) -> str:
         current_nodes = full_item.get("work_item_current_node", [])
@@ -4222,7 +3629,7 @@ class BugAnalysisRunner:
             time_text = self._format_time_parts(full_match.group(4), full_match.group(5), full_match.group(6))
             return {"value": f"{date} {time_text}", "date": date, "time": time_text, "raw": full_match.group(0)}
         md_match = re.search(
-            r"(?<!\d)(\d{1,2})[-/](\d{1,2})(?:[日_\s-]+)(\d{1,2}):(\d{2})(?::(\d{2}))?",
+            r"(?<!\d)\[?(\d{1,2})[-/](\d{1,2})\]?(?:[\]\[日_\s-]+)(\d{1,2}):(\d{2})(?::(\d{2}))?",
             normalized,
         )
         if md_match:
@@ -4620,13 +4027,16 @@ class BugAnalysisRunner:
                 f"HTML: {html_path}"
             )
 
-        if plan.kind == "general":
+        if plan.kind in {"general", "custom_skill"}:
             verdict = payload.get("verdict", {}) if isinstance(payload, dict) else {}
-            msg = str(verdict.get("text") or payload.get("summary") or "已生成通用问题分析报告")
+            default_summary = "已生成专用 Skill 分析入口" if plan.kind == "custom_skill" else "已生成通用问题分析报告"
+            msg = str(verdict.get("text") or payload.get("summary") or default_summary)
             source_matches = payload.get("source_matches", 0) if isinstance(payload, dict) else 0
+            skill = str(payload.get("analysis_skill") or self._skill_name_for_kind(plan.kind))
             return (
                 "Bug 分析完成\n"
                 f"类型: {self._analysis_label(plan.kind)}\n"
+                f"Skill: {skill}\n"
                 f"结论: {msg}\n"
                 f"源码证据: {source_matches}\n"
                 f"描述: {prompt_text}\n"
@@ -4823,6 +4233,131 @@ class BugAnalysisRunner:
             "prompt_text": prompt_text,
             "request_text": request_text,
             "description": raw_description,
+        }
+        html_path.write_text(
+            combined_bug_html.render_report_shell(**composition_to_renderer_payload(composition)),
+            encoding="utf-8",
+        )
+        json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _write_custom_skill_bug_report(
+        self,
+        *,
+        html_path: Path,
+        json_path: Path,
+        title: str,
+        description: str,
+        prompt_text: str,
+        request_text: str,
+        fault_time: str,
+        selected_input: Path | None,
+        source_evidence_path: Path | None,
+        classification_skill: str,
+        classification_source: str = "",
+        classification_reason: str = "",
+    ) -> None:
+        skill_paths = self._skill_context_paths(classification_skill)
+        skill_md = next((path for path in skill_paths if path.name == "SKILL.md"), None)
+        source_entries = self._parse_source_evidence_entries(source_evidence_path)
+        source_rows = [(entry["file"], f"L{entry['line']}", entry["text"]) for entry in source_entries[:8]]
+        has_logs = selected_input is not None
+        verdict_sev = "green" if has_logs and skill_md is not None else "yellow"
+        verdict_text = (
+            f"已命中专用 Skill `{classification_skill}`，本轮将由本地 Agent 按 Skill 规范读取日志/源码并产出最终结论。"
+            if skill_md is not None
+            else f"已命中专用 Skill `{classification_skill}`，但未找到 SKILL.md，当前只能保留材料索引并等待补齐 skill。"
+        )
+        cards = [
+            ("分析方式", "专用 Skill + Agent", verdict_sev, "没有回落为通用问题分析。"),
+            ("命中 Skill", classification_skill or "未记录", "green" if classification_skill else "yellow", classification_source or "manual_fallback"),
+            ("故障时间", fault_time or "未识别", "green" if fault_time else "yellow", ""),
+            ("现场日志", selected_input.name if selected_input else "无", "green" if has_logs else "yellow", str(selected_input or "")),
+            ("Skill 规范", skill_md.name if skill_md else "缺失", "green" if skill_md else "yellow", str(skill_md or "")),
+            ("源码证据", str(len(source_rows)), "green" if source_rows else "yellow", "按用户诉求预检索。"),
+        ]
+        summary_sections = build_structured_summary_sections(
+            conclusions=[
+                {"sev": verdict_sev, "title": "专用 Skill 已命中", "detail": verdict_text},
+                {
+                    "sev": "green" if has_logs else "yellow",
+                    "title": "日志输入",
+                    "detail": f"当前可复用日志输入：{selected_input}" if has_logs else "当前没有可复用日志，无法执行日志型专用 Skill。",
+                },
+                {
+                    "sev": "green" if skill_md else "yellow",
+                    "title": "Skill 规范",
+                    "detail": f"Agent 需要先读取 `{skill_md}` 并按其 Required Workflow 执行。" if skill_md else "缺少 SKILL.md。",
+                },
+            ],
+            evidence_rows=[
+                ("分类路由", classification_skill or "未记录", "bridge/agent", classification_source or "manual_fallback", classification_reason or "未记录"),
+                ("故障时间", fault_time or "未识别", "用户输入/标题/描述", "用于限定日志窗口", ""),
+                ("日志输入", str(selected_input or "无"), "附件/缓存", "专用 Skill 的主要运行材料", ""),
+                ("Skill 文件", str(skill_md or "未找到"), "workspace/.ai/skills", "Agent 分析规范入口", ""),
+            ],
+            causes=[
+                {
+                    "sev": "yellow",
+                    "title": "脚本覆盖",
+                    "detail": "该 Skill 当前没有 Bridge 内置 Python 执行器，因此报告主体依赖本地 Agent 按 SKILL.md 做只读分析。",
+                }
+            ],
+            confirmations=[
+                {
+                    "sev": "yellow",
+                    "title": "最终结论",
+                    "detail": "需要等待 Agent 读取日志/源码后写入；如果 Agent 超时，报告会明确标注超时而不是伪装成通用根因。",
+                }
+            ],
+            actions=[
+                {"sev": "green", "title": "按专用 Skill 继续", "detail": "后续追问会复用当前 bug、已下载日志、Skill 规范和 Agent 会话。"}
+            ],
+        )
+        skill_rows = [(path.name, str(path)) for path in skill_paths]
+        context_rows = [
+            ("Bug 标题", title or "未返回 / 未设置"),
+            ("分析请求", prompt_text or "未设置"),
+            ("故障时间", fault_time or "未识别"),
+            ("现场日志", str(selected_input) if selected_input else "无"),
+            ("源码证据文件", str(source_evidence_path) if source_evidence_path else "未生成"),
+            ("分类理由", classification_reason or "未记录"),
+        ]
+        detail_body = (
+            "<div class=\"split-grid\">"
+            f"{combined_bug_html.render_table([('原始请求', request_text.strip() or '(无请求)')], ('字段', '内容'))}"
+            f"{combined_bug_html.render_table([('缺陷描述', description.strip() or '(无描述)')], ('字段', '内容'))}"
+            "</div>"
+        )
+        composition = ReportComposition(
+            title="专用 Skill 分析",
+            heading="专用 Skill 分析",
+            subtitle=f"Bug 标题：{title or '未返回 / 未设置'}",
+            verdict=ReportVerdict(sev=verdict_sev, text=verdict_text),
+            cards=cards,
+            sections=summary_sections
+            + [
+                ReportSection(kind="table", title="Skill 输入", cols=["文件", "路径"], rows=skill_rows, empty_text="未找到 Skill 文件"),
+                ReportSection(kind="table", title="源码预检索", cols=["文件", "行号", "内容"], rows=source_rows, empty_text="未命中源码预检索证据"),
+                ReportSection(kind="table", title="分析上下文", cols=["字段", "内容"], rows=context_rows),
+                ReportSection(kind="details", title="原始输入", summary="展开查看请求与缺陷描述", body_html=detail_body),
+            ],
+        )
+        payload = {
+            "mode": "custom_skill_overview",
+            "summary": verdict_text,
+            "verdict": {"sev": verdict_sev, "text": verdict_text},
+            "fault_time": fault_time,
+            "selected_input": str(selected_input) if selected_input else "",
+            "source_evidence_file": str(source_evidence_path) if source_evidence_path else "",
+            "source_matches": len(source_rows),
+            "analysis_skill": classification_skill,
+            "classification_source": classification_source or "manual_fallback",
+            "classification_reason": classification_reason or "",
+            "skill_context_files": [str(path) for path in skill_paths],
+            "title": title,
+            "prompt_text": prompt_text,
+            "request_text": request_text,
+            "description": description.strip(),
         }
         html_path.write_text(
             combined_bug_html.render_report_shell(**composition_to_renderer_payload(composition)),
@@ -5274,54 +4809,6 @@ class BugAnalysisRunner:
             ("原始输入", str(selected_input or "无"), "green" if selected_input else "yellow", ""),
         ]
         title_suffix = signal_comment or signal_name
-        sections = [
-            ReportSection(kind="text", title="一句话判断", text=alignment["judgement"]),
-            ReportSection(
-                kind="flow",
-                title="生命周期流图",
-                description="只围绕当前可见的 package / PID 组织，避免把别的进程混进来。",
-                nodes=lifecycle_nodes,
-            ),
-            ReportSection(
-                kind="flow",
-                title="数据流图",
-                description="先看源码映射和分发，再看业务消费与最终判定落点。",
-                nodes=dataflow_nodes,
-            ),
-            ReportSection(
-                kind="table",
-                title="关键日志证据",
-                rows=evidence_rows,
-                cols=["时间", "相对启动", "进程/线程", "阶段", "证据"],
-                empty_text="未提取到可用日志证据",
-            ),
-            ReportSection(
-                kind="issues",
-                title="证据边界与未覆盖段",
-                items=boundary_issues,
-                empty_text="未识别明显边界问题",
-            ),
-        ]
-        if summary_text or source_rows:
-            detail_blocks: list[str] = []
-            if summary_text:
-                detail_blocks.append(f'<div class="insight" style="margin-top:12px">{combined_bug_html.H(summary_text)}</div>')
-            if source_rows:
-                detail_blocks.append(
-                    combined_bug_html.render_table(
-                        source_rows,
-                        ["层级", "位置", "说明"],
-                        empty_text="未提取到额外源码引用",
-                    )
-                )
-            sections.append(
-                ReportSection(
-                    kind="details",
-                    title="补充证据",
-                    summary="展开脚本结论与源码引用",
-                    body_html="".join(detail_blocks),
-                )
-            )
         composition = plan_signal_report(
             title_suffix=title_suffix,
             prompt_text=combined_bug_html.H(prompt_text),
@@ -5344,7 +4831,12 @@ class BugAnalysisRunner:
             ),
         )
         if android_data_link:
-            composition.sections = self._signal_android_data_link_sections(android_data_link) + composition.sections
+            self._signal_merge_android_conclusion(composition, android_data_link)
+            self._signal_insert_sections_after(
+                composition,
+                title="结论摘要",
+                sections=self._signal_android_data_link_sections(android_data_link),
+            )
         return composition
 
     def _signal_overview_report_name(self, suffix: str) -> str:
@@ -6146,38 +5638,64 @@ class BugAnalysisRunner:
             "evidence": evidence or "未提取到直接证据。",
         }
 
-    def _signal_android_data_link_sections(self, checks: list[dict[str, object]]) -> list[ReportSection]:
-        rows = [
-            (
-                item.get("step", ""),
-                item.get("checkpoint", ""),
-                item.get("status", ""),
-                item.get("conclusion", ""),
-                item.get("evidence", ""),
-            )
-            for item in checks
-        ]
-        failed = [item for item in checks if item.get("status") == "未通过"]
+    def _signal_merge_android_conclusion(self, composition: ReportComposition, checks: list[dict[str, object]]) -> None:
         likely_cause = self._signal_android_likely_cause(checks)
-        sections = [
+        if not likely_cause:
+            return
+        failed = [item for item in checks if item.get("status") == "未通过"]
+        item = {
+            "sev": "red" if failed else "yellow",
+            "title": "当前最可能卡点",
+            "detail": likely_cause,
+        }
+        for section in composition.sections:
+            if section.title == "结论摘要" and section.kind == "issues":
+                section.items = [item, *section.items]
+                return
+        composition.sections.insert(0, ReportSection(kind="issues", title="结论摘要", items=[item]))
+
+    def _signal_insert_sections_after(
+        self,
+        composition: ReportComposition,
+        *,
+        title: str,
+        sections: list[ReportSection],
+    ) -> None:
+        if not sections:
+            return
+        for index, section in enumerate(composition.sections):
+            if section.title == title:
+                composition.sections[index + 1 : index + 1] = sections
+                return
+        composition.sections[0:0] = sections
+
+    def _signal_android_data_link_sections(self, checks: list[dict[str, object]]) -> list[ReportSection]:
+        nodes = []
+        for item in checks:
+            status = str(item.get("status") or "").strip()
+            checkpoint = str(item.get("checkpoint") or "").strip()
+            conclusion = str(item.get("conclusion") or "").strip()
+            evidence = str(item.get("evidence") or "").strip()
+            sev = "red" if status == "未通过" else "green" if status == "通过" else "yellow"
+            step = str(item.get("step") or "").strip()
+            title = f"{step}. {checkpoint}" if step else checkpoint
+            nodes.append(
+                {
+                    "sev": sev,
+                    "title": f"{title}：{status or '未识别'}",
+                    "evidence": conclusion,
+                    "downstream": self._signal_shorten(evidence, 260),
+                }
+            )
+        return [
             ReportSection(
-                kind="table",
+                kind="chain",
                 title="Android 数据链路排查",
-                description="按 module_datacenter 初始化、上游注册、上游入数、业务注册、业务接收逐段给出结论。",
-                rows=rows,
-                cols=["序号", "排查点", "结论", "判断", "参考日志 / 源码"],
+                description="按初始化、上游注册、上游入数、业务注册、业务接收逐段收敛；完整原始日志放入后续证据区。",
+                nodes=nodes,
                 empty_text="当前信号不是 Android module_datacenter 链路。",
             )
         ]
-        if likely_cause:
-            sections.append(
-                ReportSection(
-                    kind="issues",
-                    title="最可能卡点",
-                    items=[{"sev": "red" if failed else "yellow", "title": "当前最可能原因", "detail": likely_cause}],
-                )
-            )
-        return sections
 
     def _signal_android_likely_cause(self, checks: list[dict[str, object]]) -> str:
         if not checks:
@@ -7375,7 +6893,7 @@ class BugAnalysisRunner:
         *,
         reference_seconds: float | None = None,
     ) -> int:
-        configured = int(getattr(self.config.bug_analysis, "agent_summary_timeout_seconds", 90) or 0)
+        configured = int(getattr(self.config.bug_analysis, "agent_summary_timeout_seconds", 300) or 0)
         operation_limit = max(1, min(int(operation_timeout_seconds or 0), 1800))
         if configured <= 0:
             base_timeout = operation_limit
@@ -7625,7 +7143,7 @@ class BugAnalysisRunner:
                     bridge_session_id=bridge_session_id,
                 )
             else:
-                completed = run_tracked_process(
+                completed = _run_tracked_process(
                     command,
                     watchdog=self.process_watchdog,
                     name=f"bug-agent-summary-{provider or 'agent'}",
@@ -8861,6 +8379,7 @@ class BugAnalysisRunner:
             f"- 分类来源: `{classification_source or 'manual_fallback'}`",
             f"- 分类 Agent: `{classification_provider or '无'}`",
             f"- 分类理由: `{classification_reason or '未记录'}`",
+            f"- Skill 规范:\n{self._render_skill_context_lines(classification_skill)}",
             f"- 信号目标: `{', '.join(plan.signal_code or '' for plan in plans if plan.kind == 'signal') or '无'}`",
             f"- 本次重新执行: `{', '.join(rerun_kinds) or '无'}`",
             f"- 本次直接复用: `{', '.join(reused_kinds) or '无'}`",
@@ -8904,6 +8423,7 @@ class BugAnalysisRunner:
         previous_summary_path: Path | None,
         report_files: list[Path],
         report_url: str,
+        analysis_skill: str = "",
     ) -> str:
         lines = [
             "# Bug Agent Follow-up Metadata",
@@ -8916,6 +8436,10 @@ class BugAnalysisRunner:
             f"- prepared log 输入: `{prepared_input or ''}`",
             f"- selected log 输入: `{selected_input or ''}`",
         ]
+        if analysis_skill.strip():
+            lines.append(f"- 命中 Skill: `{analysis_skill.strip()}`")
+            lines.append(f"- Skill 规范:")
+            lines.append(self._render_skill_context_lines(analysis_skill).rstrip())
         if previous_summary_path is not None:
             lines.append(f"- 上一轮 Agent 总结: `{previous_summary_path}`")
         if report_url.strip():
@@ -9125,6 +8649,7 @@ class BugAnalysisRunner:
             f"- 业务源码根目录：{self.config.guideengine_repo}\n\n"
             "以下是首批本地文件入口。请按需读取这些本地文件，优先读取 JSON/Markdown 结构化产物；"
             "HTML 只作为可视化报告入口，不要把 CSS/style/script 当作分析证据。"
+            "如果 Bug Metadata 中列出命中的 Skill 规范，必须先读取对应 SKILL.md，并按其适用范围、执行链路和输出规则分析。"
             "只读分析，不修改文件，不要编造未看到的证据：\n\n"
         )
         if followup_text.strip():
@@ -9219,10 +8744,14 @@ class BugAnalysisRunner:
         lowered = name.casefold()
         if lowered == "bug_source_evidence.md":
             return "Bug Source Evidence", 0, 0
+        if lowered == "skill.md" and ".ai/skills" in str(path):
+            return f"Matched Skill: {path.parent.name}", 0, 0
+        if path.suffix.lower() == ".md" and path.parent.name == "references" and ".ai/skills" in str(path):
+            return f"Matched Skill Reference: {name}", 1, 0
         if lowered.endswith(".json") and "_report" in lowered:
-            return f"Report JSON: {name}", 1, 0
+            return f"Report JSON: {name}", 2, 0
         if lowered.endswith(".html") and "_report" in lowered:
-            return f"Report HTML: {name}", 2, 0
+            return f"Report HTML: {name}", 3, 0
         return "", 9, 0
 
     def _render_bug_summary_context_item(self, item: dict[str, object]) -> str:
@@ -9235,6 +8764,10 @@ class BugAnalysisRunner:
             note = "可视化 HTML 报告；只有 JSON/Markdown 不足时再读取，读取时忽略 CSS/style/script。"
         elif lowered == "bug_source_evidence.md":
             note = "源码证据文件；需要源码链路时读取。"
+        elif lowered == "skill.md":
+            note = "本轮命中的专用 Skill 规范；必须先读取并按其中的 Required Workflow / 适用范围执行。"
+        elif path.parent.name == "references":
+            note = "本轮命中 Skill 的引用资料；SKILL.md 要求读取或证据不足时必须读取。"
         elif "metadata" in lowered:
             note = "元数据索引文件；先读取它获取日志、报告、output 目录、主 PID 和故障时间等入口。"
         elif "request" in lowered:
@@ -9342,368 +8875,3 @@ class BugFollowupSelection:
     source: str
     reason: str = ""
     provider: str = ""
-
-
-STARTUP_ROUTE_TERMS = (
-    "启动",
-    "时序",
-    "首帧",
-    "unityready",
-    "readyprepare",
-    "displaychanged",
-    "startrender",
-    "surfacecreated",
-    "surfacechanged",
-    "createunityplayeronmainthread",
-    "onunityready",
-    "unitymainfirstframereadyrendermsg",
-)
-
-STARTUP_BLOCK_ROUTE_TERMS = (
-    "打不开",
-    "无法打开",
-    "进不去",
-    "无法进入",
-    "未拉起",
-    "没拉起",
-    "没起来",
-    "起不来",
-    "黑屏只有logo",
-    "黑屏只有 logo",
-    "只有logo",
-    "只有 logo",
-    "只显示logo",
-    "只显示 logo",
-)
-
-STUCK_ROUTE_TERMS = (
-    "卡顿",
-    "卡住",
-    "卡死",
-    "掉帧",
-    "黑屏",
-    "不刷新",
-    "无响应",
-    "anr",
-    "3d卡",
-    "unity卡",
-    "montecarlo卡",
-)
-
-SIGNAL_ROUTE_TERMS = (
-    "信号",
-    "没到unity",
-    "没到 unity",
-    "有没有到unity",
-    "有没有到 unity",
-    "数据链",
-    "链路",
-    "x3dcb",
-    "signaldispatcher",
-    "vhalhelper",
-)
-
-SCENE_SIGNAL_ROUTE_TERMS = (
-    "3d场景信号",
-    "3d 场景信号",
-    "场景信号",
-    "scenetype",
-    "scene type",
-    "unityscenetypeservice",
-    "signal_sr_scene_type",
-    "signal_custom_gear_st",
-    "signal_custom_pk_hmi_mode",
-    "signal_custom_special_scene_type",
-    "上电p",
-    "上电 p",
-    "临停p",
-    "临停 p",
-    "特殊场景",
-    "场景管理",
-    "小憩",
-    "露营",
-    "洗车",
-    "充电场景",
-    "放电场景",
-    "场景选择",
-    "离车舒享",
-    "行车场景",
-    "泊车场景",
-    "onhandlecustomspecialscenetype",
-    "pkhmimode",
-    "onhandlecustomgearst",
-    "xsrscenestatebase",
-    "xsrscenestatemachine",
-    "xsrscenenmanager",
-    "getpkhmimodemsg",
-    "getmeterdatamsg",
-    "set_ready",
-    "onldstatechange",
-)
-
-SCENE_SIGNAL_CONTEXT_TERMS = (
-    "3d场景",
-    "3d 场景",
-    "sr场景",
-    "sr 场景",
-    "大车模",
-)
-
-SCENE_SIGNAL_HINT_TERMS = (
-    "信号",
-    "链路",
-    "源码",
-    "日志",
-    "scene",
-    "scenetype",
-    "unity",
-    "sr",
-)
-
-PERCEPTION_ROUTE_TERMS = (
-    "当前感知数据",
-    "感知数据总结",
-    "感知数据",
-    "感知统计",
-    "无感知",
-    "sr无感知",
-    "vhalhelper",
-    "mapdatahandler",
-    "x3dcb",
-    "xdatanativeproxy",
-    "unity收到的数据统计",
-)
-
-CRASH_ROUTE_TERMS = (
-    "闪退",
-    "crash",
-    "tombstone",
-    "fatal exception",
-    "异常退出",
-    "崩溃",
-    "sigsegv",
-    "abort",
-    "native crash",
-)
-
-XTHEME_ROUTE_TERMS = (
-    "xtheme",
-    "signal_sr_xtheme",
-    "105004",
-    "105009",
-    "时光主题",
-    "时光变化",
-    "晨曦",
-    "傍晚",
-    "黄昏",
-    "日出日落",
-    "主题切换",
-    "黑白夜",
-    "xuiconditionhelper",
-)
-
-
-CORE_SCENE_SIGNALS = {
-    "100002",
-    "100008",
-    "100009",
-    "100010",
-    "signal_sr_scene_type",
-    "signal_custom_gear_st",
-    "signal_custom_pk_hmi_mode",
-    "signal_custom_special_scene_type",
-}
-
-STRONG_SCENE_SIGNAL_INTENT_TERMS = (
-    "3d场景信号",
-    "3d 场景信号",
-    "场景信号",
-    "scenetype",
-    "scene type",
-    "unityscenetypeservice",
-    "场景管理",
-)
-
-
-def _is_core_scene_signal(signal: str) -> bool:
-    return signal.strip().casefold() in CORE_SCENE_SIGNALS
-
-
-def _has_strong_scene_signal_intent(lowered_text: str) -> bool:
-    return any(term in lowered_text for term in STRONG_SCENE_SIGNAL_INTENT_TERMS)
-
-
-def looks_like_scene_signal_request(text: str) -> bool:
-    lowered = (text or "").casefold()
-    if any(term in lowered for term in SCENE_SIGNAL_ROUTE_TERMS):
-        return True
-    return any(term in lowered for term in SCENE_SIGNAL_CONTEXT_TERMS) and any(
-        hint in lowered for hint in SCENE_SIGNAL_HINT_TERMS
-    )
-
-
-class PerceptionSummaryRunner:
-    def __init__(
-        self,
-        config: BridgeConfig,
-        lark_client=None,
-        process_watchdog: ProcessWatchdog | None = None,
-    ) -> None:
-        self.config = config
-        self.downloader = LogDownloader(config, lark_client) if lark_client is not None else None
-        self.process_watchdog = process_watchdog
-
-    def run_summary(self, request: PerceptionSummaryRequest, *, event: LarkEvent | None = None) -> TaskResult:
-        if request.error == "missing_prompt" or not request.prompt.strip():
-            return TaskResult(
-                success=False,
-                message="缺少总结内容：请说明要总结当前感知数据，或补充日志范围。",
-                error_code="missing_perception_prompt",
-                details={"mode": "perception_summary"},
-            )
-
-        context = create_job_context(self.config.data_dir, event=event)
-        html_path = context.output_dir / "perception_data_summary.html"
-        json_path = context.output_dir / "perception_data_summary.json"
-        script_path = self._perception_script()
-        if not request.resources:
-            return TaskResult(
-                success=False,
-                message="缺少日志输入：请在消息中提供日志 URL 或飞书附件。",
-                error_code="missing_log",
-                details={"mode": "perception_summary"},
-            )
-        if self.config.dry_run:
-            return TaskResult(
-                success=True,
-                message=(
-                    "dry-run: 当前感知数据总结命令已规划\n"
-                    f"html: {html_path}\n"
-                    f"json: {json_path}"
-                ),
-                job_id=context.job_id,
-                job_dir=context.job_dir,
-                command=[sys.executable, str(script_path), "<log_path>"],
-                details={
-                    "mode": "perception_summary",
-                    "downloads": [item.value for item in request.resources],
-                    "files_to_send": [html_path],
-                },
-            )
-
-        if self.downloader is None:
-            return TaskResult(
-                success=False,
-                message="当前感知数据总结缺少 downloader 依赖。",
-                job_id=context.job_id,
-                job_dir=context.job_dir,
-                error_code="perception_summary_missing_downloader",
-                details={"mode": "perception_summary"},
-            )
-
-        try:
-            downloaded = self.downloader.download_all(
-                request.resources,
-                context=context,
-                message_id=event.message_id if event else "",
-            )
-        except DownloadError as exc:
-            return TaskResult(
-                success=False,
-                message=f"下载失败：{exc}",
-                job_id=context.job_id,
-                job_dir=context.job_dir,
-                error_code="download_failed",
-                details={"mode": "perception_summary"},
-            )
-
-        input_path = downloaded[0].path if len(downloaded) == 1 else context.input_dir
-        command = [sys.executable, str(script_path), str(input_path)]
-        started = time.monotonic()
-        try:
-            completed = run_tracked_process(
-                command,
-                watchdog=self.process_watchdog,
-                name="perception-summary",
-                cwd=self.config.workspace_root,
-                capture_output=True,
-                text=True,
-                timeout=self.config.bug_analysis.timeout_seconds,
-                check=False,
-            )
-        except subprocess.TimeoutExpired as exc:
-            return TaskResult(
-                success=False,
-                message="当前感知数据总结超时",
-                job_id=context.job_id,
-                job_dir=context.job_dir,
-                command=command,
-                duration_seconds=time.monotonic() - started,
-                error_code="perception_summary_timeout",
-                stdout=exc.stdout or "",
-                stderr=exc.stderr or "",
-                details={"mode": "perception_summary"},
-            )
-
-        if completed.returncode != 0:
-            return TaskResult(
-                success=False,
-                message="当前感知数据总结执行失败",
-                job_id=context.job_id,
-                job_dir=context.job_dir,
-                command=command,
-                duration_seconds=time.monotonic() - started,
-                error_code="perception_summary_failed",
-                stdout=completed.stdout,
-                stderr=completed.stderr,
-                details={"mode": "perception_summary"},
-            )
-
-        generated_html = self._extract_report_path(completed.stdout, r"^\[OK\] HTML:\s*(.+)$")
-        generated_json = self._extract_report_path(completed.stdout, r"^\[OK\] JSON:\s*(.+)$")
-        if generated_html and generated_html.exists():
-            shutil.copy2(generated_html, html_path)
-        if generated_json and generated_json.exists():
-            shutil.copy2(generated_json, json_path)
-
-        if not html_path.exists():
-            return TaskResult(
-                success=False,
-                message="当前感知数据总结未生成 HTML 报告",
-                job_id=context.job_id,
-                job_dir=context.job_dir,
-                command=command,
-                duration_seconds=time.monotonic() - started,
-                error_code="perception_summary_missing_html",
-                stdout=completed.stdout,
-                stderr=completed.stderr,
-                details={"mode": "perception_summary"},
-            )
-
-        return TaskResult(
-            success=True,
-            message=(
-                "当前感知数据总结完成\n"
-                f"HTML: {html_path}\n"
-                f"JSON: {json_path if json_path.exists() else '未生成'}\n"
-                f"job: {context.job_dir}"
-            ),
-            job_id=context.job_id,
-            job_dir=context.job_dir,
-            html_report=html_path,
-            json_report=json_path if json_path.exists() else None,
-            command=command,
-            duration_seconds=time.monotonic() - started,
-            stdout=completed.stdout,
-            stderr=completed.stderr,
-            details={"mode": "perception_summary", "files_to_send": [html_path]},
-        )
-
-    def _perception_script(self) -> Path:
-        return self.config.workspace_root / ".ai/skills/perception-data-summary/scripts/analyze_perception_data_summary.py"
-
-    def _extract_report_path(self, output: str, pattern: str) -> Path | None:
-        match = re.search(pattern, output, re.MULTILINE)
-        if not match:
-            return None
-        return Path(match.group(1).strip())

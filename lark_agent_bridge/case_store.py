@@ -358,10 +358,29 @@ class CaseStore:
     def _persist(self) -> None:
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
         payload = {case_id: case.to_dict() for case_id, case in self._cases.items()}
-        self.state_file.write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        _atomic_write_json(self.state_file, payload)
+
+
+def _atomic_write_json(path: Path, payload: object) -> None:
+    """Write JSON to *path* atomically via write-to-temp + os.replace."""
+    import os
+    import tempfile
+
+    data = json.dumps(payload, ensure_ascii=False, indent=2)
+    parent = path.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(dir=parent, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(data)
+            fh.flush()
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 # ---------------------------------------------------------------------------

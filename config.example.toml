@@ -6,7 +6,7 @@ data_dir = "data"
 # Empty means no group restriction. Fill this list only when you want a group allowlist.
 allowed_chats = []
 allowed_users = []
-command_prefixes = ["/signal"]
+command_prefixes = []
 
 [signal_aliases]
 "LD normal" = "SIGNAL_X3D_LD_NORMAL_OVER_ALL_DATA"
@@ -18,6 +18,10 @@ command_prefixes = ["/signal"]
 [download]
 max_bytes = 5368709120
 timeout_seconds = 60
+# Allow downloading from private/internal network addresses (192.168.*, 10.*, 127.*, etc.).
+# Default is true — required for internal file servers and NAS.
+# Set to false only if the bridge is exposed to untrusted users.
+allow_private_urls = true
 
 [local_resources]
 # Security gate for local files mentioned in chat.
@@ -39,6 +43,9 @@ cleanup_interval_seconds = 60
 
 [event_consumer]
 # The bridge listens to one EventKey per lark-cli subprocess.
+# The default message listener does not receive card button callbacks; cards
+# hide callback-only buttons unless the deployment separately consumes
+# card.action.trigger.
 event_key = "im.message.receive_v1"
 # `lark-cli event consume` must emit `[event] ready event_key=...` on stderr
 # before the bridge starts treating the listener as healthy.
@@ -49,6 +56,11 @@ restart_on_failure = true
 max_restarts = 0
 restart_initial_delay_seconds = 1
 restart_max_delay_seconds = 60
+# When lark-cli reconnects it can replay old lightweight messages. Drop stale
+# help/identity/chat messages created before listener readiness; analysis requests
+# with Bug links, logs, files, signals, or follow-up context are still processed.
+drop_stale_light_interactions = true
+stale_light_interaction_grace_seconds = 120
 
 [lark]
 reply_in_thread = false
@@ -60,9 +72,11 @@ bot_open_id = ""
 bot_name = ""
 
 [claude_agent]
+# Optional compatibility route. Empty trigger_prefixes means the bot does not
+# expose legacy local skill-analysis chat triggers by default.
 enabled = true
 command = "claude"
-trigger_prefixes = ["/skill", "/claude"]
+trigger_prefixes = []
 working_dir = "../.."
 add_dirs = ["../.."]
 allowed_tools = ["Read", "Grep", "Glob", "LS"]
@@ -82,9 +96,9 @@ provider = "codex"
 command = "codex"
 working_dir = "../.."
 timeout_seconds = 5400
-# Final Agent summary is an enhancement step. Keep it short so generated HTML
-# and script summaries can be returned even if Codex/Claude is slow.
-agent_summary_timeout_seconds = 90
+# Final Agent summary is an enhancement step. Use a longer idle window so
+# Codex/Claude can finish large log/source reads before falling back.
+agent_summary_timeout_seconds = 300
 max_prompt_chars = 16000
 upload_result_files = true
 # Leave empty so generic bug links ask for a concrete direction instead of
@@ -124,10 +138,51 @@ followup_max_history_turns = 6
 max_tokens = 1024
 temperature = 0.3
 
+[knowledge]
+# Personal knowledge-base QA. Chinese triggers such as `知识库` and `查知识`
+# are routed before ordinary omlx chat. `/kb` and `/qa` remain compatibility
+# aliases. Fuzzy ADB signal simulation questions use deterministic templates
+# when source evidence is available.
+enabled = true
+storage = "data/knowledge/knowledge.sqlite"
+max_hits = 5
+trigger_prefixes = ["知识库", "查知识", "/kb", "/qa"]
+answer_provider = "omlx"
+
+[[knowledge.sources]]
+id = "guideengine-adb"
+type = "local_json"
+path = "/Users/zhuyl/Documents/workspace/xp/guideengine/.worktrees/os6_xpdev/config/adb/adb_data.json"
+title = "guideengine ADB 命令"
+
+[[knowledge.sources]]
+id = "guideengine-base"
+type = "feishu_base"
+url = "https://xiaopeng.feishu.cn/wiki/Tog2wE6sxij4SjkNp6UcRK6Xn6l?table=tblHjB1Nm6m9EbkL&view=vewmlXCvgy"
+title = "guideengine 多维表格知识"
+
+[[knowledge.sources]]
+id = "guideengine-wiki"
+type = "feishu_doc"
+url = "https://xiaopeng.feishu.cn/wiki/D6Vhw7iB3iTWnLkdBx3coVQQnuh"
+title = "guideengine Wiki 知识"
+
+[[knowledge.sources]]
+id = "guideengine-signals"
+type = "guideengine_signal"
+title = "guideengine 信号模拟源码"
+
 [report_server]
 enabled = true
 bind_host = "0.0.0.0"
 port = 8765
+# Admin API authentication token.
+# When set, all write operations (terminate, delete, skill CRUD) require
+# the Authorization header: `Authorization: Bearer <admin_token>`.
+# You can also create user accounts via the admin UI once authenticated.
+# Prefer environment variable for secrets:
+#   export LARK_AGENT_BRIDGE_ADMIN_TOKEN="your-secret-token"
+admin_token = ""
 # Optional: override with an externally reachable URL when running behind a reverse proxy.
 #   export LARK_AGENT_BRIDGE_REPORT_PUBLIC_BASE_URL="https://bridge.example.com/reports"
 # Leave empty to auto-publish the current LAN IP, for example `http://10.x.x.x:8765/reports`.

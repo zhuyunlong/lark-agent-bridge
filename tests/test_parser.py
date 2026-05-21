@@ -9,6 +9,7 @@ from lark_agent_bridge.parser import (
     parse_claude_skill_request,
     parse_direct_analysis_request,
     parse_perception_summary_request,
+    parse_rom_version_lookup_request,
     parse_signal_request,
     should_use_omlx_chat,
 )
@@ -17,7 +18,7 @@ from lark_agent_bridge.signal_resolver import SignalResolver
 
 class ParserTests(unittest.TestCase):
     def test_parse_chinese_signal_url_and_time(self):
-        request = parse_signal_request("@bot /signal 132002 日志 https://example.com/log.zip 13-14 点")
+        request = parse_signal_request("@bot 调查 132002 信号链路 日志 https://example.com/log.zip 13-14 点")
 
         self.assertEqual(request.signal, "132002")
         self.assertEqual(request.since, "13-14")
@@ -60,10 +61,39 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(request.signal, "SIGNAL_VCU_ELECTRICIT_PERCENT")
         self.assertTrue(request.triggered)
 
-    def test_missing_signal_on_triggered_request(self):
+    def test_rom_version_does_not_fuzzy_match_as_signal(self):
+        text = "XMARTM3EUD03E5_V6.2.2.6808_20260424002644.3_REV01_USERDEBUG 调用rom-version skill 找下导航版本"
+
+        request = parse_signal_request(text)
+
+        self.assertFalse(request.triggered)
+        self.assertIsNone(request.signal)
+
+    def test_parse_rom_version_lookup_request(self):
+        text = "XMARTM3EUD03E5_V6.2.2.6808_20260424002644.3_REV01_USERDEBUG 调用rom-version skill 找下导航版本"
+
+        request = parse_rom_version_lookup_request(text)
+
+        self.assertTrue(request.triggered)
+        self.assertEqual(
+            request.rom_version,
+            "XMARTM3EUD03E5_V6.2.2.6808_20260424002644.3_REV01_USERDEBUG",
+        )
+        self.assertIn("导航版本", request.prompt)
+
+    def test_help_bug_theme_example_is_a_valid_bug_request(self):
+        text = "@bot https://project.feishu.cn/xpfailuremgmt/buglo/detail/6991604970 分析主题变化"
+
+        request = parse_bug_request(text)
+
+        self.assertTrue(request.triggered)
+        self.assertEqual(request.bug_url, "https://project.feishu.cn/xpfailuremgmt/buglo/detail/6991604970")
+        self.assertEqual(request.prompt, "分析主题变化")
+
+    def test_signal_slash_command_is_not_a_default_trigger(self):
         request = parse_signal_request("/signal 日志 https://example.com/log.zip")
 
-        self.assertEqual(request.error, "missing_signal")
+        self.assertFalse(request.triggered)
         self.assertIsNone(request.signal)
 
     def test_basic_chat_identity_reply(self):
@@ -72,26 +102,51 @@ class ParserTests(unittest.TestCase):
         self.assertIsNotNone(reply)
         self.assertIn("Lark Agent Bridge", reply)
         self.assertIn("当前感知数据总结", reply)
+        self.assertIn("个人知识库问答", reply)
 
     def test_basic_chat_help_reply(self):
         reply = build_basic_chat_reply("帮助")
 
         self.assertIsNotNone(reply)
-        self.assertIn("/signal", reply)
-        self.assertIn("/perception-summary", reply)
+        self.assertIn("常见触发方式", reply)
+        self.assertIn("https://project.feishu.cn/xpfailuremgmt/buglo/detail/6991604970 分析主题变化", reply)
+        self.assertIn("知识库 OTA信号如何模拟", reply)
+        self.assertIn("查知识 主题信号如何模拟", reply)
+        self.assertIn("/kb 仍兼容", reply)
+        self.assertIn("ROM/导航版本", reply)
+        self.assertIn("找下导航版本", reply)
+        self.assertNotIn("SIGNAL_OTA_ST 怎么模拟", reply)
+        self.assertIn("个人知识库", reply)
+        self.assertIn("signal-chain-analyzer", reply)
+        self.assertIn("SIGNAL_X3D_LD_NORMAL_OVER_ALL_DATA", reply)
+        self.assertNotIn("/perception-summary", reply)
+        self.assertNotIn("/skill", reply)
+        self.assertNotIn("/claude", reply)
         self.assertIn("分析启动和卡顿 file_xxx", reply)
 
-    def test_parse_claude_skill_prefix(self):
+    def test_basic_chat_capability_question_lists_current_capabilities(self):
+        reply = build_basic_chat_reply("你能做什么")
+
+        self.assertIsNotNone(reply)
+        self.assertIn("Bug 分析", reply)
+        self.assertIn("个人知识库", reply)
+        self.assertIn("普通聊天", reply)
+
+    def test_parse_claude_skill_prefix_requires_opt_in(self):
         request = parse_claude_skill_request("@bot /skill 请分析这个日志排查流程")
 
+        self.assertFalse(request.triggered)
+
+    def test_parse_claude_skill_prefix_when_configured(self):
+        request = parse_claude_skill_request("@bot /skill 请分析这个日志排查流程", trigger_prefixes=["/skill"])
+
         self.assertTrue(request.triggered)
         self.assertEqual(request.prompt, "请分析这个日志排查流程")
 
-    def test_parse_claude_skill_prefix_without_slash(self):
+    def test_parse_claude_skill_prefix_without_slash_requires_opt_in(self):
         request = parse_claude_skill_request("@bot skill 请分析这个日志排查流程")
 
-        self.assertTrue(request.triggered)
-        self.assertEqual(request.prompt, "请分析这个日志排查流程")
+        self.assertFalse(request.triggered)
 
     def test_parse_claude_skill_keyword_must_be_first(self):
         request = parse_claude_skill_request("@bot 帮我 skill 请分析这个日志排查流程")
@@ -134,27 +189,32 @@ class ParserTests(unittest.TestCase):
         )
         self.assertEqual(request.prompt, "调查 SIGNAL_CTL_XPILOT_ADAS_LD_STATE 信号链路和现状")
 
-    def test_parse_perception_summary_prefix(self):
+    def test_parse_perception_summary_prefix_is_not_a_default_trigger(self):
+        request = parse_perception_summary_request("@bot /perception-summary file_abc123")
+
+        self.assertFalse(request.triggered)
+
+    def test_parse_perception_summary_natural_language(self):
         request = parse_perception_summary_request("@bot perception-summary 总结当前感知数据")
 
         self.assertTrue(request.triggered)
-        self.assertEqual(request.prompt, "总结当前感知数据")
+        self.assertEqual(request.prompt, "perception-summary 总结当前感知数据")
 
-    def test_parse_perception_summary_prefix_without_slash(self):
+    def test_parse_perception_summary_keyword_without_slash(self):
         request = parse_perception_summary_request("@bot perception 总结当前感知数据")
 
         self.assertTrue(request.triggered)
-        self.assertEqual(request.prompt, "总结当前感知数据")
+        self.assertEqual(request.prompt, "perception 总结当前感知数据")
 
     def test_parse_perception_summary_extracts_file_resource(self):
-        request = parse_perception_summary_request("@bot /perception-summary 总结当前感知数据 file_abc123")
+        request = parse_perception_summary_request("@bot 总结当前感知数据 file_abc123")
 
         self.assertTrue(request.triggered)
         self.assertEqual(request.resources[0].kind, "file")
 
     def test_parse_perception_summary_keeps_full_lark_file_v3_key(self):
         request = parse_perception_summary_request(
-            '@bot /perception-summary 总结当前感知数据 <file key="file_v3_0011s_6d5d723c-ec0b-44f3-9908-a02be496b54g" name="Log.zip"/>'
+            '@bot 总结当前感知数据 <file key="file_v3_0011s_6d5d723c-ec0b-44f3-9908-a02be496b54g" name="Log.zip"/>'
         )
 
         self.assertTrue(request.triggered)

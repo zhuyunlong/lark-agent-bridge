@@ -16,7 +16,7 @@
 
 ## 1. 项目定位
 
-`Lark Agent Bridge` 是一个本地运行的飞书机器人桥接层。它不直接把飞书消息当成“任意命令执行器”，而是把消息限制在一组可控能力里，再把本地脚本、只读 Agent、OMLX 模型和 HTML 报告回传能力串起来。
+`Lark Agent Bridge` 是一个本地运行的飞书机器人桥接层。它不直接把飞书消息当成“任意命令执行器”，而是把消息限制在一组可控能力里，再把本地脚本、Bug 总结 Agent、OMLX 模型和 HTML 报告回传能力串起来。
 
 它解决的是这类闭环：
 
@@ -41,11 +41,9 @@
    - 基于飞书文件/图片/URL 的直传日志分析
 4. `perception_summary`
    - 汇总当前感知数据统计
-5. `claude_skill`
-   - 通过 `/skill` 或 `/claude` 触发本地只读分析
-6. `omlx_chat`
+5. `omlx_chat`
    - 普通聊天
-7. `analysis_followup`
+6. `analysis_followup`
    - 对已有分析结果做续聊、追问或重分析
 
 ### 2.2 bug 分析内部路由
@@ -69,7 +67,7 @@
 |---|---|
 | `cli.py` | 命令行入口，提供 `check / handle-event / run-signal / listen` |
 | `app.py` | 总调度器，负责权限判断、消息路由、状态更新、回包 |
-| `parser.py` | 文本解析，把消息解析成 `bug / direct / signal / perception / skill / chat` 请求 |
+| `parser.py` | 文本解析，把消息解析成 `bug / direct / signal / perception / chat / followup` 请求 |
 | `policy.py` | 权限闸门，决定当前消息是否允许进入能力面 |
 | `agents.py` | 本地分析执行层，封装 `codex / claude / omlx` 和 bug 分析脚本 |
 | `downloader.py` | 下载飞书资源、URL 资源、本地资源 |
@@ -95,7 +93,6 @@ flowchart LR
     F --> I[SignalLifecycleHandler]
     F --> J[BugAnalysisRunner]
     F --> K[PerceptionSummaryRunner]
-    F --> L[ClaudeSkillRunner]
     F --> M[OmlxChatClient]
 
     J --> N[feishu-bug-fetcher / meegle]
@@ -107,7 +104,6 @@ flowchart LR
 
     I --> Q
     K --> R
-    L --> S
     M --> T[Local OMLX API]
 
     D --> U[HtmlReportPublisher]
@@ -147,7 +143,7 @@ flowchart TD
     P -- 是 --> Q[本地 Agent 判断 route]
     P -- 否 --> R[按 parser 规则路由]
 
-    Q --> S[signal / bug / direct / perception / skill / chat / followup]
+    Q --> S[signal / bug / direct / perception / chat / followup]
     R --> S
 
     S --> T[执行能力]
@@ -217,7 +213,7 @@ flowchart LR
     A2 --> C1[聊天]
     A2 --> C2[bug 分析]
     A2 --> C3[附件直传分析]
-    A2 --> C4[perception / signal / skill]
+    A2 --> C4[perception / signal]
     A2 --> C5[reply 续聊]
 
     A3 --> D1[普通成员: 仅日志分析]
@@ -391,11 +387,11 @@ sequenceDiagram
 
 ### 10.1 直接文本触发
 
-- `@bot /signal 132002 ...`
+- `@bot 调查 132002 信号链路 日志 file_xxx`
 - `@bot https://project.feishu.cn/.../buglo/detail/... 调查3D启动时序`
 - `@bot 分析启动和卡顿 file_xxx`
-- `@bot /perception-summary 总结当前感知数据 file_xxx`
-- `@bot /skill 分析这个目录`
+- `@bot 总结当前感知数据 file_xxx`
+- `@bot 调查 SIGNAL_X3D_LD_NORMAL_OVER_ALL_DATA 日志 file_xxx`
 - `@bot /chat 讲个笑话`
 
 ### 10.2 reply 触发
@@ -454,4 +450,3 @@ sequenceDiagram
    - 群 / 私聊 / 授权群 / 外部群 / 超级用户 各自支持什么
 5. **补 `report_server` 的非绑定端口测试替身**
    - 把当前 CI/本地环境不稳定点摘掉
-

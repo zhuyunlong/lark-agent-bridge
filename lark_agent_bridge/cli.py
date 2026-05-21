@@ -10,6 +10,10 @@ import threading
 
 from .app import BridgeApp
 from .config import load_config, with_cli_overrides
+from .knowledge import KnowledgeService
+from .log import get_logger, setup_logging
+
+logger = get_logger("cli")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -32,12 +36,38 @@ def build_parser() -> argparse.ArgumentParser:
     listen = subparsers.add_parser("listen", help="Listen to Feishu Bot message events.")
     _add_common_options(listen)
 
+    knowledge = subparsers.add_parser("knowledge", help="Manage and query the local knowledge base.")
+    knowledge_subparsers = knowledge.add_subparsers(dest="knowledge_command", required=True)
+    knowledge_sync = knowledge_subparsers.add_parser("sync", help="Sync configured knowledge sources.")
+    _add_common_options(knowledge_sync)
+    knowledge_sources = knowledge_subparsers.add_parser("sources", help="List indexed knowledge sources.")
+    _add_common_options(knowledge_sources)
+    knowledge_search = knowledge_subparsers.add_parser("search", help="Search the knowledge index.")
+    _add_common_options(knowledge_search)
+    knowledge_search.add_argument("query", nargs="+", help="Search query.")
+    knowledge_answer = knowledge_subparsers.add_parser("answer", help="Answer a question from the knowledge index.")
+    _add_common_options(knowledge_answer)
+    knowledge_answer.add_argument("question", nargs="+", help="Question text.")
+    knowledge_add = knowledge_subparsers.add_parser("add", help="Add one manual knowledge item.")
+    _add_common_options(knowledge_add)
+    knowledge_add.add_argument("--source-id", default="manual", help="Manual source id.")
+    knowledge_add.add_argument("--title", required=True, help="Knowledge title.")
+    knowledge_add.add_argument("--content", required=True, help="Knowledge content.")
+    knowledge_add.add_argument("--source-ref", default="", help="Optional source reference.")
+    knowledge_add_source = knowledge_subparsers.add_parser("add-source", help="Register an empty manual source.")
+    _add_common_options(knowledge_add_source)
+    knowledge_add_source.add_argument("--source-id", required=True, help="Source id.")
+    knowledge_add_source.add_argument("--type", default="manual", help="Source type.")
+    knowledge_add_source.add_argument("--title", default="", help="Source title.")
+    knowledge_add_source.add_argument("--source-ref", default="", help="Source reference.")
+
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    setup_logging()
     try:
         config = with_cli_overrides(load_config(args.config), dry_run=args.dry_run)
         progress_callback = _print_progress if args.command == "listen" and not config.dry_run else None
@@ -52,9 +82,49 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "run-signal":
             _print_json(app.run_signal(signal=args.signal, log_path=args.log_path, since=args.since).to_dict())
             return 0
+        if args.command == "knowledge":
+            service = KnowledgeService(config)
+            if args.knowledge_command == "sync":
+                _print_json(service.sync_all())
+                return 0
+            if args.knowledge_command == "sources":
+                _print_json({"sources": service.list_sources()})
+                return 0
+            if args.knowledge_command == "search":
+                query = " ".join(args.query)
+                _print_json({"hits": [hit.to_dict() for hit in service.search(query)]})
+                return 0
+            if args.knowledge_command == "answer":
+                question = " ".join(args.question)
+                _print_json(service.answer(question).to_dict())
+                return 0
+            if args.knowledge_command == "add":
+                _print_json(
+                    {
+                        "item": service.add_text(
+                            source_id=args.source_id,
+                            title=args.title,
+                            content=args.content,
+                            source_ref=args.source_ref,
+                        )
+                    }
+                )
+                return 0
+            if args.knowledge_command == "add-source":
+                _print_json(
+                    {
+                        "source": service.register_source(
+                            source_id=args.source_id,
+                            source_type=args.type,
+                            title=args.title,
+                            source_ref=args.source_ref,
+                        )
+                    }
+                )
+                return 0
         if args.command == "listen":
             if config.dry_run:
-                print("dry-run: listen would consume im.message.receive_v1 events with lark-cli")
+                logger.info("dry-run: listen would consume im.message.receive_v1 events with lark-cli")
                 return 0
             if config.job_retention.purge_all_on_listen_start:
                 app.purge_all_jobs()
@@ -70,7 +140,7 @@ def main(argv: list[str] | None = None) -> int:
                     stop_cleanup.set()
             return 0
     except Exception as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        logger.error("fatal: %s", exc, exc_info=True)
         return 1
     parser.error(f"unknown command: {args.command}")
     return 2

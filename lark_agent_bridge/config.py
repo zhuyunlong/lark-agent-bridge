@@ -18,6 +18,8 @@ from .models import (
     EventConsumerOptions,
     IntentAnalysisOptions,
     JobRetentionOptions,
+    KnowledgeOptions,
+    KnowledgeSourceOptions,
     LarkOptions,
     LocalResourceOptions,
     NotificationOptions,
@@ -66,6 +68,7 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
     workflow_archive_data = data.get("workflow_archive") or {}
     notifications_data = data.get("notifications") or {}
     dual_agent_data = data.get("dual_agent") or {}
+    knowledge_data = data.get("knowledge") or {}
 
     return BridgeConfig(
         dry_run=_bool_value(os.environ.get("LARK_AGENT_BRIDGE_DRY_RUN"), bool(data.get("dry_run", True))),
@@ -81,11 +84,12 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
         data_dir=_resolve_path(data.get("data_dir", "data"), base_dir),
         allowed_chats=_env_string_list("LARK_AGENT_BRIDGE_ALLOWED_CHATS", data.get("allowed_chats", []), "allowed_chats"),
         allowed_users=_env_string_list("LARK_AGENT_BRIDGE_ALLOWED_USERS", data.get("allowed_users", []), "allowed_users"),
-        command_prefixes=_string_list(data.get("command_prefixes", ["/signal"]), "command_prefixes"),
+        command_prefixes=_string_list(data.get("command_prefixes", []), "command_prefixes"),
         signal_aliases=aliases,
         download=DownloadConfig(
             max_bytes=int(download_data.get("max_bytes", 5 * 1024 * 1024 * 1024)),
             timeout_seconds=int(download_data.get("timeout_seconds", 60)),
+            allow_private_urls=bool(download_data.get("allow_private_urls", True)),
         ),
         local_resources=LocalResourceOptions(
             enabled=bool(local_resource_data.get("enabled", LocalResourceOptions().enabled)),
@@ -129,6 +133,18 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
                     EventConsumerOptions().restart_max_delay_seconds,
                 )
             ),
+            drop_stale_light_interactions=bool(
+                event_consumer_data.get(
+                    "drop_stale_light_interactions",
+                    EventConsumerOptions().drop_stale_light_interactions,
+                )
+            ),
+            stale_light_interaction_grace_seconds=float(
+                event_consumer_data.get(
+                    "stale_light_interaction_grace_seconds",
+                    EventConsumerOptions().stale_light_interaction_grace_seconds,
+                )
+            ),
         ),
         lark=LarkOptions(
             reply_in_thread=bool(lark_data.get("reply_in_thread", False)),
@@ -142,10 +158,10 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
             enabled=bool(claude_data.get("enabled", True)),
             command=str(claude_data.get("command", "claude")),
             trigger_prefixes=_string_list(
-                claude_data.get("trigger_prefixes", ["/skill", "/claude"]),
+                claude_data.get("trigger_prefixes", []),
                 "claude_agent.trigger_prefixes",
             ),
-            working_dir=_optional_path(claude_data.get("working_dir"), base_dir),
+            working_dir=_optional_path(claude_data.get("working_dir"), base_dir, "claude_agent.working_dir"),
             add_dirs=_path_list(claude_data.get("add_dirs", []), base_dir, "claude_agent.add_dirs"),
             allowed_tools=_string_list(
                 claude_data.get("allowed_tools", ["Read", "Grep", "Glob", "LS"]),
@@ -163,7 +179,7 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
             enabled=bool(bug_data.get("enabled", True)),
             provider=str(bug_data.get("provider", "claude")),
             command=str(bug_data.get("command", "claude")),
-            working_dir=_optional_path(bug_data.get("working_dir"), base_dir),
+            working_dir=_optional_path(bug_data.get("working_dir"), base_dir, "bug_analysis.working_dir"),
             timeout_seconds=int(bug_data.get("timeout_seconds", 5400)),
             agent_summary_timeout_seconds=int(
                 bug_data.get(
@@ -186,7 +202,7 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
             enabled=bool(intent_data.get("enabled", False)),
             provider=str(intent_data.get("provider", "")),
             command=str(intent_data.get("command", "")),
-            working_dir=_optional_path(intent_data.get("working_dir"), base_dir),
+            working_dir=_optional_path(intent_data.get("working_dir"), base_dir, "intent_analysis.working_dir"),
             timeout_seconds=int(intent_data.get("timeout_seconds", 180)),
             max_prompt_chars=int(intent_data.get("max_prompt_chars", IntentAnalysisOptions().max_prompt_chars)),
             system_prompt=str(intent_data.get("system_prompt", IntentAnalysisOptions().system_prompt)),
@@ -225,6 +241,10 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
                 os.environ.get("LARK_AGENT_BRIDGE_REPORT_PUBLIC_BASE_URL")
                 or report_server_data.get("public_base_url", ReportServerOptions().public_base_url)
             ),
+            admin_token=str(
+                os.environ.get("LARK_AGENT_BRIDGE_ADMIN_TOKEN")
+                or report_server_data.get("admin_token", "")
+            ),
         ),
         approval=ApprovalOptions(
             enabled=bool(approval_data.get("enabled", ApprovalOptions().enabled)),
@@ -246,6 +266,20 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
         ),
         dual_agent=DualAgentOptions(
             enabled=bool(dual_agent_data.get("enabled", DualAgentOptions().enabled)),
+        ),
+        knowledge=KnowledgeOptions(
+            enabled=bool(knowledge_data.get("enabled", KnowledgeOptions().enabled)),
+            storage=_resolve_path(
+                knowledge_data.get("storage", KnowledgeOptions().storage),
+                base_dir,
+            ),
+            max_hits=int(knowledge_data.get("max_hits", KnowledgeOptions().max_hits)),
+            trigger_prefixes=_string_list(
+                knowledge_data.get("trigger_prefixes", KnowledgeOptions().trigger_prefixes),
+                "knowledge.trigger_prefixes",
+            ),
+            answer_provider=str(knowledge_data.get("answer_provider", KnowledgeOptions().answer_provider)),
+            sources=_knowledge_sources(knowledge_data.get("sources", []), base_dir),
         ),
         runner_timeout_seconds=int(runner_data.get("timeout_seconds", 900)),
     )
@@ -310,11 +344,11 @@ def _optional_str(value: Any, field_name: str) -> str | None:
     return value
 
 
-def _optional_path(value: Any, base_dir: Path) -> Path | None:
+def _optional_path(value: Any, base_dir: Path, field_name: str = "path") -> Path | None:
     if value is None or value == "":
         return None
     if not isinstance(value, (str, Path)):
-        raise ValueError("claude_agent.working_dir must be a path string")
+        raise ValueError(f"{field_name} must be a path string")
     return _resolve_path(value, base_dir)
 
 
@@ -322,3 +356,34 @@ def _path_list(value: Any, base_dir: Path, field_name: str) -> list[Path]:
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         raise ValueError(f"{field_name} must be a list of path strings")
     return [_resolve_path(item, base_dir) for item in value]
+
+
+def _knowledge_sources(value: Any, base_dir: Path) -> list[KnowledgeSourceOptions]:
+    if value in (None, ""):
+        return []
+    if not isinstance(value, list):
+        raise ValueError("knowledge.sources must be a list of tables")
+    sources: list[KnowledgeSourceOptions] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            raise ValueError(f"knowledge.sources[{index}] must be a table")
+        source_id = str(item.get("id") or "").strip()
+        source_type = str(item.get("type") or "").strip()
+        if not source_id:
+            raise ValueError(f"knowledge.sources[{index}].id is required")
+        if not source_type:
+            raise ValueError(f"knowledge.sources[{index}].type is required")
+        raw_path = item.get("path") or ""
+        path = str(_resolve_path(raw_path, base_dir)) if raw_path else ""
+        sources.append(
+            KnowledgeSourceOptions(
+                id=source_id,
+                type=source_type,
+                path=path,
+                url=str(item.get("url") or "").strip(),
+                title=str(item.get("title") or "").strip(),
+                table_id=str(item.get("table_id") or "").strip(),
+                view_id=str(item.get("view_id") or "").strip(),
+            )
+        )
+    return sources

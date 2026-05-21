@@ -207,29 +207,45 @@ def plan_signal_report(
     render_summary_html: Callable[[str], str],
     render_source_rows_html: Callable[[list[tuple[object, ...]]], str],
 ) -> ReportComposition:
-    sections = build_structured_summary_sections(
-        conclusions=[
-            {"sev": verdict_sev, "title": "链路判断", "detail": judgement_text or verdict_text},
-            {"sev": verdict_sev, "title": "结论边界", "detail": verdict_text},
-        ],
-        evidence_rows=_signal_summary_evidence_rows(
-            evidence_rows=evidence_rows,
-            source_rows=source_rows,
-            judgement_text=judgement_text,
+    sections = [
+        ReportSection(
+            kind="issues",
+            title="结论摘要",
+            items=[
+                {"sev": verdict_sev, "title": "链路判断", "detail": judgement_text or verdict_text},
+                {"sev": verdict_sev, "title": "结论边界", "detail": verdict_text},
+            ],
+            empty_text="当前证据不足，暂无法形成稳定结论。",
         ),
-        causes=_signal_cause_items(
-            lifecycle_nodes=lifecycle_nodes,
-            dataflow_nodes=dataflow_nodes,
-            summary_text=summary_text,
-            verdict_sev=verdict_sev,
+        ReportSection(
+            kind="table",
+            title="关键证据",
+            rows=_signal_summary_evidence_rows(
+                evidence_rows=evidence_rows,
+                source_rows=source_rows,
+                judgement_text=judgement_text,
+            ),
+            cols=SUMMARY_EVIDENCE_COLS,
+            empty_text="未提取到可直接支撑结论的关键证据。",
         ),
-        confirmations=boundary_issues,
-        actions=_signal_action_items(
-            evidence_rows=evidence_rows,
-            source_rows=source_rows,
-            boundary_issues=boundary_issues,
+        ReportSection(
+            kind="issues",
+            title="待确认项",
+            items=_clean_items(boundary_issues),
+            empty_text="当前摘要层未识别额外待确认项。",
         ),
-    ) + [
+        ReportSection(
+            kind="issues",
+            title="建议动作",
+            items=_clean_items(
+                _signal_action_items(
+                    evidence_rows=evidence_rows,
+                    source_rows=source_rows,
+                    boundary_issues=boundary_issues,
+                )
+            ),
+            empty_text="当前摘要层未生成额外动作建议。",
+        ),
         ReportSection(
             kind="flow",
             title="生命周期流图",
@@ -241,13 +257,6 @@ def plan_signal_report(
             title="数据流图",
             description="先看源码映射和分发，再看业务消费与最终判定落点。",
             nodes=dataflow_nodes,
-        ),
-        ReportSection(
-            kind="table",
-            title="关键日志证据",
-            rows=evidence_rows,
-            cols=["时间", "相对启动", "进程/线程", "阶段", "证据"],
-            empty_text="未提取到可用日志证据",
         ),
         ReportSection(
             kind="issues",
@@ -372,7 +381,7 @@ def _signal_summary_evidence_rows(
     judgement_text: str,
 ) -> list[tuple[object, ...]]:
     rows: list[tuple[object, ...]] = []
-    for row in evidence_rows[:6]:
+    for row in _prioritize_signal_evidence_rows(evidence_rows)[:4]:
         values = tuple(row)
         time_text = values[0] if len(values) > 0 else ""
         relative = values[1] if len(values) > 1 else ""
@@ -380,7 +389,7 @@ def _signal_summary_evidence_rows(
         stage = values[3] if len(values) > 3 else "日志"
         evidence = values[4] if len(values) > 4 else ""
         rows.append((stage, f"{time_text} {relative}".strip(), actor, evidence, judgement_text or "支撑当前链路判断"))
-    for row in source_rows[:2]:
+    for row in _prioritize_signal_source_rows(source_rows)[:2]:
         values = tuple(row)
         file_name = values[0] if len(values) > 0 else ""
         line = values[1] if len(values) > 1 else ""
@@ -389,23 +398,29 @@ def _signal_summary_evidence_rows(
     return rows[:8]
 
 
-def _signal_cause_items(
-    *,
-    lifecycle_nodes: list[dict[str, object]],
-    dataflow_nodes: list[dict[str, object]],
-    summary_text: str,
-    verdict_sev: str,
-) -> list[dict[str, object]]:
-    items: list[dict[str, object]] = []
-    if summary_text.strip():
-        items.append({"sev": verdict_sev, "title": "脚本综合判断", "detail": summary_text.strip()})
-    for node in (dataflow_nodes + lifecycle_nodes)[:3]:
-        title = str(node.get("title") or "").strip()
-        meta = str(node.get("meta") or "").strip()
-        note = str(node.get("note") or "").strip()
-        if title or meta or note:
-            items.append({"sev": "yellow", "title": title or meta, "detail": "；".join(part for part in [meta, note] if part)})
-    return items[:4]
+def _prioritize_signal_evidence_rows(rows: list[tuple[object, ...]]) -> list[tuple[object, ...]]:
+    def score(row: tuple[object, ...]) -> tuple[int, int]:
+        values = tuple(row)
+        stage = str(values[3] if len(values) > 3 else "").casefold()
+        evidence = str(values[4] if len(values) > 4 else "").casefold()
+        text = f"{stage}\n{evidence}"
+        if any(token in text for token in ("datacenter", "getsignalflow", "业务", "consumer", "callback", "onnextdata")):
+            return (0, len(evidence))
+        if any(token in text for token in ("register", "注册", "injectsignalprovider")):
+            return (1, len(evidence))
+        return (2, len(evidence))
+
+    return sorted(rows, key=score)
+
+
+def _prioritize_signal_source_rows(rows: list[tuple[object, ...]]) -> list[tuple[object, ...]]:
+    prioritized: list[tuple[object, ...]] = []
+    for row in rows:
+        values = tuple(row)
+        text = "\n".join(str(value) for value in values).casefold()
+        if any(token in text for token in ("业务", "getsignalflow", "collect", "dispatch", "onnextdata", "signal_")):
+            prioritized.append(row)
+    return prioritized
 
 
 def _signal_action_items(

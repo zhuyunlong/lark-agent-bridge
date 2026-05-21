@@ -6,8 +6,7 @@
   "message_id": "om_sample_no_log",
   "sender_id": "ou_sample",
   "message_type": "text",
-  "content": "@bot /signal 132002",
+  "content": "@bot 调查 132002 信号链路",
   "create_time": "1770000000000",
   "timestamp": "1770000000000"
 }
-

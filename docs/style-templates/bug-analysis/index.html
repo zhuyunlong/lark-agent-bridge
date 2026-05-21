@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bug 分析 Skill HTML 报告样例</title>
+  <style>
+:root {
+  --c-bg: #f8f9fb; --c-surface: #ffffff; --c-border: #e2e5ea;
+  --c-text: #1a1d23; --c-text-2: #5a6170; --c-text-3: #8b919e;
+  --c-accent: #3b5bdb; --c-accent-light: #edf0ff;
+  --c-red: #e03131; --c-red-bg: #fff1f1; --c-red-border: #fecdd3;
+  --c-yellow: #e67700; --c-yellow-bg: #fff8eb; --c-yellow-border: #fde68a;
+  --c-green: #0ca678; --c-green-bg: #ecfdf5; --c-green-border: #a7f3d0;
+  --radius: 10px; --shadow: 0 1px 3px rgba(0,0,0,.06), 0 4px 12px rgba(0,0,0,.04);
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; -webkit-font-smoothing: antialiased; }
+body {
+  font-family: "Inter", -apple-system, "PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+  margin: 0; min-height: 100vh; overflow-wrap: anywhere;
+  color: var(--c-text); background: var(--c-bg);
+  font-size: 14px; line-height: 1.6;
+}
+.container { max-width: 1200px; margin: 0 auto; padding: 32px 28px 48px; }
+h1 { margin: 0 0 6px; font-size: 26px; font-weight: 700; letter-spacing: -0.02em; color: var(--c-text); }
+.sub { max-width: 860px; color: var(--c-text-2); margin-bottom: 28px; font-size: 13px; line-height: 1.7; }
+.verdict {
+  padding: 18px 24px; border-radius: var(--radius); color: #fff;
+  font-size: 16px; font-weight: 600; margin-bottom: 24px; line-height: 1.6;
+  box-shadow: var(--shadow);
+}
+.v-red { background: var(--c-red); }
+.v-yellow { background: var(--c-yellow); }
+.v-green { background: var(--c-green); }
+.cards {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px; margin-bottom: 24px;
+}
+.card {
+  background: var(--c-surface); border-radius: var(--radius);
+  border: 1px solid var(--c-border); border-top: 3px solid var(--c-text-3);
+  padding: 16px 18px; box-shadow: var(--shadow);
+  transition: box-shadow .15s;
+}
+.card:hover { box-shadow: 0 2px 8px rgba(0,0,0,.1); }
+.card .lbl { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--c-text-3); }
+.card .val { font-size: 22px; font-weight: 700; margin-top: 4px; word-break: break-word; color: var(--c-text); }
+.card .desc { color: var(--c-text-2); font-size: 12px; line-height: 1.6; margin-top: 6px; }
+.card.red { border-top-color: var(--c-red); } .card.red .val { color: var(--c-red); }
+.card.yellow { border-top-color: var(--c-yellow); } .card.yellow .val { color: var(--c-yellow); }
+.card.green { border-top-color: var(--c-green); } .card.green .val { color: var(--c-green); }
+.section {
+  background: var(--c-surface); border-radius: var(--radius);
+  border: 1px solid var(--c-border); padding: 20px 24px;
+  margin-bottom: 16px; box-shadow: var(--shadow); overflow-x: auto;
+}
+.section h2 { margin: 0 0 14px; font-size: 16px; font-weight: 700; border-left: 3px solid var(--c-accent); padding-left: 10px; color: var(--c-text); }
+.section h3 { margin: 18px 0 10px; font-size: 14px; font-weight: 600; }
+.issue {
+  padding: 10px 14px; border-radius: 8px; margin-bottom: 8px;
+  border: 1px solid var(--c-border); border-left: 3px solid var(--c-text-3);
+  background: var(--c-bg);
+}
+.issue.red { border-color: var(--c-red-border); border-left-color: var(--c-red); background: var(--c-red-bg); }
+.issue.yellow { border-color: var(--c-yellow-border); border-left-color: var(--c-yellow); background: var(--c-yellow-bg); }
+.issue.green { border-color: var(--c-green-border); border-left-color: var(--c-green); background: var(--c-green-bg); }
+.issue .t { font-weight: 600; font-size: 13px; }
+.issue .d { color: var(--c-text-2); font-size: 12px; margin-top: 4px; line-height: 1.6; }
+table { width: 100%; min-width: 680px; border-collapse: collapse; font-size: 13px; }
+th, td { padding: 10px 12px; border-bottom: 1px solid var(--c-border); text-align: left; vertical-align: top; }
+th { background: var(--c-bg); font-weight: 600; color: var(--c-text-2); font-size: 12px; text-transform: uppercase; letter-spacing: .03em; }
+.tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; color: #fff; white-space: nowrap; }
+.tag.red { background: var(--c-red); } .tag.yellow { background: var(--c-yellow); } .tag.green { background: var(--c-green); }
+details { margin-top: 10px; border: 1px solid var(--c-border); border-radius: 8px; padding: 10px 14px; background: var(--c-bg); }
+summary { cursor: pointer; color: var(--c-accent); font-size: 13px; font-weight: 500; }
+code { background: var(--c-accent-light); padding: 2px 6px; border-radius: 4px; font-size: 12px; font-family: "JetBrains Mono", "SF Mono", "Fira Code", monospace; }
+pre {
+  max-height: 480px; background: #f5f6f8; padding: 12px 14px; border-radius: 8px;
+  font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-word;
+  overflow-x: auto; border: 1px solid var(--c-border);
+  font-family: "JetBrains Mono", "SF Mono", "Fira Code", monospace;
+}
+.row { display: flex; gap: 16px; flex-wrap: wrap; }
+.row .col { flex: 1; min-width: 260px; }
+.muted { color: var(--c-text-3); }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 14px; }
+.chip {
+  display: inline-block; padding: 4px 10px; border-radius: 6px;
+  background: var(--c-accent-light); color: var(--c-accent);
+  border: 1px solid #d0d7ff; font-size: 12px; font-weight: 500;
+}
+.nav { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.nav a {
+  display: inline-block; padding: 4px 12px; border-radius: 6px;
+  background: var(--c-accent-light); color: var(--c-accent);
+  text-decoration: none; font-size: 12px; font-weight: 500;
+  border: 1px solid #d0d7ff; transition: background .15s;
+}
+.nav a:hover { background: #d0d7ff; }
+.session-header { display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; align-items: flex-start; }
+.session-meta { color: var(--c-text-2); line-height: 1.7; font-size: 13px; }
+.timeline-phases { display: grid; gap: 12px; margin-top: 18px; }
+.chain { display: flex; flex-direction: column; align-items: stretch; gap: 0; }
+.chain-node {
+  display: flex; align-items: stretch; background: var(--c-surface);
+  border-radius: var(--radius); border: 1px solid var(--c-border);
+  border-left: 4px solid var(--c-text-3); box-shadow: var(--shadow); overflow: hidden;
+}
+.chain-node.chain-red { border-left-color: var(--c-red); }
+.chain-node.chain-yellow { border-left-color: var(--c-yellow); }
+.chain-node.chain-green { border-left-color: var(--c-green); }
+.chain-step {
+  width: 36px; min-width: 36px; display: flex; align-items: center;
+  justify-content: center; font-size: 14px; font-weight: 700;
+  color: #fff; background: var(--c-text-3);
+}
+.chain-red .chain-step { background: var(--c-red); }
+.chain-yellow .chain-step { background: var(--c-yellow); }
+.chain-green .chain-step { background: var(--c-green); }
+.chain-body { padding: 12px 16px; flex: 1; }
+.chain-title { font-weight: 700; font-size: 14px; margin-bottom: 4px; }
+.chain-evi, .chain-down { font-size: 13px; color: var(--c-text-2); line-height: 1.6; margin-top: 2px; }
+.chain-arrow { text-align: center; font-size: 18px; color: var(--c-text-3); line-height: 1; padding: 3px 0; }
+.phase { border: 1px solid var(--c-border); border-radius: 8px; overflow: hidden; margin-top: 12px; }
+.phase-header { padding: 10px 14px; background: var(--c-bg); font-weight: 600; font-size: 13px; }
+.phase-body { padding: 12px; display: grid; gap: 8px; }
+.event {
+  display: grid; grid-template-columns: 180px 1fr; gap: 12px;
+  padding: 10px 14px; border-radius: 8px; background: var(--c-bg);
+  border: 1px solid var(--c-border); border-left: 3px solid var(--c-green);
+}
+.event.missing { border-left-color: var(--c-red); background: var(--c-red-bg); border-color: var(--c-red-border); }
+.event-time { color: var(--c-text-3); font-size: 12px; line-height: 1.5; white-space: nowrap; font-family: "JetBrains Mono", monospace; }
+.event-title { font-weight: 600; font-size: 13px; margin-bottom: 3px; }
+.event-source { color: var(--c-accent); font-size: 12px; margin-bottom: 4px; }
+.event-message { color: var(--c-text-2); font-size: 13px; line-height: 1.6; word-break: break-word; }
+.event-meta { color: var(--c-text-3); font-size: 12px; margin-top: 5px; }
+.repeat { margin-left: 6px; color: var(--c-accent); font-size: 12px; font-weight: 600; }
+@media (max-width: 880px) {
+  h1 { font-size: 22px; }
+  .cards { grid-template-columns: 1fr; }
+  .event { grid-template-columns: 1fr; }
+  .container { padding: 16px; }
+  table { min-width: 560px; }
+}
+
+.sample-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; }
+.sample-card {
+  display: block; text-decoration: none; color: inherit; background: var(--c-surface);
+  border: 1px solid var(--c-border); border-left: 4px solid var(--c-text-3);
+  border-radius: var(--radius); padding: 16px 18px; box-shadow: var(--shadow);
+}
+.sample-card:hover { box-shadow: 0 2px 12px rgba(0,0,0,.1); }
+.sample-card.red { border-left-color: var(--c-red); }
+.sample-card.yellow { border-left-color: var(--c-yellow); }
+.sample-card.green { border-left-color: var(--c-green); }
+.sample-title { font-weight: 700; font-size: 15px; margin-bottom: 4px; }
+.sample-skill { color: var(--c-accent); font-size: 12px; font-family: "JetBrains Mono", monospace; margin-bottom: 8px; }
+.sample-desc { color: var(--c-text-2); font-size: 13px; line-height: 1.6; }
+</style>
+</head>
+<body>
+<div class="container"><h1>Bug 分析 Skill HTML 报告样例</h1><div class="sub">每个页面都是仿写内容，主要用于查看样式。本集合只覆盖诊断/分析类 skill；飞书拉取、日志解码、ROM 查询、git-ai 检查等工具类不纳入主样例。</div><div class="section"><h2>样例列表</h2><div class="sample-grid"><a class="sample-card red" href="3d-stuck-investigate.html"><div class="sample-title">3D 卡顿与黑屏分析报告</div><div class="sample-skill">3d-stuck-investigate</div><div class="sample-desc">结论：目标时间窗内 UnityRequest 连续低帧，Surface 与 UnityReady 已到达，主卡点更接近 Unity 渲染线程阻塞而非 Android 启动链路缺失。</div></a><a class="sample-card yellow" href="unity-startup-lifecycle-check.html"><div class="sample-title">Unity 启动生命周期分析报告</div><div class="sample-skill">unity-startup-lifecycle-check</div><div class="sample-desc">结论：Android Activity 与 Surface 创建完成，但 UnityReady 到首帧耗时超阈值，启动慢主要卡在 Unity 内部初始化到首帧阶段。</div></a><a class="sample-card red" href="scene-signal-diagnosis.html"><div class="sample-title">3D 场景信号诊断报告</div><div class="sample-skill">scene-signal-diagnosis</div><div class="sample-desc">结论：Android 侧已生产并发送 SR 场景信号，Unity 已收到但状态机没有退出 IMMERSIVE_P，卡点在 Unity 场景消费后的状态切换。</div></a><a class="sample-card yellow" href="signal-chain-analyzer.html"><div class="sample-title">DataCenter 信号链路分析报告</div><div class="sample-skill">signal-chain-analyzer</div><div class="sample-desc">结论：信号在 signal.proto 中定义，上游 SDK 支持并已 dispatch 到 DataCenter；目标业务未命中 registerObserver 证据，当前卡点倾向业务消费侧。</div></a><a class="sample-card red" href="xtheme-analyzer.html"><div class="sample-title">XTheme 时光主题分析报告</div><div class="sample-skill">xtheme-analyzer</div><div class="sample-desc">结论：问题前系统 UI mode 已切到 NIGHT，但 XThemeStrategy 最后一次发送仍为 DAY，卡点在 ThemeHelper 输入刷新或 XTheme 重新计算调度。</div></a><a class="sample-card green" href="perception-data-summary.html"><div class="sample-title">感知数据链路统计报告</div><div class="sample-skill">perception-data-summary</div><div class="sample-desc">结论：目标窗口内上游、Native、Unity 发送与 Unity 接收计数递进合理，未发现感知数据链路断点；建议转向消费侧渲染或业务阈值判断。</div></a><a class="sample-card red" href="ld-lane-level-log-analysis.html"><div class="sample-title">LD 车道级无图分析报告</div><div class="sample-skill">ld-lane-level-log-analysis-portable</div><div class="sample-desc">结论：132002 接收、MapDataHandler normal 数据和 tile 请求均正常，最终未进 LD 是 LDDataModel 的 LDConf=false，直接失败位为 nearNew=128。</div></a><a class="sample-card yellow" href="addr2line-resolve.html"><div class="sample-title">Native Crash 地址反解报告</div><div class="sample-skill">addr2line-resolve</div><div class="sample-desc">结论：tombstone 地址可反解到 RenderExtend 渲染扩展函数，但该 skill 只解决符号定位；根因仍需结合崩溃前日志和调用时序判断。</div></a></div></div></div>
+</body>
+</html>

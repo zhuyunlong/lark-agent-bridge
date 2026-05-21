@@ -73,7 +73,7 @@ enabled = true
 provider = "codex"
 command = "codex"
 working_dir = "../.."
-agent_summary_timeout_seconds = 90
+agent_summary_timeout_seconds = 300
 resume_followup_sessions = false
 ```
 
@@ -92,7 +92,7 @@ Behavior:
 - `provider = "codex"` means prefer Codex first
 - `provider = "claude"` means prefer Claude Code first
 - if the preferred provider cannot start or returns non-zero, the bridge automatically tries the other provider
-- `agent_summary_timeout_seconds` only limits the final Agent-written conclusion; if it times out, the bridge falls back to the script summary and still returns the generated report
+- `agent_summary_timeout_seconds` only limits the final Agent-written conclusion; if the Agent is silent longer than this window, the bridge falls back to the script summary and still returns the generated report
 - leave `default_prompt` empty unless you intentionally want a configured fallback; generic bug links should ask for a concrete analysis direction instead of silently defaulting to startup
 - follow-ups and reanalysis create a fresh Agent session by default, while reusing the previous bug link, downloaded logs, extracted logs, report metadata, skill decision, and source-repo paths
 - set `resume_followup_sessions = true` only if you explicitly want a follow-up to resume the old Agent session; reanalysis still uses a fresh Agent summary session so the new prompt and current skill/source evidence are not biased by stale private context
@@ -195,6 +195,8 @@ restart_on_failure = true
 max_restarts = 0
 restart_initial_delay_seconds = 1
 restart_max_delay_seconds = 60
+drop_stale_light_interactions = true
+stale_light_interaction_grace_seconds = 120
 ```
 
 Behavior:
@@ -204,7 +206,9 @@ Behavior:
 - exit code `0` is treated as graceful completion and is not restarted
 - non-zero startup/runtime failure is restarted when `restart_on_failure = true`
 - `max_restarts = 0` means unlimited restarts with exponential backoff capped by `restart_max_delay_seconds`
+- when lark-cli reconnects and replays old messages, `drop_stale_light_interactions = true` skips only stale help/identity/chat interactions created before listener readiness; Bug links, logs, files, signals, and follow-up analysis requests are not dropped by this guard
 - the latest daemon status is stored in `data/state/agent_activity.json`
+- card buttons that trigger bridge work require the `card.action.trigger` event. When the listener is configured for the default `im.message.receive_v1` message event, result cards hide Skill correction, reanalysis, continue-Agent, and feedback buttons so the UI does not expose inactive controls.
 
 ## Approval cards
 
@@ -324,7 +328,6 @@ Inside unrestricted groups, or inside groups listed in `allowed_chats`, addresse
 - direct file analysis
 - signal analysis
 - perception summary
-- `/skill` read-only analysis
 - reply-based follow-up / reanalysis
 
 ### What `allowed_users` means

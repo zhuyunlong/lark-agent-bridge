@@ -28,6 +28,7 @@ from __future__ import annotations
 
 from datetime import datetime
 import json
+import re
 from typing import Any
 
 
@@ -55,6 +56,7 @@ CARD_PROGRESS_PREVIEW_LIMIT = 4
 CARD_STREAM_PREVIEW_LIMIT = 3
 CARD_STREAM_MAX_LINE_CHARS = 120
 CARD_RESULT_NOTE_MAX_CHARS = 520
+CARD_INLINE_CODE_MAX_CHARS = 40
 
 HEADER_TEMPLATES: dict[str, str] = {
     "queued": "blue",
@@ -165,6 +167,8 @@ def build_status_card(
     job_id: str | None = None,
     root_message_id: str | None = None,
     show_followup_actions: bool = False,
+    bug_skill_choices: list[dict[str, Any]] | None = None,
+    bug_skill_choice_note: str | None = None,
 ) -> dict[str, Any]:
     """Build a status progress card.
 
@@ -201,7 +205,12 @@ def build_status_card(
     if result_note and status in {"completed", "failed"}:
         elements.append(_divider())
         heading = "失败原因" if status == "failed" else "结论摘要"
-        elements.append(_md_element(f"**{heading}**\n{_truncate_summary(result_note, max_chars=CARD_RESULT_NOTE_MAX_CHARS)}"))
+        elements.append(
+            _md_element(
+                f"**{heading}**\n"
+                f"{_card_result_note_preview(result_note, max_chars=CARD_RESULT_NOTE_MAX_CHARS)}"
+            )
+        )
         note_rendered_as_summary = True
 
     progress_lines = _progress_lines(progress or [], limit=CARD_PROGRESS_PREVIEW_LIMIT)
@@ -231,6 +240,53 @@ def build_status_card(
     if action_buttons:
         elements.append(_divider())
         elements.append(_action_block(action_buttons))
+
+    if bug_skill_choices and (job_id or root_message_id):
+        context = {
+            "job_id": job_id or "",
+            "root_message_id": root_message_id or "",
+        }
+        choice_note = (
+            bug_skill_choice_note.strip()
+            if isinstance(bug_skill_choice_note, str) and bug_skill_choice_note.strip()
+            else "如果当前意图或命中的 Skill 不符合预期，可以补充要求后改选一个支持的 Skill，系统会基于已有日志重新分析。"
+        )
+        valid_skill_choices: list[dict[str, Any]] = []
+        for skill in bug_skill_choices[:8]:
+            label = str(skill.get("label") or skill.get("name") or "").strip()
+            name = str(skill.get("name") or "").strip()
+            if not label or not name:
+                continue
+            valid_skill_choices.append(skill)
+        if valid_skill_choices:
+            elements.append(_divider())
+            elements.append(
+                _md_element(
+                    "**意图/Skill 校正**\n"
+                    f"{choice_note}\n"
+                    "本区的 Skill 按钮会按所选 Skill 基于已有日志重新分析，不代表当前报告已使用这些 Skill；选择前建议先在输入框写清楚新的分析要求。"
+                )
+            )
+            selected_labels = [
+                str(skill.get("label") or skill.get("name") or "").strip()
+                for skill in valid_skill_choices
+                if bool(skill.get("selected")) and str(skill.get("label") or skill.get("name") or "").strip()
+            ]
+            if selected_labels:
+                elements.append(_note_block("当前命中：" + "、".join(selected_labels)))
+            elements.append(
+                _form_block(
+                    "bug_skill_choice_form",
+                    [
+                        _input_element(
+                            "followup_prompt",
+                            placeholder="可选：补充分析要求，例如：重点看问题时间前 5 分钟的 SR 生命周期",
+                            required=False,
+                        ),
+                        *_skill_choice_action_blocks(valid_skill_choices, context),
+                    ],
+                )
+            )
 
     if show_followup_actions and (job_id or root_message_id):
         context = {
@@ -388,6 +444,28 @@ def build_result_card(
     }
 
 
+def _skill_choice_action_blocks(
+    bug_skill_choices: list[dict[str, Any]],
+    context: dict[str, str],
+    *,
+    row_size: int = 3,
+) -> list[dict[str, Any]]:
+    buttons: list[dict[str, Any]] = []
+    for skill in bug_skill_choices[:8]:
+        label = str(skill.get("label") or skill.get("name") or "").strip()
+        name = str(skill.get("name") or "").strip()
+        if not label or not name:
+            continue
+        buttons.append(
+            _button(
+                label,
+                value={"action": "select_bug_skill", "skill_name": name, **context},
+                button_type="primary",
+            )
+        )
+    return [_action_block(buttons[index : index + row_size]) for index in range(0, len(buttons), row_size)]
+
+
 def build_followup_result_card(
     *,
     title: str,
@@ -470,6 +548,36 @@ def build_followup_result_card(
     return {
         "config": {"wide_screen_mode": True},
         "header": _header(f"💬 {title}", color="blue"),
+        "elements": elements,
+    }
+
+
+def build_knowledge_answer_card(
+    *,
+    title: str,
+    answer: str,
+    hits: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Build a card for knowledge-base QA answers."""
+    elements: list[dict[str, Any]] = [
+        _md_element(_truncate_summary(answer, max_chars=1600)),
+    ]
+    valid_hits = [hit for hit in hits or [] if isinstance(hit, dict)]
+    if valid_hits:
+        elements.append(_divider())
+        lines = ["**命中知识**"]
+        for index, hit in enumerate(valid_hits[:5], start=1):
+            source_id = str(hit.get("source_id") or "").strip()
+            title_text = str(hit.get("title") or hit.get("chunk_id") or "").strip()
+            source_ref = str(hit.get("source_ref") or "").strip()
+            score = hit.get("score")
+            score_text = f" score={float(score):.1f}" if isinstance(score, (int, float)) else ""
+            ref_text = f"\n来源：`{_truncate_summary(source_ref, max_chars=120)}`" if source_ref else ""
+            lines.append(f"{index}. **{title_text or source_id}** `{source_id}`{score_text}{ref_text}")
+        elements.append(_md_element("\n".join(lines)))
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": _header(f"📚 {title}", color="blue"),
         "elements": elements,
     }
 
@@ -691,3 +799,56 @@ def _truncate_summary(text: str, *, max_chars: int = 800) -> str:
     if last_newline > max_chars // 2:
         truncated = truncated[:last_newline]
     return truncated + "\n\n_(完整内容请查看报告)_"
+
+
+def _card_result_note_preview(text: str, *, max_chars: int) -> str:
+    """Build a readable Feishu-card preview for analysis result markdown."""
+    cleaned = _first_markdown_section_without_heading(text)
+    cleaned = _plain_inline_code_for_card(cleaned)
+    return _truncate_summary(cleaned, max_chars=max_chars)
+
+
+def _first_markdown_section_without_heading(text: str) -> str:
+    lines = [line.rstrip() for line in text.splitlines()]
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    section: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not section and re.match(r"^#{1,6}\s+", stripped):
+            continue
+        if section and re.match(r"^#{1,6}\s+", stripped):
+            break
+        section.append(line)
+    return "\n".join(section).strip() or text.strip()
+
+
+def _plain_inline_code_for_card(text: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        return _compact_card_code_token(match.group(1))
+
+    return re.sub(r"`([^`\n]+)`", replace, text)
+
+
+def _compact_card_code_token(token: str) -> str:
+    value = token.strip()
+    if len(value) <= CARD_INLINE_CODE_MAX_CHARS:
+        return value
+    if " " in value or "/" in value:
+        return re.sub(r"[A-Z0-9]+(?:_[A-Z0-9]+){3,}(?:\([^)]+\))?", _compact_card_code_match, value)
+    if len(value) <= 72 and not re.fullmatch(r"[A-Z0-9_()]+", value):
+        return value
+    parts = [part for part in value.split("_") if part]
+    if len(parts) >= 4:
+        prefix = "_".join(parts[:3])
+        suffix = parts[-1]
+        compact = f"{prefix}_..._{suffix}"
+        if len(compact) <= 64:
+            return compact
+    head = max(16, CARD_INLINE_CODE_MAX_CHARS // 2)
+    tail = max(12, CARD_INLINE_CODE_MAX_CHARS - head - 3)
+    return f"{value[:head]}...{value[-tail:]}"
+
+
+def _compact_card_code_match(match: re.Match[str]) -> str:
+    return _compact_card_code_token(match.group(0))

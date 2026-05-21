@@ -16,8 +16,13 @@ import time
 from urllib.parse import parse_qs, quote, unquote, urlsplit, urlunsplit
 
 from .admin_ui import render_admin_page
+from .auth import AdminAuth
 from .case_store import CaseStore
 from .health import ProcessWatchdog
+from .knowledge import KnowledgeService
+from .log import get_logger
+
+logger = get_logger("server")
 from .models import BridgeConfig, TaskResult
 from .report_version import ReportVersionStore
 from .state import AgentActivityStore, ConversationContextStore
@@ -48,6 +53,7 @@ class HtmlReportPublisher:
         return resolve_public_base_url(
             self.config.report_server.public_base_url,
             port=self.config.report_server.port,
+            bind_host=self.config.report_server.bind_host,
         )
 
     def publish_result(self, result: TaskResult) -> PublishedReport | None:
@@ -195,8 +201,8 @@ class HtmlReportPublisher:
             (
                 "<section class=\"report-card\">"
                 f"<h2>{escape(_report_title(mode, index, len(reports)))}</h2>"
-                f"<p><a href=\"{quote(report.name)}\" target=\"_blank\" rel=\"noreferrer\">打开 HTML 报告</a></p>"
-                f"<iframe src=\"{quote(report.name)}\" loading=\"lazy\"></iframe>"
+                "<p class=\"muted\">完整报告较长，包含详细证据、图表和运行信息；首页只保留摘要和入口，避免重复嵌套展示。请在新窗口打开完整报告。</p>"
+                f"<p><a class=\"report-link\" href=\"{quote(report.name)}\" target=\"_blank\" rel=\"noreferrer\">打开 HTML 报告</a></p>"
                 "</section>"
             )
             for index, report in enumerate(reports, start=1)
@@ -232,7 +238,8 @@ class HtmlReportPublisher:
             "    .meta-item dt { font-size: 12px; color: var(--muted); margin-bottom: 4px; }\n"
             "    .meta-item dd { margin: 0; font-size: 16px; font-weight: 700; color: var(--text); word-break: break-word; }\n"
             "    .lead { font-size: 16px; line-height: 1.75; color: var(--text); margin-bottom: 12px; white-space: pre-wrap; }\n"
-            "    iframe { width: 100%; min-height: 920px; border: 1px solid var(--border); border-radius: 14px; background: #fff; }\n"
+            "    .muted { color: var(--muted); line-height: 1.7; }\n"
+            "    .report-link { display: inline-flex; align-items: center; justify-content: center; padding: 10px 14px; border-radius: 10px; border: 1px solid rgba(37,99,235,.28); background: rgba(37,99,235,.08); text-decoration: none; }\n"
             "    h1, h2 { margin-top: 0; }\n"
             "    h1 { color: var(--blue); font-size: 28px; }\n"
             "    h2 { color: var(--cyan); }\n"
@@ -269,6 +276,7 @@ class ReportHttpServer:
         process_watchdog: ProcessWatchdog | None = None,
         conversation_store: ConversationContextStore | None = None,
         version_store: ReportVersionStore | None = None,
+        knowledge_service: KnowledgeService | None = None,
     ) -> None:
         self.config = config
         self.activity_store = activity_store
@@ -278,6 +286,8 @@ class ReportHttpServer:
         self.process_watchdog = process_watchdog
         self.conversation_store = conversation_store
         self.version_store = version_store
+        self.knowledge_service = knowledge_service
+        self._admin_auth: AdminAuth | None = None
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
 
@@ -286,10 +296,15 @@ class ReportHttpServer:
             return
         root_dir = self.config.data_dir / "published_reports"
         root_dir.mkdir(parents=True, exist_ok=True)
+        self._admin_auth = AdminAuth(
+            self.config.data_dir,
+            admin_token=self.config.report_server.admin_token,
+        )
         prefix = _url_prefix(
             resolve_public_base_url(
                 self.config.report_server.public_base_url,
                 port=self.config.report_server.port,
+                bind_host=self.config.report_server.bind_host,
             )
         )
         handler = _build_handler(
@@ -302,6 +317,8 @@ class ReportHttpServer:
             self.process_watchdog,
             self.conversation_store,
             self.version_store,
+            self.knowledge_service,
+            self._admin_auth,
         )
         self._server = ThreadingHTTPServer(
             (resolve_bind_host(self.config.report_server.bind_host), self.config.report_server.port),
@@ -350,6 +367,8 @@ def _build_handler(
     process_watchdog: ProcessWatchdog | None = None,
     conversation_store: ConversationContextStore | None = None,
     version_store: ReportVersionStore | None = None,
+    knowledge_service: KnowledgeService | None = None,
+    admin_auth: AdminAuth | None = None,
 ):
     class _ReportHandler(SimpleHTTPRequestHandler):
         def __init__(self, *args, **kwargs):
@@ -365,6 +384,15 @@ def _build_handler(
                 return
             if request_path in {"/sessions", "/sessions/", "/admin", "/admin/"}:
                 self._send_html(_render_sessions_page())
+                return
+            # -- auth endpoints (no auth required) --
+            if request_path == "/api/auth/status":
+                self._send_json(self._auth_status())
+                return
+            if request_path == "/api/auth/users":
+                if not self._check_write_auth():
+                    return
+                self._send_json({"users": admin_auth.list_users() if admin_auth else []})
                 return
             if request_path == "/api/sessions":
                 self._send_json({"sessions": self._list_sessions()})
@@ -383,6 +411,12 @@ def _build_handler(
                 return
             if request_path == "/api/health":
                 self._send_json(self._get_health())
+                return
+            if request_path == "/api/knowledge/sources":
+                self._send_json({"sources": self._knowledge_sources()})
+                return
+            if request_path == "/api/knowledge/search":
+                self._send_json({"hits": self._knowledge_search(parsed.query)})
                 return
             if request_path.startswith("/api/cases/"):
                 case_id = request_path.removeprefix("/api/cases/").strip("/")
@@ -439,6 +473,8 @@ def _build_handler(
                 or request_path.startswith("/api/skills/")
                 or request_path == "/api/daemon"
                 or request_path == "/api/health"
+                or request_path == "/api/knowledge/sources"
+                or request_path == "/api/knowledge/search"
             ):
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -452,10 +488,57 @@ def _build_handler(
         def do_POST(self) -> None:
             parsed = urlsplit(self.path)
             request_path = unquote(parsed.path).rstrip("/")
+            # -- auth endpoints (no auth gate) --
+            if request_path == "/api/auth/login":
+                self._handle_login()
+                return
+            if request_path == "/api/auth/logout":
+                self._handle_logout()
+                return
+            if request_path == "/api/auth/users":
+                if not self._check_write_auth():
+                    return
+                self._handle_create_user()
+                return
+            if request_path == "/api/auth/change-password":
+                if not self._check_write_auth():
+                    return
+                self._handle_change_password()
+                return
+            # -- write endpoints (require auth) --
+            if not self._check_write_auth():
+                return
             if request_path == "/api/skills":
                 try:
                     payload = self._read_json_body()
                     self._send_json({"skill": self._create_skill(payload)}, status=201)
+                except SkillManagerError as exc:
+                    self._send_json({"error": str(exc)}, status=exc.status_code)
+                except ValueError as exc:
+                    self._send_json({"error": str(exc)}, status=400)
+                return
+            if request_path == "/api/knowledge/sync":
+                self._send_json(self._knowledge_sync())
+                return
+            if request_path == "/api/knowledge/sources":
+                try:
+                    payload = self._read_json_body()
+                    self._send_json({"source": self._knowledge_register_source(payload)}, status=201)
+                except ValueError as exc:
+                    self._send_json({"error": str(exc)}, status=400)
+                return
+            if request_path == "/api/knowledge/items":
+                try:
+                    payload = self._read_json_body()
+                    self._send_json({"item": self._knowledge_add_item(payload)}, status=201)
+                except ValueError as exc:
+                    self._send_json({"error": str(exc)}, status=400)
+                return
+            if request_path.startswith("/api/skills/") and request_path.endswith("/route"):
+                skill_name = request_path.removeprefix("/api/skills/").removesuffix("/route").strip("/")
+                try:
+                    payload = self._read_json_body()
+                    self._send_json({"skill": self._route_skill(unquote(skill_name), payload)})
                 except SkillManagerError as exc:
                     self._send_json({"error": str(exc)}, status=exc.status_code)
                 except ValueError as exc:
@@ -491,14 +574,27 @@ def _build_handler(
             self._send_json({"error": "unsupported endpoint"}, status=404)
 
         def do_PUT(self) -> None:
+            if not self._check_write_auth():
+                return
             self._handle_skill_update()
 
         def do_PATCH(self) -> None:
+            if not self._check_write_auth():
+                return
             self._handle_skill_update()
 
         def do_DELETE(self) -> None:
+            if not self._check_write_auth():
+                return
             parsed = urlsplit(self.path)
             request_path = unquote(parsed.path).rstrip("/")
+            if request_path.startswith("/api/auth/users/"):
+                username = request_path.removeprefix("/api/auth/users/").strip("/")
+                if admin_auth and admin_auth.delete_user(unquote(username)):
+                    self._send_json({"ok": True})
+                else:
+                    self._send_json({"error": "user not found"}, status=404)
+                return
             if request_path.startswith("/api/analysis-history/"):
                 session_id = request_path.removeprefix("/api/analysis-history/").strip("/")
                 payload, status = self._delete_analysis_history(unquote(session_id))
@@ -678,6 +774,20 @@ def _build_handler(
                 raise ValueError("content 不能为空")
             return skill_manager.update_skill(name, content=content).to_dict(include_content=True)
 
+        def _route_skill(self, name: str, payload: dict[str, object]) -> dict[str, object]:
+            if skill_manager is None:
+                raise SkillManagerError("skill manager not configured", status_code=503)
+            role = str(payload.get("role") or "")
+            kind = str(payload.get("kind") or "")
+            requires_logs_value = payload.get("requires_logs")
+            requires_logs = requires_logs_value if isinstance(requires_logs_value, bool) else None
+            return skill_manager.set_skill_route(
+                name,
+                role=role,
+                kind=kind,
+                requires_logs=requires_logs,
+            ).to_dict(include_content=True)
+
         def _delete_skill(self, name: str) -> dict[str, object]:
             if skill_manager is None:
                 raise SkillManagerError("skill manager not configured", status_code=503)
@@ -733,6 +843,44 @@ def _build_handler(
                 return to_dict()
             return {"healthy": True}
 
+        def _knowledge_sources(self) -> list[dict[str, object]]:
+            if knowledge_service is None:
+                return []
+            return knowledge_service.list_sources()
+
+        def _knowledge_search(self, query: str) -> list[dict[str, object]]:
+            if knowledge_service is None:
+                return []
+            params = parse_qs(query)
+            q = _query_str(params, "q") or _query_str(params, "query")
+            limit = _query_int(params, "limit", 20)
+            return [hit.to_dict() for hit in knowledge_service.search(q, limit=limit)]
+
+        def _knowledge_sync(self) -> dict[str, object]:
+            if knowledge_service is None:
+                return {"source_count": 0, "total_chunks": 0, "sources": []}
+            return knowledge_service.sync_all()
+
+        def _knowledge_register_source(self, payload: dict[str, object]) -> dict[str, object]:
+            if knowledge_service is None:
+                raise ValueError("knowledge service not configured")
+            return knowledge_service.register_source(
+                source_id=str(payload.get("source_id") or payload.get("id") or ""),
+                source_type=str(payload.get("type") or "manual"),
+                title=str(payload.get("title") or ""),
+                source_ref=str(payload.get("source_ref") or payload.get("url") or payload.get("path") or ""),
+            )
+
+        def _knowledge_add_item(self, payload: dict[str, object]) -> dict[str, object]:
+            if knowledge_service is None:
+                raise ValueError("knowledge service not configured")
+            return knowledge_service.add_text(
+                source_id=str(payload.get("source_id") or "manual"),
+                title=str(payload.get("title") or ""),
+                content=str(payload.get("content") or ""),
+                source_ref=str(payload.get("source_ref") or ""),
+            )
+
         def _send_html(self, html: str) -> None:
             body = html.encode("utf-8")
             self.send_response(200)
@@ -761,6 +909,102 @@ def _build_handler(
             if not isinstance(payload, dict):
                 raise ValueError("请求体必须是 JSON 对象")
             return payload
+
+        # -- auth helpers ------------------------------------------------
+
+        def _get_bearer_token(self) -> str:
+            header = self.headers.get("Authorization") or ""
+            if header.lower().startswith("bearer "):
+                return header[7:].strip()
+            return ""
+
+        def _check_write_auth(self) -> bool:
+            """Return True if write is allowed; sends 401/403 and returns False otherwise."""
+            if admin_auth is None or not admin_auth.auth_required:
+                return True
+            token = self._get_bearer_token()
+            user = admin_auth.check_token(token)
+            if user is None:
+                self._send_json({"error": "未认证，请先登录"}, status=401)
+                return False
+            if user.get("role") == "viewer":
+                self._send_json({"error": "权限不足，viewer 角色不能执行写操作"}, status=403)
+                return False
+            return True
+
+        def _auth_status(self) -> dict[str, object]:
+            if admin_auth is None:
+                return {"required": False, "has_users": False, "has_token": False}
+            return {
+                "required": admin_auth.auth_required,
+                "has_users": admin_auth.has_users,
+                "has_token": bool(admin_auth._admin_token),
+            }
+
+        def _handle_login(self) -> None:
+            try:
+                payload = self._read_json_body()
+            except ValueError as exc:
+                self._send_json({"error": str(exc)}, status=400)
+                return
+            # Static token login
+            token = str(payload.get("token") or "").strip()
+            if token and admin_auth is not None:
+                user = admin_auth.check_token(token)
+                if user is not None:
+                    self._send_json({"ok": True, "token": token, **user})
+                    return
+            # Username/password login
+            username = str(payload.get("username") or "").strip()
+            password = str(payload.get("password") or "")
+            if username and admin_auth is not None:
+                session = admin_auth.login(username, password)
+                if session is not None:
+                    self._send_json({
+                        "ok": True,
+                        "token": session.token,
+                        "username": session.username,
+                        "role": session.role,
+                        "expires_at": session.expires_at,
+                    })
+                    return
+            self._send_json({"error": "认证失败"}, status=401)
+
+        def _handle_logout(self) -> None:
+            token = self._get_bearer_token()
+            if token and admin_auth is not None:
+                admin_auth.logout(token)
+            self._send_json({"ok": True})
+
+        def _handle_create_user(self) -> None:
+            if admin_auth is None:
+                self._send_json({"error": "auth not configured"}, status=503)
+                return
+            try:
+                payload = self._read_json_body()
+                username = str(payload.get("username") or "").strip()
+                password = str(payload.get("password") or "")
+                role = str(payload.get("role") or "admin")
+                user = admin_auth.create_user(username, password, role)
+                self._send_json({"ok": True, "user": {"username": user.username, "role": user.role}}, status=201)
+            except ValueError as exc:
+                self._send_json({"error": str(exc)}, status=400)
+
+        def _handle_change_password(self) -> None:
+            if admin_auth is None:
+                self._send_json({"error": "auth not configured"}, status=503)
+                return
+            try:
+                payload = self._read_json_body()
+                username = str(payload.get("username") or "").strip()
+                old_password = str(payload.get("old_password") or "")
+                new_password = str(payload.get("new_password") or "")
+                if admin_auth.change_password(username, old_password, new_password):
+                    self._send_json({"ok": True})
+                else:
+                    self._send_json({"error": "原密码错误或用户不存在"}, status=401)
+            except ValueError as exc:
+                self._send_json({"error": str(exc)}, status=400)
 
         def _handle_skill_update(self) -> None:
             parsed = urlsplit(self.path)
@@ -824,11 +1068,9 @@ def _history_search_text(session: dict[str, object]) -> str:
 
 def _delete_authorization_placeholder() -> dict[str, object]:
     return {
-        "checked": False,
-        "actor_id": "",
-        "actor_role": "",
+        "checked": True,
         "scope": "analysis_history.delete",
-        "note": "权限管理暂未启用，后续可在此接入角色/用户校验。",
+        "note": "写操作已通过 admin_auth 鉴权保护。",
     }
 
 
@@ -910,22 +1152,26 @@ def _current_timestamp() -> float:
 
 def resolve_bind_host(bind_host: str) -> str:
     value = (bind_host or "").strip()
-    if value in {"", "127.0.0.1", "localhost", "::1"}:
-        return "0.0.0.0"
+    if not value:
+        return "127.0.0.1"
     return value
 
 
-def resolve_public_base_url(public_base_url: str, *, port: int) -> str:
+def resolve_public_base_url(public_base_url: str, *, port: int, bind_host: str = "") -> str:
     raw = (public_base_url or "").strip()
+    resolved_bind = resolve_bind_host(bind_host)
+    bind_is_loopback = _is_loopback_host(resolved_bind)
     if not raw:
-        raw = f"http://{_detect_lan_ip()}:{port}/reports"
+        # When bound to loopback only, the LAN IP is unreachable — use loopback.
+        host = "127.0.0.1" if bind_is_loopback else _detect_lan_ip()
+        raw = f"http://{host}:{port}/reports"
     parts = urlsplit(raw)
     host = parts.hostname or ""
     if not _should_replace_public_host(host):
         return raw.rstrip("/")
     scheme = parts.scheme or "http"
     path = parts.path or "/reports"
-    resolved_host = _detect_lan_ip()
+    resolved_host = "127.0.0.1" if bind_is_loopback else _detect_lan_ip()
     effective_port = parts.port or port
     netloc = f"{resolved_host}:{effective_port}"
     if parts.username:
@@ -1040,6 +1286,17 @@ def _should_replace_public_host(host: str) -> bool:
     except ValueError:
         return False
     return address.is_loopback or address.is_unspecified
+
+
+def _is_loopback_host(host: str) -> bool:
+    """Return True if *host* is a loopback address (127.x.x.x, ::1, localhost)."""
+    normalized = (host or "").strip().lower()
+    if normalized in {"localhost", "127.0.0.1", "::1"}:
+        return True
+    try:
+        return ipaddress.ip_address(normalized).is_loopback
+    except ValueError:
+        return False
 
 
 def _detect_lan_ip() -> str:

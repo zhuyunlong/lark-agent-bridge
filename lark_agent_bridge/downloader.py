@@ -2,17 +2,57 @@
 
 from __future__ import annotations
 
+import ipaddress
 from pathlib import Path
 import re
+import socket
 from urllib.parse import unquote, urlparse
 import urllib.request
 
 from .lark_client import LarkClient
+from .log import get_logger
 from .models import BridgeConfig, DownloadResource, DownloadedResource, JobContext
+
+logger = get_logger("download")
 
 
 class DownloadError(RuntimeError):
     pass
+
+
+# ---------------------------------------------------------------------------
+# SSRF protection: reject redirects and connections to private/reserved IPs
+# ---------------------------------------------------------------------------
+
+_SSRF_SAFE_SCHEMES = {"http", "https"}
+
+
+def _is_private_ip(host: str) -> bool:
+    """Return True if *host* resolves to a private, loopback, or reserved IP."""
+    try:
+        infos = socket.getaddrinfo(host, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+    except socket.gaierror:
+        return False
+    for _family, _type, _proto, _canon, sockaddr in infos:
+        try:
+            addr = ipaddress.ip_address(sockaddr[0])
+        except ValueError:
+            continue
+        if addr.is_private or addr.is_loopback or addr.is_reserved or addr.is_link_local:
+            return True
+    return False
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Block automatic redirects and validate redirect targets."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        parsed = urlparse(newurl)
+        if parsed.scheme not in _SSRF_SAFE_SCHEMES:
+            raise DownloadError(f"Redirect to disallowed scheme: {parsed.scheme}")
+        if _is_private_ip(parsed.hostname or ""):
+            raise DownloadError(f"Redirect to private/reserved IP blocked: {parsed.hostname}")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 class LogDownloader:
@@ -47,15 +87,18 @@ class LogDownloader:
 
     def _download_url(self, resource: DownloadResource, context: JobContext) -> DownloadedResource:
         parsed = urlparse(resource.value)
-        if parsed.scheme not in {"http", "https"}:
+        if parsed.scheme not in _SSRF_SAFE_SCHEMES:
             raise DownloadError(f"Unsupported URL scheme: {parsed.scheme}")
+        if not self.config.download.allow_private_urls and _is_private_ip(parsed.hostname or ""):
+            raise DownloadError(f"Download from private/reserved IP blocked: {parsed.hostname}")
         target = context.input_dir / safe_filename_from_url(resource.value)
         if self.config.dry_run:
             return DownloadedResource(resource=resource, path=target, dry_run=True)
 
         request = urllib.request.Request(resource.value, headers={"User-Agent": "lark-agent-bridge/0.1"})
+        opener = urllib.request.build_opener(_NoRedirectHandler)
         try:
-            with urllib.request.urlopen(request, timeout=self.config.download.timeout_seconds) as response:
+            with opener.open(request, timeout=self.config.download.timeout_seconds) as response:
                 content_length = response.headers.get("Content-Length")
                 if content_length and int(content_length) > self.config.download.max_bytes:
                     raise DownloadError("Download exceeds configured max_bytes")

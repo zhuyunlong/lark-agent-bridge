@@ -1,22 +1,28 @@
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
 import json
 import os
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 from lark_agent_bridge.app import BridgeApp
-from lark_agent_bridge.agents import BugFollowupSelection
+from lark_agent_bridge.agents import BugAnalysisPlan, BugAnalysisSelection, BugFollowupSelection
 from lark_agent_bridge.lark_client import CommandResult
 from lark_agent_bridge.models import (
     ApprovalOptions,
     BridgeConfig as RealBridgeConfig,
+    ClaudeAgentOptions,
     DualAgentOptions,
+    EventConsumerOptions,
     IntentDecision,
+    KnowledgeOptions,
     LarkEvent,
     LarkOptions,
     LocalResourceOptions,
     NotificationOptions,
+    ReportServerOptions,
     SignalRequest,
     TaskResult,
     WorkflowArchiveOptions,
@@ -134,6 +140,32 @@ class FakeOmlxChatClient:
         )
 
 
+class FakeKnowledgeService:
+    def __init__(self):
+        self.questions = []
+
+    def should_handle(self, text):
+        return "/kb" in text or "知识库" in text or "OTA信号" in text
+
+    def answer(self, question):
+        self.questions.append(question)
+        return TaskResult(
+            success=True,
+            message="SIGNAL_OTA_ST 四种组合指令\nadb shell am broadcast -a com.xiaopeng.guide.action.mock.datacenter --ei code 105003 --ei format 7 --es value \"[1, 2]\"",
+            details={
+                "mode": "knowledge_qa",
+                "knowledge_hits": [
+                    {
+                        "source_id": "guideengine-signals",
+                        "title": "SIGNAL_OTA_ST 定义",
+                        "source_ref": "/repo/signal.proto",
+                        "score": 9.0,
+                    }
+                ],
+            },
+        )
+
+
 class FakeIntentRunner:
     def __init__(self, decisions=None, *, enabled=True):
         self.decisions = decisions or {}
@@ -173,6 +205,52 @@ class FakeBugRunner:
             message="bug 分析完成",
             details={"mode": "bug_analysis", "files_to_send": [self.metadata_path, self.html_path]},
         )
+
+    def selection_for_skill_name(self, skill_name, *, source, reason="", provider=""):
+        mapping = {
+            "xtheme-analyzer": ("xtheme", "XTheme时光主题分析"),
+            "3d-stuck-investigate": ("stuck", "3D卡顿分析"),
+            "perception-data-summary": ("perception", "当前感知数据总结"),
+        }
+        if skill_name not in mapping:
+            return None
+        kind, label = mapping[skill_name]
+        return BugAnalysisSelection(
+            plans=[BugAnalysisPlan(kind=kind)],
+            skill_name=skill_name,
+            skill_label=label,
+            source=source,
+            reason=reason,
+            provider=provider,
+        )
+
+    def supported_primary_bug_skills(self):
+        return [
+            {
+                "name": "xtheme-analyzer",
+                "kind": "xtheme",
+                "label": "XTheme时光主题分析",
+                "requires_logs": True,
+                "role": "primary",
+                "description": "分析主题切换、UI mode、日出日落等问题。",
+            },
+            {
+                "name": "3d-stuck-investigate",
+                "kind": "stuck",
+                "label": "3D卡顿分析",
+                "requires_logs": True,
+                "role": "primary",
+                "description": "分析画面卡顿、黑屏、掉帧。",
+            },
+            {
+                "name": "perception-data-summary",
+                "kind": "perception",
+                "label": "当前感知数据总结",
+                "requires_logs": True,
+                "role": "primary",
+                "description": "分析感知数据、LD/SD 地图状态等问题。",
+            },
+        ]
 
     def run_direct_analysis(self, request, *, event=None, progress_callback=None):
         self.requests.append(request)
@@ -242,6 +320,19 @@ class FakePerceptionRunner:
         )
 
 
+class FakeRomVersionRunner:
+    def __init__(self):
+        self.requests = []
+
+    def run_lookup(self, request, *, event=None):
+        self.requests.append(request)
+        return __import__("lark_agent_bridge.models", fromlist=["TaskResult"]).TaskResult(
+            success=True,
+            message="ROM 版本查询完成\n导航版本: 6.2.2-test",
+            details={"mode": "rom_version_lookup", "rom_version": request.rom_version},
+        )
+
+
 class FakeSignalHandler:
     def __init__(self):
         self.requests = []
@@ -287,7 +378,7 @@ def event(**overrides):
         "chat_type": "group",
         "sender_id": "ou_1",
         "message_type": "text",
-        "content": "/signal 132002 https://example.com/log.zip",
+        "content": "调查 132002 信号链路 https://example.com/log.zip",
     }
     values.update(overrides)
     return LarkEvent(**values)
@@ -854,6 +945,30 @@ class AppTests(unittest.TestCase):
         self.assertTrue(any("飞书/Meegle CLI" in item["card_json"] for item in fake_lark.updated_cards))
         self.assertTrue(any("已完成" in item["card_json"] for item in fake_lark.updated_cards))
 
+    def test_progress_live_url_uses_lan_ip_when_report_server_binds_all_interfaces(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch(
+            "lark_agent_bridge.app.resolve_public_base_url"
+        ) as resolve_url:
+            resolve_url.return_value = "http://10.2.3.4:8765/reports"
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    report_server=ReportServerOptions(
+                        enabled=True,
+                        bind_host="0.0.0.0",
+                        port=8765,
+                        public_base_url="",
+                    ),
+                ),
+                lark_client=FakeLarkClient(),
+            )
+
+            live_url = app._progress_live_url("om_1")
+
+        self.assertEqual(live_url, "http://10.2.3.4:8765/sessions?session=om_1")
+        resolve_url.assert_called_with("", port=8765, bind_host="0.0.0.0")
+
     def test_completed_progress_card_keeps_result_followup_actions(self):
         with tempfile.TemporaryDirectory() as tmp:
             metadata = Path(tmp) / "bug_metadata.md"
@@ -862,7 +977,12 @@ class AppTests(unittest.TestCase):
             html.write_text("<html></html>", encoding="utf-8")
             fake_lark = FakeLarkClient()
             app = BridgeApp(
-                BridgeConfig(dry_run=False, data_dir=Path(tmp), allowed_chats=["oc_denied"]),
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    allowed_chats=["oc_denied"],
+                    event_consumer=EventConsumerOptions(event_key="card.action.trigger"),
+                ),
                 lark_client=fake_lark,
                 bug_runner=FakeBugRunner(metadata, html),
             )
@@ -1130,7 +1250,10 @@ class AppTests(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertEqual(result.error_code, "missing_followup_reply")
         self.assertIn("回复对应那条分析消息", result.message)
-        self.assertTrue(any("回复对应那条分析消息" in item["card_json"] for item in fake_lark.updated_cards))
+        self.assertEqual(fake_intent.calls, [])
+        self.assertEqual(fake_lark.card_replies, [])
+        self.assertEqual(fake_lark.updated_cards, [])
+        self.assertTrue(any("回复对应那条分析消息" in item["text"] for item in fake_lark.sent))
 
     def test_reply_to_failed_bug_link_session_uses_activity_context_before_intent(self):
         class FailingIntentRunner(FakeIntentRunner):
@@ -1259,7 +1382,27 @@ class AppTests(unittest.TestCase):
         self.assertIn("分析3D生命周期", fake_bug.requests[0].prompt)
         self.assertIn("重新分析", fake_bug.requests[0].prompt)
 
-    def test_claude_skill_request_sends_text_and_result_file(self):
+    def test_claude_skill_request_is_unsupported_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_lark = FakeLarkClient()
+            fake_claude = FakeClaudeRunner(Path(tmp) / "skill-result.md")
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    allowed_chats=["oc_denied"],
+                ),
+                lark_client=fake_lark,
+                claude_runner=fake_claude,
+            )
+
+            result = app.handle_event(event(content="@bot /skill 分析下这个 skill 场景"))
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.details["mode"], "unsupported")
+        self.assertEqual(fake_claude.requests, [])
+
+    def test_claude_skill_request_sends_text_and_result_file_when_configured(self):
         with tempfile.TemporaryDirectory() as tmp:
             artifact = Path(tmp) / "skill-result.md"
             artifact.write_text("结论", encoding="utf-8")
@@ -1270,6 +1413,7 @@ class AppTests(unittest.TestCase):
                     dry_run=False,
                     data_dir=Path(tmp),
                     allowed_chats=["oc_denied"],
+                    claude_agent=ClaudeAgentOptions(trigger_prefixes=["/skill"]),
                 ),
                 lark_client=fake_lark,
                 claude_runner=fake_claude,
@@ -1296,6 +1440,7 @@ class AppTests(unittest.TestCase):
                     data_dir=Path(tmp),
                     allowed_chats=["oc_denied"],
                     lark=LarkOptions(bot_name="Test Bot"),
+                    claude_agent=ClaudeAgentOptions(trigger_prefixes=["/skill"]),
                 ),
                 lark_client=fake_lark,
                 claude_runner=fake_claude,
@@ -1320,6 +1465,7 @@ class AppTests(unittest.TestCase):
                     dry_run=False,
                     data_dir=Path(tmp),
                     allowed_chats=["oc_denied"],
+                    claude_agent=ClaudeAgentOptions(trigger_prefixes=["skill"]),
                 ),
                 lark_client=fake_lark,
                 claude_runner=fake_claude,
@@ -1408,6 +1554,168 @@ class AppTests(unittest.TestCase):
         self.assertEqual(fake_chat.prompts, ["帮我解释一下什么是 token？"])
         self.assertEqual(len(fake_lark.sent), 1)
 
+    def test_knowledge_question_uses_knowledge_card_before_omlx(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_lark = FakeLarkClient()
+            fake_chat = FakeOmlxChatClient()
+            fake_knowledge = FakeKnowledgeService()
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    knowledge=KnowledgeOptions(enabled=True),
+                ),
+                lark_client=fake_lark,
+                chat_client=fake_chat,
+                intent_runner=FakeIntentRunner(enabled=False),
+                knowledge_service=fake_knowledge,
+            )
+
+            result = app.handle_event(
+                event(
+                    event_id="evt_kb",
+                    message_id="om_kb",
+                    chat_id="oc_p2p",
+                    chat_type="p2p",
+                    content="知识库 OTA信号如何模拟",
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.details["mode"], "knowledge_qa")
+        self.assertEqual(fake_knowledge.questions, ["知识库 OTA信号如何模拟"])
+        self.assertEqual(fake_chat.prompts, [])
+        self.assertEqual(len(fake_lark.card_replies), 1)
+        self.assertIn("知识库回答", fake_lark.card_replies[0]["card_json"])
+        self.assertIn("SIGNAL_OTA_ST 定义", fake_lark.card_replies[0]["card_json"])
+
+    def test_help_request_replies_as_plain_text_without_intent_or_card(self):
+        class FailingIntentRunner(FakeIntentRunner):
+            def classify(self, **kwargs):
+                raise AssertionError("help should be answered locally")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_lark = FakeLarkClient()
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    allowed_chats=["oc_denied"],
+                ),
+                lark_client=fake_lark,
+                intent_runner=FailingIntentRunner(enabled=True),
+            )
+
+            result = app.handle_event(event(content="@bot help"))
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.details["mode"], "basic_chat")
+        self.assertEqual(fake_lark.card_replies, [])
+        self.assertEqual(fake_lark.updated_cards, [])
+        self.assertEqual(len(fake_lark.sent), 1)
+        self.assertIn("常用触发方式", fake_lark.sent[0]["text"])
+        self.assertIn("| Bug 分析 |", fake_lark.sent[0]["text"])
+
+    def test_stale_help_replayed_before_listener_ready_is_skipped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_lark = FakeLarkClient()
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    allowed_chats=["oc_denied"],
+                    event_consumer=EventConsumerOptions(
+                        drop_stale_light_interactions=True,
+                        stale_light_interaction_grace_seconds=60,
+                    ),
+                ),
+                lark_client=fake_lark,
+                intent_runner=FakeIntentRunner(enabled=True),
+            )
+            app.record_daemon_status({"stage": "event_consumer_ready", "ready": True})
+            old_create_time = int((datetime.now(timezone.utc) - timedelta(minutes=5)).timestamp() * 1000)
+
+            result = app.handle_event(
+                event(
+                    event_id="evt_stale_help",
+                    message_id="om_stale_help",
+                    content="@bot help",
+                    create_time=str(old_create_time),
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertTrue(result.skipped)
+        self.assertEqual(result.details["mode"], "stale_light_interaction")
+        self.assertEqual(fake_lark.sent, [])
+        self.assertEqual(fake_lark.replies, [])
+        self.assertEqual(fake_lark.card_replies, [])
+
+    def test_stale_bug_request_is_not_dropped_by_light_interaction_guard(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            metadata = tmp_path / "metadata.md"
+            html = tmp_path / "report.html"
+            metadata.write_text("metadata", encoding="utf-8")
+            html.write_text("<html>report</html>", encoding="utf-8")
+            fake_lark = FakeLarkClient()
+            bug_runner = FakeBugRunner(metadata, html)
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=tmp_path,
+                    allowed_chats=["oc_denied"],
+                    event_consumer=EventConsumerOptions(
+                        drop_stale_light_interactions=True,
+                        stale_light_interaction_grace_seconds=60,
+                    ),
+                ),
+                lark_client=fake_lark,
+                bug_runner=bug_runner,
+            )
+            app.record_daemon_status({"stage": "event_consumer_ready", "ready": True})
+            old_create_time = int((datetime.now(timezone.utc) - timedelta(minutes=5)).timestamp() * 1000)
+
+            result = app.handle_event(
+                event(
+                    event_id="evt_stale_bug",
+                    message_id="om_stale_bug",
+                    content="@bot https://project.feishu.cn/xpfailuremgmt/buglo/detail/6991604970 分析主题变化",
+                    create_time=str(old_create_time),
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertFalse(result.skipped)
+        self.assertEqual(len(bug_runner.requests), 1)
+        self.assertEqual(result.details["mode"], "bug_analysis")
+
+    def test_identity_request_replies_as_plain_text_without_intent_or_card(self):
+        class FailingIntentRunner(FakeIntentRunner):
+            def classify(self, **kwargs):
+                raise AssertionError("identity should be answered locally")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_lark = FakeLarkClient()
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    allowed_chats=["oc_denied"],
+                ),
+                lark_client=fake_lark,
+                intent_runner=FailingIntentRunner(enabled=True),
+            )
+
+            result = app.handle_event(event(content="@bot 你是谁"))
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.details["mode"], "basic_chat")
+        self.assertEqual(fake_lark.card_replies, [])
+        self.assertEqual(fake_lark.updated_cards, [])
+        self.assertEqual(len(fake_lark.sent), 1)
+        self.assertIn("Lark Agent Bridge", fake_lark.sent[0]["text"])
+
     def test_agent_intent_routes_simple_question_to_chat(self):
         with tempfile.TemporaryDirectory() as tmp:
             fake_lark = FakeLarkClient()
@@ -1445,8 +1753,7 @@ class AppTests(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertEqual(result.details["mode"], "omlx_chat")
         self.assertEqual(fake_chat.prompts, ["帮我解释一下什么是 token？"])
-        self.assertEqual(len(fake_intent.calls), 1)
-        self.assertEqual(fake_intent.calls[0]["route_content"], "帮我解释一下什么是 token？")
+        self.assertEqual(fake_intent.calls, [])
 
     def test_super_user_in_non_allowlisted_group_uses_intent_routing(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1486,7 +1793,7 @@ class AppTests(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertEqual(result.details["mode"], "omlx_chat")
         self.assertEqual(fake_chat.prompts, ["帮我解释一下什么是 token？"])
-        self.assertEqual(len(fake_intent.calls), 1)
+        self.assertEqual(fake_intent.calls, [])
 
     def test_perception_summary_request_sends_html_file(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1504,7 +1811,7 @@ class AppTests(unittest.TestCase):
                 perception_runner=fake_runner,
             )
 
-            result = app.handle_event(event(content="@bot /perception-summary 总结当前感知数据"))
+            result = app.handle_event(event(content="@bot 总结当前感知数据"))
 
         self.assertTrue(result.success)
         self.assertEqual(result.details["mode"], "perception_summary")
@@ -1765,6 +2072,31 @@ class AppTests(unittest.TestCase):
         resources = fake_handler.requests[0].resources
         self.assertEqual(resources[0].kind, "local")
         self.assertEqual(Path(resources[0].value), log_dir.resolve())
+
+    def test_rom_version_lookup_preempts_signal_parser(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_lark = FakeLarkClient()
+            fake_rom = FakeRomVersionRunner()
+            fake_handler = FakeSignalHandler()
+            text = (
+                "@bot XMARTM3EUD03E5_V6.2.2.6808_20260424002644.3_REV01_USERDEBUG "
+                "调用rom-version skill 找下导航版本"
+            )
+            app = BridgeApp(
+                BridgeConfig(dry_run=False, data_dir=Path(tmp), allowed_chats=["oc_denied"]),
+                lark_client=fake_lark,
+                handler=fake_handler,
+                rom_version_runner=fake_rom,
+            )
+
+            result = app.handle_event(event(content=text))
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.details["mode"], "rom_version_lookup")
+        self.assertEqual(len(fake_rom.requests), 1)
+        self.assertEqual(fake_handler.requests, [])
+        self.assertEqual(len(fake_lark.sent), 1)
+        self.assertIn("导航版本", fake_lark.sent[0]["text"])
 
     def test_scene_signal_prompt_preempts_generic_signal_route(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -3072,7 +3404,12 @@ class AppTests(unittest.TestCase):
             fake_lark = FakeLarkClient()
             fake_bug = FakeBugRunner(Path(tmp) / "bug_metadata.md", Path(tmp) / "bug_report.html")
             app = BridgeApp(
-                BridgeConfig(dry_run=False, data_dir=Path(tmp), allowed_chats=["oc_denied"]),
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    allowed_chats=["oc_denied"],
+                    event_consumer=EventConsumerOptions(event_key="card.action.trigger"),
+                ),
                 lark_client=fake_lark,
                 bug_runner=fake_bug,
                 chat_client=FakeOmlxChatClient(),
@@ -3204,6 +3541,212 @@ class AppTests(unittest.TestCase):
         self.assertEqual(result.details["mode"], "bug_reanalysis")
         self.assertEqual(len(fake_bug.reanalysis_calls), 1)
         self.assertEqual(fake_bug.reanalysis_calls[0]["followup_text"], "根据导航源码分析 SR 页面生命周期")
+
+    def test_select_bug_skill_card_action_routes_reanalysis_to_selected_skill(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_bug = FakeBugRunner(Path(tmp) / "bug_metadata.md", Path(tmp) / "bug_report.html")
+            app = BridgeApp(
+                BridgeConfig(dry_run=False, data_dir=Path(tmp), allowed_chats=["oc_denied"]),
+                lark_client=FakeLarkClient(),
+                bug_runner=fake_bug,
+                chat_client=FakeOmlxChatClient(),
+            )
+            request_text = "https://project.feishu.cn/xpfailuremgmt/buglo/detail/6994226322 分析这个 bug"
+            app.conversation_store.remember(
+                root_message_id="om_bug_root",
+                chat_id="oc_denied",
+                mode="bug_clarification",
+                request_text=request_text,
+                summary_text="未命中专用 skill，请选择分析方向。",
+                report_url="",
+                report_excerpt="",
+            )
+            original = event(
+                event_id="evt_bug_clarify",
+                message_id="om_bug_root",
+                content=request_text,
+            )
+            app.activity_store.record_event(original)
+            app.activity_store.record_result(
+                original,
+                TaskResult(
+                    success=True,
+                    message="未命中专用 skill",
+                    job_id="job_clarify",
+                    job_dir=Path(tmp) / "jobs" / "job_clarify",
+                    details={
+                        "mode": "bug_clarification",
+                        "conversation_root_message_id": "om_bug_root",
+                        "bug_url": "https://project.feishu.cn/xpfailuremgmt/buglo/detail/6994226322",
+                        "user_request_text": request_text,
+                    },
+                ),
+            )
+
+            result = app.handle_payload(
+                {
+                    "header": {"event_id": "evt_select_xtheme"},
+                    "event": {
+                        "context": {
+                            "open_message_id": "om_card_select",
+                            "open_chat_id": "oc_denied",
+                            "chat_type": "group",
+                        },
+                        "operator": {"operator_id": {"open_id": "ou_1"}},
+                        "action": {
+                            "value": {
+                                "action": "select_bug_skill",
+                                "root_message_id": "om_bug_root",
+                                "job_id": "job_clarify",
+                                "skill_name": "xtheme-analyzer",
+                            },
+                            "form_value": {"followup_prompt": "重点看问题时间前的 ThemeHelper 变化"},
+                        },
+                    },
+                }
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.details["mode"], "bug_reanalysis")
+        self.assertEqual(len(fake_bug.reanalysis_calls), 1)
+        call = fake_bug.reanalysis_calls[0]
+        self.assertTrue(call["force_rerun"])
+        self.assertEqual(call["classification_skill"], "xtheme-analyzer")
+        self.assertEqual(call["classification_source"], "user_selected_card")
+        self.assertEqual(call["plans_override"][0].kind, "xtheme")
+        self.assertIn("ThemeHelper", call["followup_text"])
+
+    def test_bug_result_card_offers_skill_correction_choices(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_bug = FakeBugRunner(Path(tmp) / "bug_metadata.md", Path(tmp) / "bug_report.html")
+            fake_lark = FakeLarkClient()
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    allowed_chats=["oc_denied"],
+                    event_consumer=EventConsumerOptions(event_key="card.action.trigger"),
+                ),
+                lark_client=fake_lark,
+                bug_runner=fake_bug,
+                chat_client=FakeOmlxChatClient(),
+            )
+            result = TaskResult(
+                success=True,
+                message="Bug 分析完成\n结论：当前更像是感知链路问题。",
+                job_id="job_bug_result",
+                details={
+                    "mode": "bug_analysis",
+                    "published_report_url": "http://127.0.0.1:8765/reports/job_bug_result/",
+                    "analysis_skill": "perception-data-summary",
+                    "analysis_skill_label": "当前感知数据总结",
+                    "classification_source": "agent",
+                },
+            )
+
+            sent = app._try_send_result_card(
+                event(message_id="om_bug_result"),
+                result,
+                delivery="reply",
+                session_id="om_bug_result",
+            )
+
+        self.assertTrue(sent)
+        self.assertEqual(len(fake_lark.card_replies), 1)
+        rendered = fake_lark.card_replies[0]["card_json"]
+        self.assertIn("意图/Skill 校正", rendered)
+        self.assertIn("当前命中：当前感知数据总结", rendered)
+        self.assertIn("select_bug_skill", rendered)
+        self.assertIn("xtheme-analyzer", rendered)
+        self.assertIn("perception-data-summary", rendered)
+
+    def test_bug_result_card_hides_card_action_buttons_without_card_action_consumer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_bug = FakeBugRunner(Path(tmp) / "bug_metadata.md", Path(tmp) / "bug_report.html")
+            fake_lark = FakeLarkClient()
+            app = BridgeApp(
+                BridgeConfig(dry_run=False, data_dir=Path(tmp), allowed_chats=["oc_denied"]),
+                lark_client=fake_lark,
+                bug_runner=fake_bug,
+                chat_client=FakeOmlxChatClient(),
+            )
+            result = TaskResult(
+                success=True,
+                message="Bug 分析完成\n结论：当前更像是启动时序问题。",
+                job_id="job_bug_result",
+                details={
+                    "mode": "bug_analysis",
+                    "published_report_url": "http://127.0.0.1:8765/reports/job_bug_result/",
+                    "analysis_skill": "3d-stuck-investigate",
+                    "analysis_skill_label": "3D启动时序分析",
+                    "classification_source": "agent",
+                },
+            )
+
+            sent = app._try_send_result_card(
+                event(message_id="om_bug_result"),
+                result,
+                delivery="reply",
+                session_id="om_bug_result",
+            )
+
+        self.assertTrue(sent)
+        rendered = fake_lark.card_replies[0]["card_json"]
+        self.assertIn("命中 Skill", rendered)
+        self.assertNotIn("意图/Skill 校正", rendered)
+        self.assertNotIn("select_bug_skill", rendered)
+        self.assertNotIn("feedback_helpful", rendered)
+        self.assertNotIn("feedback_unhelpful", rendered)
+        self.assertNotIn("下方按钮", rendered)
+
+    def test_finished_progress_card_offers_skill_correction_choices(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_bug = FakeBugRunner(Path(tmp) / "bug_metadata.md", Path(tmp) / "bug_report.html")
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    allowed_chats=["oc_denied"],
+                    event_consumer=EventConsumerOptions(event_key="card.action.trigger"),
+                ),
+                lark_client=FakeLarkClient(),
+                bug_runner=fake_bug,
+                chat_client=FakeOmlxChatClient(),
+            )
+            app._progress_cards["om_bug_result"] = {
+                "title": "Bug 分析",
+                "status": "analyzing",
+                "details": {},
+                "started_at": datetime.now(timezone.utc),
+                "message_id": "om_card_1",
+            }
+            result = TaskResult(
+                success=True,
+                message="Bug 分析完成\n结论：当前更像是感知链路问题。",
+                job_id="job_bug_result",
+                details={
+                    "mode": "bug_analysis",
+                    "published_report_url": "http://127.0.0.1:8765/reports/job_bug_result/",
+                    "analysis_skill": "perception-data-summary",
+                    "analysis_skill_label": "当前感知数据总结",
+                    "classification_source": "agent",
+                    "conversation_root_message_id": "om_bug_result",
+                },
+            )
+
+            card = app._build_progress_card(
+                event(message_id="om_bug_result"),
+                key="om_bug_result",
+                status="completed",
+                result=result,
+                note=result.message,
+            )
+
+        rendered = str(card)
+        self.assertIn("意图/Skill 校正", rendered)
+        self.assertIn("当前命中：当前感知数据总结", rendered)
+        self.assertIn("select_bug_skill", rendered)
+        self.assertIn("命中 Skill", rendered)
 
     def test_continue_agent_card_action_explicitly_resumes_saved_agent_session(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -3790,7 +4333,11 @@ class AppTests(unittest.TestCase):
         self.assertEqual(result.details["mode"], "omlx_chat")
         self.assertEqual(fake_chat.prompts, ["讲个笑话"])
 
-    def test_intent_routing_sends_ack_card_before_classification(self):
+    def test_plain_question_bypasses_intent_card(self):
+        class FailingIntentRunner(FakeIntentRunner):
+            def classify(self, **kwargs):
+                raise AssertionError("plain chat should not wait for intent classification")
+
         with tempfile.TemporaryDirectory() as tmp:
             metadata = Path(tmp) / "bug_metadata.md"
             html = Path(tmp) / "bug_report.html"
@@ -3798,23 +4345,6 @@ class AppTests(unittest.TestCase):
             html.write_text("<html></html>", encoding="utf-8")
             fake_lark = FakeLarkClient()
             fake_chat = FakeOmlxChatClient()
-
-            def classify_after_ack(**kwargs):
-                self.assertGreaterEqual(len(fake_lark.card_replies), 1)
-                self.assertIn("意图分析", fake_lark.card_replies[0]["card_json"])
-                return IntentDecision(
-                    route="chat",
-                    reason="普通聊天提问",
-                    confidence="high",
-                    followup_action="none",
-                    context_source="none",
-                )
-
-            fake_intent = FakeIntentRunner(
-                {
-                    "帮我解释一下 token": classify_after_ack,
-                }
-            )
             app = BridgeApp(
                 BridgeConfig(
                     dry_run=False,
@@ -3825,7 +4355,7 @@ class AppTests(unittest.TestCase):
                 lark_client=fake_lark,
                 chat_client=fake_chat,
                 bug_runner=FakeBugRunner(metadata, html),
-                intent_runner=fake_intent,
+                intent_runner=FailingIntentRunner(enabled=True),
             )
 
             result = app.handle_event(
@@ -3837,8 +4367,9 @@ class AppTests(unittest.TestCase):
 
         self.assertTrue(result.success)
         self.assertEqual(result.details["mode"], "omlx_chat")
-        self.assertEqual(len(fake_lark.card_replies), 1)
-        self.assertEqual(len(fake_intent.calls), 1)
+        self.assertEqual(fake_lark.card_replies, [])
+        self.assertEqual(fake_lark.updated_cards, [])
+        self.assertEqual(fake_lark.sent[0]["text"], "omlx 模型回复")
 
     def test_explicit_bug_link_bypasses_intent_classifier(self):
         class FailingIntentRunner(FakeIntentRunner):
@@ -3910,20 +4441,13 @@ class AppTests(unittest.TestCase):
         self.assertEqual(fake_bug.requests[0].prompt, "分析3D生命周期")
 
     def test_intent_chat_updates_ack_card_with_answer(self):
+        class FailingIntentRunner(FakeIntentRunner):
+            def classify(self, **kwargs):
+                raise AssertionError("plain chat should not wait for intent classification")
+
         with tempfile.TemporaryDirectory() as tmp:
             fake_lark = FakeLarkClient()
             fake_chat = FakeOmlxChatClient()
-            fake_intent = FakeIntentRunner(
-                {
-                    "帮我解释一下 token": IntentDecision(
-                        route="chat",
-                        reason="普通聊天",
-                        confidence="high",
-                        followup_action="none",
-                        context_source="none",
-                    )
-                }
-            )
             app = BridgeApp(
                 BridgeConfig(
                     dry_run=False,
@@ -3932,16 +4456,16 @@ class AppTests(unittest.TestCase):
                 ),
                 lark_client=fake_lark,
                 chat_client=fake_chat,
-                intent_runner=fake_intent,
+                intent_runner=FailingIntentRunner(enabled=True),
             )
 
             result = app.handle_event(event(content="@bot 帮我解释一下 token"))
 
         self.assertTrue(result.success)
         self.assertEqual(result.details["mode"], "omlx_chat")
-        self.assertEqual(len(fake_lark.card_replies), 1)
-        self.assertEqual(fake_lark.replies, [])
-        self.assertTrue(any("omlx 模型回复" in item["card_json"] for item in fake_lark.updated_cards))
+        self.assertEqual(fake_lark.card_replies, [])
+        self.assertEqual(fake_lark.updated_cards, [])
+        self.assertEqual(fake_lark.sent[0]["text"], "omlx 模型回复")
 
     def test_group_bug_request_accepts_configured_bot_name_at_end(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -4034,6 +4558,40 @@ class AppTests(unittest.TestCase):
                 event(
                     event_id="evt_right_bot_name",
                     content="@Test Bot /chat 讲个笑话",
+                )
+            )
+
+        self.assertTrue(rejected.skipped)
+        self.assertEqual(rejected.details["mode"], "not_addressed")
+        self.assertTrue(accepted.success)
+        self.assertFalse(accepted.skipped)
+        self.assertEqual(fake_chat.prompts, ["讲个笑话"])
+
+    def test_group_chat_command_accepts_configured_bot_name_without_spaces(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_lark = FakeLarkClient()
+            fake_chat = FakeOmlxChatClient()
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    allowed_chats=["oc_denied"],
+                    lark=LarkOptions(bot_name="朱云龙的飞书 CLI"),
+                ),
+                lark_client=fake_lark,
+                chat_client=fake_chat,
+            )
+
+            rejected = app.handle_event(
+                event(
+                    event_id="evt_human_mention",
+                    content="@朱云龙 /chat 讲个笑话",
+                )
+            )
+            accepted = app.handle_event(
+                event(
+                    event_id="evt_bot_name_no_space",
+                    content="@朱云龙的飞书CLI /chat 讲个笑话",
                 )
             )
 

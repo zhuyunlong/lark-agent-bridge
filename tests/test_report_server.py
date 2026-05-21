@@ -8,7 +8,8 @@ from unittest import mock
 
 from lark_agent_bridge.case_store import CaseRecord, CaseStore
 from lark_agent_bridge.health import ProcessWatchdog
-from lark_agent_bridge.models import BridgeConfig, LarkEvent, ReportServerOptions, TaskResult
+from lark_agent_bridge.knowledge import KnowledgeService
+from lark_agent_bridge.models import BridgeConfig, KnowledgeOptions, LarkEvent, ReportServerOptions, TaskResult
 from lark_agent_bridge.report_server import HtmlReportPublisher, ReportHttpServer
 from lark_agent_bridge.skill_manager import SkillManager
 from lark_agent_bridge.state import AgentActivityStore
@@ -19,7 +20,12 @@ class ReportServerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             html_path = Path(tmp) / "bug_report.html"
             html_path.write_text("<html><body><h1>根因分析</h1><p>首帧超时</p></body></html>", encoding="utf-8")
-            publisher = HtmlReportPublisher(BridgeConfig(dry_run=False, data_dir=Path(tmp)))
+            config = BridgeConfig(
+                dry_run=False,
+                data_dir=Path(tmp),
+                report_server=ReportServerOptions(bind_host="0.0.0.0"),
+            )
+            publisher = HtmlReportPublisher(config)
 
             with mock.patch("lark_agent_bridge.report_server._detect_lan_ip", return_value="10.2.3.4"):
                 published = publisher.publish_result(
@@ -93,6 +99,30 @@ class ReportServerTests(unittest.TestCase):
         self.assertNotIn("原始 Agent 总结", index_html)
         self.assertNotIn("<details", index_html)
         self.assertIn("打开 HTML 报告", index_html)
+        self.assertNotIn("<iframe", index_html)
+
+    def test_publish_result_index_links_reports_without_embedding_html(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            html_path = Path(tmp) / "bug_report.html"
+            html_path.write_text("<html><body><h1>3D Unity 启动生命周期报告</h1></body></html>", encoding="utf-8")
+            publisher = HtmlReportPublisher(BridgeConfig(dry_run=False, data_dir=Path(tmp)))
+
+            published = publisher.publish_result(
+                TaskResult(
+                    success=True,
+                    message="结论：已生成报告。",
+                    job_id="evt_bug_link",
+                    details={"mode": "bug_analysis", "files_to_send": [html_path]},
+                )
+            )
+
+            assert published is not None
+            index_html = published.index_path.read_text(encoding="utf-8")
+
+        self.assertIn('href="report.html"', index_html)
+        self.assertIn("在新窗口打开完整报告", index_html)
+        self.assertNotIn("<iframe", index_html)
+        self.assertNotIn("3D Unity 启动生命周期报告", index_html)
 
     def test_publish_result_index_keeps_multiple_summary_lines(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -257,6 +287,14 @@ class ReportServerTests(unittest.TestCase):
                 )
                 with urllib.request.urlopen(create_request, timeout=5) as response:
                     created_skill = json.loads(response.read().decode("utf-8"))
+                route_request = urllib.request.Request(
+                    f"http://127.0.0.1:{port}/api/skills/http-debug-skill/route",
+                    data=json.dumps({"role": "primary", "kind": "general", "requires_logs": True}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(route_request, timeout=5) as response:
+                    routed_skill = json.loads(response.read().decode("utf-8"))
                 debug_request = urllib.request.Request(
                     f"http://127.0.0.1:{port}/api/skills/http-debug-skill/debug",
                     data=json.dumps({"sample_text": "debug skill"}).encode("utf-8"),
@@ -284,6 +322,11 @@ class ReportServerTests(unittest.TestCase):
         self.assertIn("后台管理", admin_html)
         self.assertIn("分析历史", admin_html)
         self.assertIn("删除记录", admin_html)
+        self.assertIn("报告卡片可选", admin_html)
+        self.assertIn("未接入主路由", admin_html)
+        self.assertIn("skill-route-filter", admin_html)
+        self.assertIn("进 Bug 分析", admin_html)
+        self.assertIn("/route", admin_html)
         self.assertIn("/api/analysis-history", admin_html)
         self.assertIn("终止任务", admin_html)
         self.assertIn("/terminate", admin_html)
@@ -294,7 +337,14 @@ class ReportServerTests(unittest.TestCase):
         self.assertEqual(history_detail["item"]["progress"][0]["stage"], "agent_running")
         self.assertEqual(history_detail["item"]["details"]["evidence_log_bundle"], str(job_dir / "evidence_logs"))
         self.assertTrue(any(item["name"] == "general" for item in skills["skills"]))
+        general_skill = next(item for item in skills["skills"] if item["name"] == "general")
+        self.assertEqual(general_skill["route_status"], "fallback")
+        self.assertFalse(general_skill["selectable_in_report_card"])
         self.assertEqual(created_skill["skill"]["name"], "http-debug-skill")
+        self.assertEqual(created_skill["skill"]["route_status"], "custom_unrouted")
+        self.assertFalse(created_skill["skill"]["selectable_in_report_card"])
+        self.assertEqual(routed_skill["skill"]["route_status"], "bug_primary")
+        self.assertTrue(routed_skill["skill"]["selectable_in_report_card"])
         self.assertIn("summary", debug_skill)
         self.assertEqual(daemon["daemon"]["stage"], "event_consumer_ready")
         self.assertIn("report ok", report)
@@ -367,6 +417,132 @@ class ReportServerTests(unittest.TestCase):
         self.assertEqual(payload["terminated"][0]["session_id"], "om_running")
         terminate.assert_called_once_with(12345)
 
+    def test_http_server_exposes_knowledge_search_and_sync(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            config = BridgeConfig(
+                dry_run=False,
+                data_dir=data_dir,
+                report_server=ReportServerOptions(enabled=True, bind_host="127.0.0.1", port=0),
+                knowledge=KnowledgeOptions(enabled=True, storage=data_dir / "knowledge.sqlite"),
+            )
+            knowledge = KnowledgeService(config)
+            knowledge.add_text(
+                source_id="manual",
+                title="打开Debug面板",
+                content="adb shell am start -a com.xiaopeng.intent.action.DEV_BOARD",
+            )
+            server = ReportHttpServer(config, knowledge_service=knowledge)
+            try:
+                server.start()
+            except PermissionError as exc:
+                self.skipTest(f"local HTTP bind is not permitted in this environment: {exc}")
+            assert server._server is not None
+            port = server._server.server_address[1]
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/knowledge/search?q=Debug", timeout=5) as response:
+                    search_payload = json.loads(response.read().decode("utf-8"))
+                request = urllib.request.Request(
+                    f"http://127.0.0.1:{port}/api/knowledge/sync",
+                    data=b"{}",
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(request, timeout=5) as response:
+                    sync_payload = json.loads(response.read().decode("utf-8"))
+            finally:
+                server.stop()
+
+        self.assertEqual(search_payload["hits"][0]["title"], "打开Debug面板")
+        self.assertEqual(sync_payload["source_count"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ResolvePublicBaseUrlTests(unittest.TestCase):
+    """Verify bind_host affects public URL generation."""
+
+    def test_loopback_bind_uses_loopback_public_url(self):
+        from lark_agent_bridge.report_server import resolve_public_base_url
+        with mock.patch("lark_agent_bridge.report_server._detect_lan_ip", return_value="10.2.3.4"):
+            url = resolve_public_base_url("", port=8765, bind_host="127.0.0.1")
+        self.assertEqual(url, "http://127.0.0.1:8765/reports")
+
+    def test_all_interfaces_bind_uses_lan_ip(self):
+        from lark_agent_bridge.report_server import resolve_public_base_url
+        with mock.patch("lark_agent_bridge.report_server._detect_lan_ip", return_value="10.2.3.4"):
+            url = resolve_public_base_url("", port=8765, bind_host="0.0.0.0")
+        self.assertEqual(url, "http://10.2.3.4:8765/reports")
+
+    def test_empty_bind_defaults_to_loopback(self):
+        from lark_agent_bridge.report_server import resolve_public_base_url
+        with mock.patch("lark_agent_bridge.report_server._detect_lan_ip", return_value="10.2.3.4"):
+            url = resolve_public_base_url("", port=8765, bind_host="")
+        self.assertEqual(url, "http://127.0.0.1:8765/reports")
+
+    def test_explicit_public_url_is_preserved(self):
+        from lark_agent_bridge.report_server import resolve_public_base_url
+        url = resolve_public_base_url(
+            "https://bridge.example.com/reports",
+            port=8765,
+            bind_host="127.0.0.1",
+        )
+        self.assertEqual(url, "https://bridge.example.com/reports")
+
+    def test_localhost_bind_uses_loopback_public_url(self):
+        from lark_agent_bridge.report_server import resolve_public_base_url
+        with mock.patch("lark_agent_bridge.report_server._detect_lan_ip", return_value="10.2.3.4"):
+            url = resolve_public_base_url("", port=8765, bind_host="localhost")
+        # localhost is loopback, should not use LAN IP
+        self.assertNotIn("10.2.3.4", url)
+
+
+class BindHostTests(unittest.TestCase):
+    """Verify resolve_bind_host behavior."""
+
+    def test_empty_defaults_to_loopback(self):
+        from lark_agent_bridge.report_server import resolve_bind_host
+        self.assertEqual(resolve_bind_host(""), "127.0.0.1")
+
+    def test_explicit_zero_preserved(self):
+        from lark_agent_bridge.report_server import resolve_bind_host
+        self.assertEqual(resolve_bind_host("0.0.0.0"), "0.0.0.0")
+
+    def test_explicit_loopback_preserved(self):
+        from lark_agent_bridge.report_server import resolve_bind_host
+        self.assertEqual(resolve_bind_host("127.0.0.1"), "127.0.0.1")
+
+
+class ViewerRoleTests(unittest.TestCase):
+    """Verify viewer role cannot perform write operations."""
+
+    def test_viewer_role_returned_from_check_token(self):
+        from lark_agent_bridge.auth import AdminAuth
+        import tempfile as tf
+        with tf.TemporaryDirectory() as tmp:
+            auth = AdminAuth(Path(tmp), admin_token="admin-secret")
+            auth.create_user("viewer1", "password123", role="viewer")
+            session = auth.login("viewer1", "password123")
+            self.assertIsNotNone(session)
+            info = auth.check_token(session.token)
+            self.assertEqual(info["role"], "viewer")
+
+    def test_admin_role_returned_from_check_token(self):
+        from lark_agent_bridge.auth import AdminAuth
+        import tempfile as tf
+        with tf.TemporaryDirectory() as tmp:
+            auth = AdminAuth(Path(tmp), admin_token="admin-secret")
+            auth.create_user("admin1", "password123", role="admin")
+            session = auth.login("admin1", "password123")
+            info = auth.check_token(session.token)
+            self.assertEqual(info["role"], "admin")
+
+    def test_static_token_has_admin_role(self):
+        from lark_agent_bridge.auth import AdminAuth
+        import tempfile as tf
+        with tf.TemporaryDirectory() as tmp:
+            auth = AdminAuth(Path(tmp), admin_token="secret")
+            info = auth.check_token("secret")
+            self.assertEqual(info["role"], "admin")

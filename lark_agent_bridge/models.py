@@ -14,6 +14,7 @@ from typing import Any
 class DownloadConfig:
     max_bytes: int = 5 * 1024 * 1024 * 1024
     timeout_seconds: int = 60
+    allow_private_urls: bool = True
 
 
 @dataclass(slots=True)
@@ -40,6 +41,8 @@ class EventConsumerOptions:
     max_restarts: int = 0
     restart_initial_delay_seconds: float = 1
     restart_max_delay_seconds: float = 60
+    drop_stale_light_interactions: bool = True
+    stale_light_interaction_grace_seconds: float = 120
 
 
 @dataclass(slots=True)
@@ -54,7 +57,7 @@ class LarkOptions:
 class ClaudeAgentOptions:
     enabled: bool = True
     command: str = "claude"
-    trigger_prefixes: list[str] = field(default_factory=lambda: ["/skill", "/claude"])
+    trigger_prefixes: list[str] = field(default_factory=list)
     working_dir: Path | None = None
     add_dirs: list[Path] = field(default_factory=list)
     allowed_tools: list[str] = field(default_factory=lambda: ["Read", "Grep", "Glob", "LS"])
@@ -79,7 +82,7 @@ class BugAnalysisOptions:
     command: str = "claude"
     working_dir: Path | None = None
     timeout_seconds: int = 5400
-    agent_summary_timeout_seconds: int = 90
+    agent_summary_timeout_seconds: int = 300
     max_prompt_chars: int = 16000
     upload_result_files: bool = True
     default_prompt: str = ""
@@ -128,7 +131,7 @@ class OmlxChatOptions:
         "你是一个本地普通聊天助手。"
         "你没有文件系统、命令行、飞书管理、网络检索或代码修改权限。"
         "只回答普通聊天问题；如果用户要求日志分析、仓库分析、执行命令或访问文件，"
-        "请提醒用户改用 /skill 或 /signal。"
+        "请提醒用户提供 Bug 链接、日志附件或明确的分析方向。"
     )
     followup_max_context_chars: int = 12000
     followup_max_history_turns: int = 6
@@ -144,9 +147,10 @@ class OmlxChatOptions:
 @dataclass(slots=True)
 class ReportServerOptions:
     enabled: bool = True
-    bind_host: str = "127.0.0.1"
+    bind_host: str = "0.0.0.0"
     port: int = 8765
-    public_base_url: str = "http://127.0.0.1:8765/reports"
+    public_base_url: str = ""
+    admin_token: str = ""
 
 
 @dataclass(slots=True)
@@ -191,6 +195,27 @@ class DualAgentOptions:
 
 
 @dataclass(slots=True)
+class KnowledgeSourceOptions:
+    id: str
+    type: str
+    path: str = ""
+    url: str = ""
+    title: str = ""
+    table_id: str = ""
+    view_id: str = ""
+
+
+@dataclass(slots=True)
+class KnowledgeOptions:
+    enabled: bool = False
+    storage: Path = field(default_factory=lambda: Path("data/knowledge/knowledge.sqlite"))
+    max_hits: int = 5
+    trigger_prefixes: list[str] = field(default_factory=lambda: ["知识库", "查知识", "/kb", "/qa"])
+    answer_provider: str = "omlx"
+    sources: list[KnowledgeSourceOptions] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class BridgeConfig:
     dry_run: bool = True
     workspace_root: Path = field(default_factory=lambda: Path.cwd())
@@ -198,7 +223,7 @@ class BridgeConfig:
     data_dir: Path = field(default_factory=lambda: Path("data"))
     allowed_chats: list[str] = field(default_factory=list)
     allowed_users: list[str] = field(default_factory=list)
-    command_prefixes: list[str] = field(default_factory=lambda: ["/signal"])
+    command_prefixes: list[str] = field(default_factory=list)
     signal_aliases: dict[str, str] = field(default_factory=dict)
     download: DownloadConfig = field(default_factory=DownloadConfig)
     local_resources: LocalResourceOptions = field(default_factory=LocalResourceOptions)
@@ -214,6 +239,7 @@ class BridgeConfig:
     workflow_archive: WorkflowArchiveOptions = field(default_factory=WorkflowArchiveOptions)
     notifications: NotificationOptions = field(default_factory=NotificationOptions)
     dual_agent: DualAgentOptions = field(default_factory=DualAgentOptions)
+    knowledge: KnowledgeOptions = field(default_factory=KnowledgeOptions)
     runner_timeout_seconds: int = 900
 
 
@@ -288,6 +314,7 @@ class CardActionEvent:
     request_id: str = ""
     job_id: str = ""
     root_message_id: str = ""
+    skill_name: str = ""
     message_id: str = ""
     chat_id: str = ""
     chat_type: str = ""
@@ -337,6 +364,7 @@ class CardActionEvent:
             root_message_id=_safe_callback_identifier(
                 value.get("root_message_id") or value.get("conversation_root_message_id") or ""
             ),
+            skill_name=_safe_callback_identifier(value.get("skill_name") or value.get("selected_skill") or ""),
             message_id=_safe_callback_identifier(
                 payload.get("message_id")
                 or context.get("open_message_id")
@@ -484,6 +512,15 @@ class DirectAnalysisRequest:
 @dataclass(slots=True)
 class BugRequest:
     bug_url: str
+    prompt: str = ""
+    raw_text: str = ""
+    triggered: bool = False
+    error: str | None = None
+
+
+@dataclass(slots=True)
+class RomVersionLookupRequest:
+    rom_version: str
     prompt: str = ""
     raw_text: str = ""
     triggered: bool = False

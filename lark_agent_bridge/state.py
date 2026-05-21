@@ -9,10 +9,15 @@ from pathlib import Path
 import threading
 from typing import Any
 
+from .log import get_logger
 from .models import LarkEvent, TaskResult
+
+logger = get_logger("state")
 
 
 class EventStateStore:
+    _MAX_SEEN_EVENTS = 50000
+
     def __init__(self, state_file: str | Path) -> None:
         self.state_file = Path(state_file)
         self._seen = self._load_seen()
@@ -35,17 +40,21 @@ class EventStateStore:
         with self.state_file.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(record, ensure_ascii=False) + "\n")
         self._seen.add(event.event_id)
+        if len(self._seen) > self._MAX_SEEN_EVENTS * 2:
+            self._compact()
         return True
 
     def _load_seen(self) -> set[str]:
         if not self.state_file.exists():
             return set()
         seen: set[str] = set()
+        lines: list[str] = []
         with self.state_file.open("r", encoding="utf-8") as fh:
             for line in fh:
                 line = line.strip()
                 if not line:
                     continue
+                lines.append(line)
                 try:
                     record = json.loads(line)
                 except json.JSONDecodeError:
@@ -53,7 +62,42 @@ class EventStateStore:
                 event_id = record.get("event_id")
                 if isinstance(event_id, str):
                     seen.add(event_id)
+        # Keep only the most recent entries on load
+        if len(lines) > self._MAX_SEEN_EVENTS:
+            kept_lines = lines[-self._MAX_SEEN_EVENTS :]
+            seen = set()
+            for line in kept_lines:
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                event_id = record.get("event_id")
+                if isinstance(event_id, str):
+                    seen.add(event_id)
+            self.state_file.write_text("\n".join(kept_lines) + "\n", encoding="utf-8")
         return seen
+
+    def _compact(self) -> None:
+        """Trim the state file to the most recent MAX entries."""
+        if not self.state_file.exists():
+            return
+        with self.state_file.open("r", encoding="utf-8") as fh:
+            lines = [line.strip() for line in fh if line.strip()]
+        if len(lines) <= self._MAX_SEEN_EVENTS:
+            return
+        kept = lines[-self._MAX_SEEN_EVENTS :]
+        self._seen = set()
+        for line in kept:
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            event_id = record.get("event_id")
+            if isinstance(event_id, str):
+                self._seen.add(event_id)
+        tmp = self.state_file.with_suffix(".tmp")
+        tmp.write_text("\n".join(kept) + "\n", encoding="utf-8")
+        tmp.replace(self.state_file)
 
 
 @dataclass(slots=True)
@@ -274,7 +318,7 @@ class ConversationContextStore:
             }
             for key, context in self._contexts.items()
         }
-        self.state_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        _atomic_write_json(self.state_file, payload)
 
 
 class AgentActivityStore:
@@ -674,7 +718,7 @@ class AgentActivityStore:
     def _save(self) -> None:
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
         payload = {"sessions": self._sessions, "daemon": self._daemon_status}
-        self.state_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        _atomic_write_json(self.state_file, payload)
 
 
 def _coerce_history(value: object) -> list[dict[str, str]]:
@@ -739,7 +783,7 @@ def _is_admin_visible_session(session: dict[str, Any]) -> bool:
         mode = str(details.get("mode") or "").strip()
     if not mode:
         mode = str(session.get("mode") or "").strip()
-    if mode == "not_addressed":
+    if mode in {"not_addressed", "stale_light_interaction"}:
         return False
     message = str(session.get("message") or "").strip()
     if message.startswith("duplicate event skipped:"):
@@ -802,3 +846,25 @@ def _trim_text(value: object, max_chars: int) -> str:
     if len(text) <= max_chars:
         return text
     return text[: max_chars - 1].rstrip() + "…"
+
+
+def _atomic_write_json(path: Path, payload: object) -> None:
+    """Write JSON to *path* atomically via write-to-temp + os.replace."""
+    import os
+    import tempfile
+
+    data = json.dumps(payload, ensure_ascii=False, indent=2)
+    parent = path.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(dir=parent, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(data)
+            fh.flush()
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise

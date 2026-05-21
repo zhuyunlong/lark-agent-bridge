@@ -17,6 +17,8 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(config.report_server.enabled)
         self.assertFalse(config.approval.enabled)
         self.assertEqual(config.job_retention.bug_cache_max_age_hours, 24)
+        self.assertEqual(config.command_prefixes, [])
+        self.assertEqual(config.claude_agent.trigger_prefixes, [])
 
     def test_toml_overrides_are_resolved_relative_to_config(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -129,6 +131,8 @@ restart_on_failure = true
 max_restarts = 2
 restart_initial_delay_seconds = 0.5
 restart_max_delay_seconds = 8
+drop_stale_light_interactions = false
+stale_light_interaction_grace_seconds = 15
 """,
                 encoding="utf-8",
             )
@@ -141,6 +145,8 @@ restart_max_delay_seconds = 8
         self.assertEqual(config.event_consumer.max_restarts, 2)
         self.assertEqual(config.event_consumer.restart_initial_delay_seconds, 0.5)
         self.assertEqual(config.event_consumer.restart_max_delay_seconds, 8)
+        self.assertFalse(config.event_consumer.drop_stale_light_interactions)
+        self.assertEqual(config.event_consumer.stale_light_interaction_grace_seconds, 15)
 
     def test_load_approval_and_workflow_archive_options(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -241,6 +247,41 @@ max_prompt_chars = 6000
         self.assertEqual(config.intent_analysis.command, "codex")
         self.assertEqual(config.intent_analysis.timeout_seconds, 45)
         self.assertEqual(config.intent_analysis.max_prompt_chars, 6000)
+
+    def test_load_knowledge_options(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text(
+                """
+[knowledge]
+enabled = true
+storage = "kb/knowledge.sqlite"
+max_hits = 7
+trigger_prefixes = ["/kb", "知识库"]
+answer_provider = "omlx"
+
+[[knowledge.sources]]
+id = "adb"
+type = "local_json"
+path = "adb_data.json"
+
+[[knowledge.sources]]
+id = "wiki"
+type = "feishu_doc"
+url = "https://example.feishu.cn/wiki/doc"
+""",
+                encoding="utf-8",
+            )
+
+            config = load_config(config_path)
+
+        self.assertTrue(config.knowledge.enabled)
+        self.assertEqual(config.knowledge.storage, Path(tmp) / "kb/knowledge.sqlite")
+        self.assertEqual(config.knowledge.max_hits, 7)
+        self.assertEqual(config.knowledge.trigger_prefixes, ["/kb", "知识库"])
+        self.assertEqual(config.knowledge.sources[0].id, "adb")
+        self.assertEqual(config.knowledge.sources[0].path, str(Path(tmp) / "adb_data.json"))
+        self.assertEqual(config.knowledge.sources[1].url, "https://example.feishu.cn/wiki/doc")
 
     def test_environment_overrides_sensitive_fields(self):
         with tempfile.TemporaryDirectory() as tmp:

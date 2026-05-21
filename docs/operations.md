@@ -7,7 +7,7 @@ cd /path/to/workspace/tools/lark-agent-bridge
 python3.11 -m lark_agent_bridge listen --config config.toml
 ```
 
-Use `config.example.toml` only for dry-run checks. For real Feishu traffic, copy it to `config.toml` and keep `dry_run = false`. By default `allowed_chats = []`, so group access is not restricted: any group can `@` the bot for bug analysis, direct analysis, skill analysis, follow-up, and ordinary chat. Configure `allowed_chats` only when you want to turn on group access control.
+Use `config.example.toml` only for dry-run checks. For real Feishu traffic, copy it to `config.toml` and keep `dry_run = false`. By default `allowed_chats = []`, so group access is not restricted: any group can `@` the bot for bug analysis, direct analysis, signal analysis, perception summary, follow-up, and ordinary chat. Configure `allowed_chats` only when you want to turn on group access control.
 
 Real deployments usually keep these values in local `config.toml` or environment variables:
 
@@ -44,7 +44,7 @@ Example:
 [bug_analysis]
 provider = "codex"
 command = "codex"
-agent_summary_timeout_seconds = 90
+agent_summary_timeout_seconds = 300
 ```
 
 or:
@@ -84,7 +84,6 @@ If `allowed_chats = []`, the Bot supports full behavior in any group where it is
 - direct file analysis
 - signal analysis
 - perception summary
-- `/skill` read-only analysis
 - reply follow-up / reanalysis
 
 ### Restricted full-permission groups
@@ -96,7 +95,6 @@ If `allowed_chats` is non-empty, only `chat_id` values in `allowed_chats` get fu
 - direct file analysis
 - signal analysis
 - perception summary
-- `/skill` read-only analysis
 - reply follow-up / reanalysis
 
 ### Super-user bypass
@@ -126,7 +124,6 @@ python3.11 -m lark_agent_bridge check --config config.example.toml
 python3.11 -m lark_agent_bridge handle-event --config config.example.toml --event samples/signal_event_with_url.json --dry-run
 python3.11 -m lark_agent_bridge handle-event --config config.example.toml --event samples/signal_event_with_file.json --dry-run
 python3.11 -m lark_agent_bridge handle-event --config config.example.toml --event samples/basic_chat_who_are_you.json --dry-run
-python3.11 -m lark_agent_bridge handle-event --config config.example.toml --event samples/claude_skill_request.json --dry-run
 python3.11 -m lark_agent_bridge handle-event --config config.example.toml --event samples/omlx_chat_question.json --dry-run
 python3.11 -m lark_agent_bridge handle-event --config config.example.toml --event samples/group_chat_command.json --dry-run
 python3.11 -m lark_agent_bridge handle-event --config config.example.toml --event samples/group_unmentioned_url.json --dry-run
@@ -138,8 +135,9 @@ Use Python 3.11+ for these commands. On this machine `/opt/homebrew/bin/python3.
 
 ## Agent Routes
 
-- `/signal ...` keeps using the guideengine `signal-chain-analyzer`.
-- `skill ...` / `/skill ...` or `claude ...` / `/claude ...` calls local Claude Code for read-only skill analysis. The keyword must be the first token. The default tool allowlist is `Read`, `Grep`, `Glob`, `LS`; result Markdown is sent back as a file when not in dry-run mode.
+- Signal alias / enum requests such as `@My Feishu CLI Bot 调查 SIGNAL_X3D_LD_NORMAL_OVER_ALL_DATA 日志 file_xxx` call the guideengine `signal-chain-analyzer`.
+- Direct log-analysis requests such as `@My Feishu CLI Bot 分析启动和卡顿 file_xxx 11:30` route the uploaded file, image, folder, URL, or authorized local download file into the local analyzers.
+- Perception requests such as `@My Feishu CLI Bot 总结当前感知数据 file_xxx` call `perception-data-summary`.
 - A mentioned Feishu bug detail URL such as `@My Feishu CLI Bot https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722 调查3D启动时序` calls the local bug-analysis pipeline. The bridge still runs the local bug-fetch/decode/analyzer scripts directly for the heavy work, but the final Bug conclusion is handed to the configured Bug agent (`codex` / `claude`), and both generic follow-ups and follow-up reanalysis try to stay in that same agent session.
 - Private-chat ordinary questions such as `帮我解释一下什么是 token？`, or explicit mentioned group commands such as `@My Feishu CLI Bot /chat 讲个笑话` or `@My Feishu CLI Bot chat 讲个笑话`, call the local omlx OpenAI-compatible endpoint at `http://127.0.0.1:8000/v1`, model `gemma-4-26b-a4b-it-4bit`, and a locally configured API key. This route has no local tools or shell permissions.
 - To avoid cross-bot conflicts, set `[lark].bot_name` or `[lark].bot_open_id` in `config.toml`; then only that bot's leading mention can trigger group handling.
@@ -181,7 +179,6 @@ Restart after config changes by unloading and loading the plist again.
 - Attachment download fails: verify the message ID, file key, Bot visibility, and resource type (`file` or `image`).
 - Analyzer output missing: verify `guideengine_repo` points to the worktree containing `.github/skills/signal-chain-analyzer/scripts/analyze_signal_chain.py`.
 - `tokenStatus` is `needs_refresh`: run `lark-cli auth login` before starting the real listener.
-- Claude Code analysis fails to start: run `claude --help` in the same user session and verify `config.toml [claude_agent].command`.
 - Bug analysis fails to start: verify `config.toml [bug_analysis]`, local `claude` or `codex` availability, and Meegle auth state (`meegle auth status`).
 - omlx chat returns unavailable: start omlx with `omlx serve --api-key <local-key>` or the equivalent `brew services` setup, and verify `curl http://127.0.0.1:8000/v1/models`.
 - Listener starts and exits immediately: check `/api/daemon` or `data/state/agent_activity.json`; if stderr reports `reason: signal`, the parent likely closed stdin. The bridge now starts `lark-cli event consume` with stdin held open, so this usually means an external supervisor stopped the bridge itself.

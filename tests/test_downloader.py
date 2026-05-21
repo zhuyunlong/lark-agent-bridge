@@ -95,3 +95,54 @@ class DownloaderTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DownloaderPrivateUrlTests(unittest.TestCase):
+    """Test allow_private_urls configuration for SSRF protection."""
+
+    def test_private_ip_allowed_by_default(self):
+        """Default config allows private IPs (core use case: internal file servers)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=True, data_dir=Path(tmp))
+            self.assertTrue(config.download.allow_private_urls)
+
+    def test_private_ip_blocked_when_disabled(self):
+        from lark_agent_bridge.downloader import _is_private_ip
+        from lark_agent_bridge.models import DownloadConfig
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(
+                dry_run=False,
+                data_dir=Path(tmp),
+                download=DownloadConfig(allow_private_urls=False),
+            )
+            context = create_job_context(config.data_dir, job_id="job-priv")
+            downloader = LogDownloader(config, LarkClient(config))
+            # Mock _is_private_ip to return True
+            with unittest.mock.patch("lark_agent_bridge.downloader._is_private_ip", return_value=True):
+                with self.assertRaises(DownloadError) as ctx:
+                    downloader.download(
+                        DownloadResource(kind="url", value="http://192.168.1.100/logs/app.log"),
+                        context=context,
+                        message_id="om_test",
+                    )
+                self.assertIn("private", str(ctx.exception).lower())
+
+    def test_private_ip_not_blocked_when_allowed(self):
+        """When allow_private_urls=True (default), private IPs should not be blocked."""
+        from lark_agent_bridge.models import DownloadConfig
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(
+                dry_run=True,
+                data_dir=Path(tmp),
+                download=DownloadConfig(allow_private_urls=True),
+            )
+            context = create_job_context(config.data_dir, job_id="job-allow")
+            downloader = LogDownloader(config, LarkClient(config))
+            # Even though IP is private, allow_private_urls=True means no block
+            with unittest.mock.patch("lark_agent_bridge.downloader._is_private_ip", return_value=True):
+                result = downloader.download(
+                    DownloadResource(kind="url", value="http://192.168.1.100/logs/app.log"),
+                    context=context,
+                    message_id="om_test",
+                )
+            self.assertTrue(result.dry_run)

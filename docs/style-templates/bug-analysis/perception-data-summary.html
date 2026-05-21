@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>感知数据链路统计报告</title>
+  <style>
+:root {
+  --c-bg: #f8f9fb; --c-surface: #ffffff; --c-border: #e2e5ea;
+  --c-text: #1a1d23; --c-text-2: #5a6170; --c-text-3: #8b919e;
+  --c-accent: #3b5bdb; --c-accent-light: #edf0ff;
+  --c-red: #e03131; --c-red-bg: #fff1f1; --c-red-border: #fecdd3;
+  --c-yellow: #e67700; --c-yellow-bg: #fff8eb; --c-yellow-border: #fde68a;
+  --c-green: #0ca678; --c-green-bg: #ecfdf5; --c-green-border: #a7f3d0;
+  --radius: 10px; --shadow: 0 1px 3px rgba(0,0,0,.06), 0 4px 12px rgba(0,0,0,.04);
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; -webkit-font-smoothing: antialiased; }
+body {
+  font-family: "Inter", -apple-system, "PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+  margin: 0; min-height: 100vh; overflow-wrap: anywhere;
+  color: var(--c-text); background: var(--c-bg);
+  font-size: 14px; line-height: 1.6;
+}
+.container { max-width: 1200px; margin: 0 auto; padding: 32px 28px 48px; }
+h1 { margin: 0 0 6px; font-size: 26px; font-weight: 700; letter-spacing: -0.02em; color: var(--c-text); }
+.sub { max-width: 860px; color: var(--c-text-2); margin-bottom: 28px; font-size: 13px; line-height: 1.7; }
+.verdict {
+  padding: 18px 24px; border-radius: var(--radius); color: #fff;
+  font-size: 16px; font-weight: 600; margin-bottom: 24px; line-height: 1.6;
+  box-shadow: var(--shadow);
+}
+.v-red { background: var(--c-red); }
+.v-yellow { background: var(--c-yellow); }
+.v-green { background: var(--c-green); }
+.cards {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px; margin-bottom: 24px;
+}
+.card {
+  background: var(--c-surface); border-radius: var(--radius);
+  border: 1px solid var(--c-border); border-top: 3px solid var(--c-text-3);
+  padding: 16px 18px; box-shadow: var(--shadow);
+  transition: box-shadow .15s;
+}
+.card:hover { box-shadow: 0 2px 8px rgba(0,0,0,.1); }
+.card .lbl { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--c-text-3); }
+.card .val { font-size: 22px; font-weight: 700; margin-top: 4px; word-break: break-word; color: var(--c-text); }
+.card .desc { color: var(--c-text-2); font-size: 12px; line-height: 1.6; margin-top: 6px; }
+.card.red { border-top-color: var(--c-red); } .card.red .val { color: var(--c-red); }
+.card.yellow { border-top-color: var(--c-yellow); } .card.yellow .val { color: var(--c-yellow); }
+.card.green { border-top-color: var(--c-green); } .card.green .val { color: var(--c-green); }
+.section {
+  background: var(--c-surface); border-radius: var(--radius);
+  border: 1px solid var(--c-border); padding: 20px 24px;
+  margin-bottom: 16px; box-shadow: var(--shadow); overflow-x: auto;
+}
+.section h2 { margin: 0 0 14px; font-size: 16px; font-weight: 700; border-left: 3px solid var(--c-accent); padding-left: 10px; color: var(--c-text); }
+.section h3 { margin: 18px 0 10px; font-size: 14px; font-weight: 600; }
+.issue {
+  padding: 10px 14px; border-radius: 8px; margin-bottom: 8px;
+  border: 1px solid var(--c-border); border-left: 3px solid var(--c-text-3);
+  background: var(--c-bg);
+}
+.issue.red { border-color: var(--c-red-border); border-left-color: var(--c-red); background: var(--c-red-bg); }
+.issue.yellow { border-color: var(--c-yellow-border); border-left-color: var(--c-yellow); background: var(--c-yellow-bg); }
+.issue.green { border-color: var(--c-green-border); border-left-color: var(--c-green); background: var(--c-green-bg); }
+.issue .t { font-weight: 600; font-size: 13px; }
+.issue .d { color: var(--c-text-2); font-size: 12px; margin-top: 4px; line-height: 1.6; }
+table { width: 100%; min-width: 680px; border-collapse: collapse; font-size: 13px; }
+th, td { padding: 10px 12px; border-bottom: 1px solid var(--c-border); text-align: left; vertical-align: top; }
+th { background: var(--c-bg); font-weight: 600; color: var(--c-text-2); font-size: 12px; text-transform: uppercase; letter-spacing: .03em; }
+.tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; color: #fff; white-space: nowrap; }
+.tag.red { background: var(--c-red); } .tag.yellow { background: var(--c-yellow); } .tag.green { background: var(--c-green); }
+details { margin-top: 10px; border: 1px solid var(--c-border); border-radius: 8px; padding: 10px 14px; background: var(--c-bg); }
+summary { cursor: pointer; color: var(--c-accent); font-size: 13px; font-weight: 500; }
+code { background: var(--c-accent-light); padding: 2px 6px; border-radius: 4px; font-size: 12px; font-family: "JetBrains Mono", "SF Mono", "Fira Code", monospace; }
+pre {
+  max-height: 480px; background: #f5f6f8; padding: 12px 14px; border-radius: 8px;
+  font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-word;
+  overflow-x: auto; border: 1px solid var(--c-border);
+  font-family: "JetBrains Mono", "SF Mono", "Fira Code", monospace;
+}
+.row { display: flex; gap: 16px; flex-wrap: wrap; }
+.row .col { flex: 1; min-width: 260px; }
+.muted { color: var(--c-text-3); }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 14px; }
+.chip {
+  display: inline-block; padding: 4px 10px; border-radius: 6px;
+  background: var(--c-accent-light); color: var(--c-accent);
+  border: 1px solid #d0d7ff; font-size: 12px; font-weight: 500;
+}
+.nav { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.nav a {
+  display: inline-block; padding: 4px 12px; border-radius: 6px;
+  background: var(--c-accent-light); color: var(--c-accent);
+  text-decoration: none; font-size: 12px; font-weight: 500;
+  border: 1px solid #d0d7ff; transition: background .15s;
+}
+.nav a:hover { background: #d0d7ff; }
+.session-header { display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; align-items: flex-start; }
+.session-meta { color: var(--c-text-2); line-height: 1.7; font-size: 13px; }
+.timeline-phases { display: grid; gap: 12px; margin-top: 18px; }
+.chain { display: flex; flex-direction: column; align-items: stretch; gap: 0; }
+.chain-node {
+  display: flex; align-items: stretch; background: var(--c-surface);
+  border-radius: var(--radius); border: 1px solid var(--c-border);
+  border-left: 4px solid var(--c-text-3); box-shadow: var(--shadow); overflow: hidden;
+}
+.chain-node.chain-red { border-left-color: var(--c-red); }
+.chain-node.chain-yellow { border-left-color: var(--c-yellow); }
+.chain-node.chain-green { border-left-color: var(--c-green); }
+.chain-step {
+  width: 36px; min-width: 36px; display: flex; align-items: center;
+  justify-content: center; font-size: 14px; font-weight: 700;
+  color: #fff; background: var(--c-text-3);
+}
+.chain-red .chain-step { background: var(--c-red); }
+.chain-yellow .chain-step { background: var(--c-yellow); }
+.chain-green .chain-step { background: var(--c-green); }
+.chain-body { padding: 12px 16px; flex: 1; }
+.chain-title { font-weight: 700; font-size: 14px; margin-bottom: 4px; }
+.chain-evi, .chain-down { font-size: 13px; color: var(--c-text-2); line-height: 1.6; margin-top: 2px; }
+.chain-arrow { text-align: center; font-size: 18px; color: var(--c-text-3); line-height: 1; padding: 3px 0; }
+.phase { border: 1px solid var(--c-border); border-radius: 8px; overflow: hidden; margin-top: 12px; }
+.phase-header { padding: 10px 14px; background: var(--c-bg); font-weight: 600; font-size: 13px; }
+.phase-body { padding: 12px; display: grid; gap: 8px; }
+.event {
+  display: grid; grid-template-columns: 180px 1fr; gap: 12px;
+  padding: 10px 14px; border-radius: 8px; background: var(--c-bg);
+  border: 1px solid var(--c-border); border-left: 3px solid var(--c-green);
+}
+.event.missing { border-left-color: var(--c-red); background: var(--c-red-bg); border-color: var(--c-red-border); }
+.event-time { color: var(--c-text-3); font-size: 12px; line-height: 1.5; white-space: nowrap; font-family: "JetBrains Mono", monospace; }
+.event-title { font-weight: 600; font-size: 13px; margin-bottom: 3px; }
+.event-source { color: var(--c-accent); font-size: 12px; margin-bottom: 4px; }
+.event-message { color: var(--c-text-2); font-size: 13px; line-height: 1.6; word-break: break-word; }
+.event-meta { color: var(--c-text-3); font-size: 12px; margin-top: 5px; }
+.repeat { margin-left: 6px; color: var(--c-accent); font-size: 12px; font-weight: 600; }
+@media (max-width: 880px) {
+  h1 { font-size: 22px; }
+  .cards { grid-template-columns: 1fr; }
+  .event { grid-template-columns: 1fr; }
+  .container { padding: 16px; }
+  table { min-width: 560px; }
+}
+</style>
+</head>
+<body>
+<div class="container"><h1>感知数据链路统计报告</h1><div class="sub">样例报告，用于预览 <code>perception-data-summary</code> 的 HTML 信息组织、状态色、链路结构和证据折叠区。内容为仿写样例，不代表真实 Bug 结论。</div><div class="verdict v-green">结论：目标窗口内上游、Native、Unity 发送与 Unity 接收计数递进合理，未发现感知数据链路断点；建议转向消费侧渲染或业务阈值判断。</div><div class="cards"><div class="card green"><div class="lbl">统计窗口</div><div class="val">10 分钟</div><div class="desc">T±300s</div></div><div class="card green"><div class="lbl">上游输入</div><div class="val">12000 条</div><div class="desc">频率稳定</div></div><div class="card green"><div class="lbl">Native 处理</div><div class="val">11996 条</div><div class="desc">丢失率 0.03%</div></div><div class="card green"><div class="lbl">Unity 发送</div><div class="val">11992 条</div><div class="desc">递进合理</div></div><div class="card green"><div class="lbl">Unity 接收</div><div class="val">11990 条</div><div class="desc">未见突降</div></div><div class="card green"><div class="lbl">报告可信度</div><div class="val">高</div><div class="desc">四层计数完整</div></div></div><div class="section"><h2>结论摘要</h2><div class="issue green"><div class="t">健康项：链路频率稳定</div><div class="d">上游到 Unity 接收各层频率一致，没有持续缺口。</div></div><div class="issue green"><div class="t">健康项：无异常突降</div><div class="d">T±300s 内未出现单层计数断崖。</div></div><div class="issue yellow"><div class="t">后续方向：消费侧判断</div><div class="d">若用户仍感知异常，应转向 Unity 消费、阈值过滤或渲染侧。</div></div></div><div class="section"><h2>链路与卡点</h2><p class="muted">按上游证据、处理中间层和用户可见结果逐层展开；每个节点保留可回溯证据与下游影响。</p><div class="chain"><div class="chain-node chain-green"><div class="chain-step">1</div><div class="chain-body"><div class="chain-title">上游输入稳定</div><div class="chain-evi"><b>证据：</b>20Hz 平均稳定</div><div class="chain-down"><b>下游影响：</b>数据源不是主因。</div></div></div><div class="chain-arrow">↓</div><div class="chain-node chain-green"><div class="chain-step">2</div><div class="chain-body"><div class="chain-title">Native 处理正常</div><div class="chain-evi"><b>证据：</b>处理计数与输入基本一致</div><div class="chain-down"><b>下游影响：</b>Native 过滤无异常。</div></div></div><div class="chain-arrow">↓</div><div class="chain-node chain-green"><div class="chain-step">3</div><div class="chain-body"><div class="chain-title">Unity 发送/接收正常</div><div class="chain-evi"><b>证据：</b>发送 11992，接收 11990</div><div class="chain-down"><b>下游影响：</b>传输链路没有断点。</div></div></div><div class="chain-arrow">↓</div><div class="chain-node chain-yellow"><div class="chain-step">4</div><div class="chain-body"><div class="chain-title">转向消费侧</div><div class="chain-evi"><b>证据：</b>链路统计正常但现象仍存在</div><div class="chain-down"><b>下游影响：</b>需要看业务阈值和渲染呈现。</div></div></div></div></div><div class="section"><h2>关键时间线</h2><table><thead><tr><th>时间</th><th>节点</th><th>事件</th><th>状态</th></tr></thead><tbody><tr><td>07:45-07:55</td><td>Upstream</td><td>12000 events</td><td>正常</td></tr><tr><td>07:45-07:55</td><td>Native</td><td>11996 events</td><td>正常</td></tr><tr><td>07:45-07:55</td><td>UnityTransport</td><td>11992 events</td><td>正常</td></tr><tr><td>07:45-07:55</td><td>UnityConsumer</td><td>11990 events</td><td>正常</td></tr></tbody></table></div><div class="section"><h2>排查矩阵</h2><table><thead><tr><th>链路段</th><th>状态</th><th>代表证据</th><th>判断</th></tr></thead><tbody><tr><td>上游数据</td><td>正常</td><td>频率稳定</td><td>非卡点</td></tr><tr><td>Native 处理</td><td>正常</td><td>计数递进</td><td>非卡点</td></tr><tr><td>Unity 通道</td><td>正常</td><td>接收稳定</td><td>非卡点</td></tr></tbody></table></div><div class="section"><h2>可折叠证据区</h2><details open><summary>代表日志与脚本输出</summary><pre>window=2026-05-18 07:45:00~07:55:00
+upstream_count=12000 native_count=11996 unity_send=11992 unity_recv=11990
+max_gap=82ms avg_fps=19.98</pre></details></div><div class="section"><h2>下一步动作</h2><table><thead><tr><th>类型</th><th>动作</th></tr></thead><tbody><tr><td>自动化</td><td>将本页结构接入对应 skill 的真实脚本输出。</td></tr><tr><td>证据</td><td>保留每个结论的时间、PID、tag、文件行号或源码路径。</td></tr><tr><td>降噪</td><td>重复日志聚合成统计和代表样本，完整明细放 JSON。</td></tr></tbody></table></div></div>
+</body>
+</html>

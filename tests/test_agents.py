@@ -1617,7 +1617,11 @@ class AgentTests(unittest.TestCase):
                 )
 
         self.assertTrue(result.success)
-        self.assertEqual(analysis_inputs, [(cache_dir / "logs").resolve()])
+        # With fixed _startup_analysis_input, the runner selects the best
+        # matching log file (by fault time) instead of passing the whole dir.
+        self.assertEqual(len(analysis_inputs), 1)
+        selected = analysis_inputs[0]
+        self.assertIn("main_2026-05-11_23-00.alog", str(selected))
         self.assertTrue(result.details["bug_cache_reused"])
         self.assertEqual(result.details["bug_cache_dir"], str(cache_dir.resolve()))
 
@@ -1835,6 +1839,68 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(selection.source, "agent")
         self.assertEqual(selection.provider, "codex")
 
+    def test_custom_skill_route_can_enter_bug_primary_selection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "workspace"
+            skill_dir = root / ".ai" / "skills" / "lane-level-skill"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "---\nname: Lane Level Skill\ndescription: 分析不进车道级、退无图和 LD 状态。\n---\n\n# Lane\n",
+                encoding="utf-8",
+            )
+            config = BridgeConfig(dry_run=False, workspace_root=root, data_dir=Path(tmp) / "data")
+            runner = BugAnalysisRunner(config)
+            runner.skill_manager.set_skill_route("lane-level-skill", role="primary")
+
+            supported = runner.supported_primary_bug_skills()
+            self.assertTrue(any(item["name"] == "lane-level-skill" for item in supported))
+            selection = runner.selection_for_skill_name(
+                "lane-level-skill",
+                source="user_selected_card",
+            )
+
+        self.assertIsNotNone(selection)
+        assert selection is not None
+        self.assertEqual(selection.skill_name, "lane-level-skill")
+        self.assertEqual(selection.skill_label, "Lane Level Skill")
+        self.assertEqual(selection.plans[0].kind, "custom_skill")
+
+    def test_agent_selected_custom_skill_overrides_general_kind(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "workspace"
+            skill_dir = root / ".ai" / "skills" / "lane-level-skill"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "---\nname: Lane Level Skill\ndescription: 分析不进车道级、退无图和 LD 状态。\n---\n\n# Lane\n",
+                encoding="utf-8",
+            )
+            runner = BugAnalysisRunner(BridgeConfig(dry_run=False, workspace_root=root, data_dir=Path(tmp) / "data"))
+            runner.skill_manager.set_skill_route("lane-level-skill", role="primary", kind="general")
+            with mock.patch.object(
+                runner,
+                "_run_bug_decision_agent",
+                return_value=(
+                    {
+                        "analysis_kind": "general",
+                        "skill": "lane-level-skill",
+                        "signal_hint": "",
+                        "reason": "车道级无图应使用 LD skill。",
+                    },
+                    "codex",
+                ),
+            ):
+                selection = runner._classify_bug_request_with_agent(
+                    prompt_text="为什么进不去车道级",
+                    title="车道级导航显示异常，持续处于无图状态",
+                    description="05-18 07:51 车道级无图",
+                    attachments=[],
+                )
+
+        self.assertIsNotNone(selection)
+        assert selection is not None
+        self.assertEqual(selection.skill_name, "lane-level-skill")
+        self.assertEqual(selection.plans[0].kind, "custom_skill")
+
     def test_bug_analysis_classifies_startup_and_stuck_requests_together(self):
         runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
 
@@ -1952,6 +2018,31 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(context.fault_time, "2026-05-19 14:33")
         self.assertEqual(context.source, "description")
         self.assertTrue(context.has_full_datetime)
+
+    def test_bug_time_context_parses_bracket_date_format(self):
+        """[05/19] 14:33 format should be recognized as a valid MM/DD HH:mm date."""
+        runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
+
+        context = runner._resolve_bug_time_context(
+            request_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/123 分析根因",
+            title="[05/19] 14:33 sr底图黑屏",
+            description="车型：F57AES\n问题描述：sr底图黑屏",
+            reference_time="2026-05-20T15:24:24+08:00",
+        )
+
+        self.assertIn("05-19", context.fault_time)
+        self.assertIn("14:33", context.fault_time)
+        self.assertTrue(context.has_full_datetime)
+
+    def test_extract_time_candidate_bracket_date(self):
+        """Direct test that _extract_time_candidate handles [MM/DD] HH:mm."""
+        runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
+
+        result = runner._extract_time_candidate("[05/19] 14:33 sr底图黑屏")
+
+        self.assertIsNotNone(result)
+        self.assertIn("05-19", result["date"])
+        self.assertEqual(result["time"], "14:33")
 
     def test_bug_log_coverage_detects_android_log_time_inside_window(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -3395,6 +3486,10 @@ class AgentTests(unittest.TestCase):
             cache_payload = json.loads((workspace / "data" / "signal_keyword_cache.json").read_text(encoding="utf-8"))
 
         self.assertIn("Android 数据链路排查", html)
+        self.assertLess(html.index("<h2>结论摘要</h2>"), html.index("<h2>Android 数据链路排查</h2>"))
+        self.assertLess(html.index("<h2>Android 数据链路排查</h2>"), html.index("<h2>关键证据</h2>"))
+        self.assertIn("当前最可能卡点", html)
+        self.assertNotIn("<h2>最可能卡点</h2>", html)
         self.assertEqual([item["status"] for item in payload["android_data_link"]], ["通过", "通过", "未通过", "通过", "未通过"])
         self.assertIn("3500003", html)
         self.assertIn("未看到 3500003 回调数据进入 CarCtlPowerCenterHelper", html)
@@ -3505,7 +3600,7 @@ class AgentTests(unittest.TestCase):
         self.assertTrue(any(section.kind == "flow" for section in composition.sections))
         self.assertEqual(
             [section.title for section in composition.sections[:5]],
-            ["结论摘要", "关键证据", "最可能原因", "待确认项", "建议动作"],
+            ["结论摘要", "关键证据", "待确认项", "建议动作", "生命周期流图"],
         )
 
     def test_bug_analysis_combined_route_uploads_only_merged_html(self):

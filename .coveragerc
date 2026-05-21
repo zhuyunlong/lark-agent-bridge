@@ -1,0 +1,17 @@
+[run]
+source = lark_agent_bridge
+omit =
+    lark_agent_bridge/__pycache__/*
+    lark_agent_bridge/agents/__pycache__/*
+
+[report]
+show_missing = true
+precision = 1
+exclude_lines =
+    pragma: no cover
+    def __repr__
+    if __name__ == .__main__
+    raise NotImplementedError
+
+[html]
+directory = htmlcov

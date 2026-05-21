@@ -5,7 +5,15 @@ from __future__ import annotations
 import re
 
 from .config import DEFAULT_SIGNAL_ALIASES
-from .models import BugRequest, ClaudeSkillRequest, DirectAnalysisRequest, DownloadResource, PerceptionSummaryRequest, SignalRequest
+from .models import (
+    BugRequest,
+    ClaudeSkillRequest,
+    DirectAnalysisRequest,
+    DownloadResource,
+    PerceptionSummaryRequest,
+    RomVersionLookupRequest,
+    SignalRequest,
+)
 from .signal_resolver import SignalResolver
 
 
@@ -18,6 +26,11 @@ BUG_URL_RE = re.compile(
 SIGNAL_ENUM_RE = re.compile(r"(?<![A-Za-z0-9_])SIGNAL_[A-Z0-9_]+(?![A-Za-z0-9_])")
 SIGNAL_BARE_NAME_RE = re.compile(r"(?<![A-Za-z0-9_])([A-Z][A-Z0-9]+(?:_[A-Z0-9]+)+)(?![A-Za-z0-9_])")
 SIGNAL_CODE_RE = re.compile(r"(?<![A-Za-z0-9_])\d{5,6}(?![A-Za-z0-9_])")
+ROM_VERSION_RE = re.compile(
+    r"(?<![A-Za-z0-9_])"
+    r"([A-Z0-9]+_V\d+\.\d+\.\d+(?:\.\d+)?_\d{14}(?:\.\d+)?_[A-Z0-9]+_[A-Z]+(?:_[A-Za-z0-9]+)?)"
+    r"(?![A-Za-z0-9_])"
+)
 FILE_KEY_RE = re.compile(r"\bfile_[A-Za-z0-9_-]+\b")
 IMAGE_KEY_RE = re.compile(r"\bimg_[A-Za-z0-9_-]+\b")
 FOLDER_XML_RE = re.compile(r"<folder\b[^>]*\b(?:folder_token|token)=\"(?P<token>[A-Za-z0-9_-]+)\"", re.I)
@@ -27,9 +40,38 @@ HOUR_RANGE_RE = re.compile(r"(?<!\d)(\d{1,2})\s*-\s*(\d{1,2})\s*点")
 TRIGGER_TERMS = (
     "信号生命周期",
     "调查信号",
+    "信号链",
+    "信号链路",
     "有没有到 Unity",
     "有没有到Unity",
     "生命周期",
+)
+SIGNAL_CONTEXT_TERMS = (
+    "信号",
+    "signal",
+    "Signal",
+    "生命周期",
+    "链路",
+    "有没有到 Unity",
+    "有没有到Unity",
+)
+ROM_LOOKUP_TERMS = (
+    "rom-version",
+    "rom version",
+    "ROM版本",
+    "rom版本",
+    "导航版本",
+    "APK版本",
+    "apk版本",
+    "查打包版本",
+    "查导航版本",
+    "Maven",
+    "maven",
+    "Jenkins",
+    "jenkins",
+    "Napa",
+    "napa",
+    "符号表",
 )
 
 TRAILING_URL_PUNCTUATION = "，。；;,.、)）]】}"
@@ -135,17 +177,18 @@ def parse_signal_request(
     signal_resolver: SignalResolver | None = None,
 ) -> SignalRequest:
     aliases = signal_aliases or DEFAULT_SIGNAL_ALIASES
-    prefixes = command_prefixes or ["/signal"]
     normalized_text = text or ""
+    cleaned = _strip_leading_mentions(normalized_text).strip()
+    prefixes = [] if command_prefixes is None else command_prefixes
+    prefix_prompt = extract_first_keyword_payload(cleaned, prefixes) if prefixes else None
+    unsupported_slash_command = cleaned.startswith("/") and prefix_prompt is None
 
-    triggered = any(prefix in normalized_text for prefix in prefixes) or any(
-        term in normalized_text for term in TRIGGER_TERMS
-    )
+    triggered = prefix_prompt is not None or (not unsupported_slash_command and any(term in normalized_text for term in TRIGGER_TERMS))
     signal = _find_signal(normalized_text, aliases, signal_resolver=signal_resolver)
     resources = _find_resources(normalized_text)
     since = _find_since(normalized_text)
     error = "missing_signal" if triggered and not signal else None
-    if signal:
+    if signal and not unsupported_slash_command:
         triggered = True
 
     return SignalRequest(
@@ -158,39 +201,66 @@ def parse_signal_request(
     )
 
 
+def parse_rom_version_lookup_request(text: str) -> RomVersionLookupRequest:
+    normalized_text = text or ""
+    cleaned = _strip_leading_mentions(normalized_text).strip()
+    match = ROM_VERSION_RE.search(cleaned)
+    if not match:
+        return RomVersionLookupRequest(rom_version="", raw_text=normalized_text, triggered=False)
+    lowered = cleaned.casefold()
+    if not _contains_any(cleaned, lowered, ROM_LOOKUP_TERMS):
+        return RomVersionLookupRequest(rom_version=match.group(1), raw_text=normalized_text, triggered=False)
+    prompt = f"{cleaned[:match.start()]}{cleaned[match.end():]}".strip()
+    return RomVersionLookupRequest(
+        rom_version=match.group(1),
+        prompt=prompt,
+        raw_text=normalized_text,
+        triggered=True,
+    )
+
+
 def build_basic_chat_reply(text: str, *, command_prefixes: list[str] | None = None) -> str | None:
     normalized_text = (text or "").strip()
     lowered = normalized_text.casefold()
-    primary_prefix = (command_prefixes or ["/signal"])[0]
 
     if _contains_any(normalized_text, lowered, IDENTITY_TERMS):
         return (
             "我是本地运行的 Lark Agent Bridge。"
             "我负责在飞书里接收消息、下载日志或附件，并调用本地分析脚本回传报告；"
-            "现在支持 signal 调查、XTheme 时光主题分析、bug 链接分析、附件直传通用分析、当前感知数据总结、普通聊天和帮助回复。"
+            "现在支持 Bug 链接分析、附件/URL 直传分析、信号链路分析、当前感知数据总结、"
+            "个人知识库问答、历史报告续聊、普通聊天和帮助回复。\n"
+            "发送 `help` 可以查看常用触发示例。"
         )
 
     if _contains_any(normalized_text, lowered, HELP_TERMS):
         return (
-            "我现在支持：\n"
-            f"1. 信号生命周期调查：`{primary_prefix} 132002 日志 https://...`\n"
-            "2. 使用枚举名或别名，例如 `SIGNAL_X3D_LD_NORMAL_OVER_ALL_DATA`、`LD normal`\n"
-            "3. 飞书附件或 URL 直传通用分析，例如 `分析启动和卡顿 file_xxx 11:30`\n"
-            "4. 飞书项目 bug 链接分析，例如 `https://project.feishu.cn/.../buglo/detail/... 调查3D启动时序`\n"
-            "5. bug 链接 + XTheme 时光主题分析，例如 `https://project.feishu.cn/.../buglo/detail/... 分析 xtheme / 晨曦 / 主题切换`\n"
-            "6. bug 链接 + 当前感知数据总结，例如 `https://project.feishu.cn/.../buglo/detail/... 总结当前感知数据`\n"
-            "7. 感知数据总结，例如 `/perception-summary 总结当前感知数据 file_xxx`\n"
-            "8. Claude Code 只读分析，例如 `/skill 分析这个目录`\n"
-            "9. 群里简单聊天，例如 `@机器人 /chat 讲个笑话`；私聊可直接提问\n"
-            "10. 基础问答，例如 `你好`、`你是谁`、`帮助`"
+            "常用触发方式（常见触发方式）：\n"
+            "| 模式 | 怎么发 |\n"
+            "| --- | --- |\n"
+            "| Bug 分析 | `@机器人 https://project.feishu.cn/xpfailuremgmt/buglo/detail/6991604970 分析主题变化` |\n"
+            "| Bug 卡顿/黑屏 | `@机器人 <bug链接> 调查3D卡顿黑屏` |\n"
+            "| Bug 闪退 | `@机器人 <bug链接> 调查闪退 tombstone` |\n"
+            "| Bug 信号链 | `@机器人 <bug链接> 分析132002为什么没到Unity` |\n"
+            "| Bug XTheme | `@机器人 <bug链接> 分析 xtheme / 晨曦 / 主题切换` |\n"
+            "| Bug 感知总结 | `@机器人 <bug链接> 总结当前感知数据` |\n"
+            "| 附件/日志分析 | 回复文件、文件夹、压缩包或日志：`@机器人 分析启动和卡顿 file_xxx 11:30` |\n"
+            "| 信号链分析 | `@机器人 /signal 132002 日志 https://.../Log.zip`，或 `@机器人 调查 SIGNAL_X3D_LD_NORMAL_OVER_ALL_DATA 日志 file_xxx`，触发 `signal-chain-analyzer` |\n"
+            "| 个人知识库 | `@机器人 知识库 OTA信号如何模拟`、`@机器人 查知识 主题信号如何模拟`，/kb 仍兼容 |\n"
+            "| ROM/导航版本 | `@机器人 XMARTM3EUD03E5_V6.2.2.6808_20260424002644.3_REV01_USERDEBUG 找下导航版本` |\n"
+            "| 续聊/重跑 | 回复上一条报告卡片或报告文件：`@机器人 基于源码重新分析` |\n"
+            "| 普通聊天 | 群里 `@机器人 /chat 讲个笑话`，私聊可直接提问 |\n"
+            "\n"
+            "只有明确的 Bug 链接、日志/附件分析、信号/感知、知识库、ROM 查询等请求会进入卡片式处理；普通问答会直接文本回复。"
         )
 
     if _contains_any(normalized_text, lowered, GREETING_TERMS):
         return (
             "你好，我是 Lark Agent Bridge。"
-            f"你可以直接发 `{primary_prefix} 132002 日志 https://...`、"
+            "你可以直接发 `Bug链接 调查3D启动时序`、"
             "`分析启动和卡顿 file_xxx`、"
-            "`/perception-summary 总结当前感知数据 file_xxx`，"
+            "`调查 SIGNAL_X3D_LD_NORMAL_OVER_ALL_DATA 日志 file_xxx`、"
+            "`总结当前感知数据 file_xxx`，"
+            "`知识库 OTA信号如何模拟`，"
             "也可以问我“你是谁”或“帮助”。"
         )
 
@@ -204,8 +274,8 @@ def parse_claude_skill_request(
 ) -> ClaudeSkillRequest:
     normalized_text = text or ""
     cleaned = _strip_leading_mentions(normalized_text).strip()
-    prefixes = trigger_prefixes or ["/skill", "/claude"]
-    prompt = extract_first_keyword_payload(cleaned, prefixes)
+    prefixes = [] if trigger_prefixes is None else trigger_prefixes
+    prompt = extract_first_keyword_payload(cleaned, prefixes) if prefixes else None
     if prompt is not None:
         return ClaudeSkillRequest(
             prompt=prompt,
@@ -214,7 +284,7 @@ def parse_claude_skill_request(
             error="missing_prompt" if not prompt else None,
         )
 
-    if _contains_any(cleaned, cleaned.casefold(), CLAUDE_TRIGGER_TERMS):
+    if prefixes and _contains_any(cleaned, cleaned.casefold(), CLAUDE_TRIGGER_TERMS):
         return ClaudeSkillRequest(
             prompt=cleaned,
             raw_text=normalized_text,
@@ -232,8 +302,8 @@ def parse_perception_summary_request(
 ) -> PerceptionSummaryRequest:
     normalized_text = text or ""
     cleaned = _strip_leading_mentions(normalized_text).strip()
-    prefixes = trigger_prefixes or ["/perception-summary", "/perception"]
-    prompt = extract_first_keyword_payload(cleaned, prefixes)
+    prefixes = [] if trigger_prefixes is None else trigger_prefixes
+    prompt = extract_first_keyword_payload(cleaned, prefixes) if prefixes else None
     if prompt is not None:
         return PerceptionSummaryRequest(
             prompt=prompt,
@@ -244,6 +314,8 @@ def parse_perception_summary_request(
         )
 
     lowered = cleaned.casefold()
+    if cleaned.startswith("/") and prompt is None:
+        return PerceptionSummaryRequest(prompt="", resources=_find_resources(cleaned), raw_text=normalized_text, triggered=False)
     if _contains_any(cleaned, lowered, PERCEPTION_TRIGGER_TERMS):
         return PerceptionSummaryRequest(
             prompt=cleaned,
@@ -361,7 +433,7 @@ def _find_signal(text: str, aliases: dict[str, str], *, signal_resolver: SignalR
     if enum_match:
         return _resolve_signal_value(enum_match.group(0), signal_resolver)
     bare_match = SIGNAL_BARE_NAME_RE.search(text)
-    if bare_match:
+    if bare_match and _is_bare_signal_candidate(bare_match.group(1), text):
         resolved_bare = _resolve_bare_signal_name(bare_match.group(1), signal_resolver)
         if resolved_bare:
             return resolved_bare
@@ -373,6 +445,21 @@ def _find_signal(text: str, aliases: dict[str, str], *, signal_resolver: SignalR
     if code_match:
         return _resolve_signal_value(code_match.group(0), signal_resolver)
     return None
+
+
+def _is_bare_signal_candidate(value: str, text: str) -> bool:
+    # Build/version identifiers such as XMART..._V6 are not signal names even if
+    # fuzzy source search can map them to a nearby enum by accident.
+    if ROM_VERSION_RE.search(text):
+        return False
+    if value.count("_") >= 2:
+        return True
+    return _has_signal_context(text)
+
+
+def _has_signal_context(text: str) -> bool:
+    lowered = text.casefold()
+    return _contains_any(text, lowered, SIGNAL_CONTEXT_TERMS)
 
 
 def _signal_code_search_text(text: str) -> str:

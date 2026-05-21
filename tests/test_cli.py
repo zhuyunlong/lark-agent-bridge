@@ -46,7 +46,7 @@ class CliTests(unittest.TestCase):
   "message_id": "om_1",
   "sender_id": "ou_1",
   "message_type": "text",
-  "content": "@bot /signal 132002 https://example.com/log.zip"
+  "content": "@bot 调查 132002 信号链路 https://example.com/log.zip"
 }
 """,
                 encoding="utf-8",
@@ -85,6 +85,45 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertIn("Lark Agent Bridge", output.getvalue())
+
+    def test_knowledge_cli_sync_and_answer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            adb_json = root / "adb_data.json"
+            adb_json.write_text(
+                """
+{"commands":[{"name":"打开Debug面板","command":"adb shell am start -a com.xiaopeng.intent.action.DEV_BOARD","group":"开发调试"}]}
+""",
+                encoding="utf-8",
+            )
+            config = root / "config.toml"
+            config.write_text(
+                f"""
+data_dir = "{root}/data"
+
+[knowledge]
+enabled = true
+storage = "{root}/data/knowledge.sqlite"
+
+[[knowledge.sources]]
+id = "adb"
+type = "local_json"
+path = "{adb_json}"
+""",
+                encoding="utf-8",
+            )
+            sync_output = io.StringIO()
+            answer_output = io.StringIO()
+
+            with redirect_stdout(sync_output):
+                sync_code = main(["knowledge", "sync", "--config", str(config)])
+            with redirect_stdout(answer_output):
+                answer_code = main(["knowledge", "answer", "--config", str(config), "怎么打开Debug面板"])
+
+        self.assertEqual(sync_code, 0)
+        self.assertEqual(answer_code, 0)
+        self.assertIn('"total_chunks": 1', sync_output.getvalue())
+        self.assertIn("打开Debug面板", answer_output.getvalue())
 
     def test_handle_unsupported_event_dry_run(self):
         with tempfile.TemporaryDirectory() as tmp:

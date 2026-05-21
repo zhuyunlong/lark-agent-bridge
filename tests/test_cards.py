@@ -8,6 +8,7 @@ import unittest
 from lark_agent_bridge.cards import (
     build_confirmation_card,
     build_followup_result_card,
+    build_knowledge_answer_card,
     build_result_card,
     build_status_card,
     build_text_fallback,
@@ -42,6 +43,63 @@ class TestBuildStatusCard:
         card = build_status_card(title="完成", status="completed")
         assert card["header"]["template"] == "green"
         assert any("已完成" in str(e) for e in card["elements"])
+
+    def test_completed_status_note_is_readable_preview(self):
+        note = (
+            "## 结论摘要\n"
+            "- `SIGNAL_CTL_POWERCENTER_SYNTHESIS_REMAIN_DIS_CHANGE` 是 `16042`，含义为综合续航。\n"
+            "- 故障时间附近未看到回调。\n"
+            "## 关键证据\n"
+            "- 证据详情应留在报告中。"
+        )
+
+        card = build_status_card(title="Bug 分析", status="completed", note=note)
+
+        rendered = str(card)
+        assert "**结论摘要**" in rendered
+        assert "## 结论摘要" not in rendered
+        assert "SIGNAL_CTL_POWERCENTER_SYNTHESIS_REMAIN_DIS_CHANGE" not in rendered
+        assert "SIGNAL_CTL_POWERCENTER_..._CHANGE" in rendered
+        assert "`16042`" not in rendered
+        assert "## 关键证据" not in rendered
+        assert "证据详情应留在报告中" not in rendered
+
+    def test_status_card_can_offer_bug_skill_choices(self):
+        card = build_status_card(
+            title="Bug 分析分诊",
+            status="completed",
+            job_id="job_1",
+            root_message_id="om_root",
+            bug_skill_choice_note="当前命中：当前感知数据总结。如果意图不正确，可以改选支持的 Skill 重新分析。",
+            bug_skill_choices=[
+                {
+                    "name": "xtheme-analyzer",
+                    "label": "XTheme时光主题分析",
+                    "description": "分析主题切换、UI mode、日出日落等问题。",
+                    "selected": False,
+                },
+                {
+                    "name": "3d-stuck-investigate",
+                    "label": "3D卡顿分析",
+                    "description": "分析画面卡顿、黑屏、掉帧。",
+                    "selected": True,
+                },
+            ],
+        )
+
+        rendered = str(card)
+        assert "意图/Skill 校正" in rendered
+        assert "当前命中：当前感知数据总结" in rendered
+        assert "当前命中" in rendered
+        assert "bug_skill_choice_form" in rendered
+        assert "select_bug_skill" in rendered
+        assert "xtheme-analyzer" in rendered
+        assert "3D卡顿分析" in rendered
+        assert "不代表当前报告已使用这些 Skill" in rendered
+        assert "下方按钮只是重新分析入口" not in rendered
+        assert "本区的 Skill 按钮会按所选 Skill" in rendered
+        assert "分析主题切换" not in rendered
+        assert "分析画面卡顿" not in rendered
 
     def test_status_failed(self):
         card = build_status_card(title="失败", status="failed")
@@ -141,6 +199,35 @@ class TestBuildFollowupResultCard:
         assert "'action': 'continue_agent'" in rendered
         assert "'tag': 'form'" in rendered
         assert "'followup_text': '问题时刻系统主题是白天还是黑夜'" in rendered
+
+
+class TestBuildKnowledgeAnswerCard:
+    def test_knowledge_answer_card_lists_multiple_hits(self):
+        card = build_knowledge_answer_card(
+            title="知识库回答",
+            answer="SIGNAL_OTA_ST 四种组合指令\nadb shell am broadcast ...",
+            hits=[
+                {
+                    "source_id": "guideengine-signals",
+                    "title": "SIGNAL_OTA_ST 定义",
+                    "source_ref": "/path/to/signal.proto",
+                    "score": 8.5,
+                },
+                {
+                    "source_id": "guideengine-adb",
+                    "title": "ADB 命令集",
+                    "source_ref": "/path/to/adb_data.json",
+                    "score": 4.2,
+                },
+            ],
+        )
+
+        rendered = str(card)
+        assert "知识库回答" in card["header"]["title"]["content"]
+        assert "SIGNAL_OTA_ST 四种组合指令" in rendered
+        assert "命中知识" in rendered
+        assert "guideengine-signals" in rendered
+        assert "ADB 命令集" in rendered
 
 
 class TestBuildConfirmationCard:

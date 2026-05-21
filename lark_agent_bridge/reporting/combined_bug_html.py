@@ -29,7 +29,7 @@ html { scroll-behavior: smooth; }
   --red:#dc2626;
 }
 body { font-family: -apple-system, "Helvetica Neue", "PingFang SC", "Microsoft YaHei", sans-serif;
-       margin: 0; min-height: 100vh; overflow-wrap: anywhere; background:
+       margin: 0; min-height: 100vh; overflow-wrap: break-word; background:
        radial-gradient(circle at top left, rgba(37,99,235,.10), transparent 28%),
        radial-gradient(circle at top right, rgba(124,58,237,.10), transparent 26%),
        linear-gradient(180deg, #f4f7ff 0%, var(--bg) 100%);
@@ -50,9 +50,14 @@ h1 { margin: 0 0 8px; font-size: 30px; line-height: 1.25; letter-spacing: 0; }
 .card .lbl { font-size: 12px; font-weight: 700; letter-spacing: .02em; color: var(--muted); }
 .card .val { font-size: 24px; font-weight: 800; margin-top: 6px; overflow-wrap: anywhere; }
 .card .desc { color: var(--muted); font-size: 12px; line-height: 1.6; margin-top: 8px; }
+.card.card-compact .val { font-size: 15px; line-height: 1.45; font-weight: 750; color: var(--text); word-break: normal; overflow-wrap: anywhere; }
+.card.card-compact .desc { font-size: 11px; line-height: 1.55; word-break: normal; overflow-wrap: anywhere; }
 .card.red .val { color: var(--red); }
 .card.yellow .val { color: var(--yellow); }
 .card.green .val { color: var(--green); }
+.card.card-compact.red .val { color: var(--red); }
+.card.card-compact.yellow .val { color: var(--yellow); }
+.card.card-compact.green .val { color: var(--green); }
 .section { background: linear-gradient(180deg, rgba(255,255,255,.96), rgba(250,252,255,.96)); border-radius: 16px; padding: 22px 24px; margin-bottom: 18px;
            box-shadow: 0 12px 30px rgba(15,23,42,.07); border: 1px solid var(--border); overflow-x: auto; }
 .section h2 { margin: 0 0 14px; font-size: 18px; border-left: 4px solid var(--blue); padding-left: 10px; }
@@ -62,8 +67,10 @@ h1 { margin: 0 0 8px; font-size: 30px; line-height: 1.25; letter-spacing: 0; }
 .issue.green { border-color: var(--green); background: linear-gradient(90deg, rgba(22,163,74,.10), rgba(236,253,245,.86)); }
 .issue .t { font-weight: 600; }
 .issue .d { color: var(--muted); font-size: 12px; margin-top: 4px; line-height: 1.6; }
-table { width: 100%; min-width: 720px; border-collapse: collapse; font-size: 13px; border-radius: 12px; overflow: hidden; }
-th, td { padding: 9px 11px; border-bottom: 1px solid #eef0f3; text-align: left; vertical-align: top; }
+table { width: 100%; min-width: 980px; border-collapse: collapse; font-size: 13px; border-radius: 12px; overflow: hidden; table-layout: auto; }
+th, td { padding: 9px 11px; border-bottom: 1px solid #eef0f3; text-align: left; vertical-align: top; word-break: normal; overflow-wrap: break-word; }
+th:first-child, td:first-child { white-space: nowrap; }
+th:last-child, td:last-child { min-width: 360px; }
 th { background: linear-gradient(180deg, rgba(37,99,235,.12), rgba(8,145,178,.06)); font-weight: 700; color: var(--blue); }
 tbody tr:nth-child(even) td { background: rgba(248,251,255,.72); }
 code { background: rgba(37,99,235,.10); padding: 1px 6px; border-radius: 999px; font-size: 12px; color: var(--blue); }
@@ -136,12 +143,49 @@ def render_cards(cards: Iterable[Sequence[object]]) -> str:
         value = card[1] if len(card) > 1 else ""
         severity = card[2] if len(card) > 2 else "green"
         desc = card[3] if len(card) > 3 else ""
-        desc_html = f'<div class="desc">{H(desc)}</div>' if desc else ""
+        value_text, desc_text = _display_card_value(value, desc)
+        classes = f"card {H(severity)}"
+        if _is_compact_card_value(value_text, desc_text):
+            classes += " card-compact"
+        desc_html = f'<div class="desc">{H(desc_text)}</div>' if desc_text else ""
         chunks.append(
-            f'<div class="card {H(severity)}"><div class="lbl">{H(label)}</div>'
-            f'<div class="val">{H(value)}</div>{desc_html}</div>'
+            f'<div class="{classes}"><div class="lbl">{H(label)}</div>'
+            f'<div class="val">{H(value_text)}</div>'
+            f"{desc_html}</div>"
         )
     return "".join(chunks)
+
+
+def _display_card_value(value: object, desc: object) -> tuple[str, str]:
+    value_text = str(value) if value is not None else ""
+    desc_text = str(desc) if desc is not None else ""
+    if desc_text.strip():
+        return value_text, desc_text
+    if _looks_like_path(value_text) and len(value_text) > 42:
+        leaf = value_text.rstrip("/\\").replace("\\", "/").rsplit("/", 1)[-1]
+        if leaf:
+            return leaf, value_text
+    return value_text, desc_text
+
+
+def _looks_like_path(text: str) -> bool:
+    stripped = text.strip()
+    return (
+        stripped.startswith(("/", "./", "../", "~/", "http://", "https://"))
+        or "\\" in stripped
+        or ("/" in stripped and " " not in stripped)
+    )
+
+
+def _is_compact_card_value(value: str, desc: str) -> bool:
+    text = value.strip()
+    if len(text) > 18:
+        return True
+    if _looks_like_path(desc):
+        return True
+    if text.count(".") >= 2:
+        return True
+    return any(len(token) > 18 for token in text.replace("/", " ").split())
 
 
 def render_issue_list(issues: Iterable[Mapping[str, object]], empty_text: str = "未发现明显异常") -> str:

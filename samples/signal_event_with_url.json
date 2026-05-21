@@ -6,8 +6,7 @@
   "message_id": "om_sample_url",
   "sender_id": "ou_sample",
   "message_type": "text",
-  "content": "@bot /signal 132002 日志 https://example.com/log.zip",
+  "content": "@bot 调查 132002 信号链路 日志 https://example.com/log.zip",
   "create_time": "1770000000000",
   "timestamp": "1770000000000"
 }
-
