@@ -13,6 +13,15 @@ from urllib.parse import parse_qs, urlsplit
 
 from ..models import BridgeConfig, KnowledgeSourceOptions
 from .models import KnowledgeChunk
+from .template_data import load_simulation_template_chunks, load_source_specs
+
+
+_OBSOLETE_DATACENTER_INTENT_MOCK_ACTION = "com.xiaopeng.intent.action.mock.datacenter"
+_SIGNAL_TOKEN_ALIASES = {
+    "show": ["展示", "显示"],
+    "debug": ["调试"],
+    "info": ["信息"],
+}
 
 
 class KnowledgeIngestError(RuntimeError):
@@ -79,6 +88,8 @@ def _ingest_local_json(source: KnowledgeSourceOptions) -> list[KnowledgeChunk]:
             ]
             if line
         )
+        if _is_obsolete_datacenter_intent_mock(content):
+            continue
         chunks.append(
             KnowledgeChunk(
                 id=_chunk_id(source.id, index, content),
@@ -95,73 +106,15 @@ def _ingest_local_json(source: KnowledgeSourceOptions) -> list[KnowledgeChunk]:
 
 def _ingest_guideengine_signal(config: BridgeConfig, source: KnowledgeSourceOptions) -> list[KnowledgeChunk]:
     repo = config.guideengine_repo
-    specs = [
-        (
-            "DataCenterBroadcastReceiver 通用信号模拟入口",
-            repo
-            / "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/debug/broadcast/DataCenterBroadcastReceiver.java",
-            ["ACTION_MOCK", "mock.datacenter", "code", "format", "value", "adb", "信号模拟"],
-        ),
-        (
-            "DataCenterBroadcastReceiver mockXTheme 主题模拟",
-            repo
-            / "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/debug/broadcast/DataCenterBroadcastReceiver.java",
-            ["SIGNAL_SR_XTHEME", "SIGNAL_SR_XTHEME_VALUE", "mockXTheme", "TimePeriod", "ThemeMode", "XTheme"],
-        ),
-        (
-            "DataCenterBroadcastReceiver PB/ByteArray 自定义模拟",
-            repo
-            / "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/debug/broadcast/DataCenterBroadcastReceiver.java",
-            [
-                "mockDataFactory",
-                "mockRoadMarkData",
-                "mockConstructionData",
-                "mockObstacleData",
-                "toByteArray",
-                "ByteArray",
-                "makeValue",
-            ],
-        ),
-        (
-            "ReplayReceiver/ProtocolFile record 回放入口",
-            repo / "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/debug/broadcast/ReplayReceiver.kt",
-            ["REPLAY_FILE", "REPLAY_FATH", "START_RECORD", "STOP_RECORD", "record", "replay"],
-        ),
-        (
-            "ProtocolFile ByteArray 回放调度",
-            repo / "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/debug/protolFile/ProtocolFile.java",
-            ["ByteArray", "convertBytesToMsg", "mockSignal", "XDATA_ANDROID_REPLAY", "record", "Replay"],
-        ),
-        (
-            "SrOtaService OtaCampaign/OtaUpgrade 枚举",
-            repo / "module_core/subreality_biz/src/main/java/com/xiaopeng/ainavi/subreality_biz/ota/SrOtaService.kt",
-            ["SIGNAL_OTA_ST", "OtaCampaign", "OtaUpgrade", "OTA_CAMPAIGN_SHOW", "OTA_UPGRADE_AFTER_VIDEO"],
-        ),
-        (
-            "signal.proto SIGNAL_OTA_ST 定义",
-            repo / "module_floorcenter/module_proto/src/main/proto/signal.proto",
-            ["SIGNAL_OTA_ST", "105003", "OTA状态"],
-        ),
-        (
-            "signal.proto 主题相关信号定义",
-            repo / "module_floorcenter/module_proto/src/main/proto/signal.proto",
-            [
-                "SIGNAL_SR_XTHEME",
-                "SIGNAL_SR_XTHEME_MSG",
-                "SIGNAL_CLOUD_HIDE_SR_THEME",
-                "SIGNAL_CLOUD_HIDE_CAR_MODEL_THEME",
-                "JavaObject",
-                "ByteArray",
-                "ProtoObject",
-                "themeMode",
-                "timePeriod",
-                "主题",
-                "SIGNAL_SR_PROPERTY",
-            ],
-        ),
-    ]
     chunks: list[KnowledgeChunk] = []
-    for index, (title, path, keywords) in enumerate(specs):
+    for index, spec in enumerate(load_source_specs()):
+        title = str(spec.get("title") or "").strip()
+        raw_path = str(spec.get("path") or "").strip()
+        raw_keywords = spec.get("keywords") or []
+        keywords = [str(keyword) for keyword in raw_keywords if str(keyword).strip()] if isinstance(raw_keywords, list) else []
+        if not title or not raw_path or not keywords:
+            continue
+        path = repo / raw_path
         if not path.is_file():
             continue
         text = path.read_text(encoding="utf-8", errors="replace")
@@ -177,12 +130,128 @@ def _ingest_guideengine_signal(config: BridgeConfig, source: KnowledgeSourceOpti
                 metadata={"keywords": keywords},
             )
         )
-    chunks.extend([_ota_template_chunk(source.id), _xtheme_template_chunk(source.id)])
+    chunks.extend(_ingest_signal_proto_entries(config, source, start_index=len(chunks)))
+    chunks.extend(load_simulation_template_chunks(source.id))
     return chunks
 
 
+def _ingest_signal_proto_entries(
+    config: BridgeConfig,
+    source: KnowledgeSourceOptions,
+    *,
+    start_index: int,
+) -> list[KnowledgeChunk]:
+    chunks: list[KnowledgeChunk] = []
+    for path in _signal_proto_paths(config, source):
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for entry in _parse_signal_proto_entries(text):
+            content = "\n".join(
+                line
+                for line in [
+                    f"signal: {entry['name']}",
+                    f"code: {entry['code']}",
+                    f"comment: {entry['comment']}" if entry["comment"] else "",
+                    f"line: {entry['line']}",
+                    f"tokens: {' '.join(_signal_name_terms(entry['name']))}",
+                ]
+                if line
+            )
+            index = start_index + len(chunks)
+            chunks.append(
+                KnowledgeChunk(
+                    id=_chunk_id(source.id, index, str(path) + content),
+                    source_id=source.id,
+                    title=f"{entry['name']} ({entry['code']})",
+                    content=content,
+                    source_ref=str(path),
+                    kind="signal_proto_entry",
+                    metadata={
+                        "signal": entry["name"],
+                        "code": entry["code"],
+                        "line": entry["line"],
+                        "keywords": [entry["name"], entry["code"], entry["comment"], *_signal_name_terms(entry["name"])],
+                    },
+                )
+            )
+    return chunks
+
+
+def _signal_proto_paths(config: BridgeConfig, source: KnowledgeSourceOptions) -> list[Path]:
+    candidates: list[Path] = []
+    if source.path:
+        candidates.append(Path(source.path).expanduser())
+    repo = config.guideengine_repo
+    candidates.extend(
+        [
+            repo / "module_floorcenter/module_proto/src/main/proto/signal.proto",
+            repo / "module_foundation/module_proto/src/main/proto/signal.proto",
+        ]
+    )
+    paths: list[Path] = []
+    seen: set[Path] = set()
+    for candidate in candidates:
+        path = candidate.resolve()
+        if path in seen or not path.is_file():
+            continue
+        seen.add(path)
+        paths.append(path)
+    return paths
+
+
+def _parse_signal_proto_entries(text: str) -> list[dict[str, str]]:
+    entries: list[dict[str, str]] = []
+    section_comment = ""
+    leading_comments: list[str] = []
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        comment_line = re.match(r"\s*//\s*(.*)", line)
+        if comment_line:
+            comment = comment_line.group(1).strip()
+            if comment:
+                if "===" in comment or re.search(r"\d+\s*-\s*\d+", comment):
+                    section_comment = comment
+                    leading_comments = []
+                else:
+                    leading_comments.append(comment)
+            continue
+        match = re.match(r"\s*(SIGNAL_[A-Za-z0-9_]+)\s*=\s*(\d+)\s*;\s*(?://\s*(.*))?", line)
+        if not match:
+            if line.strip():
+                leading_comments = []
+            continue
+        comments = [section_comment, *leading_comments, (match.group(3) or "").strip()]
+        comment = " | ".join(item for item in comments if item)
+        leading_comments = []
+        if _is_obsolete_datacenter_intent_mock(comment):
+            continue
+        entries.append(
+            {
+                "name": match.group(1).strip(),
+                "code": match.group(2).strip(),
+                "comment": comment,
+                "line": str(line_number),
+            }
+        )
+    return entries
+
+
+def _signal_name_terms(signal_name: str) -> list[str]:
+    terms: list[str] = []
+    for item in re.split(r"_+", signal_name.casefold()):
+        cleaned = item.strip()
+        _append_unique(terms, cleaned)
+        for alias in _SIGNAL_TOKEN_ALIASES.get(cleaned, []):
+            _append_unique(terms, alias)
+    return terms
+
+
+def _append_unique(values: list[str], value: str) -> None:
+    cleaned = value.strip()
+    if cleaned and cleaned not in values:
+        values.append(cleaned)
+
+
 def _focused_signal_excerpt(text: str, keywords: list[str], *, radius: int = 18) -> str:
-    lines = text.splitlines()
+    lines = [line for line in text.splitlines() if not _is_obsolete_datacenter_intent_mock(line)]
     matched: set[int] = set()
     lowered_keywords = [keyword.casefold() for keyword in keywords]
     for index, line in enumerate(lines):
@@ -196,63 +265,24 @@ def _focused_signal_excerpt(text: str, keywords: list[str], *, radius: int = 18)
     return "\n".join(lines[index] for index in sorted(matched))[:8000]
 
 
-def _ota_template_chunk(source_id: str) -> KnowledgeChunk:
-    content = (
-        "SIGNAL_OTA_ST ADB 模拟模板\n"
-        "code: 105003\n"
-        "format: 7 String 类型\n"
-        "value: [campaign, upgrade]\n"
-        "campaign: 0 OTA_CAMPAIGN_NONE, 1 OTA_CAMPAIGN_SHOW\n"
-        "upgrade: 0 OTA_UPGRADE_NONE, 1 OTA_UPGRADE_SHOW, 2 OTA_UPGRADE_AFTER_VIDEO\n"
-        "action: com.xiaopeng.guide.action.mock.datacenter"
-    )
-    return KnowledgeChunk(
-        id=_chunk_id(source_id, 10000, content),
-        source_id=source_id,
-        title="SIGNAL_OTA_ST ADB 四种常见组合",
-        content=content,
-        source_ref="generated:guideengine_signal_template",
-        kind="adb_signal_template",
-        metadata={
-            "signal": "SIGNAL_OTA_ST",
-            "code": 105003,
-            "format": 7,
-            "keywords": ["SIGNAL_OTA_ST", "105003", "OTA", "adb", "模拟", "指令"],
-        },
-    )
-
-
-def _xtheme_template_chunk(source_id: str) -> KnowledgeChunk:
-    content = (
-        "SIGNAL_SR_XTHEME ADB 模拟模板\n"
-        "code: 105004\n"
-        "format: 18 JavaObject 类型\n"
-        "value: timePeriod,themeMode\n"
-        "timePeriod: 0 早晨, 1 白天, 2 傍晚, 3 夜晚\n"
-        "themeMode: 0 白天模式, 1 黑夜模式\n"
-        "action: com.xiaopeng.guide.action.mock.datacenter\n"
-        "相关主题候选: SIGNAL_SR_XTHEME_MSG, SIGNAL_CLOUD_HIDE_SR_THEME, SIGNAL_CLOUD_HIDE_CAR_MODEL_THEME"
-    )
-    return KnowledgeChunk(
-        id=_chunk_id(source_id, 10001, content),
-        source_id=source_id,
-        title="SIGNAL_SR_XTHEME 主题 ADB 常见组合",
-        content=content,
-        source_ref="generated:guideengine_signal_template",
-        kind="adb_signal_template",
-        metadata={
-            "signal": "SIGNAL_SR_XTHEME",
-            "code": 105004,
-            "format": 18,
-            "keywords": ["SIGNAL_SR_XTHEME", "105004", "主题", "XTheme", "adb", "模拟", "指令"],
-        },
-    )
-
-
 def _ingest_feishu_doc(source: KnowledgeSourceOptions) -> list[KnowledgeChunk]:
     if not source.url:
         raise KnowledgeIngestError("feishu_doc source requires url")
-    payload = _run_lark_json(["lark-cli", "docs", "+fetch", "--api-version", "v2", "--doc", source.url])
+    payload = _run_lark_json(
+        [
+            "lark-cli",
+            "docs",
+            "+fetch",
+            "--api-version",
+            "v2",
+            "--as",
+            "user",
+            "--doc",
+            source.url,
+            "--format",
+            "json",
+        ]
+    )
     title = str(payload.get("title") or source.title or source.url)
     markdown = str(payload.get("markdown") or payload.get("content") or "")
     if not markdown.strip():
@@ -267,35 +297,140 @@ def _ingest_feishu_base(source: KnowledgeSourceOptions) -> list[KnowledgeChunk]:
     view_id = source.view_id or _url_query(source.url, "view")
     if not table_id:
         raise KnowledgeIngestError("feishu_base source requires table_id or table= query")
-    command = ["lark-cli", "base", "+record-list", "--base-token", source.url, "--table-id", table_id]
-    if view_id:
-        command.extend(["--view-id", view_id])
-    payload = _run_lark_json(command)
-    records = payload.get("items") or payload.get("records") or payload.get("data") or []
-    if isinstance(records, dict):
-        records = records.get("items") or records.get("records") or []
-    if not isinstance(records, list):
-        records = []
+    base_token = _resolve_feishu_base_token(source.url)
     chunks: list[KnowledgeChunk] = []
-    for index, record in enumerate(records):
-        text = json.dumps(record, ensure_ascii=False, indent=2)
-        title = _record_title(record, fallback=f"{source.id} record {index + 1}")
-        chunks.append(
-            KnowledgeChunk(
-                id=_chunk_id(source.id, index, text),
-                source_id=source.id,
-                title=title,
-                content=text,
-                source_ref=source.url,
-                kind="feishu_base_record",
-                metadata={"table_id": table_id, "view_id": view_id},
+    limit = 200
+    offset = 0
+    while True:
+        command = [
+            "lark-cli",
+            "base",
+            "+record-list",
+            "--as",
+            "user",
+            "--base-token",
+            base_token,
+            "--table-id",
+            table_id,
+            "--limit",
+            str(limit),
+            "--offset",
+            str(offset),
+            "--format",
+            "json",
+        ]
+        if view_id:
+            command.extend(["--view-id", view_id])
+        payload = _run_lark_json(command)
+        records, has_more = _extract_feishu_base_records(payload)
+        for record in records:
+            index = len(chunks)
+            text = json.dumps(record, ensure_ascii=False, indent=2)
+            if _is_obsolete_datacenter_intent_mock(text):
+                continue
+            title = _record_title(record, fallback=f"{source.id} record {index + 1}")
+            chunks.append(
+                KnowledgeChunk(
+                    id=_chunk_id(source.id, index, text),
+                    source_id=source.id,
+                    title=title,
+                    content=text,
+                    source_ref=source.url,
+                    kind="feishu_base_record",
+                    metadata={"table_id": table_id, "view_id": view_id},
+                )
             )
-        )
+        if not has_more or not records:
+            break
+        offset += len(records)
     return chunks
 
 
+def _extract_feishu_base_records(payload: dict[str, Any]) -> tuple[list[Any], bool]:
+    direct_records = payload.get("items") or payload.get("records")
+    if isinstance(direct_records, list):
+        return direct_records, bool(payload.get("has_more"))
+    data = payload.get("data")
+    if isinstance(data, list):
+        return data, bool(payload.get("has_more"))
+    if not isinstance(data, dict):
+        return [], False
+    nested_records = data.get("items") or data.get("records")
+    has_more = bool(data.get("has_more") or payload.get("has_more"))
+    if isinstance(nested_records, list):
+        return nested_records, has_more
+    table_rows = data.get("data")
+    field_names = data.get("fields")
+    if not isinstance(table_rows, list) or not isinstance(field_names, list):
+        return [], has_more
+    record_ids = data.get("record_id_list")
+    records: list[Any] = []
+    fields = [str(field) for field in field_names]
+    for index, row in enumerate(table_rows):
+        if isinstance(row, dict):
+            records.append(row)
+            continue
+        if not isinstance(row, list):
+            continue
+        record: dict[str, Any] = {"fields": {field: row[pos] for pos, field in enumerate(fields) if pos < len(row)}}
+        if isinstance(record_ids, list) and index < len(record_ids):
+            record["record_id"] = record_ids[index]
+        records.append(record)
+    return records, has_more
+
+
+def _resolve_feishu_base_token(value: str) -> str:
+    cleaned = value.strip()
+    if not cleaned:
+        raise KnowledgeIngestError("feishu_base source requires url")
+    parsed = urlsplit(cleaned)
+    if parsed.scheme and parsed.netloc:
+        segments = [segment for segment in parsed.path.split("/") if segment]
+        for marker in ("base", "bitable"):
+            if marker in segments:
+                index = segments.index(marker)
+                if index + 1 < len(segments):
+                    return segments[index + 1]
+        if "wiki" in segments:
+            payload = _run_lark_json(
+                [
+                    "lark-cli",
+                    "wiki",
+                    "+node-get",
+                    "--as",
+                    "user",
+                    "--token",
+                    cleaned,
+                    "--format",
+                    "json",
+                ]
+            )
+            return _extract_bitable_token_from_wiki_node(payload)
+    return cleaned
+
+
+def _extract_bitable_token_from_wiki_node(payload: dict[str, Any]) -> str:
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        raise KnowledgeIngestError("wiki node response has no data")
+    candidates = [data]
+    node = data.get("node")
+    if isinstance(node, dict):
+        candidates.insert(0, node)
+    for candidate in candidates:
+        obj_type = str(candidate.get("obj_type") or candidate.get("object_type") or "").strip()
+        obj_token = str(candidate.get("obj_token") or candidate.get("object_token") or "").strip()
+        if obj_token and (not obj_type or obj_type == "bitable"):
+            return obj_token
+    raise KnowledgeIngestError("wiki node is not a bitable or has no obj_token")
+
+
 def _text_chunks(source_id: str, title: str, text: str, source_ref: str, *, kind: str) -> list[KnowledgeChunk]:
-    paragraphs = [item.strip() for item in re.split(r"\n{2,}", text) if item.strip()]
+    paragraphs = [
+        item.strip()
+        for item in re.split(r"\n{2,}", text)
+        if item.strip() and not _is_obsolete_datacenter_intent_mock(item)
+    ]
     if not paragraphs:
         return []
     chunks: list[KnowledgeChunk] = []
@@ -352,7 +487,7 @@ def _record_title(record: Any, *, fallback: str) -> str:
     if isinstance(record, dict):
         fields = record.get("fields")
         if isinstance(fields, dict):
-            for key in ("标题", "名称", "问题", "name", "title"):
+            for key in ("标题", "名称", "命令名称", "问题", "问题标题", "name", "title"):
                 value = fields.get(key)
                 if value:
                     return str(value)[:120]
@@ -365,6 +500,10 @@ def _record_title(record: Any, *, fallback: str) -> str:
 def _url_query(url: str, name: str) -> str:
     values = parse_qs(urlsplit(url).query).get(name)
     return values[0] if values else ""
+
+
+def _is_obsolete_datacenter_intent_mock(text: str) -> bool:
+    return _OBSOLETE_DATACENTER_INTENT_MOCK_ACTION in text
 
 
 def _chunk_id(source_id: str, index: int, content: str) -> str:

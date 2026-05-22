@@ -13,6 +13,32 @@ from typing import Any
 from .models import KnowledgeChunk, SearchHit
 
 
+_QUERY_STOP_TERMS = {
+    "adb",
+    "mock",
+    "broadcast",
+    "知识库",
+    "查知识",
+    "如何",
+    "怎么",
+    "怎么样",
+    "怎样",
+    "能否",
+    "可以",
+    "请问",
+    "帮我",
+    "一下",
+    "模拟",
+    "信号",
+    "命令",
+    "指令",
+    "广播",
+    "构造",
+    "造",
+    "造数据",
+}
+
+
 class KnowledgeStore:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
@@ -246,24 +272,57 @@ def _score_chunk(query: str, chunk: KnowledgeChunk) -> float:
     for term in _query_terms(query_cf):
         if not term:
             continue
-        if term in title:
+        if _contains_query_term(title, term):
             score += 8.0
-        if term in content:
+        if _contains_query_term(content, term):
             score += 3.0
         metadata_keywords = chunk.metadata.get("keywords")
-        if isinstance(metadata_keywords, list) and term in " ".join(str(item).casefold() for item in metadata_keywords):
+        if isinstance(metadata_keywords, list) and _contains_query_term(
+            " ".join(str(item).casefold() for item in metadata_keywords), term
+        ):
             score += 4.0
     return score
 
 
 def _query_terms(value: str) -> list[str]:
-    terms = re.findall(r"[a-z0-9_]+|[\u4e00-\u9fff]+", value)
+    terms = re.findall(r"[a-z0-9_]+|[\u4e00-\u9fff]+", _normalize_query_text(value))
     expanded: list[str] = []
     for term in terms:
-        expanded.append(term)
+        _append_query_term(expanded, term)
         if len(term) > 4 and re.search(r"[\u4e00-\u9fff]", term):
-            expanded.extend(term[index : index + 2] for index in range(0, len(term) - 1))
+            for index in range(0, len(term) - 1):
+                _append_query_term(expanded, term[index : index + 2])
     return expanded
+
+
+def query_terms(value: str) -> list[str]:
+    """Return searchable non-generic terms using the same tokenizer as scoring."""
+    return _query_terms(value)
+
+
+def _normalize_query_text(value: str) -> str:
+    text = value.casefold()
+    for term in sorted(_QUERY_STOP_TERMS, key=len, reverse=True):
+        if re.fullmatch(r"[a-z0-9_]+", term):
+            text = re.sub(rf"(?<![a-z0-9_]){re.escape(term)}(?![a-z0-9_])", " ", text)
+        else:
+            text = text.replace(term, " ")
+    return text
+
+
+def _append_query_term(terms: list[str], term: str) -> None:
+    cleaned = term.strip().casefold()
+    if not cleaned or cleaned in _QUERY_STOP_TERMS:
+        return
+    if cleaned in terms:
+        return
+    terms.append(cleaned)
+
+
+def _contains_query_term(value: str, term: str) -> bool:
+    if re.fullmatch(r"[a-z0-9_]+", term):
+        return re.search(rf"(?<![a-z0-9_]){re.escape(term)}(?![a-z0-9_])", value) is not None
+    return term in value
 
 
 def _json_dict(value: str) -> dict[str, Any]:

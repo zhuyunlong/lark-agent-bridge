@@ -19,6 +19,15 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.job_retention.bug_cache_max_age_hours, 24)
         self.assertEqual(config.command_prefixes, [])
         self.assertEqual(config.claude_agent.trigger_prefixes, [])
+        self.assertTrue(config.knowledge.auto_probe_enabled)
+        self.assertIn("模拟", config.knowledge.auto_probe_intent_terms)
+        self.assertNotIn("怎么", config.knowledge.auto_probe_intent_terms)
+        self.assertTrue(config.source_investigation.enabled)
+        self.assertEqual(config.source_investigation.provider, "codex")
+        self.assertEqual(config.source_investigation.model, "gpt-5.3-codex-spark")
+        self.assertEqual(config.source_investigation.timeout_seconds, 120)
+        self.assertEqual(config.source_investigation.max_evidence, 20)
+        self.assertEqual(config.source_investigation.repo_roots, [config.guideengine_repo])
 
     def test_toml_overrides_are_resolved_relative_to_config(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -219,6 +228,39 @@ force_reanalysis_terms = ["重新分析", "源码"]
         self.assertEqual(config.bug_analysis.default_prompt, "分析这个bug")
         self.assertTrue(config.bug_analysis.resume_followup_sessions)
         self.assertEqual(config.bug_analysis.force_reanalysis_terms, ["重新分析", "源码"])
+
+    def test_load_source_investigation_options(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text(
+                """
+guideengine_repo = "guideengine"
+
+[source_investigation]
+enabled = true
+provider = "codex"
+command = "codex"
+model = "gpt-5.3-codex-spark"
+fallback_model = "gpt-5.3-codex"
+timeout_seconds = 66
+max_evidence = 7
+repo_roots = ["guideengine"]
+add_dirs = ["Napa5"]
+""",
+                encoding="utf-8",
+            )
+
+            config = load_config(config_path)
+
+        self.assertTrue(config.source_investigation.enabled)
+        self.assertEqual(config.source_investigation.provider, "codex")
+        self.assertEqual(config.source_investigation.command, "codex")
+        self.assertEqual(config.source_investigation.model, "gpt-5.3-codex-spark")
+        self.assertEqual(config.source_investigation.fallback_model, "gpt-5.3-codex")
+        self.assertEqual(config.source_investigation.timeout_seconds, 66)
+        self.assertEqual(config.source_investigation.max_evidence, 7)
+        self.assertEqual(config.source_investigation.repo_roots, [Path(tmp) / "guideengine"])
+        self.assertEqual(config.source_investigation.add_dirs, [Path(tmp) / "Napa5"])
 
     def test_default_bug_analysis_prompt_is_empty(self):
         config = load_config()

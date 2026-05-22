@@ -25,6 +25,7 @@ from .models import (
     NotificationOptions,
     OmlxChatOptions,
     ReportServerOptions,
+    SourceInvestigationOptions,
     WorkflowArchiveOptions,
 )
 
@@ -61,6 +62,7 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
     runner_data = data.get("runner") or {}
     claude_data = data.get("claude_agent") or {}
     bug_data = data.get("bug_analysis") or {}
+    source_investigation_data = data.get("source_investigation") or {}
     intent_data = data.get("intent_analysis") or {}
     omlx_data = data.get("omlx_chat") or {}
     report_server_data = data.get("report_server") or {}
@@ -69,6 +71,11 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
     notifications_data = data.get("notifications") or {}
     dual_agent_data = data.get("dual_agent") or {}
     knowledge_data = data.get("knowledge") or {}
+    guideengine_repo = _resolve_path(
+        os.environ.get("LARK_AGENT_BRIDGE_GUIDEENGINE_REPO")
+        or data.get("guideengine_repo", default_guideengine_repo),
+        base_dir,
+    )
 
     return BridgeConfig(
         dry_run=_bool_value(os.environ.get("LARK_AGENT_BRIDGE_DRY_RUN"), bool(data.get("dry_run", True))),
@@ -76,11 +83,7 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
             os.environ.get("LARK_AGENT_BRIDGE_WORKSPACE_ROOT") or data.get("workspace_root", default_workspace_root),
             base_dir,
         ),
-        guideengine_repo=_resolve_path(
-            os.environ.get("LARK_AGENT_BRIDGE_GUIDEENGINE_REPO")
-            or data.get("guideengine_repo", default_guideengine_repo),
-            base_dir,
-        ),
+        guideengine_repo=guideengine_repo,
         data_dir=_resolve_path(data.get("data_dir", "data"), base_dir),
         allowed_chats=_env_string_list("LARK_AGENT_BRIDGE_ALLOWED_CHATS", data.get("allowed_chats", []), "allowed_chats"),
         allowed_users=_env_string_list("LARK_AGENT_BRIDGE_ALLOWED_USERS", data.get("allowed_users", []), "allowed_users"),
@@ -279,7 +282,50 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
                 "knowledge.trigger_prefixes",
             ),
             answer_provider=str(knowledge_data.get("answer_provider", KnowledgeOptions().answer_provider)),
+            auto_probe_enabled=bool(
+                knowledge_data.get("auto_probe_enabled", KnowledgeOptions().auto_probe_enabled)
+            ),
+            auto_probe_min_score=float(
+                knowledge_data.get("auto_probe_min_score", KnowledgeOptions().auto_probe_min_score)
+            ),
+            auto_probe_intent_terms=_string_list(
+                knowledge_data.get("auto_probe_intent_terms", KnowledgeOptions().auto_probe_intent_terms),
+                "knowledge.auto_probe_intent_terms",
+            ),
+            auto_probe_no_hit_terms=_string_list(
+                knowledge_data.get("auto_probe_no_hit_terms", KnowledgeOptions().auto_probe_no_hit_terms),
+                "knowledge.auto_probe_no_hit_terms",
+            ),
             sources=_knowledge_sources(knowledge_data.get("sources", []), base_dir),
+        ),
+        source_investigation=SourceInvestigationOptions(
+            enabled=bool(source_investigation_data.get("enabled", SourceInvestigationOptions().enabled)),
+            provider=str(source_investigation_data.get("provider", SourceInvestigationOptions().provider)),
+            command=str(source_investigation_data.get("command", SourceInvestigationOptions().command)),
+            model=str(source_investigation_data.get("model", SourceInvestigationOptions().model)),
+            fallback_model=str(
+                source_investigation_data.get(
+                    "fallback_model",
+                    SourceInvestigationOptions().fallback_model,
+                )
+            ),
+            timeout_seconds=int(
+                source_investigation_data.get(
+                    "timeout_seconds",
+                    SourceInvestigationOptions().timeout_seconds,
+                )
+            ),
+            max_evidence=int(source_investigation_data.get("max_evidence", SourceInvestigationOptions().max_evidence)),
+            repo_roots=_path_list(
+                source_investigation_data.get("repo_roots", [str(guideengine_repo)]),
+                base_dir,
+                "source_investigation.repo_roots",
+            ),
+            add_dirs=_path_list(
+                source_investigation_data.get("add_dirs", SourceInvestigationOptions().add_dirs),
+                base_dir,
+                "source_investigation.add_dirs",
+            ),
         ),
         runner_timeout_seconds=int(runner_data.get("timeout_seconds", 900)),
     )

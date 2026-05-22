@@ -809,6 +809,17 @@ class BugAnalysisRunner:
         request_text = self._request_text(raw_text=request.raw_text, prompt_text=prompt_text, bug_url=request.bug_url)
         plans = self.classify_requests(prompt_text=prompt_text, title="", description="")
         plan = plans[0]
+        time_context = self._resolve_bug_time_context(
+            request_text=request_text,
+            title="",
+            description="",
+            reference_time=None,
+        )
+        target_time = (
+            time_context.fault_time
+            if time_context.has_full_datetime and plan.kind in {"startup", "xtheme", "scene_signal", "perception"}
+            else None
+        )
         bug_dir = context.input_dir / f"bug_{self._bug_id(request.bug_url)}"
         html_path = context.output_dir / self._report_name(plan.kind, "html")
         json_path = context.output_dir / self._report_name(plan.kind, "json")
@@ -819,7 +830,7 @@ class BugAnalysisRunner:
             html_path=html_path,
             json_path=json_path,
             analysis_dir=analysis_dir,
-            target_time=None,
+            target_time=target_time,
         )
         request_artifact = context.output_dir / "bug_agent_request.md"
         request_artifact.write_text(
@@ -946,7 +957,7 @@ class BugAnalysisRunner:
                 request_text=request_text,
                 title=title,
                 description=description,
-                reference_time=str(fetched.get("create_time") or ""),
+                reference_time=self._bug_reference_time(fetched, full_item),
             )
             selection = self._classify_bug_request_with_agent(
                 prompt_text=prompt_text,
@@ -1095,7 +1106,7 @@ class BugAnalysisRunner:
                     html_path=current_html,
                     json_path=current_json,
                     analysis_dir=current_analysis_dir,
-                    target_time=fault_time if current_plan.kind in {"startup", "xtheme", "scene_signal"} else None,
+                    target_time=fault_time if current_plan.kind in {"startup", "xtheme", "scene_signal", "perception"} else None,
                     request_text=request_text if current_plan.kind == "xtheme" else None,
                 )
                 self._emit_progress(
@@ -1147,7 +1158,7 @@ class BugAnalysisRunner:
                         "json_path": current_json,
                         "analysis_dir": current_analysis_dir,
                         "timeout": options.timeout_seconds,
-                        "target_time": fault_time if current_plan.kind in {"startup", "xtheme", "scene_signal"} else None,
+                        "target_time": fault_time if current_plan.kind in {"startup", "xtheme", "scene_signal", "perception"} else None,
                         "request_text": request_text if current_plan.kind == "xtheme" else None,
                     }
                     if bridge_session_id:
@@ -1364,6 +1375,7 @@ class BugAnalysisRunner:
         classification_source: str = "",
         classification_reason: str = "",
         classification_provider: str = "",
+        agent_provider_override: str = "",
         local_log_resources: list[DownloadResource] | None = None,
         bridge_session_id: str = "",
     ) -> TaskResult:
@@ -1590,7 +1602,7 @@ class BugAnalysisRunner:
                     html_path=html_path,
                     json_path=json_path,
                     analysis_dir=analysis_dir,
-                    target_time=target_time if plan.kind in {"startup", "xtheme", "scene_signal"} else None,
+                    target_time=target_time if plan.kind in {"startup", "xtheme", "scene_signal", "perception"} else None,
                     request_text=followup_text if plan.kind == "xtheme" else None,
                 )
                 self._emit_progress(
@@ -1605,7 +1617,7 @@ class BugAnalysisRunner:
                     plan_label=self._analysis_label(plan.kind),
                     html_path=str(html_path),
                     json_path=str(json_path),
-                    target_time=target_time if plan.kind in {"startup", "xtheme", "scene_signal"} else "",
+                    target_time=target_time if plan.kind in {"startup", "xtheme", "scene_signal", "perception"} else "",
                 )
                 if plan.kind == "general":
                     self._write_general_bug_report(
@@ -1647,7 +1659,7 @@ class BugAnalysisRunner:
                         "json_path": json_path,
                         "analysis_dir": analysis_dir,
                         "timeout": self.config.bug_analysis.timeout_seconds,
-                        "target_time": target_time if plan.kind in {"startup", "xtheme", "scene_signal"} else None,
+                        "target_time": target_time if plan.kind in {"startup", "xtheme", "scene_signal", "perception"} else None,
                         "request_text": followup_text if plan.kind == "xtheme" else None,
                     }
                     if bridge_session_id:
@@ -1750,6 +1762,7 @@ class BugAnalysisRunner:
                 followup_text=followup_text,
                 provider_session_id="",
             ),
+            provider_override=agent_provider_override,
             bridge_session_id=bridge_session_id,
         )
         self._append_agent_runtime_metadata(
@@ -1791,6 +1804,7 @@ class BugAnalysisRunner:
             "classification_source": classification_source or "manual_fallback",
             "classification_reason": classification_reason or "",
             "classification_provider": classification_provider or "",
+            "selected_agent_provider": agent_provider_override,
             "selected_log_input": str(selected_input or ""),
             "prepared_log_input": str(prepared_input),
             "local_log_resources": [item.value for item in local_log_resources],
@@ -1838,6 +1852,7 @@ class BugAnalysisRunner:
         event: LarkEvent | None = None,
         progress_callback: Callable[[dict[str, object]], None] | None = None,
         resume_agent_session: bool = False,
+        agent_provider_override: str = "",
         bridge_session_id: str = "",
     ) -> TaskResult:
         started = time.monotonic()
@@ -1930,6 +1945,7 @@ class BugAnalysisRunner:
                 followup_text=followup_text,
                 provider_session_id=provider_session_id,
             ),
+            provider_override=agent_provider_override,
             bridge_session_id=bridge_session_id,
         )
         self._append_agent_runtime_metadata(
@@ -1950,6 +1966,7 @@ class BugAnalysisRunner:
             "selected_log_input": str(selected_input or ""),
             "user_request_text": request_text,
             "followup_text": followup_text,
+            "selected_agent_provider": agent_provider_override,
             "agent_request_file": str(agent_request_path),
             "followup_metadata_file": str(agent_metadata_path),
             "agent_summary_file": str(agent_summary_path),
@@ -2122,7 +2139,7 @@ class BugAnalysisRunner:
                 html_path=current_html,
                 json_path=current_json,
                 analysis_dir=current_analysis_dir,
-                target_time=fault_time if current_plan.kind in {"startup", "xtheme", "scene_signal"} else None,
+                target_time=fault_time if current_plan.kind in {"startup", "xtheme", "scene_signal", "perception"} else None,
                 request_text=request.prompt if current_plan.kind == "xtheme" else None,
             )
             try:
@@ -2174,7 +2191,7 @@ class BugAnalysisRunner:
                         "json_path": current_json,
                         "analysis_dir": current_analysis_dir,
                         "timeout": self.config.bug_analysis.timeout_seconds,
-                        "target_time": fault_time if current_plan.kind in {"startup", "xtheme", "scene_signal"} else None,
+                        "target_time": fault_time if current_plan.kind in {"startup", "xtheme", "scene_signal", "perception"} else None,
                         "request_text": request.prompt if current_plan.kind == "xtheme" else None,
                     }
                     if bridge_session_id:
@@ -2351,11 +2368,14 @@ class BugAnalysisRunner:
                 str(input_path),
             ]
         if plan.kind == "perception":
-            return [
+            command = [
                 sys.executable,
                 str(self._perception_script()),
                 str(input_path),
             ]
+            if target_time:
+                command.extend(["--target-time", target_time])
+            return command
         if plan.kind == "xtheme":
             command = [
                 sys.executable,
@@ -3403,6 +3423,31 @@ class BugAnalysisRunner:
             return value
         return fallback if isinstance(fallback, str) else ""
 
+    def _bug_reference_time(self, fetched: dict[str, object], full_item: dict[str, object]) -> str:
+        for value in (
+            fetched.get("create_time"),
+            fetched.get("created_at"),
+            fetched.get("createTime"),
+            self._nested_string(full_item, "work_item_attribute", "create_time"),
+            self._nested_string(full_item, "work_item_attribute", "created_at"),
+            self._nested_string(full_item, "data", "work_item_attribute", "create_time"),
+            self._nested_string(full_item, "data", "work_item_attribute", "created_at"),
+            full_item.get("create_time"),
+            full_item.get("created_at"),
+        ):
+            text = str(value or "").strip()
+            if text:
+                return text
+        return ""
+
+    def _nested_string(self, payload: object, *keys: str) -> str:
+        current = payload
+        for key in keys:
+            if not isinstance(current, dict):
+                return ""
+            current = current.get(key)
+        return str(current or "").strip()
+
     def _build_bug_outputs(
         self,
         *,
@@ -3428,7 +3473,7 @@ class BugAnalysisRunner:
         title = str(fetched.get("title", ""))
         description = self._bug_description(fetched)
         status = str(fetched.get("status", ""))
-        create_time = str(fetched.get("create_time", ""))
+        create_time = self._bug_reference_time(fetched, full_item)
         create_by = str(fetched.get("create_by", ""))
         owner = self._extract_owner(full_item)
         bug_source = self._map_option(option_map, fetched.get("fields", {}), "field_24095d")
@@ -3569,6 +3614,7 @@ class BugAnalysisRunner:
             ("description", description or ""),
         ]
         reference_year = self._reference_year_from_text(reference_time)
+        fallback_reference_date = self._reference_date_from_text(reference_time)
         candidates: list[dict[str, str]] = []
         for source, text in sources:
             candidate = self._extract_time_candidate(text, reference_year=reference_year)
@@ -3584,7 +3630,7 @@ class BugAnalysisRunner:
                 candidates=[],
             )
 
-        reference_date = self._select_reference_date(candidates)
+        reference_date = self._select_reference_date(candidates) or fallback_reference_date
         for preferred_source in ("user", "title", "description"):
             for candidate in candidates:
                 if candidate["source"] != preferred_source:
@@ -3617,6 +3663,13 @@ class BugAnalysisRunner:
     def _reference_year_from_text(self, text: str) -> int | None:
         match = re.search(r"\b(20\d{2})\b", text or "")
         return int(match.group(1)) if match else None
+
+    def _reference_date_from_text(self, text: str) -> str:
+        normalized = (text or "").replace("：", ":").replace("/", "-")
+        match = re.search(r"\b(20\d{2})[-年](\d{1,2})[-月](\d{1,2})", normalized)
+        if not match:
+            return ""
+        return f"{int(match.group(1)):04d}-{int(match.group(2)):02d}-{int(match.group(3)):02d}"
 
     def _extract_time_candidate(self, text: str, *, reference_year: int | None = None) -> dict[str, str] | None:
         normalized = (text or "").replace("：", ":")
@@ -6767,8 +6820,23 @@ class BugAnalysisRunner:
         followup_text: str = "",
         previous_summary_path: Path | None = None,
         prefer_lightweight: bool = False,
+        provider_override: str = "",
+        command_override: str = "",
         bridge_session_id: str = "",
     ) -> dict[str, object]:
+        explicit_provider = _normalize_provider_name(provider_override)
+        if explicit_provider == "omlx":
+            return self._run_bug_agent_summary_omlx_fallback(
+                request_text=request_text,
+                request_artifact=request_artifact,
+                metadata_path=metadata_path,
+                output_path=output_path,
+                followup_text=followup_text,
+                previous_summary_path=previous_summary_path,
+                progress_callback=progress_callback,
+                reason="explicit_agent",
+                allow_file_context=True,
+            )
         invocation = self._build_bug_agent_summary_command(
             request_text=request_text,
             request_artifact=request_artifact,
@@ -6777,6 +6845,8 @@ class BugAnalysisRunner:
             provider_session_id=provider_session_id,
             followup_text=followup_text,
             previous_summary_path=previous_summary_path,
+            provider_override=explicit_provider,
+            command_override=command_override,
         )
         if not invocation["command"]:
             return {
@@ -6788,6 +6858,7 @@ class BugAnalysisRunner:
                 "resumed": False,
                 "usage_scope": "",
             }
+        explicit_file_agent = bool(explicit_provider)
         if prefer_lightweight:
             omlx_result = self._run_bug_agent_summary_omlx_fallback(
                 request_text=request_text,
@@ -6817,6 +6888,8 @@ class BugAnalysisRunner:
             bridge_session_id=bridge_session_id,
         )
         if result["message"] and result["provider"]:
+            return result
+        if explicit_file_agent:
             return result
         if result["message"]:
             return result
@@ -6930,11 +7003,12 @@ class BugAnalysisRunner:
         previous_summary_path: Path | None = None,
         progress_callback: Callable[[dict[str, object]], None] | None,
         reason: str = "primary_timeout",
+        allow_file_context: bool = False,
     ) -> dict[str, object]:
         options = self.config.omlx_chat
         provider = "omlx"
         command = ["omlx", options.model]
-        if self._bug_summary_referenced_context_files(metadata_path):
+        if self._bug_summary_referenced_context_files(metadata_path) and not allow_file_context:
             return {
                 "message": "",
                 "command": command,
@@ -6962,6 +7036,7 @@ class BugAnalysisRunner:
             metadata_path=metadata_path,
             followup_text=followup_text,
             previous_summary_path=previous_summary_path,
+            include_context_file_excerpts=allow_file_context,
         )
         if not prompt.strip():
             return {
@@ -6976,9 +7051,15 @@ class BugAnalysisRunner:
             }
         self._emit_progress(
             progress_callback,
-            stage="bug_agent_summary_omlx" if reason == "lightweight_first" else "bug_agent_summary_omlx_fallback",
+            stage=(
+                "bug_agent_summary_omlx"
+                if reason in {"lightweight_first", "explicit_agent"}
+                else "bug_agent_summary_omlx_fallback"
+            ),
             message=(
-                "本地 omlx 基于已生成报告/元数据整理最终结论"
+                "用户指定 OMLX 本地模型基于已生成材料重新分析"
+                if reason == "explicit_agent"
+                else "本地 omlx 基于已生成报告/元数据整理最终结论"
                 if reason == "lightweight_first"
                 else "主 Agent 超时，改用本地 omlx 基于现有材料做轻量总结"
             ),
@@ -7037,6 +7118,7 @@ class BugAnalysisRunner:
         metadata_path: Path,
         followup_text: str = "",
         previous_summary_path: Path | None = None,
+        include_context_file_excerpts: bool = False,
     ) -> str:
         budget = max(500, int(getattr(self.config.omlx_chat, "max_prompt_chars", 2000) or 2000))
         sections = [
@@ -7052,6 +7134,16 @@ class BugAnalysisRunner:
                 self._omlx_prompt_section("上一轮摘要摘录", self._read_text_excerpt(previous_summary_path, 700), 700)
             )
         for item in self._bug_summary_referenced_context_files(metadata_path)[:4]:
+            path = Path(str(item["path"]))
+            if include_context_file_excerpts:
+                sections.append(
+                    self._omlx_prompt_section(
+                        str(item["title"]),
+                        self._read_bug_summary_context_excerpt(path, 900),
+                        900,
+                    )
+                )
+                continue
             sections.append(
                 self._omlx_prompt_section(
                     str(item["title"]),
@@ -7063,6 +7155,18 @@ class BugAnalysisRunner:
         if len(prompt) > budget:
             prompt = prompt[: budget - 1].rstrip() + "…"
         return prompt
+
+    def _read_bug_summary_context_excerpt(self, path: Path, max_chars: int) -> str:
+        text = self._read_text_excerpt(path, max_chars * 2)
+        if not text:
+            return ""
+        if path.suffix.lower() == ".html":
+            text = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", text)
+            text = re.sub(r"(?s)<[^>]+>", " ", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        if len(text) > max_chars:
+            text = text[: max_chars - 1].rstrip() + "…"
+        return text
 
     def _omlx_prompt_section(self, title: str, text: str, max_chars: int) -> str:
         body = (text or "").strip()

@@ -594,6 +594,33 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(result["message"], "fallback summary")
         self.assertEqual(result["provider"], "claude")
 
+    def test_explicit_bug_agent_summary_provider_does_not_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=False, data_dir=Path(tmp), workspace_root=Path(tmp))
+            config.bug_analysis.provider = "claude"
+            config.bug_analysis.command = "claude"
+            runner = BugAnalysisRunner(config)
+            output_path = Path(tmp) / "bug_agent_summary.md"
+            request_artifact = Path(tmp) / "request.md"
+            metadata_path = Path(tmp) / "metadata.md"
+            request_artifact.write_text("request", encoding="utf-8")
+            metadata_path.write_text("metadata", encoding="utf-8")
+
+            with mock.patch("subprocess.run", side_effect=OSError("codex missing")):
+                result = runner._run_bug_agent_summary(
+                    request_text="分析启动卡顿",
+                    request_artifact=request_artifact,
+                    metadata_path=metadata_path,
+                    output_path=output_path,
+                    progress_callback=None,
+                    timeout=30,
+                    provider_override="codex",
+                )
+
+        self.assertEqual(result["message"], "")
+        self.assertEqual(result["provider"], "codex")
+        self.assertEqual(result["error"], "codex missing")
+
     def test_bug_agent_summary_extracts_token_usage_from_codex_json_output(self):
         runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
         output = "\n".join(
@@ -2019,6 +2046,30 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(context.source, "description")
         self.assertTrue(context.has_full_datetime)
 
+    def test_bug_time_context_completes_description_short_time_from_reference_date(self):
+        runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
+
+        context = runner._resolve_bug_time_context(
+            request_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6997398474 分析感知数据",
+            title="SR无感知显示",
+            description="用户反馈 16:17 SR 无感知显示",
+            reference_time="2026-05-22T16:39:07+08:00",
+        )
+
+        self.assertEqual(context.fault_time, "2026-05-22 16:17")
+        self.assertEqual(context.source, "description")
+        self.assertTrue(context.has_full_datetime)
+
+    def test_bug_reference_time_uses_full_workitem_create_time_when_fetch_data_missing(self):
+        runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
+
+        reference = runner._bug_reference_time(
+            {"title": "SR无感知显示"},
+            {"work_item_attribute": {"create_time": "2026-05-22T16:39:07+08:00"}},
+        )
+
+        self.assertEqual(reference, "2026-05-22T16:39:07+08:00")
+
     def test_bug_time_context_parses_bracket_date_format(self):
         """[05/19] 14:33 format should be recognized as a valid MM/DD HH:mm date."""
         runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
@@ -2263,14 +2314,16 @@ class AgentTests(unittest.TestCase):
             result = BugAnalysisRunner(config).run_bug_analysis(
                 BugRequest(
                     bug_url="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722",
-                    prompt="总结当前感知数据",
-                    raw_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722 总结当前感知数据",
+                    prompt="总结当前感知数据 时间点2026-05-22 16:17",
+                    raw_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722 总结当前感知数据 时间点2026-05-22 16:17",
                     triggered=True,
                 )
             )
 
         self.assertTrue(result.success)
         self.assertEqual(result.details["analysis_kinds"], ["perception"])
+        self.assertIn("--target-time", result.command)
+        self.assertIn("2026-05-22 16:17", result.command)
         self.assertIn("bug_perception_data_summary.html", result.message)
 
     def test_bug_analysis_selects_startup_log_nearest_fault_time(self):

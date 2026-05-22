@@ -7,6 +7,7 @@ from ..evidence_logs import preserve_evidence_log_bundle
 from ..health import ProcessWatchdog, run_tracked_process
 from ..log import get_logger
 from ..models import (
+    Addr2LineRequest,
     BridgeConfig,
     BugRequest,
     ClaudeSkillRequest,
@@ -31,6 +32,7 @@ from ..reporting import (
 )
 from ..signal_resolver import SignalResolver
 from ..skill_registry import AUX_BUG_SKILLS, PRIMARY_BUG_SKILL_MAP, extract_skill_frontmatter
+from .addr2line_runner import Addr2LineRunner
 from .bug_runner import (
     BugAnalysisPlan,
     BugAnalysisRunner,
@@ -64,6 +66,8 @@ logger = get_logger("agents")
 
 __all__ = [
     "AUX_BUG_SKILLS",
+    "Addr2LineRequest",
+    "Addr2LineRunner",
     "BridgeConfig",
     "BugAnalysisPlan",
     "BugAnalysisRunner",

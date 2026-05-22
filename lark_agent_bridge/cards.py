@@ -169,6 +169,7 @@ def build_status_card(
     show_followup_actions: bool = False,
     bug_skill_choices: list[dict[str, Any]] | None = None,
     bug_skill_choice_note: str | None = None,
+    bug_agent_choices: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build a status progress card.
 
@@ -293,38 +294,45 @@ def build_status_card(
             "job_id": job_id or "",
             "root_message_id": root_message_id or "",
         }
+        valid_agent_choices = _valid_agent_choices(bug_agent_choices or [])
         elements.append(
             _note_block(
                 "提示：先输入追问或重跑要求，再选择回答/重跑/续 Agent；输入为空时不会执行。"
             )
         )
+        form_elements: list[dict[str, Any]] = [
+            _input_element(
+                "followup_prompt",
+                placeholder="请输入追问或重跑要求，例如：根据源码分析问题时刻前的生命周期",
+                required=False,
+            ),
+            _action_block(
+                [
+                    _button(
+                        "📌 按输入从报告回答",
+                        value={"action": "answer_from_report", **context},
+                    ),
+                    _button(
+                        "🔄 按输入重跑日志",
+                        value={"action": "reanalyze", **context},
+                        button_type="primary",
+                    ),
+                    _button(
+                        "🧠 按输入续 Agent",
+                        value={"action": "continue_agent", **context},
+                    ),
+                ]
+            ),
+        ]
+        if valid_agent_choices:
+            elements.append(
+                _note_block("换 Agent 会先弹出确认卡；确认后会基于同一个 bug 会话重新分析。")
+            )
+            form_elements.extend(_agent_choice_action_blocks(valid_agent_choices, context))
         elements.append(
             _form_block(
                 "followup_prompt_form",
-                [
-                    _input_element(
-                        "followup_prompt",
-                        placeholder="请输入追问或重跑要求，例如：根据源码分析问题时刻前的生命周期",
-                        required=False,
-                    ),
-                    _action_block(
-                        [
-                            _button(
-                                "📌 按输入从报告回答",
-                                value={"action": "answer_from_report", **context},
-                            ),
-                            _button(
-                                "🔄 按输入重跑日志",
-                                value={"action": "reanalyze", **context},
-                                button_type="primary",
-                            ),
-                            _button(
-                                "🧠 按输入续 Agent",
-                                value={"action": "continue_agent", **context},
-                            ),
-                        ]
-                    ),
-                ],
+                form_elements,
             )
         )
         feedback_context = {**context, "followup_text": ""}
@@ -466,6 +474,83 @@ def _skill_choice_action_blocks(
     return [_action_block(buttons[index : index + row_size]) for index in range(0, len(buttons), row_size)]
 
 
+def _valid_agent_choices(bug_agent_choices: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    valid: list[dict[str, Any]] = []
+    for agent in bug_agent_choices[:6]:
+        provider = str(agent.get("provider") or agent.get("name") or "").strip()
+        label = str(agent.get("label") or provider).strip()
+        if not provider or not label:
+            continue
+        valid.append({"provider": provider, "label": label})
+    return valid
+
+
+def _agent_choice_action_blocks(
+    bug_agent_choices: list[dict[str, Any]],
+    context: dict[str, str],
+    *,
+    row_size: int = 3,
+) -> list[dict[str, Any]]:
+    buttons: list[dict[str, Any]] = []
+    for agent in bug_agent_choices[:6]:
+        provider = str(agent.get("provider") or agent.get("name") or "").strip()
+        label = str(agent.get("label") or provider).strip()
+        if not provider or not label:
+            continue
+        buttons.append(
+            _button(
+                label,
+                value={"action": "select_bug_agent", "agent_provider": provider, **context},
+                button_type="default",
+            )
+        )
+    return [_action_block(buttons[index : index + row_size]) for index in range(0, len(buttons), row_size)]
+
+
+def build_agent_reanalysis_confirmation_card(
+    *,
+    agent_label: str,
+    agent_provider: str,
+    job_id: str = "",
+    root_message_id: str = "",
+    followup_text: str = "",
+) -> dict[str, Any]:
+    """Build a confirmation card before re-running bug analysis with another agent."""
+    provider = agent_provider.strip()
+    context = {
+        "job_id": job_id.strip(),
+        "root_message_id": root_message_id.strip(),
+        "agent_provider": provider,
+        "followup_text": followup_text.strip()[:1000],
+    }
+    prompt = followup_text.strip() or f"换用 {agent_label} 基于已有日志/报告重新分析"
+    elements = [
+        _md_element(
+            f"即将使用 **{agent_label}** 重新分析当前 bug 会话。\n\n"
+            f"**重分析要求**\n{_truncate_summary(prompt, max_chars=360)}"
+        ),
+        _action_block(
+            [
+                _button(
+                    f"确认使用 {agent_label}",
+                    value={"action": "confirm_bug_agent_reanalysis", **context},
+                    button_type="primary",
+                ),
+                _button(
+                    "取消",
+                    value={"action": "cancel_bug_agent_reanalysis", **context},
+                    button_type="default",
+                ),
+            ]
+        ),
+    ]
+    return {
+        "config": {"wide_screen_mode": True},
+        "header": _header("确认换 Agent 重分析", color="orange"),
+        "elements": elements,
+    }
+
+
 def build_followup_result_card(
     *,
     title: str,
@@ -475,6 +560,7 @@ def build_followup_result_card(
     job_id: str | None = None,
     followup_text: str = "",
     answer_confidence: float | None = None,
+    bug_agent_choices: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build a bug follow-up card with explicit next-step choices."""
     prompt_hint = followup_text.strip()
@@ -499,35 +585,40 @@ def build_followup_result_card(
         "job_id": job_id or "",
         "root_message_id": root_message_id or "",
     }
+    valid_agent_choices = _valid_agent_choices(bug_agent_choices or [])
     if report_url:
         elements.append(_action_block([_button("📄 打开报告", url=report_url, button_type="primary")]))
+    form_elements: list[dict[str, Any]] = [
+        _input_element(
+            "followup_prompt",
+            placeholder="请输入追问或重跑要求，例如：根据导航源码分析 P 挡生命周期",
+            required=False,
+        ),
+        _action_block(
+            [
+                _button(
+                    "📌 按输入从报告回答",
+                    value={"action": "answer_from_report", **context},
+                ),
+                _button(
+                    "🔄 按输入重跑日志",
+                    value={"action": "reanalyze", **context},
+                    button_type="primary",
+                ),
+                _button(
+                    "🧠 按输入续 Agent",
+                    value={"action": "continue_agent", **context},
+                ),
+            ]
+        ),
+    ]
+    if valid_agent_choices:
+        elements.append(_note_block("换 Agent 会先弹出确认卡；确认后会基于同一个 bug 会话重新分析。"))
+        form_elements.extend(_agent_choice_action_blocks(valid_agent_choices, context))
     elements.append(
         _form_block(
             "followup_prompt_form",
-            [
-                _input_element(
-                    "followup_prompt",
-                    placeholder="请输入追问或重跑要求，例如：根据导航源码分析 P 挡生命周期",
-                    required=False,
-                ),
-                _action_block(
-                    [
-                        _button(
-                            "📌 按输入从报告回答",
-                            value={"action": "answer_from_report", **context},
-                        ),
-                        _button(
-                            "🔄 按输入重跑日志",
-                            value={"action": "reanalyze", **context},
-                            button_type="primary",
-                        ),
-                        _button(
-                            "🧠 按输入续 Agent",
-                            value={"action": "continue_agent", **context},
-                        ),
-                    ]
-                ),
-            ],
+            form_elements,
         )
     )
 
@@ -564,17 +655,28 @@ def build_knowledge_answer_card(
     ]
     valid_hits = [hit for hit in hits or [] if isinstance(hit, dict)]
     if valid_hits:
-        elements.append(_divider())
-        lines = ["**命中知识**"]
-        for index, hit in enumerate(valid_hits[:5], start=1):
-            source_id = str(hit.get("source_id") or "").strip()
+        source_lines: list[str] = []
+        seen_sources: set[tuple[str, str]] = set()
+        for hit in valid_hits:
             title_text = str(hit.get("title") or hit.get("chunk_id") or "").strip()
             source_ref = str(hit.get("source_ref") or "").strip()
-            score = hit.get("score")
-            score_text = f" score={float(score):.1f}" if isinstance(score, (int, float)) else ""
-            ref_text = f"\n来源：`{_truncate_summary(source_ref, max_chars=120)}`" if source_ref else ""
-            lines.append(f"{index}. **{title_text or source_id}** `{source_id}`{score_text}{ref_text}")
-        elements.append(_md_element("\n".join(lines)))
+            source_id = str(hit.get("source_id") or "").strip()
+            display_title = title_text or source_id
+            if not display_title:
+                continue
+            source_key = (display_title, source_ref)
+            if source_key in seen_sources:
+                continue
+            seen_sources.add(source_key)
+            line = f"{len(source_lines) + 1}. **{_truncate_summary(display_title, max_chars=80)}**"
+            if source_ref:
+                line += f"\n来源：`{_truncate_summary(source_ref, max_chars=120)}`"
+            source_lines.append(line)
+            if len(source_lines) >= 3:
+                break
+        if source_lines:
+            elements.append(_divider())
+            elements.append(_md_element("**参考来源**\n" + "\n".join(source_lines)))
     return {
         "config": {"wide_screen_mode": True},
         "header": _header(f"📚 {title}", color="blue"),

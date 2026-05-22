@@ -6,6 +6,7 @@ import re
 
 from .config import DEFAULT_SIGNAL_ALIASES
 from .models import (
+    Addr2LineRequest,
     BugRequest,
     ClaudeSkillRequest,
     DirectAnalysisRequest,
@@ -31,6 +32,19 @@ ROM_VERSION_RE = re.compile(
     r"([A-Z0-9]+_V\d+\.\d+\.\d+(?:\.\d+)?_\d{14}(?:\.\d+)?_[A-Z0-9]+_[A-Z]+(?:_[A-Za-z0-9]+)?)"
     r"(?![A-Za-z0-9_])"
 )
+APK_VERSION_RE = re.compile(
+    r"(?<![A-Za-z0-9_])"
+    r"(V\d+\.\d+\.\d+(?:\.\d+)?_\d{14}(?:\.\d+)?_[A-Za-z0-9]+)"
+    r"(?![A-Za-z0-9_])"
+)
+NAPA_VERSION_RE = re.compile(
+    r"(?<![A-Za-z0-9_.-])"
+    r"(\d+\.\d+\.\d+-\d{14}-[A-Za-z0-9_.-]+)"
+    r"(?![A-Za-z0-9_.-])"
+)
+TOMBSTONE_PC_RE = re.compile(r"#\d+\s+pc\s+[0-9a-fA-F]{8,16}\s+\S*lib[\w.-]+\.so\b", re.I)
+SO_ADDR_RE = re.compile(r"\blib[\w.-]+\.so\b|0x[0-9a-fA-F]{4,}|\bpc\s+[0-9a-fA-F]{8,16}\b", re.I)
+ADDR2LINE_ADDRESS_RE = re.compile(r"0x[0-9a-fA-F]{4,}|\bpc\s+[0-9a-fA-F]{8,16}\b", re.I)
 FILE_KEY_RE = re.compile(r"\bfile_[A-Za-z0-9_-]+\b")
 IMAGE_KEY_RE = re.compile(r"\bimg_[A-Za-z0-9_-]+\b")
 FOLDER_XML_RE = re.compile(r"<folder\b[^>]*\b(?:folder_token|token)=\"(?P<token>[A-Za-z0-9_-]+)\"", re.I)
@@ -73,6 +87,38 @@ ROM_LOOKUP_TERMS = (
     "napa",
     "符号表",
 )
+ADDR2LINE_TERMS = (
+    "addr2line",
+    "地址反解",
+    "反解地址",
+    "反解符号表",
+    "反解导航符号表",
+    "分解符号表",
+    "分解导航符号表",
+    "符号表分解",
+    "符号表反解",
+    "堆栈解析",
+    "解析堆栈",
+    "反解堆栈",
+    "反解crash",
+    "反解 crash",
+    "crash分析",
+    "crash 分析",
+    "tombstone",
+)
+STACK_ANALYSIS_ACTION_RE = re.compile(
+    r"(?:反解|解析|分析|解码|定位|还原|符号化|帮(?:我)?看(?:下|一下)?|看(?:下|一下)?)",
+    re.I,
+)
+STACK_ANALYSIS_OBJECT_RE = re.compile(
+    r"(?:堆栈|调用栈|backtrace|stack|tombstone|crash|addr2line|lib[\w.-]+\.so)",
+    re.I,
+)
+STACK_ANALYSIS_CONTEXT_RE = re.compile(
+    r"(?:unity|3d|导航|envirodrive|montecarlo|libunity)",
+    re.I,
+)
+SYMBOLISH_RE = re.compile(r"(?:symbol|符.{0,2}(?:号|合|表))", re.I)
 
 TRAILING_URL_PUNCTUATION = "，。；;,.、)）]】}"
 IDENTITY_TERMS = (
@@ -216,6 +262,44 @@ def parse_rom_version_lookup_request(text: str) -> RomVersionLookupRequest:
         prompt=prompt,
         raw_text=normalized_text,
         triggered=True,
+    )
+
+
+def parse_addr2line_request(text: str, *, allow_missing_address: bool = False) -> Addr2LineRequest:
+    normalized_text = text or ""
+    cleaned = _strip_leading_mentions(normalized_text).strip()
+    lowered = cleaned.casefold()
+    has_stack_payload = TOMBSTONE_PC_RE.search(cleaned) is not None
+    has_addr_payload = ADDR2LINE_ADDRESS_RE.search(cleaned) is not None and ("lib" in lowered or "pc " in lowered)
+    has_trigger = _looks_like_addr2line_intent(
+        cleaned,
+        lowered,
+        has_stack_payload=has_stack_payload,
+        has_addr_payload=has_addr_payload,
+        allow_missing_address=allow_missing_address,
+    )
+    if not (has_trigger and (has_stack_payload or has_addr_payload or allow_missing_address)):
+        return Addr2LineRequest(addr_text="", raw_text=normalized_text, triggered=False)
+
+    rom_match = ROM_VERSION_RE.search(cleaned)
+    apk_match = APK_VERSION_RE.search(cleaned)
+    napa_match = NAPA_VERSION_RE.search(cleaned)
+    target = _detect_addr2line_target(cleaned)
+    error = None
+    if not _has_addr2line_address(cleaned):
+        error = "missing_address"
+    elif rom_match is None and apk_match is None and napa_match is None:
+        error = "missing_symbol_version"
+    return Addr2LineRequest(
+        addr_text=_extract_addr2line_payload(cleaned),
+        raw_text=normalized_text,
+        rom_version=rom_match.group(1) if rom_match else "",
+        napa_version=napa_match.group(1) if napa_match else "",
+        apk_version=apk_match.group(1) if apk_match else "",
+        target=target,
+        prompt=cleaned,
+        triggered=True,
+        error=error,
     )
 
 
@@ -511,6 +595,64 @@ def _find_since(text: str) -> str | None:
     if hour_match:
         return f"{hour_match.group(1)}-{hour_match.group(2)}"
     return None
+
+
+def _detect_addr2line_target(text: str) -> str:
+    lowered = text.casefold()
+    if "renderextend" in lowered or "librenderextend.so" in lowered:
+        return "renderextend"
+    if "libxdata_native.so" in lowered or "xdata native" in lowered:
+        return "xdata_native"
+    if "libxdata_client.so" in lowered or "xdata client" in lowered:
+        return "xdata_client"
+    if "libxdata_sdk.so" in lowered or "xdata sdk" in lowered:
+        return "xdata_sdk"
+    if "xdata" in lowered:
+        return "xdata"
+    if "所有符号" in text or "全部符号" in text or "all targets" in lowered:
+        return "all"
+    return "auto"
+
+
+def _looks_like_addr2line_intent(
+    text: str,
+    lowered: str,
+    *,
+    has_stack_payload: bool,
+    has_addr_payload: bool,
+    allow_missing_address: bool,
+) -> bool:
+    if has_stack_payload:
+        return True
+    if _contains_any(text, lowered, ADDR2LINE_TERMS):
+        return True
+
+    has_action = STACK_ANALYSIS_ACTION_RE.search(text) is not None
+    has_object = STACK_ANALYSIS_OBJECT_RE.search(text) is not None
+    has_context = STACK_ANALYSIS_CONTEXT_RE.search(text) is not None
+    has_symbolish = SYMBOLISH_RE.search(text) is not None
+
+    if has_action and (has_object or has_symbolish or has_addr_payload):
+        return True
+    if allow_missing_address and has_object and has_context:
+        return True
+    if has_addr_payload and (has_object or has_context):
+        return True
+    return False
+
+
+def _extract_addr2line_payload(text: str) -> str:
+    lines = [line.strip() for line in text.splitlines()]
+    stack_lines = [line for line in lines if TOMBSTONE_PC_RE.search(line)]
+    if stack_lines:
+        return "\n".join(stack_lines)
+    if SO_ADDR_RE.search(text):
+        return text
+    return ""
+
+
+def _has_addr2line_address(text: str) -> bool:
+    return ADDR2LINE_ADDRESS_RE.search(text) is not None
 
 
 def _contains_any(original: str, lowered: str, terms: tuple[str, ...]) -> bool:

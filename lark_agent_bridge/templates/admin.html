@@ -45,11 +45,11 @@
     .view { display: none; }
     .view.active { display: block; }
     .grid { display: grid; gap: 14px; }
-    .metrics { grid-template-columns: repeat(6, minmax(130px, 1fr)); margin-bottom: 14px; }
+    .metrics { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
     .metric, .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: var(--shadow); }
-    .metric { padding: 12px; min-height: 76px; }
-    .metric .label { color: var(--muted); font-size: 12px; margin-bottom: 8px; }
-    .metric .value { font-size: 24px; font-weight: 800; }
+    .metric { flex: 0 1 132px; min-height: 0; padding: 8px 10px; display: inline-flex; align-items: center; justify-content: space-between; gap: 10px; box-shadow: none; background: #fff; }
+    .metric .label { color: var(--muted); font-size: 12px; margin: 0; white-space: nowrap; }
+    .metric .value { font-size: 18px; line-height: 1; font-weight: 800; }
     .split { grid-template-columns: minmax(320px, 430px) minmax(0, 1fr); align-items: start; }
     .panel { overflow: hidden; }
     .panel-head { padding: 13px 14px; border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; gap: 12px; }
@@ -98,6 +98,8 @@
     .filters { display: grid; grid-template-columns: minmax(180px, 1fr) 150px 150px auto; gap: 8px; align-items: center; }
     .history-layout { grid-template-columns: minmax(360px, 520px) minmax(0, 1fr); align-items: start; }
     .skill-layout { grid-template-columns: 330px minmax(0, 1fr); align-items: start; }
+    .knowledge-report-meta { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    .knowledge-report-frame { display: block; width: 100%; min-height: calc(100vh - 220px); border: 0; background: #fff; }
     .skill-controls { display: grid; gap: 10px; }
     .skill-summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
     .summary-pill { border: 1px solid var(--line); border-radius: 8px; padding: 8px; background: var(--panel-soft); }
@@ -126,8 +128,8 @@
     .user-item { display: flex; justify-content: space-between; align-items: center; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; margin-bottom: 6px; }
     .user-item .uname { font-weight: 700; }
     .user-item .urole { font-size: 12px; color: var(--muted); }
-    @media (max-width: 1040px) { .metrics { grid-template-columns: repeat(3, 1fr); } .split, .history-layout, .skill-layout, .filters, .form-grid { grid-template-columns: 1fr; } .scroll { max-height: none; } }
-    @media (max-width: 640px) { header { height: auto; padding: 14px; align-items: flex-start; flex-direction: column; } main, .tabs { padding-left: 12px; padding-right: 12px; } .metrics { grid-template-columns: repeat(2, 1fr); } }
+    @media (max-width: 1040px) { .split, .history-layout, .skill-layout, .filters, .form-grid { grid-template-columns: 1fr; } .scroll { max-height: none; } }
+    @media (max-width: 640px) { header { height: auto; padding: 14px; align-items: flex-start; flex-direction: column; } main, .tabs { padding-left: 12px; padding-right: 12px; } .metric { flex-basis: calc(50% - 4px); } }
   </style>
 </head>
 <body>
@@ -144,20 +146,20 @@
     <button class="tab active" data-view="sessions-view">多会话进度</button>
     <button class="tab" data-view="cases-view">分析历史</button>
     <button class="tab" data-view="skills-view">Skill 管理</button>
+    <button class="tab" data-view="knowledge-report-view">知识库报告</button>
     <button class="tab" data-view="daemon-view">运行状态</button>
     <button class="tab" data-view="users-view" id="users-tab" style="display:none">用户管理</button>
   </nav>
   <main>
-    <section class="grid metrics">
-      <div class="metric"><div class="label">运行中</div><div id="metric-running" class="value">0</div></div>
-      <div class="metric"><div class="label">待确认</div><div id="metric-pending" class="value">0</div></div>
-      <div class="metric"><div class="label">失败</div><div id="metric-failed" class="value">0</div></div>
-      <div class="metric"><div class="label">今日会话</div><div id="metric-sessions" class="value">0</div></div>
-      <div class="metric"><div class="label">分析记录</div><div id="metric-cases" class="value">0</div></div>
-      <div class="metric"><div class="label">Skill</div><div id="metric-skills" class="value">0</div></div>
-    </section>
-
     <section id="sessions-view" class="view active">
+      <section class="metrics">
+        <div class="metric"><div class="label">运行中</div><div id="metric-running" class="value">0</div></div>
+        <div class="metric"><div class="label">待确认</div><div id="metric-pending" class="value">0</div></div>
+        <div class="metric"><div class="label">失败</div><div id="metric-failed" class="value">0</div></div>
+        <div class="metric"><div class="label">今日会话</div><div id="metric-sessions" class="value">0</div></div>
+        <div class="metric"><div class="label">分析记录</div><div id="metric-cases" class="value">0</div></div>
+        <div class="metric"><div class="label">Skill</div><div id="metric-skills" class="value">0</div></div>
+      </section>
       <div class="grid split">
         <section class="panel">
           <div class="panel-head"><h2>会话列表</h2><span id="session-count" class="muted"></span></div>
@@ -251,6 +253,19 @@
       </section>
     </section>
 
+    <section id="knowledge-report-view" class="view">
+      <section class="panel">
+        <div class="panel-head"><h2>知识库报告</h2><span id="knowledge-report-status"></span></div>
+        <div class="panel-body">
+          <div class="knowledge-report-meta">
+            <a id="knowledge-report-open" href="/knowledge/export-report" target="_blank" rel="noreferrer">新窗口打开</a>
+            <span id="knowledge-report-meta" class="muted">正在读取导出报告...</span>
+          </div>
+        </div>
+        <iframe id="knowledge-report-frame" class="knowledge-report-frame" title="知识库导出报告"></iframe>
+      </section>
+    </section>
+
     <section id="users-view" class="view">
       <section class="panel" style="max-width:600px">
         <div class="panel-head"><h2>用户管理</h2></div>
@@ -293,6 +308,8 @@
     /* ---- Auth layer ---- */
     let authToken = localStorage.getItem("bridge_auth_token") || "";
     let authRequired = false;
+    const isFilePreviewMode = window.location.protocol === "file:";
+    const localKnowledgeReportUrl = "../../data/knowledge/knowledge_export_report.html";
 
     /* ---- DOM helpers (must precede all usage) ---- */
     const $ = (id) => document.getElementById(id);
@@ -320,7 +337,38 @@
       if (authToken) h["Authorization"] = "Bearer " + authToken;
       return h;
     }
+    function filePreviewKnowledgeReportData() {
+      return {
+        exists: true,
+        url: localKnowledgeReportUrl,
+        path: "data/knowledge/knowledge_export_report.html",
+        updated_at: "本地文件预览；实时更新请使用后台服务 /admin",
+        version: "file-preview-" + Date.now()
+      };
+    }
+    function filePreviewResponse(url) {
+      const path = String(url || "").split("?")[0];
+      let payload = {};
+      if (path === "/api/auth/status") {
+        payload = { required: false, has_users: false, has_token: false };
+      } else if (path === "/api/sessions") {
+        payload = { sessions: [] };
+      } else if (path === "/api/analysis-history") {
+        payload = { items: [] };
+      } else if (path === "/api/skills") {
+        payload = { skills: [] };
+      } else if (path === "/api/daemon") {
+        payload = { daemon: { stage: "file_preview", ready: false, updated_at: "本地文件预览" } };
+      } else if (path === "/api/knowledge/export-report") {
+        payload = filePreviewKnowledgeReportData();
+      }
+      return new Response(JSON.stringify(payload), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    }
     async function authFetch(url, opts) {
+      if (isFilePreviewMode) return filePreviewResponse(url);
       opts = opts || {};
       opts.headers = Object.assign({}, opts.headers || {}, authHeaders());
       const res = await fetch(url, opts);
@@ -374,6 +422,12 @@
       $("users-tab").style.display = authToken ? "" : "none";
     }
     async function checkAuth() {
+      if (isFilePreviewMode) {
+        authRequired = false;
+        hideLogin();
+        updateAuthUI("");
+        return;
+      }
       const res = await fetch("/api/auth/status", { cache: "no-store" });
       const data = await res.json();
       authRequired = data.required;
@@ -436,6 +490,8 @@
     let casesData = [];
     let skillsData = [];
     let daemonData = {};
+    let knowledgeReportData = {};
+    let knowledgeReportVersion = "";
 
     function badge(status, label) {
       return el("span", { class: "badge " + (status || ""), text: label || status || "unknown" });
@@ -547,6 +603,42 @@
       cards.appendChild(card("restarts", daemonData.restart_count));
       cards.appendChild(card("updated", daemonData.updated_at));
       $("daemon-json").textContent = JSON.stringify(daemonData, null, 2);
+    }
+
+    function renderKnowledgeReport() {
+      const exists = knowledgeReportData.exists === true;
+      $("knowledge-report-status").replaceChildren(badge(exists ? "succeeded" : "pending", exists ? "已加载" : "未生成"));
+      const open = $("knowledge-report-open");
+      const meta = $("knowledge-report-meta");
+      const frame = $("knowledge-report-frame");
+      if (!exists) {
+        knowledgeReportVersion = "";
+        open.href = "/knowledge/export-report";
+        open.style.pointerEvents = "none";
+        open.style.opacity = ".55";
+        meta.textContent = "未找到 " + text(knowledgeReportData.path || "data/knowledge/knowledge_export_report.html");
+        frame.removeAttribute("src");
+        frame.srcdoc = "<!doctype html><html lang=\"zh-CN\"><body style=\"font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;padding:24px;color:#667085;background:#f8fafc\">暂无知识库导出报告。</body></html>";
+        return;
+      }
+      const version = knowledgeReportData.version || String(Date.now());
+      const url = knowledgeReportData.url || "/knowledge/export-report";
+      const versionedUrl = url + "?v=" + encodeURIComponent(version);
+      const sizeText = knowledgeReportData.size_bytes === undefined || knowledgeReportData.size_bytes === null ? "" : " · " + text(knowledgeReportData.size_bytes) + " bytes";
+      open.href = versionedUrl;
+      open.style.pointerEvents = "";
+      open.style.opacity = "";
+      meta.textContent = "更新时间 " + text(knowledgeReportData.updated_at) + sizeText;
+      if (!isKnowledgeReportActive()) return;
+      if (knowledgeReportVersion !== version) {
+        knowledgeReportVersion = version;
+        frame.removeAttribute("srcdoc");
+        frame.src = versionedUrl;
+      }
+    }
+
+    function isKnowledgeReportActive() {
+      return $("knowledge-report-view").classList.contains("active");
     }
 
     function renderCases() {
@@ -719,7 +811,7 @@
     }
 
     async function loadAll() {
-      await Promise.all([loadSessions(), loadCases(), loadSkills(), loadDaemon()]);
+      await Promise.all([loadSessions(), loadCases(), loadSkills(), loadDaemon(), loadKnowledgeReport()]);
       renderMetrics();
     }
 
@@ -930,6 +1022,22 @@
       renderDaemon();
     }
 
+    async function loadKnowledgeReport() {
+      if (isFilePreviewMode) {
+        knowledgeReportData = filePreviewKnowledgeReportData();
+        renderKnowledgeReport();
+        return;
+      }
+      const response = await authFetch("/api/knowledge/export-report", { cache: "no-store" });
+      if (!response.ok) {
+        knowledgeReportData = { exists: false, path: "data/knowledge/knowledge_export_report.html" };
+        renderKnowledgeReport();
+        return;
+      }
+      knowledgeReportData = await response.json();
+      renderKnowledgeReport();
+    }
+
     $("refresh").onclick = loadAll;
     $("case-search").onclick = async () => { await loadCases(); renderMetrics(); };
     $("create-skill").onclick = createSkill;
@@ -949,13 +1057,19 @@
         tab.classList.add("active");
         $(tab.dataset.view).classList.add("active");
         if (tab.dataset.view === "users-view") loadUsers();
+        if (tab.dataset.view === "knowledge-report-view") loadKnowledgeReport();
       });
     }
 
-    checkAuth().then(() => loadAll());
+    checkAuth().then(() => loadAll()).catch(error => {
+      console.warn("admin init failed", error);
+      if (isFilePreviewMode) loadAll();
+    });
     setInterval(async () => {
+      if (isFilePreviewMode) return;
       await loadSessions();
       await loadDaemon();
+      await loadKnowledgeReport();
       renderMetrics();
     }, 3000);
   </script>

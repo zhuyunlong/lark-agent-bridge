@@ -44,6 +44,7 @@ class CardActionEventTests(unittest.TestCase):
                             "request_id": "apr_123456abcdef",
                             "job_id": "job_1",
                             "root_message_id": "om_root",
+                            "agent_provider": "claude",
                             "followup_text": "继续分析\u0000这个问题",
                         }
                     },
@@ -56,6 +57,7 @@ class CardActionEventTests(unittest.TestCase):
         self.assertEqual(event.request_id, "apr_123456abcdef")
         self.assertEqual(event.job_id, "job_1")
         self.assertEqual(event.root_message_id, "om_root")
+        self.assertEqual(event.agent_provider, "claude")
         self.assertEqual(event.message_id, "om_card")
         self.assertEqual(event.chat_id, "oc_card")
         self.assertEqual(event.chat_type, "group")

@@ -212,7 +212,38 @@ class KnowledgeOptions:
     max_hits: int = 5
     trigger_prefixes: list[str] = field(default_factory=lambda: ["知识库", "查知识", "/kb", "/qa"])
     answer_provider: str = "omlx"
+    auto_probe_enabled: bool = True
+    auto_probe_min_score: float = 6.0
+    auto_probe_intent_terms: list[str] = field(
+        default_factory=lambda: [
+            "模拟",
+            "命令",
+            "指令",
+            "广播",
+            "构造",
+            "造数据",
+            "造",
+            "mock",
+            "adb",
+        ]
+    )
+    auto_probe_no_hit_terms: list[str] = field(
+        default_factory=lambda: ["模拟", "命令", "指令", "广播", "构造", "造数据", "造", "mock", "adb"]
+    )
     sources: list[KnowledgeSourceOptions] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class SourceInvestigationOptions:
+    enabled: bool = True
+    provider: str = "codex"
+    command: str = "codex"
+    model: str = "gpt-5.3-codex-spark"
+    fallback_model: str = "gpt-5.3-codex"
+    timeout_seconds: int = 120
+    max_evidence: int = 20
+    repo_roots: list[Path] = field(default_factory=list)
+    add_dirs: list[Path] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -232,6 +263,7 @@ class BridgeConfig:
     lark: LarkOptions = field(default_factory=LarkOptions)
     claude_agent: ClaudeAgentOptions = field(default_factory=ClaudeAgentOptions)
     bug_analysis: BugAnalysisOptions = field(default_factory=BugAnalysisOptions)
+    source_investigation: SourceInvestigationOptions = field(default_factory=SourceInvestigationOptions)
     intent_analysis: IntentAnalysisOptions = field(default_factory=IntentAnalysisOptions)
     omlx_chat: OmlxChatOptions = field(default_factory=OmlxChatOptions)
     report_server: ReportServerOptions = field(default_factory=ReportServerOptions)
@@ -315,6 +347,7 @@ class CardActionEvent:
     job_id: str = ""
     root_message_id: str = ""
     skill_name: str = ""
+    agent_provider: str = ""
     message_id: str = ""
     chat_id: str = ""
     chat_type: str = ""
@@ -365,6 +398,7 @@ class CardActionEvent:
                 value.get("root_message_id") or value.get("conversation_root_message_id") or ""
             ),
             skill_name=_safe_callback_identifier(value.get("skill_name") or value.get("selected_skill") or ""),
+            agent_provider=_safe_callback_identifier(value.get("agent_provider") or value.get("provider") or ""),
             message_id=_safe_callback_identifier(
                 payload.get("message_id")
                 or context.get("open_message_id")
@@ -523,6 +557,20 @@ class RomVersionLookupRequest:
     rom_version: str
     prompt: str = ""
     raw_text: str = ""
+    triggered: bool = False
+    error: str | None = None
+
+
+@dataclass(slots=True)
+class Addr2LineRequest:
+    addr_text: str
+    resources: list[DownloadResource] = field(default_factory=list)
+    raw_text: str = ""
+    rom_version: str = ""
+    napa_version: str = ""
+    apk_version: str = ""
+    target: str = "auto"
+    prompt: str = ""
     triggered: bool = False
     error: str | None = None
 

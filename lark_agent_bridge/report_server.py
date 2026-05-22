@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from html import escape
 from html.parser import HTMLParser
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -27,6 +28,10 @@ from .models import BridgeConfig, TaskResult
 from .report_version import ReportVersionStore
 from .state import AgentActivityStore, ConversationContextStore
 from .skill_manager import SkillManager, SkillManagerError
+
+
+_KNOWLEDGE_EXPORT_REPORT_ROUTES = {"/knowledge/export-report", "/knowledge/export-report.html"}
+_KNOWLEDGE_EXPORT_REPORT_NAME = "knowledge_export_report.html"
 
 
 @dataclass(slots=True)
@@ -310,6 +315,7 @@ class ReportHttpServer:
         handler = _build_handler(
             root_dir,
             prefix,
+            self.config,
             self.activity_store,
             self.case_store,
             self.skill_manager,
@@ -360,6 +366,7 @@ class _HtmlTextExtractor(HTMLParser):
 def _build_handler(
     root_dir: Path,
     prefix: str,
+    config: BridgeConfig,
     activity_store: AgentActivityStore | None = None,
     case_store: CaseStore | None = None,
     skill_manager: SkillManager | None = None,
@@ -418,6 +425,12 @@ def _build_handler(
             if request_path == "/api/knowledge/search":
                 self._send_json({"hits": self._knowledge_search(parsed.query)})
                 return
+            if request_path == "/api/knowledge/export-report":
+                self._send_json(_knowledge_export_report_status(config))
+                return
+            if request_path in _KNOWLEDGE_EXPORT_REPORT_ROUTES:
+                self._send_knowledge_export_report()
+                return
             if request_path.startswith("/api/cases/"):
                 case_id = request_path.removeprefix("/api/cases/").strip("/")
                 case = self._get_case(unquote(case_id))
@@ -475,9 +488,19 @@ def _build_handler(
                 or request_path == "/api/health"
                 or request_path == "/api/knowledge/sources"
                 or request_path == "/api/knowledge/search"
+                or request_path == "/api/knowledge/export-report"
             ):
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.end_headers()
+                return
+            if request_path in _KNOWLEDGE_EXPORT_REPORT_ROUTES:
+                status = _knowledge_export_report_status(config)
+                self.send_response(200 if status["exists"] else 404)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Cache-Control", "no-store")
+                if status["exists"]:
+                    self.send_header("Content-Length", str(status["size_bytes"]))
                 self.end_headers()
                 return
             if not self._rewrite_report_path():
@@ -897,6 +920,25 @@ def _build_handler(
             self.end_headers()
             self.wfile.write(body)
 
+        def _send_knowledge_export_report(self) -> None:
+            report_path = _knowledge_export_report_path(config)
+            if not report_path.is_file():
+                self._send_json(
+                    {
+                        "error": "knowledge export report not found",
+                        "status": _knowledge_export_report_status(config),
+                    },
+                    status=404,
+                )
+                return
+            body = report_path.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         def _read_json_body(self) -> dict[str, object]:
             length = int(self.headers.get("Content-Length") or 0)
             if length <= 0:
@@ -1037,6 +1079,34 @@ def _query_int(params: dict[str, list[str]], key: str, default: int) -> int:
         return max(1, min(int(raw), 1000))
     except ValueError:
         return default
+
+
+def _knowledge_export_report_path(config: BridgeConfig) -> Path:
+    return config.data_dir / "knowledge" / _KNOWLEDGE_EXPORT_REPORT_NAME
+
+
+def _knowledge_export_report_status(config: BridgeConfig) -> dict[str, object]:
+    report_path = _knowledge_export_report_path(config)
+    payload: dict[str, object] = {
+        "exists": False,
+        "url": "/knowledge/export-report",
+        "path": str(report_path),
+        "updated_at": "",
+        "size_bytes": 0,
+        "version": "",
+    }
+    if not report_path.is_file():
+        return payload
+    stat = report_path.stat()
+    payload.update(
+        {
+            "exists": True,
+            "updated_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+            "size_bytes": stat.st_size,
+            "version": f"{stat.st_mtime_ns}-{stat.st_size}",
+        }
+    )
+    return payload
 
 
 _ANALYSIS_HISTORY_MODES = {

@@ -5,6 +5,7 @@ import unittest
 from lark_agent_bridge.parser import (
     build_basic_chat_reply,
     find_resources,
+    parse_addr2line_request,
     parse_bug_request,
     parse_claude_skill_request,
     parse_direct_analysis_request,
@@ -80,6 +81,78 @@ class ParserTests(unittest.TestCase):
             "XMARTM3EUD03E5_V6.2.2.6808_20260424002644.3_REV01_USERDEBUG",
         )
         self.assertIn("导航版本", request.prompt)
+
+    def test_parse_addr2line_request_with_rom_and_stack(self):
+        text = (
+            "XMARTQGZHE29E5_V6.1.0.8810_20260327200937.9_REV01_USER_Release 反解地址\n"
+            "#05 pc 0000000000f385e4 /system/app/xp_envirodrive/lib/arm64/libunity.so\n"
+            "#06 pc 00000000010fa7f0 /system/app/xp_envirodrive/lib/arm64/libunity.so"
+        )
+
+        request = parse_addr2line_request(text)
+
+        self.assertTrue(request.triggered)
+        self.assertEqual(
+            request.rom_version,
+            "XMARTQGZHE29E5_V6.1.0.8810_20260327200937.9_REV01_USER_Release",
+        )
+        self.assertEqual(request.target, "auto")
+        self.assertIn("#05 pc 0000000000f385e4", request.addr_text)
+        self.assertIsNone(request.error)
+
+    def test_parse_addr2line_request_without_symbol_version_still_triggers(self):
+        text = (
+            "反解地址\n"
+            "#05 pc 0000000000f385e4 /system/app/xp_envirodrive/lib/arm64/libunity.so"
+        )
+
+        request = parse_addr2line_request(text)
+
+        self.assertTrue(request.triggered)
+        self.assertEqual(request.error, "missing_symbol_version")
+        self.assertIn("libunity.so", request.addr_text)
+
+    def test_parse_addr2line_request_recognizes_stack_analysis_intent_variants(self):
+        rom = "XMARTQGZHE29E5_V6.1.0.8810_20260327200937.9_REV01_USER_Release"
+        variants = (
+            "反解符合",
+            "分解符号表",
+            "分解导航符号表",
+            "堆栈分析",
+            "Unity堆栈",
+            "3D堆栈",
+            "帮我看下 crash stack",
+            "解析 tombstone",
+        )
+
+        for phrase in variants:
+            with self.subTest(phrase=phrase):
+                request = parse_addr2line_request(f"{rom} {phrase}", allow_missing_address=True)
+
+                self.assertTrue(request.triggered)
+                self.assertEqual(request.rom_version, rom)
+                self.assertEqual(request.error, "missing_address")
+
+    def test_parse_addr2line_request_with_file_intent_does_not_treat_prompt_as_address(self):
+        rom = "XMARTQGZHE29E5_V6.1.0.8810_20260327200937.9_REV01_USER_Release"
+
+        request = parse_addr2line_request(f"{rom} 反解符号表", allow_missing_address=True)
+
+        self.assertTrue(request.triggered)
+        self.assertEqual(request.addr_text, "")
+        self.assertEqual(request.error, "missing_address")
+
+    def test_parse_addr2line_request_does_not_confuse_non_stack_requests(self):
+        for text in (
+            "分析3D生命周期",
+            "Unity 场景是什么",
+            "这个信号符合预期吗",
+            "XMARTQGZHE29E5_V6.1.0.8810_20260327200937.9_REV01_USER_Release 查符号表地址",
+        ):
+            with self.subTest(text=text):
+                request = parse_addr2line_request(text, allow_missing_address=True)
+
+                self.assertFalse(request.triggered)
 
     def test_help_bug_theme_example_is_a_valid_bug_request(self):
         text = "@bot https://project.feishu.cn/xpfailuremgmt/buglo/detail/6991604970 分析主题变化"

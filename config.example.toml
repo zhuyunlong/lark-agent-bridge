@@ -142,12 +142,21 @@ temperature = 0.3
 # Personal knowledge-base QA. Chinese triggers such as `知识库` and `查知识`
 # are routed before ordinary omlx chat. `/kb` and `/qa` remain compatibility
 # aliases. Fuzzy ADB signal simulation questions use deterministic templates
-# when source evidence is available.
+# when source evidence is available. HTTP reads auto-sync a fresh index, and
+# source-derived answers are recorded under `derived-adb-simulations`.
 enabled = true
 storage = "data/knowledge/knowledge.sqlite"
 max_hits = 5
 trigger_prefixes = ["知识库", "查知识", "/kb", "/qa"]
 answer_provider = "omlx"
+# Auto-probe lets clear internal operation questions use knowledge QA without
+# requiring the explicit "知识库" prefix. Keep only generic action terms here.
+# Business aliases, signal names, code/format/value mappings, and exclusions
+# belong in the template data, not in Python or this routing list.
+auto_probe_enabled = true
+auto_probe_min_score = 6.0
+auto_probe_intent_terms = ["模拟", "命令", "指令", "广播", "mock", "adb", "构造", "造数据", "造"]
+auto_probe_no_hit_terms = ["模拟", "命令", "指令", "广播", "mock", "adb", "构造", "造数据", "造"]
 
 [[knowledge.sources]]
 id = "guideengine-adb"
@@ -171,6 +180,23 @@ title = "guideengine Wiki 知识"
 id = "guideengine-signals"
 type = "guideengine_signal"
 title = "guideengine 信号模拟源码"
+
+[source_investigation]
+# Read-only Codex CLI fallback for explicit source-investigation knowledge
+# requests such as "源码调查/查源码/基于源码". Ordinary fuzzy signal questions
+# should answer from verified/source-derived templates first. Spark is intended
+# only for short source investigations; large logs and long reports stay on the
+# existing bug-analysis path.
+enabled = true
+provider = "codex"
+command = "codex"
+model = "gpt-5.3-codex-spark"
+fallback_model = "gpt-5.3-codex"
+timeout_seconds = 120
+max_evidence = 20
+repo_roots = ["/Users/zhuyl/Documents/workspace/xp/guideengine/.worktrees/os6_xpdev"]
+# Add extra read-only roots for cross-repo source lookup when needed, for example Napa5.
+add_dirs = []
 
 [report_server]
 enabled = true

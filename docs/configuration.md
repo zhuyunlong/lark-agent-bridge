@@ -183,6 +183,29 @@ Triggered log-analysis records are kept by default:
 - `/admin` exposes an analysis-history page backed by `/api/analysis-history`; deleting a record removes the linked activity session, case entry, job directory, published report, follow-up context, and report-version entry when present
 - Bug/direct log analysis writes a focused `output/evidence_logs/manifest.json` bundle that preserves the selected navigation log (`log0`/`log1`/`log2`), its `logd`, and vehicle-related sibling logs when referenced by the investigation
 
+## Knowledge QA
+
+`[knowledge]` controls the personal knowledge QA and ADB simulation answers. On a fresh SQLite index, `/api/knowledge/sources` and `/api/knowledge/search` auto-sync configured sources instead of returning a misleading empty result. Verified and source-derived ADB simulation templates are matched before any model call; high-confidence Codex CLI source investigations can be recorded under `derived-adb-simulations` so later bot mentions and HTTP searches retrieve the verified template directly.
+
+Knowledge auto-probe is intentionally narrow. `auto_probe_intent_terms` should contain generic action terms such as `模拟`、`adb`、`命令`、`广播`; do not put business aliases, signal names, codes, formats, values, or negative exclusions here. Those belong in the data-backed template store. If a broad operation question has no high-confidence template but the remaining core terms retrieve executable commands, the bridge can return those commands as low-confidence candidates and clearly ask the user to confirm the scenario. `[source_investigation]` is reserved for explicit requests such as `源码调查`、`查源码` or `基于源码`; ordinary fuzzy signal questions should use existing knowledge, derived templates, or no-hit guidance instead of automatically launching a model-backed source investigation.
+
+`[source_investigation]` configures that fallback:
+
+```toml
+[source_investigation]
+enabled = true
+provider = "codex"
+command = "codex"
+model = "gpt-5.3-codex-spark"
+fallback_model = "gpt-5.3-codex"
+timeout_seconds = 120
+max_evidence = 20
+repo_roots = ["/path/to/guideengine"]
+add_dirs = ["/path/to/Napa5"]
+```
+
+The runner invokes `codex exec --json --output-last-message -s read-only -m gpt-5.3-codex-spark`, sets `-C` to the primary repo root, and appends `--add-dir` for optional cross-repo lookups. The prompt tells Codex to use `rg` anchors first, read only key snippets, avoid whole-repo context dumps, and return a fixed JSON schema: `answer`, `canonical_key`, `confidence`, `commands`, `source_evidence`, `coverage_boundary`, `writeback_allowed`. Write-back is allowed only when confidence is high enough, a canonical key exists, and source evidence is present. Spark is for short source investigations only; big logs, long reports, and bug-analysis summaries stay on the existing analysis runners.
+
 ## Event consumer health
 
 `listen` runs `lark-cli event consume` as a managed subprocess. Configure it with `[event_consumer]`:

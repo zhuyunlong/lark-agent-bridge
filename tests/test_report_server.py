@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+import os
 import tempfile
 import unittest
 import urllib.error
@@ -455,6 +456,60 @@ class ReportServerTests(unittest.TestCase):
 
         self.assertEqual(search_payload["hits"][0]["title"], "打开Debug面板")
         self.assertEqual(sync_payload["source_count"], 0)
+
+    def test_http_server_embeds_live_knowledge_export_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            report_path = data_dir / "knowledge" / "knowledge_export_report.html"
+            report_path.parent.mkdir(parents=True)
+            report_path.write_text("<html><body>knowledge export v1</body></html>", encoding="utf-8")
+            config = BridgeConfig(
+                dry_run=False,
+                data_dir=data_dir,
+                report_server=ReportServerOptions(enabled=True, bind_host="127.0.0.1", port=0),
+            )
+            server = ReportHttpServer(config)
+            try:
+                server.start()
+            except PermissionError as exc:
+                self.skipTest(f"local HTTP bind is not permitted in this environment: {exc}")
+            assert server._server is not None
+            port = server._server.server_address[1]
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/admin", timeout=5) as response:
+                    admin_html = response.read().decode("utf-8")
+                with urllib.request.urlopen(
+                    f"http://127.0.0.1:{port}/api/knowledge/export-report",
+                    timeout=5,
+                ) as response:
+                    first_status = json.loads(response.read().decode("utf-8"))
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/knowledge/export-report", timeout=5) as response:
+                    report_html = response.read().decode("utf-8")
+                    cache_control = response.headers.get("Cache-Control")
+                report_path.write_text("<html><body>knowledge export v2</body></html>", encoding="utf-8")
+                next_mtime = report_path.stat().st_mtime + 2
+                os.utime(report_path, (next_mtime, next_mtime))
+                with urllib.request.urlopen(
+                    f"http://127.0.0.1:{port}/api/knowledge/export-report",
+                    timeout=5,
+                ) as response:
+                    second_status = json.loads(response.read().decode("utf-8"))
+            finally:
+                server.stop()
+
+        self.assertIn("知识库报告", admin_html)
+        self.assertIn("knowledge-report-frame", admin_html)
+        self.assertIn("/api/knowledge/export-report", admin_html)
+        self.assertIn("isKnowledgeReportActive", admin_html)
+        self.assertIn("isFilePreviewMode", admin_html)
+        self.assertIn("../../data/knowledge/knowledge_export_report.html", admin_html)
+        self.assertIn('tab.dataset.view === "knowledge-report-view"', admin_html)
+        self.assertTrue(first_status["exists"])
+        self.assertEqual(first_status["url"], "/knowledge/export-report")
+        self.assertGreater(first_status["size_bytes"], 0)
+        self.assertIn("knowledge export v1", report_html)
+        self.assertEqual(cache_control, "no-store")
+        self.assertNotEqual(first_status["version"], second_status["version"])
 
 
 if __name__ == "__main__":

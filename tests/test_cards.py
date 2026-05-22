@@ -6,6 +6,7 @@ import json
 import unittest
 
 from lark_agent_bridge.cards import (
+    build_agent_reanalysis_confirmation_card,
     build_confirmation_card,
     build_followup_result_card,
     build_knowledge_answer_card,
@@ -100,6 +101,27 @@ class TestBuildStatusCard:
         assert "本区的 Skill 按钮会按所选 Skill" in rendered
         assert "分析主题切换" not in rendered
         assert "分析画面卡顿" not in rendered
+
+    def test_status_card_can_offer_agent_switch_choices(self):
+        card = build_status_card(
+            title="Bug 分析",
+            status="completed",
+            job_id="job_1",
+            root_message_id="om_root",
+            show_followup_actions=True,
+            bug_agent_choices=[
+                {"provider": "claude", "label": "换 Claude 重分析"},
+                {"provider": "omlx", "label": "用 OMLX 本地模型"},
+            ],
+        )
+
+        rendered = str(card)
+        assert "换 Agent 会先弹出确认卡" in rendered
+        assert "select_bug_agent" in rendered
+        assert "换 Claude 重分析" in rendered
+        assert "用 OMLX 本地模型" in rendered
+        assert "'agent_provider': 'claude'" in rendered
+        assert "'agent_provider': 'omlx'" in rendered
 
     def test_status_failed(self):
         card = build_status_card(title="失败", status="failed")
@@ -225,8 +247,9 @@ class TestBuildKnowledgeAnswerCard:
         rendered = str(card)
         assert "知识库回答" in card["header"]["title"]["content"]
         assert "SIGNAL_OTA_ST 四种组合指令" in rendered
-        assert "命中知识" in rendered
-        assert "guideengine-signals" in rendered
+        assert "参考来源" in rendered
+        assert "score=" not in rendered
+        assert "guideengine-signals" not in rendered
         assert "ADB 命令集" in rendered
 
 
@@ -252,6 +275,23 @@ class TestBuildConfirmationCard:
             risk_level="high",
         )
         assert any("🔴 高" in str(e) for e in card["elements"])
+
+    def test_agent_reanalysis_confirmation(self):
+        card = build_agent_reanalysis_confirmation_card(
+            agent_label="Claude Agent",
+            agent_provider="claude",
+            job_id="job_1",
+            root_message_id="om_root",
+            followup_text="重点看源码证据",
+        )
+
+        rendered = str(card)
+        assert "确认换 Agent 重分析" in card["header"]["title"]["content"]
+        assert "Claude Agent" in rendered
+        assert "重点看源码证据" in rendered
+        assert "confirm_bug_agent_reanalysis" in rendered
+        assert "cancel_bug_agent_reanalysis" in rendered
+        assert "'agent_provider': 'claude'" in rendered
 
 
 class TestCardToJson:

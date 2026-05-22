@@ -1,0 +1,339 @@
+{
+  "source_specs": [
+    {
+      "title": "DataCenterBroadcastReceiver 通用信号模拟入口",
+      "path": "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/debug/broadcast/DataCenterBroadcastReceiver.java",
+      "keywords": ["ACTION_MOCK", "mock.datacenter", "code", "format", "value", "adb", "信号模拟"]
+    },
+    {
+      "title": "DataCenterBroadcastReceiver mockXTheme 主题模拟",
+      "path": "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/debug/broadcast/DataCenterBroadcastReceiver.java",
+      "keywords": ["SIGNAL_SR_XTHEME", "SIGNAL_SR_XTHEME_VALUE", "mockXTheme", "TimePeriod", "ThemeMode", "XTheme"]
+    },
+    {
+      "title": "DataCenterBroadcastReceiver PB/ByteArray 自定义模拟",
+      "path": "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/debug/broadcast/DataCenterBroadcastReceiver.java",
+      "keywords": ["mockDataFactory", "mockRoadMarkData", "mockConstructionData", "mockObstacleData", "toByteArray", "ByteArray", "makeValue"]
+    },
+    {
+      "title": "ReplayReceiver/ProtocolFile record 回放入口",
+      "path": "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/debug/broadcast/ReplayReceiver.kt",
+      "keywords": ["REPLAY_FILE", "REPLAY_FATH", "START_RECORD", "STOP_RECORD", "record", "replay"]
+    },
+    {
+      "title": "ProtocolFile ByteArray 回放调度",
+      "path": "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/debug/protolFile/ProtocolFile.java",
+      "keywords": ["ByteArray", "convertBytesToMsg", "mockSignal", "XDATA_ANDROID_REPLAY", "record", "Replay"]
+    },
+    {
+      "title": "SrOtaService OtaCampaign/OtaUpgrade 枚举",
+      "path": "module_core/subreality_biz/src/main/java/com/xiaopeng/ainavi/subreality_biz/ota/SrOtaService.kt",
+      "keywords": ["SIGNAL_OTA_ST", "OtaCampaign", "OtaUpgrade", "OTA_CAMPAIGN_SHOW", "OTA_UPGRADE_AFTER_VIDEO"]
+    },
+    {
+      "title": "signal.proto SIGNAL_OTA_ST 定义",
+      "path": "module_floorcenter/module_proto/src/main/proto/signal.proto",
+      "keywords": ["SIGNAL_OTA_ST", "105003", "OTA状态"]
+    },
+    {
+      "title": "signal.proto SIGNAL_MCU_IG_ST 上下电定义",
+      "path": "module_floorcenter/module_proto/src/main/proto/signal.proto",
+      "keywords": ["SIGNAL_MCU_IG_ST", "36001", "上下电", "IG_OFF", "LOCAL_IG_ON", "REMOTE_IG_ON"]
+    },
+    {
+      "title": "CarCrlBizCode 上下电业务码定义",
+      "path": "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/define/mapping/code/bizcode/CarCrlBizCode.kt",
+      "keywords": ["set_McuIGStatus", "上下电Ignition状态", "1030", "IG_OFF", "LOCAL_IG_ON", "REMOTE_IG_ON"]
+    },
+    {
+      "title": "signal.proto 3D 场景和天气信号定义",
+      "path": "module_floorcenter/module_proto/src/main/proto/signal.proto",
+      "keywords": ["SIGNAL_SR_SCENE_TYPE", "100002", "SIGNAL_XUI_WEATHER", "70010", "SIGNAL_XUI_TEMPERATURE", "70003", "SR大场景", "天气信息"]
+    },
+    {
+      "title": "UnitySceneTypeService SR 场景状态机",
+      "path": "module_display/launcher_subreality_service/src/main/java/com/xiaopeng/ainavi/scene/UnitySceneTypeService.kt",
+      "keywords": ["SIGNAL_SR_SCENE_TYPE", "P_Gear_Scene", "P_Gear_Interim_Scene", "tryEntryImmersivePScene", "tryExitImmersivePScene", "normalSceneTypeFLow"]
+    },
+    {
+      "title": "SceneTypeBroadcastReceiver 上电 P/临停 P 模拟入口",
+      "path": "module_display/launcher_subreality_service/src/main/java/com/xiaopeng/ainavi/scene/SceneTypeBroadcastReceiver.java",
+      "keywords": ["ACTION_MOCK", "mock.scene", "TYPE_P", "tryEntryImmersivePScene", "tryExitImmersivePScene", "上电P模拟"]
+    },
+    {
+      "title": "XuiContextInfoHelper 天气信号注入",
+      "path": "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/helper/xuimanager/XuiContextInfoHelper.kt",
+      "keywords": ["SIGNAL_XUI_WEATHER", "mSkycon", "parseWeather", "onNextData", "SignalFormat.String"]
+    },
+    {
+      "title": "WeatherStatus 天气枚举",
+      "path": "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/define/xui/WeatherStatus.kt",
+      "keywords": ["CLOUDY", "CLEAR_DAY", "LIGHT_RAIN", "WeatherStatus", "fromDesc", "desc"]
+    },
+    {
+      "title": "signal.proto 主题相关信号定义",
+      "path": "module_floorcenter/module_proto/src/main/proto/signal.proto",
+      "keywords": ["SIGNAL_SR_XTHEME", "SIGNAL_SR_XTHEME_MSG", "SIGNAL_CLOUD_HIDE_SR_THEME", "SIGNAL_CLOUD_HIDE_CAR_MODEL_THEME", "JavaObject", "ByteArray", "ProtoObject", "themeMode", "timePeriod", "主题", "SIGNAL_SR_PROPERTY"]
+    }
+  ],
+  "simulation_templates": [
+    {
+      "id": "mcu_ig_status",
+      "canonical_key": "adb-sim:SIGNAL_MCU_IG_ST",
+      "signal": "SIGNAL_MCU_IG_ST",
+      "code": "36001",
+      "format": 3,
+      "title": "SIGNAL_MCU_IG_ST 上下电 ADB 模拟",
+      "summary": "模拟 DataCenter 内部上下电状态，适合验证依赖 IG_OFF、LOCAL_IG_ON、REMOTE_IG_ON 的业务逻辑。",
+      "category": "power",
+      "direct": true,
+      "support": "source_derived",
+      "capability": "direct",
+      "aliases": ["上下电", "上电", "下电", "远程上电", "点火状态", "IG状态", "ignition", "mcu_ig"],
+      "negative_aliases": ["上电P", "上电 p", "上电临停P", "临停P", "临时P", "P档", "P 档", "power on p", "temporary p"],
+      "example": "adb shell am broadcast -a com.xiaopeng.guide.action.mock.datacenter --ei code 36001 --ei format 3 --es value 1",
+      "format_note": "format 3(Int32)，value=0 下电 / 1 本地上电 / 2 远程上电",
+      "commands": [
+        "adb shell am broadcast -a com.xiaopeng.guide.action.mock.datacenter --ei code 36001 --ei format 3 --es value 0",
+        "adb shell am broadcast -a com.xiaopeng.guide.action.mock.datacenter --ei code 36001 --ei format 3 --es value 1",
+        "adb shell am broadcast -a com.xiaopeng.guide.action.mock.datacenter --ei code 36001 --ei format 3 --es value 2"
+      ],
+      "answer_blocks": [
+        "基于 signal.proto、CarCrlBizCode.set_McuIGStatus 和 DataCenterBroadcastReceiver 通用模拟入口，这是上下电 IG 状态的常见指令：",
+        "SIGNAL_MCU_IG_ST 上下电模拟指令",
+        "1. 下电 / IG_OFF [0]\nadb shell am broadcast -a com.xiaopeng.guide.action.mock.datacenter --ei code 36001 --ei format 3 --es value 0",
+        "2. 本地上电 / LOCAL_IG_ON [1]\nadb shell am broadcast -a com.xiaopeng.guide.action.mock.datacenter --ei code 36001 --ei format 3 --es value 1",
+        "3. 远程上电 / REMOTE_IG_ON [2]\nadb shell am broadcast -a com.xiaopeng.guide.action.mock.datacenter --ei code 36001 --ei format 3 --es value 2",
+        "参数说明：\ncode: 36001 (SIGNAL_MCU_IG_ST)\nformat: 3 (Int32 类型)\nvalue: 0/1/2\n0 IG_OFF，下电\n1 LOCAL_IG_ON，本地上电\n2 REMOTE_IG_ON，远程上电",
+        "边界：这只是写入 guideengine DataCenter 的 mock 信号，用于验证业务消费链路；不等同于真实 MCU 物理上下电。"
+      ],
+      "evidence": [
+        {"file": "module_floorcenter/module_proto/src/main/proto/signal.proto", "text": "SIGNAL_MCU_IG_ST = 36001"},
+        {"file": "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/debug/broadcast/DataCenterBroadcastReceiver.java", "text": "ACTION_MOCK code/format/value"}
+      ]
+    },
+    {
+      "id": "xui_weather",
+      "canonical_key": "adb-sim:SIGNAL_XUI_WEATHER",
+      "signal": "SIGNAL_XUI_WEATHER",
+      "code": "70010",
+      "format": 7,
+      "title": "3D 天气状态 ADB 模拟",
+      "summary": "以 DataCenter raw XUI 天气信号为准，模拟 3D/场景 UI 使用的天气状态。",
+      "category": "weather",
+      "direct": true,
+      "support": "verified",
+      "capability": "direct",
+      "aliases": ["3D天气", "天气模拟", "天气信号", "天气状态", "weather", "CLOUDY", "阴天", "雨天", "晴天", "skycon"],
+      "negative_aliases": ["天气粒子删除", "粒子删除"],
+      "example": "adb shell am broadcast -a com.xiaopeng.guide.action.mock.datacenter --ei code 70010 --ei format 7 --es value CLOUDY",
+      "format_note": "format 7(String)，value 使用 WeatherStatus.desc()，例如 CLOUDY、LIGHT_RAIN、CLEAR_DAY。",
+      "commands": [
+        "adb shell am broadcast -a com.xiaopeng.guide.action.mock.datacenter --ei code 70010 --ei format 7 --es value CLOUDY"
+      ],
+      "answer_blocks": [
+        "3D 天气模拟以 DataCenter 的 SIGNAL_XUI_WEATHER 为准：",
+        "adb shell am broadcast -a com.xiaopeng.guide.action.mock.datacenter --ei code 70010 --ei format 7 --es value CLOUDY",
+        "参数说明：\ncode: 70010 (SIGNAL_XUI_WEATHER)\nformat: 7 (String 类型)\nvalue: CLOUDY，来自 WeatherStatus.desc()",
+        "常用 value：CLEAR_DAY、CLEAR_NIGHT、PARTLY_CLOUDY_DAY、PARTLY_CLOUDY_NIGHT、CLOUDY、LIGHT_RAIN、MODERATE_RAIN、HEAVY_RAIN、STORM_RAIN、LIGHT_SNOW、MODERATE_SNOW、HEAVY_SNOW、STORM_SNOW、FOG、DUST、SAND、LIGHT_HAZE、MODERATE_HAZE、HEAVY_HAZE、WIND。",
+        "边界：这是直接写入 guideengine DataCenter 下游天气状态，用于验证 3D/场景 UI 消费链路；不等同于 SmartWeatherService 上游真实天气服务。"
+      ],
+      "evidence": [
+        {"file": "module_floorcenter/module_proto/src/main/proto/signal.proto", "text": "SIGNAL_XUI_WEATHER = 70010"},
+        {"file": "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/helper/xuimanager/XuiContextInfoHelper.kt", "text": "onNextData(SIGNAL_XUI_WEATHER, SignalFormat.String, mSkycon)"},
+        {"file": "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/define/xui/WeatherStatus.kt", "text": "Cloudy(..., \"CLOUDY\", \"阴\")"}
+      ]
+    },
+    {
+      "id": "sr_scene_type",
+      "canonical_key": "adb-sim:SIGNAL_SR_SCENE_TYPE",
+      "signal": "SIGNAL_SR_SCENE_TYPE",
+      "code": "100002",
+      "format": 3,
+      "title": "3D SR 大场景 ADB 模拟",
+      "summary": "3D 场景模拟主看 SIGNAL_SR_SCENE_TYPE；UnitySceneTypeService 会围绕 P 档、行车、泊车、充电等场景同步给 Unity。",
+      "category": "scene",
+      "direct": true,
+      "support": "source_derived",
+      "capability": "direct",
+      "aliases": ["3D场景", "场景模拟", "SR场景", "大场景", "unity场景", "Unity场景", "SIGNAL_SR_SCENE_TYPE", "P_Gear_Scene", "Pilot_Scene"],
+      "negative_aliases": ["上电P", "上电 p", "上电临停P"],
+      "example": "adb shell am broadcast -a com.xiaopeng.guide.action.mock.datacenter --ei code 100002 --ei format 3 --es value 8",
+      "format_note": "format 3(Int32)，value 使用 SceneType.value()。",
+      "commands": [
+        "adb shell am broadcast -a com.xiaopeng.guide.action.mock.datacenter --ei code 100002 --ei format 3 --es value 8",
+        "adb shell am broadcast -a com.xiaopeng.guide.action.mock.datacenter --ei code 100002 --ei format 3 --es value 9",
+        "adb shell am broadcast -a com.xiaopeng.guide.action.mock.datacenter --ei code 100002 --ei format 3 --es value 7"
+      ],
+      "answer_blocks": [
+        "3D 场景模拟主信号以 SIGNAL_SR_SCENE_TYPE 为准：",
+        "1. 长期 P 档场景 / P_Gear_Scene [8]\nadb shell am broadcast -a com.xiaopeng.guide.action.mock.datacenter --ei code 100002 --ei format 3 --es value 8",
+        "2. 行车临时 P 档场景 / P_Gear_Interim_Scene [9]\nadb shell am broadcast -a com.xiaopeng.guide.action.mock.datacenter --ei code 100002 --ei format 3 --es value 9",
+        "3. 泊车场景 / Pilot_Scene [7]\nadb shell am broadcast -a com.xiaopeng.guide.action.mock.datacenter --ei code 100002 --ei format 3 --es value 7",
+        "常用 SceneType 值：1 Driving_Scene，2 Charge_Scene，3 Discharge_Scene，7 Pilot_Scene，8 P_Gear_Scene，9 P_Gear_Interim_Scene，10 P_Gear_Pilot_Interim_Scene，11 洗车，12 露营，13 小憩。",
+        "源码依据：UnitySceneTypeService 内部 normalSceneTypeFLow 默认 P_Gear_Scene，并在 Unity Ready 等链路把 SIGNAL_SR_SCENE_TYPE 发送给 Unity；SceneType.kt 定义了这些 value。",
+        "边界：如果目的是触发上电 P/临停 P 的状态机，不建议只写 raw SIGNAL_SR_SCENE_TYPE，优先使用 mock.scene type=1 入口。"
+      ],
+      "evidence": [
+        {"file": "module_floorcenter/module_proto/src/main/proto/signal.proto", "text": "SIGNAL_SR_SCENE_TYPE = 100002"},
+        {"file": "module_display/launcher_subreality_service/src/main/java/com/xiaopeng/ainavi/scene/UnitySceneTypeService.kt", "text": "sendMsgToUnity(SIGNAL_SR_SCENE_TYPE, SignalFormat.Int32, SceneType.Pilot_Scene.value())"},
+        {"file": "module_display/ai_capsule_common/src/main/java/com/xiaopeng/montecarlo/aicapsulecommon/constant/SceneType.kt", "text": "P_Gear_Scene(8), P_Gear_Interim_Scene(9), Pilot_Scene(7)"}
+      ]
+    },
+    {
+      "id": "power_on_p_scene",
+      "canonical_key": "adb-sim:POWER_ON_P_SCENE",
+      "signal": "POWER_ON_P_SCENE",
+      "code": "mock.scene:type=1",
+      "format": "scene-broadcast",
+      "title": "上电 P / 临停 P 场景 ADB 模拟",
+      "summary": "触发 UnitySceneTypeService 的上电 P/临停 P 状态机，进入或退出沉浸 P。",
+      "category": "scene",
+      "direct": true,
+      "support": "verified",
+      "capability": "direct",
+      "aliases": ["上电P", "上电 p", "上电临停P", "临停P", "临时P", "沉浸P", "P档场景", "P 档场景", "power on p", "temporary p"],
+      "negative_aliases": ["IG状态", "上下电", "点火状态"],
+      "example": "adb shell am broadcast -a com.xiaopeng.guide.action.mock.scene --ei type 1 --es value 1",
+      "format_note": "mock.scene type=1；value=1 进入上电 P，value=0 退出上电 P/进入临停 P。",
+      "commands": [
+        "adb shell am broadcast -a com.xiaopeng.guide.action.mock.scene --ei type 1 --es value 1",
+        "adb shell am broadcast -a com.xiaopeng.guide.action.mock.scene --ei type 1 --es value 0"
+      ],
+      "answer_blocks": [
+        "上电 P/临停 P 场景不要走 SIGNAL_MCU_IG_ST，上下电 IG 和 P 档场景是两类信号。",
+        "进入上电 P：\nadb shell am broadcast -a com.xiaopeng.guide.action.mock.scene --ei type 1 --es value 1",
+        "退出上电 P / 切到临停 P：\nadb shell am broadcast -a com.xiaopeng.guide.action.mock.scene --ei type 1 --es value 0",
+        "参数说明：\naction: com.xiaopeng.guide.action.mock.scene\ntype: 1 (SceneTypeBroadcastReceiver.TYPE_P)\nvalue: 1 调用 tryEntryImmersivePScene；0 调用 tryExitImmersivePScene。",
+        "源码依据：SceneTypeBroadcastReceiver 的 TYPE_P 分支会调用 UnitySceneTypeService 的 tryEntryImmersivePScene/tryExitImmersivePScene；后者切换 immersiveFlag 并触发 P 信号状态机。"
+      ],
+      "evidence": [
+        {"file": "module_display/launcher_subreality_service/src/main/java/com/xiaopeng/ainavi/scene/SceneTypeBroadcastReceiver.java", "text": "TYPE_P value 0 -> tryExitImmersivePScene, else -> tryEntryImmersivePScene"},
+        {"file": "module_display/launcher_subreality_service/src/main/java/com/xiaopeng/ainavi/scene/UnitySceneTypeService.kt", "text": "tryEntryImmersivePScene / tryExitImmersivePScene update immersiveFlag"}
+      ]
+    },
+    {
+      "id": "ota",
+      "canonical_key": "adb-sim:SIGNAL_OTA_ST",
+      "signal": "SIGNAL_OTA_ST",
+      "code": "105003",
+      "format": 7,
+      "title": "SIGNAL_OTA_ST ADB 四种常见组合",
+      "summary": "模拟 OTA 活动露出和升级状态，适合验证升级活动、升级状态相关卡片。",
+      "category": "ota",
+      "direct": true,
+      "support": "generic",
+      "capability": "direct",
+      "aliases": ["ota", "升级", "升级状态", "ota信号"],
+      "negative_aliases": [],
+      "example": "adb shell am broadcast -a com.xiaopeng.guide.action.mock.datacenter --ei code 105003 --ei format 7 --es value \"[1, 2]\"",
+      "format_note": "format 7(String)，value=\"[campaign, upgrade]\"",
+      "commands": [
+        "adb shell am broadcast -a com.xiaopeng.guide.action.mock.datacenter --ei code 105003 --ei format 7 --es value \"[0, 0]\"",
+        "adb shell am broadcast -a com.xiaopeng.guide.action.mock.datacenter --ei code 105003 --ei format 7 --es value \"[1, 0]\"",
+        "adb shell am broadcast -a com.xiaopeng.guide.action.mock.datacenter --ei code 105003 --ei format 7 --es value \"[1, 1]\"",
+        "adb shell am broadcast -a com.xiaopeng.guide.action.mock.datacenter --ei code 105003 --ei format 7 --es value \"[1, 2]\""
+      ],
+      "answer_blocks": [
+        "基于 SrOtaService 中的 OtaCampaign 和 OtaUpgrade 枚举，这是四种常见组合的指令：",
+        "SIGNAL_OTA_ST 四种组合指令",
+        "1. 无升级活动、无升级状态 [0, 0]\nadb shell am broadcast -a com.xiaopeng.guide.action.mock.datacenter --ei code 105003 --ei format 7 --es value \"[0, 0]\"",
+        "2. 显示升级活动、无升级状态 [1, 0]\nadb shell am broadcast -a com.xiaopeng.guide.action.mock.datacenter --ei code 105003 --ei format 7 --es value \"[1, 0]\"",
+        "3. 显示升级活动、显示升级状态 [1, 1]\nadb shell am broadcast -a com.xiaopeng.guide.action.mock.datacenter --ei code 105003 --ei format 7 --es value \"[1, 1]\"",
+        "4. 显示升级活动、视频后升级状态 [1, 2]\nadb shell am broadcast -a com.xiaopeng.guide.action.mock.datacenter --ei code 105003 --ei format 7 --es value \"[1, 2]\"",
+        "参数说明：\ncode: 105003 (SIGNAL_OTA_ST)\nformat: 7 (String 类型)\nvalue: \"[campaign, upgrade]\" 格式",
+        "OTA 参数映射：\ncampaign\n0 OTA_CAMPAIGN_NONE (无活动)\n1 OTA_CAMPAIGN_SHOW (显示活动)\nupgrade\n0 OTA_UPGRADE_NONE (无升级)\n1 OTA_UPGRADE_SHOW (显示升级)\n2 OTA_UPGRADE_AFTER_VIDEO (视频后升级)"
+      ]
+    },
+    {
+      "id": "xtheme",
+      "canonical_key": "adb-sim:SIGNAL_SR_XTHEME",
+      "signal": "SIGNAL_SR_XTHEME",
+      "code": "105004",
+      "format": 18,
+      "title": "SR 时光主题信号",
+      "summary": "模拟早晨、白天、傍晚、夜晚以及白天/黑夜主题模式，适合验证主题切换展示。",
+      "category": "theme",
+      "candidate_intro": "命中多个可能的主题模拟信号，先按用途选一个：",
+      "direct": true,
+      "support": "custom_factory",
+      "capability": "direct",
+      "aliases": ["主题", "时光主题", "xtheme", "白天", "黑夜", "夜晚", "晨曦", "傍晚"],
+      "negative_aliases": [],
+      "example": "adb shell am broadcast -a com.xiaopeng.guide.action.mock.datacenter --ei code 105004 --ei format 18 --es value \"1,0\"",
+      "format_note": "format 18(JavaObject)，value=\"timePeriod,themeMode\"",
+      "answer_blocks": [
+        "基于 DataCenterBroadcastReceiver 中 mockXTheme 的自定义 factory，这是 SR 时光主题的常见组合指令：",
+        "SIGNAL_SR_XTHEME 常见组合指令",
+        "1. 早晨 + 白天模式 [0,0]\nadb shell am broadcast -a com.xiaopeng.guide.action.mock.datacenter --ei code 105004 --ei format 18 --es value \"0,0\"",
+        "2. 白天 + 白天模式 [1,0]\nadb shell am broadcast -a com.xiaopeng.guide.action.mock.datacenter --ei code 105004 --ei format 18 --es value \"1,0\"",
+        "3. 傍晚 + 黑夜模式 [2,1]\nadb shell am broadcast -a com.xiaopeng.guide.action.mock.datacenter --ei code 105004 --ei format 18 --es value \"2,1\"",
+        "4. 夜晚 + 黑夜模式 [3,1]\nadb shell am broadcast -a com.xiaopeng.guide.action.mock.datacenter --ei code 105004 --ei format 18 --es value \"3,1\"",
+        "参数说明：\ncode: 105004 (SIGNAL_SR_XTHEME)\nformat: 18 (JavaObject 类型)\nvalue: \"timePeriod,themeMode\""
+      ]
+    },
+    {
+      "id": "xtheme_msg",
+      "canonical_key": "adb-sim:SIGNAL_SR_XTHEME_MSG",
+      "signal": "SIGNAL_SR_XTHEME_MSG",
+      "code": "105009",
+      "title": "当前主题及皮肤信息",
+      "summary": "描述当前主题/皮肤状态，适合查状态透传；不是已验证的通用 ADB 切换模板。",
+      "category": "theme",
+      "candidate_intro": "命中多个可能的主题模拟信号，先按用途选一个：",
+      "direct": false,
+      "support": "custom_required",
+      "capability": "custom_required",
+      "aliases": ["主题", "皮肤", "xtheme", "当前主题"],
+      "negative_aliases": [],
+      "format_note": "需要结合具体消息结构补齐 format/value。"
+    },
+    {
+      "id": "cloud_hide_sr_theme",
+      "canonical_key": "adb-sim:SIGNAL_CLOUD_HIDE_SR_THEME",
+      "signal": "SIGNAL_CLOUD_HIDE_SR_THEME",
+      "code": "102055",
+      "title": "云控隐藏 SR 主题",
+      "summary": "控制 SR 主题入口是否隐藏，适合排查主题入口被云控关闭的场景。",
+      "category": "theme",
+      "candidate_intro": "命中多个可能的主题模拟信号，先按用途选一个：",
+      "direct": false,
+      "support": "custom_required",
+      "capability": "custom_required",
+      "aliases": ["主题", "云控", "隐藏", "hide", "sr主题"],
+      "negative_aliases": [],
+      "format_note": "需要按对应云控信号定义确认 format/value。"
+    },
+    {
+      "id": "cloud_hide_car_model_theme",
+      "canonical_key": "adb-sim:SIGNAL_CLOUD_HIDE_CAR_MODEL_THEME",
+      "signal": "SIGNAL_CLOUD_HIDE_CAR_MODEL_THEME",
+      "code": "102056",
+      "title": "云控隐藏车型主题",
+      "summary": "控制车型主题入口是否隐藏，适合排查车型主题入口展示问题。",
+      "category": "theme",
+      "candidate_intro": "命中多个可能的主题模拟信号，先按用途选一个：",
+      "direct": false,
+      "support": "custom_required",
+      "capability": "custom_required",
+      "aliases": ["主题", "车型主题", "云控", "隐藏", "hide"],
+      "negative_aliases": [],
+      "format_note": "需要按对应云控信号定义确认 format/value。"
+    },
+    {
+      "id": "sr_property",
+      "canonical_key": "adb-sim:SIGNAL_SR_PROPERTY",
+      "signal": "SIGNAL_SR_PROPERTY",
+      "code": "105007",
+      "title": "SR Property PB 字节信号",
+      "summary": "业务发送的是 PB 序列化后的 ByteArray，通用 ADB 字符串转换不能直接构造。",
+      "category": "complex",
+      "direct": false,
+      "support": "custom_required",
+      "capability": "custom_required",
+      "aliases": ["property", "属性", "pb", "proto", "bytearray", "set_property", "复杂对象", "PB对象", "特殊类型"],
+      "negative_aliases": [],
+      "format_note": "需要新增 mockDataFactory builder，或用录制文件走 record 回放。"
+    }
+  ]
+}

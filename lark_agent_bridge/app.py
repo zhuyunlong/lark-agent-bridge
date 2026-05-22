@@ -18,19 +18,29 @@ from .log import get_logger
 logger = get_logger("app")
 
 from .agents import (
+    Addr2LineRunner,
     BugAnalysisRunner,
     BugFollowupSelection,
     ClaudeSkillRunner,
+    CRASH_ROUTE_TERMS,
     IntentAnalysisFailure,
     IntentAnalysisRunner,
     OmlxChatClient,
+    PERCEPTION_ROUTE_TERMS,
     PerceptionSummaryRunner,
     RomVersionLookupRunner,
+    SCENE_SIGNAL_ROUTE_TERMS,
+    SIGNAL_ROUTE_TERMS,
+    STARTUP_BLOCK_ROUTE_TERMS,
+    STARTUP_ROUTE_TERMS,
+    STUCK_ROUTE_TERMS,
+    XTHEME_ROUTE_TERMS,
     looks_like_scene_signal_request,
 )
 from .arbitration import arbitrate, extract_conclusion
 from .approval import ApprovalStatus, ApprovalStore, build_operation_request
 from .cards import (
+    build_agent_reanalysis_confirmation_card,
     build_confirmation_card,
     build_followup_result_card,
     build_knowledge_answer_card,
@@ -51,6 +61,7 @@ from .knowledge import KnowledgeService
 from .lark_client import LarkClient
 from .lifecycle import AnalysisType, LifecycleStore, mode_to_analysis_type
 from .models import (
+    Addr2LineRequest,
     BridgeConfig,
     CardActionEvent,
     DownloadResource,
@@ -68,6 +79,7 @@ from .parser import (
     parse_bug_request,
     parse_direct_analysis_request,
     parse_perception_summary_request,
+    parse_addr2line_request,
     parse_rom_version_lookup_request,
     parse_signal_request,
     should_use_omlx_chat,
@@ -104,6 +116,18 @@ LOCAL_RESOURCE_NAME_RE = re.compile(
     r"(?![A-Za-z0-9_./~-])",
     re.IGNORECASE,
 )
+
+
+def _contains_any_term(text: str, terms: list[str] | tuple[str, ...]) -> bool:
+    lowered = text.casefold()
+    return any(term and term.casefold() in lowered for term in terms)
+
+
+def _looks_like_knowledge_probe_question(text: str, *, intent_terms: list[str]) -> bool:
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return False
+    return _contains_any_term(cleaned, intent_terms)
 
 
 class _BugReanalysisDecision:
@@ -233,6 +257,7 @@ class _RouteContext:
     direct_analysis_request: object = None
     perception_request: object = None
     rom_version_request: object = None
+    addr2line_request: Addr2LineRequest | None = None
     referenced_resources: list[DownloadResource] = field(default_factory=list)
     latest_chat_context: ConversationContext | None = None
 
@@ -249,6 +274,7 @@ class BridgeApp:
         bug_runner: BugAnalysisRunner | None = None,
         perception_runner: PerceptionSummaryRunner | None = None,
         rom_version_runner: RomVersionLookupRunner | None = None,
+        addr2line_runner: Addr2LineRunner | None = None,
         chat_client: OmlxChatClient | None = None,
         intent_runner: IntentAnalysisRunner | None = None,
         knowledge_service: KnowledgeService | None = None,
@@ -311,6 +337,11 @@ class BridgeApp:
         )
         self.rom_version_runner = rom_version_runner or RomVersionLookupRunner(
             config,
+            process_watchdog=self.process_watchdog,
+        )
+        self.addr2line_runner = addr2line_runner or Addr2LineRunner(
+            config,
+            lark_client=self.lark_client,
             process_watchdog=self.process_watchdog,
         )
         self.chat_client = chat_client or OmlxChatClient(config)
@@ -401,6 +432,12 @@ class BridgeApp:
             return self._handle_continue_agent_action(action_event)
         if action == "select_bug_skill":
             return self._handle_select_bug_skill_action(action_event)
+        if action == "select_bug_agent":
+            return self._handle_select_bug_agent_action(action_event)
+        if action == "confirm_bug_agent_reanalysis":
+            return self._handle_confirm_bug_agent_reanalysis_action(action_event)
+        if action == "cancel_bug_agent_reanalysis":
+            return self._handle_cancel_bug_agent_reanalysis_action(action_event)
         if action in {"feedback_helpful", "feedback_unhelpful"}:
             return self._handle_feedback_action(action_event)
         if action == "escalate":
@@ -460,6 +497,7 @@ class BridgeApp:
         )
         signal_request = self._build_signal_request(route_content, referenced_resources)
         rom_version_request = parse_rom_version_lookup_request(route_content)
+        addr2line_request = self._build_addr2line_request(route_content, event, referenced_resources)
         bug_request = parse_bug_request(route_content)
         if bug_request.triggered and signal_request.error == "missing_signal":
             signal_request = SignalRequest(
@@ -481,6 +519,7 @@ class BridgeApp:
                 bug_request=bug_request,
                 direct_analysis_request=direct_analysis_request,
                 perception_request=perception_request,
+                addr2line_request=addr2line_request,
             )
         ):
             decision = PolicyDecision(True, "group_log_analysis_allowed")
@@ -512,6 +551,7 @@ class BridgeApp:
             direct_analysis_request=direct_analysis_request,
             perception_request=perception_request,
             rom_version_request=rom_version_request,
+            addr2line_request=addr2line_request,
             referenced_resources=referenced_resources,
             latest_chat_context=latest_chat_context,
         )
@@ -524,20 +564,22 @@ class BridgeApp:
         _ROUTE_HANDLERS = [
             self._route_bug_followup,       # 1. Bug followup conversation
             self._route_bug_intent,         # 2. Explicit bug analysis request
-            self._route_rom_version_lookup, # 3. ROM version lookup
-            self._route_scene_signal,       # 4. Scene signal shortcut
-            self._route_knowledge_qa,       # 5. Personal knowledge QA / ADB templates
-            self._route_signal_request,     # 6. Signal lifecycle analysis
-            self._route_claude_skill,       # 7. Optional configured local skill route
-            self._route_bug_request,        # 8. Bug request (secondary match)
-            self._route_perception,         # 9. Perception summary
-            self._route_direct_analysis,    # 10. Direct file/log analysis
-            self._route_followup_intent,    # 11. Followup intent keywords
-            self._route_general_followup,   # 12. General followup conversation
-            self._route_stale_light_interaction,  # 13. Replayed old lightweight messages
-            self._route_basic_chat,         # 14. Deterministic help/identity replies
-            self._route_omlx_chat,          # 15. OMLX chat conversation
-            self._route_intent_router,      # 16. Intent fallback for unresolved tasks
+            self._route_addr2line_resolve,  # 3. Native stack address reverse lookup
+            self._route_rom_version_lookup, # 4. ROM version lookup
+            self._route_scene_signal,       # 5. Scene signal shortcut
+            self._route_knowledge_qa,       # 6. Personal knowledge QA / ADB templates
+            self._route_signal_request,     # 7. Signal lifecycle analysis
+            self._route_claude_skill,       # 8. Optional configured local skill route
+            self._route_bug_request,        # 9. Bug request (secondary match)
+            self._route_perception,         # 10. Perception summary
+            self._route_direct_analysis,    # 11. Direct file/log analysis
+            self._route_followup_intent,    # 12. Followup intent keywords
+            self._route_general_followup,   # 13. General followup conversation
+            self._route_knowledge_probe,    # 14. Internal operation QA from knowledge before chat
+            self._route_stale_light_interaction,  # 15. Replayed old lightweight messages
+            self._route_basic_chat,         # 16. Deterministic help/identity replies
+            self._route_omlx_chat,          # 17. OMLX chat conversation
+            self._route_intent_router,      # 18. Intent fallback for unresolved tasks
         ]
         for handler in _ROUTE_HANDLERS:
             result = handler(ctx)
@@ -572,6 +614,13 @@ class BridgeApp:
         if ctx.bug_request is not None and getattr(ctx.bug_request, "triggered", False):
             return self._handle_bug_intent(ctx.event, ctx.route_content)
         return None
+
+    def _route_addr2line_resolve(self, ctx: _RouteContext) -> TaskResult | None:
+        if ctx.addr2line_request is None or not ctx.addr2line_request.triggered:
+            return None
+        if not self.state_store.mark_seen(ctx.event):
+            return TaskResult(True, f"duplicate event skipped: {ctx.event.event_id}", skipped=True)
+        return self._run_addr2line_resolve_request(ctx.event, ctx.addr2line_request)
 
     def _route_rom_version_lookup(self, ctx: _RouteContext) -> TaskResult | None:
         if ctx.rom_version_request is None or not getattr(ctx.rom_version_request, "triggered", False):
@@ -653,6 +702,53 @@ class BridgeApp:
             return None
         if ctx.referenced_resources:
             return None
+        if not self.state_store.mark_seen(ctx.event):
+            return TaskResult(True, f"duplicate event skipped: {ctx.event.event_id}", skipped=True)
+        result = self.knowledge_service.answer(ctx.route_content)
+        details = dict(result.details)
+        details["delivery"] = "reply"
+        details["conversation_root_message_id"] = ctx.event.root_id or ctx.event.message_id
+        result.details = details
+        return self._deliver_result(ctx.event, result, request_text=ctx.route_content)
+
+    def _route_knowledge_probe(self, ctx: _RouteContext) -> TaskResult | None:
+        knowledge_options = self.config.knowledge
+        if not knowledge_options.enabled or not knowledge_options.auto_probe_enabled:
+            return None
+        if ctx.referenced_resources:
+            return None
+        if build_basic_chat_reply(ctx.route_content, command_prefixes=self.config.command_prefixes) is not None:
+            return None
+        if not _looks_like_knowledge_probe_question(
+            ctx.route_content,
+            intent_terms=knowledge_options.auto_probe_intent_terms,
+        ):
+            return None
+        hits = self.knowledge_service.search(ctx.route_content, limit=1)
+        usable_hits = [hit for hit in hits if hit.score >= knowledge_options.auto_probe_min_score]
+        if not usable_hits:
+            low_confidence_answer = getattr(self.knowledge_service, "answer_low_confidence_candidates", None)
+            if callable(low_confidence_answer):
+                result = low_confidence_answer(ctx.route_content)
+                if result is not None:
+                    if not self.state_store.mark_seen(ctx.event):
+                        return TaskResult(True, f"duplicate event skipped: {ctx.event.event_id}", skipped=True)
+                    details = dict(result.details)
+                    details["delivery"] = "reply"
+                    details["conversation_root_message_id"] = ctx.event.root_id or ctx.event.message_id
+                    result.details = details
+                    return self._deliver_result(ctx.event, result, request_text=ctx.route_content)
+            if not _contains_any_term(ctx.route_content, knowledge_options.auto_probe_no_hit_terms):
+                return None
+            if not self.state_store.mark_seen(ctx.event):
+                return TaskResult(True, f"duplicate event skipped: {ctx.event.event_id}", skipped=True)
+            result = TaskResult(
+                success=False,
+                message=f"知识库未命中：{ctx.route_content}\n请补充更具体的关键词，或先同步/新增对应知识。",
+                error_code="knowledge_probe_no_hits",
+                details={"mode": "knowledge_probe", "knowledge_hits": []},
+            )
+            return self._deliver_result(ctx.event, result, request_text=ctx.route_content)
         if not self.state_store.mark_seen(ctx.event):
             return TaskResult(True, f"duplicate event skipped: {ctx.event.event_id}", skipped=True)
         result = self.knowledge_service.answer(ctx.route_content)
@@ -1036,6 +1132,7 @@ class BridgeApp:
                 show_followup_actions=bool(card_actions_enabled and result.success and report_url and root_message_id),
                 bug_skill_choices=self._result_bug_skill_choices(result) if card_actions_enabled else [],
                 bug_skill_choice_note=self._result_bug_skill_choice_note(result) if card_actions_enabled else None,
+                bug_agent_choices=self._result_bug_agent_choices(result) if card_actions_enabled else [],
             )
         elif mode in {"bug_followup_existing_answer", "bug_agent_followup", "bug_reanalysis"}:
             confidence_value = result.details.get("answer_confidence")
@@ -1048,6 +1145,7 @@ class BridgeApp:
                 job_id=result.job_id,
                 followup_text=str(result.details.get("followup_text") or ""),
                 answer_confidence=answer_confidence,
+                bug_agent_choices=self._result_bug_agent_choices(result) if card_actions_enabled else [],
             )
         elif mode == "knowledge_qa":
             hits = result.details.get("knowledge_hits")
@@ -1488,6 +1586,56 @@ class BridgeApp:
             return f"当前命中：{skill_label}。如果意图不正确，可以先补充要求，再从 Skill 按钮改选一个方向基于已有日志重新分析。"
         return "如果当前意图不正确，可以先补充要求，再从 Skill 按钮改选一个方向基于已有日志重新分析。"
 
+    def _result_bug_agent_choices(self, result: TaskResult | None) -> list[dict[str, object]]:
+        if result is None or not result.success or not self._result_is_bug_report_mode(result):
+            return []
+        current_provider = self._normalize_bug_agent_provider(
+            str(result.details.get("agent_summary_provider") or result.details.get("provider") or "")
+        )
+        choices: list[dict[str, object]] = []
+        for provider in ("codex", "claude", "omlx"):
+            choice = self._bug_agent_choice(provider)
+            if choice is None:
+                continue
+            if provider == current_provider:
+                continue
+            choices.append(choice)
+        return choices
+
+    def _bug_agent_choice(self, provider: str) -> dict[str, object] | None:
+        normalized = self._normalize_bug_agent_provider(provider)
+        if normalized == "codex":
+            return {
+                "provider": "codex",
+                "label": "换 Codex 重分析",
+                "confirm_label": "Codex Agent",
+            }
+        if normalized == "claude":
+            if not self.config.claude_agent.enabled:
+                return None
+            return {
+                "provider": "claude",
+                "label": "换 Claude 重分析",
+                "confirm_label": "Claude Agent",
+            }
+        if normalized == "omlx":
+            if not self.config.omlx_chat.enabled:
+                return None
+            return {
+                "provider": "omlx",
+                "label": "用 OMLX 本地模型",
+                "confirm_label": "OMLX 本地模型",
+            }
+        return None
+
+    def _normalize_bug_agent_provider(self, provider: str) -> str:
+        normalized = (provider or "").strip().casefold()
+        if normalized in {"claude-code", "claude_code"}:
+            return "claude"
+        if normalized in {"codex", "claude", "omlx"}:
+            return normalized
+        return ""
+
     def _build_progress_card(
         self,
         event: LarkEvent,
@@ -1549,6 +1697,7 @@ class BridgeApp:
             show_followup_actions=show_followup_actions,
             bug_skill_choices=bug_skill_choices,
             bug_skill_choice_note=self._result_bug_skill_choice_note(result) if self._card_actions_enabled() else None,
+            bug_agent_choices=self._result_bug_agent_choices(result) if self._card_actions_enabled() else [],
         )
 
     def _progress_live_url(self, session_id: str) -> str | None:
@@ -1782,6 +1931,57 @@ class BridgeApp:
         result = self.rom_version_runner.run_lookup(rom_version_request, event=event)
         return self._deliver_result(event, result, request_text=rom_version_request.raw_text)
 
+    def _run_addr2line_resolve_request(self, event: LarkEvent, request: Addr2LineRequest) -> TaskResult:
+        self._notify_progress(
+            "addr2line_resolve_received",
+            "收到地址反解请求",
+            event=event,
+            target=request.target,
+            rom_version=request.rom_version,
+            napa_version=request.napa_version,
+            apk_version=request.apk_version,
+            raw_text=request.raw_text,
+        )
+        request = self._resolve_addr2line_navigation_version(event, request)
+        result = self.addr2line_runner.run_resolve(request, event=event)
+        return self._deliver_result(event, result, request_text=request.raw_text)
+
+    def _resolve_addr2line_navigation_version(self, event: LarkEvent, request: Addr2LineRequest) -> Addr2LineRequest:
+        if request.apk_version or request.napa_version or not request.rom_version:
+            return request
+        lookup_request = parse_rom_version_lookup_request(f"{request.rom_version} 查导航版本")
+        if not lookup_request.triggered or not lookup_request.rom_version:
+            return request
+        self._notify_progress(
+            "addr2line_symbol_version_lookup",
+            "查询 ROM 对应导航符号表版本",
+            event=event,
+            rom_version=request.rom_version,
+        )
+        lookup_result = self.rom_version_runner.run_lookup(lookup_request, event=event)
+        navigation_version = self._navigation_version_from_lookup_result(lookup_result)
+        if not navigation_version:
+            return request
+        self._notify_progress(
+            "addr2line_symbol_version_resolved",
+            "已匹配导航符号表版本",
+            event=event,
+            rom_version=request.rom_version,
+            apk_version=navigation_version,
+        )
+        return Addr2LineRequest(
+            addr_text=request.addr_text,
+            resources=request.resources,
+            raw_text=request.raw_text,
+            rom_version=request.rom_version,
+            napa_version=request.napa_version,
+            apk_version=navigation_version,
+            target=request.target,
+            prompt=request.prompt,
+            triggered=request.triggered,
+            error=None if request.error == "missing_symbol_version" else request.error,
+        )
+
     def _maybe_request_approval(
         self,
         event: LarkEvent,
@@ -1904,6 +2104,21 @@ class BridgeApp:
         if not previous_session and metadata.get("job_id"):
             previous_session = self.activity_store.find_session_by_job_id(str(metadata.get("job_id") or "")) or {}
         selected_skill = str(metadata.get("selected_skill") or "").strip()
+        selected_agent_provider = self._normalize_bug_agent_provider(
+            str(metadata.get("selected_agent_provider") or metadata.get("agent_provider") or "")
+        )
+        if (metadata.get("selected_agent_provider") or metadata.get("agent_provider")) and not selected_agent_provider:
+            return TaskResult(
+                success=False,
+                message="指定的 Agent 无效或不支持，无法重新分析。",
+                error_code="invalid_bug_agent_selection",
+                details={
+                    "mode": "approval",
+                    "agent_provider": str(
+                        metadata.get("selected_agent_provider") or metadata.get("agent_provider") or ""
+                    ),
+                },
+            )
         selected_skill_decision = (
             self.bug_runner.selection_for_skill_name(
                 selected_skill,
@@ -1938,6 +2153,7 @@ class BridgeApp:
             classification_source=reanalysis_decision.source,
             classification_reason=reanalysis_decision.reason,
             classification_provider=reanalysis_decision.provider,
+            agent_provider_override=selected_agent_provider,
             local_log_resources=self._authorized_local_download_resources(event, route_content),
             bridge_session_id=followup_context.root_message_id,
         )
@@ -2155,6 +2371,158 @@ class BridgeApp:
                 "root_message_id": followup_context.root_message_id,
                 "job_id": action_event.job_id,
                 "selected_skill": selected.skill_name,
+            },
+        )
+
+    def _handle_select_bug_agent_action(self, action_event: CardActionEvent) -> TaskResult:
+        provider = self._normalize_bug_agent_provider(action_event.agent_provider)
+        choice = self._bug_agent_choice(provider)
+        if choice is None:
+            return TaskResult(
+                success=False,
+                message="卡片回调中的 Agent 无效或当前未启用，请重新选择。",
+                error_code="invalid_bug_agent_selection",
+                details={
+                    "mode": "card_action",
+                    "action": "select_bug_agent",
+                    "agent_provider": action_event.agent_provider,
+                },
+            )
+        _root_message_id, followup_context, previous_session = self._card_followup_context(action_event)
+        if followup_context is None:
+            return TaskResult(
+                success=False,
+                message="找不到可重新分析的 bug 上下文，请回复原分析消息后再重试。",
+                error_code="missing_reanalysis_context",
+                details={"mode": "card_action", "action": "select_bug_agent"},
+            )
+        chat_id = self._card_action_chat_id(action_event, followup_context)
+        if not chat_id:
+            return TaskResult(
+                success=False,
+                message="卡片回调缺少 chat_id，无法确认换 Agent 重分析。",
+                error_code="invalid_card_action_context",
+                details={"mode": "card_action", "action": "select_bug_agent"},
+            )
+        event = self._event_from_card_action(
+            action_event,
+            root_message_id=followup_context.root_message_id,
+            fallback_chat_id=chat_id,
+            fallback_chat_type=str(previous_session.get("chat_type") or ""),
+        )
+        if not self.state_store.mark_seen(event):
+            return TaskResult(True, f"duplicate event skipped: {event.event_id}", skipped=True)
+        agent_label = str(choice.get("confirm_label") or choice.get("label") or provider)
+        card = build_agent_reanalysis_confirmation_card(
+            agent_label=agent_label,
+            agent_provider=provider,
+            job_id=action_event.job_id,
+            root_message_id=followup_context.root_message_id,
+            followup_text=action_event.followup_text,
+        )
+        if not self.config.dry_run and event.chat_type in {"group", "p2p"}:
+            card_json = card_to_json(card)
+            if event.message_id:
+                self.lark_client.reply_card(event.message_id, card_json)
+            else:
+                self.lark_client.send_card_response(event, card_json)
+        return TaskResult(
+            success=True,
+            message=f"已选择 {agent_label}，等待确认后重新分析。",
+            details={
+                "mode": "card_action",
+                "action": "select_bug_agent",
+                "agent_provider": provider,
+                "root_message_id": followup_context.root_message_id,
+                "job_id": action_event.job_id,
+            },
+        )
+
+    def _handle_confirm_bug_agent_reanalysis_action(self, action_event: CardActionEvent) -> TaskResult:
+        provider = self._normalize_bug_agent_provider(action_event.agent_provider)
+        choice = self._bug_agent_choice(provider)
+        if choice is None:
+            return TaskResult(
+                success=False,
+                message="确认卡中的 Agent 无效或当前未启用，请重新从结果卡片选择。",
+                error_code="invalid_bug_agent_selection",
+                details={
+                    "mode": "card_action",
+                    "action": "confirm_bug_agent_reanalysis",
+                    "agent_provider": action_event.agent_provider,
+                },
+            )
+        _root_message_id, followup_context, previous_session = self._card_followup_context(action_event)
+        if followup_context is None:
+            return TaskResult(
+                success=False,
+                message="找不到可重新分析的 bug 上下文，请回复原分析消息后再重试。",
+                error_code="missing_reanalysis_context",
+                details={"mode": "card_action", "action": "confirm_bug_agent_reanalysis"},
+            )
+        chat_id = self._card_action_chat_id(action_event, followup_context)
+        if not chat_id:
+            return TaskResult(
+                success=False,
+                message="卡片回调缺少 chat_id，无法换 Agent 重分析。",
+                error_code="invalid_card_action_context",
+                details={"mode": "card_action", "action": "confirm_bug_agent_reanalysis"},
+            )
+        event = self._event_from_card_action(
+            action_event,
+            root_message_id=followup_context.root_message_id,
+            fallback_chat_id=chat_id,
+            fallback_chat_type=str(previous_session.get("chat_type") or ""),
+        )
+        if not self.state_store.mark_seen(event):
+            return TaskResult(True, f"duplicate event skipped: {event.event_id}", skipped=True)
+        agent_label = str(choice.get("confirm_label") or choice.get("label") or provider)
+        route_content = action_event.followup_text.strip()
+        if not route_content:
+            route_content = f"换用 {agent_label} 基于已有日志/报告重新分析"
+        self._notify_progress(
+            "bug_agent_switch_confirmed",
+            "用户确认换 Agent 重新分析",
+            event=event,
+            session_id=followup_context.root_message_id,
+            agent_provider=provider,
+            agent_label=agent_label,
+            job_id=action_event.job_id,
+        )
+        return self._execute_approved_reanalysis(
+            event,
+            route_content,
+            {
+                "root_message_id": followup_context.root_message_id,
+                "job_id": action_event.job_id,
+                "selected_agent_provider": provider,
+            },
+        )
+
+    def _handle_cancel_bug_agent_reanalysis_action(self, action_event: CardActionEvent) -> TaskResult:
+        _root_message_id, followup_context, previous_session = self._card_followup_context(action_event)
+        chat_id = self._card_action_chat_id(action_event, followup_context)
+        event = self._event_from_card_action(
+            action_event,
+            root_message_id=str(getattr(followup_context, "root_message_id", "") or action_event.root_message_id),
+            fallback_chat_id=chat_id,
+            fallback_chat_type=str(previous_session.get("chat_type") or ""),
+        )
+        if not self.state_store.mark_seen(event):
+            return TaskResult(True, f"duplicate event skipped: {event.event_id}", skipped=True)
+        message = "已取消换 Agent 重分析。"
+        if not self.config.dry_run and event.chat_type in {"group", "p2p"}:
+            if event.message_id:
+                self.lark_client.reply(event.message_id, self._reply_payload(event, message))
+            elif event.chat_id:
+                self.lark_client.send_response(event, message)
+        return TaskResult(
+            success=True,
+            message=message,
+            details={
+                "mode": "card_action",
+                "action": "cancel_bug_agent_reanalysis",
+                "agent_provider": self._normalize_bug_agent_provider(action_event.agent_provider),
             },
         )
 
@@ -2767,6 +3135,7 @@ class BridgeApp:
         bug_request,
         direct_analysis_request,
         perception_request,
+        addr2line_request,
     ) -> bool:
         if event.chat_type != "group":
             return False
@@ -2781,6 +3150,7 @@ class BridgeApp:
             or bug_request.triggered
             or direct_analysis_request.triggered
             or perception_request.triggered
+            or (addr2line_request is not None and addr2line_request.triggered)
         )
 
     def _build_signal_request(self, route_content: str, referenced_resources: list[DownloadResource]) -> SignalRequest:
@@ -2800,6 +3170,126 @@ class BridgeApp:
             triggered=request.triggered,
             error=request.error,
         )
+
+    def _build_addr2line_request(
+        self,
+        route_content: str,
+        event: LarkEvent,
+        referenced_resources: list[DownloadResource] | None = None,
+    ) -> Addr2LineRequest:
+        resources = referenced_resources or []
+        if not resources:
+            probe = parse_addr2line_request(route_content, allow_missing_address=True)
+            if probe.triggered:
+                resources = self._reference_chain_log_resources(event)
+        request = parse_addr2line_request(route_content, allow_missing_address=bool(resources))
+        if request.triggered and resources and not request.resources:
+            request = Addr2LineRequest(
+                addr_text=request.addr_text,
+                resources=resources,
+                raw_text=request.raw_text,
+                rom_version=request.rom_version,
+                napa_version=request.napa_version,
+                apk_version=request.apk_version,
+                target=request.target,
+                prompt=request.prompt,
+                triggered=request.triggered,
+                error=request.error,
+            )
+        if not request.triggered:
+            return request
+        if request.rom_version and not request.apk_version and not request.napa_version:
+            recent_apk = self._recent_navigation_version_for_chat(event, request.rom_version)
+            if recent_apk:
+                request = Addr2LineRequest(
+                    addr_text=request.addr_text,
+                    resources=request.resources,
+                    raw_text=request.raw_text,
+                    rom_version=request.rom_version,
+                    napa_version=request.napa_version,
+                    apk_version=recent_apk,
+                    target=request.target,
+                    prompt=request.prompt,
+                    triggered=request.triggered,
+                    error=None if request.error == "missing_symbol_version" else request.error,
+                )
+        if request.rom_version or request.napa_version or request.apk_version:
+            return request
+        inherited_rom = self._recent_rom_version_for_chat(event)
+        if not inherited_rom:
+            return request
+        inherited_apk = self._recent_navigation_version_for_chat(event, inherited_rom)
+        return Addr2LineRequest(
+            addr_text=request.addr_text,
+            resources=request.resources,
+            raw_text=request.raw_text,
+            rom_version=inherited_rom,
+            napa_version=request.napa_version,
+            apk_version=inherited_apk or request.apk_version,
+            target=request.target,
+            prompt=request.prompt,
+            triggered=True,
+            error=None if request.error == "missing_symbol_version" else request.error,
+        )
+
+    def _recent_rom_version_for_chat(self, event: LarkEvent) -> str:
+        session = self._recent_rom_lookup_session_for_chat(event)
+        if not session:
+            return ""
+        candidate = parse_rom_version_lookup_request(str(session.get("content") or ""))
+        return candidate.rom_version
+
+    def _recent_navigation_version_for_chat(self, event: LarkEvent, rom_version: str = "") -> str:
+        session = self._recent_rom_lookup_session_for_chat(event, rom_version=rom_version)
+        if not session:
+            return ""
+        details = session.get("details")
+        if not isinstance(details, dict):
+            return ""
+        required = details.get("required_outputs")
+        if not isinstance(required, dict):
+            return ""
+        return self._navigation_version_from_required_outputs(required)
+
+    def _navigation_version_from_lookup_result(self, result: TaskResult) -> str:
+        if not result.success or not isinstance(result.details, dict):
+            return ""
+        required = result.details.get("required_outputs")
+        if not isinstance(required, dict):
+            return ""
+        return self._navigation_version_from_required_outputs(required)
+
+    def _navigation_version_from_required_outputs(self, required: dict[str, object]) -> str:
+        navigation_version = str(required.get("navigation_version") or "").strip()
+        if self._looks_like_apk_version(navigation_version):
+            return navigation_version
+        symbol_url = str(required.get("symbol_table_url") or "").strip()
+        match = re.search(r"/(V\d+\.\d+\.\d+(?:\.\d+)?_\d{14}(?:\.\d+)?_[A-Za-z0-9]+)/?$", symbol_url)
+        return match.group(1) if match else ""
+
+    def _recent_rom_lookup_session_for_chat(self, event: LarkEvent, rom_version: str = "") -> dict[str, object] | None:
+        chat_id = event.chat_id.strip()
+        if not chat_id:
+            return None
+        for session in self.activity_store.list_sessions(limit=30, include_hidden=True):
+            if str(session.get("chat_id") or "") != chat_id:
+                continue
+            if str(session.get("session_id") or "") == event.message_id:
+                continue
+            if str(session.get("mode") or "") != "rom_version_lookup":
+                continue
+            if str(session.get("status") or "") != "succeeded":
+                continue
+            candidate = parse_rom_version_lookup_request(str(session.get("content") or ""))
+            if candidate.rom_version:
+                if rom_version and candidate.rom_version != rom_version:
+                    continue
+                session_id = str(session.get("session_id") or "").strip()
+                return self.activity_store.get_session(session_id) or session
+        return None
+
+    def _looks_like_apk_version(self, value: str) -> bool:
+        return re.match(r"^V\d+\.\d+\.\d+(?:\.\d+)?_\d{14}(?:\.\d+)?_[A-Za-z0-9]+$", value) is not None
 
     def _resource_descriptors(self, resources: list[DownloadResource]) -> list[dict[str, str]]:
         return [
@@ -3102,11 +3592,27 @@ class BridgeApp:
         force_current_lookup: bool = False,
     ) -> list[DownloadResource]:
         resources: list[DownloadResource] = []
-        for message_id in self._candidate_reference_message_ids(
+        candidate_ids = self._candidate_reference_message_ids(
             event,
             route_content=route_content,
             force_current_lookup=force_current_lookup,
-        ):
+        )
+        for message_id in candidate_ids:
+            fetched = self.lark_client.fetch_message(message_id)
+            if fetched.returncode != 0:
+                continue
+            resources = self._merge_resources(
+                resources,
+                self._extract_resources_from_message_payload(fetched.stdout, fallback_message_id=message_id),
+            )
+        if resources:
+            return resources
+        seen = set(candidate_ids)
+        reference_ids = self._fetch_followup_reference_ids(event)
+        for message_id in self._followup_context_candidate_ids(event, reference_ids):
+            if message_id in seen:
+                continue
+            seen.add(message_id)
             fetched = self.lark_client.fetch_message(message_id)
             if fetched.returncode != 0:
                 continue
@@ -4081,21 +4587,31 @@ class BridgeApp:
         lowered = route_content.casefold()
         force_terms = tuple(term.casefold() for term in self.config.bug_analysis.force_reanalysis_terms)
         manual_selection = None
-        if hasattr(self.bug_runner, "_manual_bug_selection"):
-            manual_selection = self.bug_runner._manual_bug_selection(
-                prompt_text=route_content,
-                title=str(getattr(followup_context, "request_text", "") or ""),
-                description=str(getattr(followup_context, "report_excerpt", "") or ""),
-            )
+
+        def resolve_manual_selection():
+            nonlocal manual_selection
+            if manual_selection is None and hasattr(self.bug_runner, "_manual_bug_selection"):
+                manual_selection = self.bug_runner._manual_bug_selection(
+                    prompt_text=route_content,
+                    title=str(getattr(followup_context, "request_text", "") or ""),
+                    description="",
+                )
+            return manual_selection
+
         if any(term in lowered for term in force_terms):
+            selection = resolve_manual_selection() if self._followup_has_explicit_bug_route(route_content) else None
             return _BugReanalysisDecision(
                 True,
                 True,
-                plans=getattr(manual_selection, "plans", None),
-                skill_name=getattr(manual_selection, "skill_name", ""),
-                skill_label=getattr(manual_selection, "skill_label", ""),
-                source=getattr(manual_selection, "source", ""),
-                reason="命中本地强制重分析词，退回手动分类。",
+                plans=getattr(selection, "plans", None),
+                skill_name=getattr(selection, "skill_name", ""),
+                skill_label=getattr(selection, "skill_label", ""),
+                source=getattr(selection, "source", ""),
+                reason=(
+                    "命中本地强制重分析词，并识别到新的分析方向。"
+                    if selection is not None
+                    else "命中本地强制重分析词，沿用上一轮分析类型重新执行。"
+                ),
             )
         if parse_signal_request(
             route_content,
@@ -4103,26 +4619,32 @@ class BridgeApp:
             command_prefixes=self.config.command_prefixes,
             signal_resolver=self.signal_resolver,
         ).signal:
+            selection = resolve_manual_selection()
             return _BugReanalysisDecision(
                 True,
                 True,
-                plans=getattr(manual_selection, "plans", None),
-                skill_name=getattr(manual_selection, "skill_name", ""),
-                skill_label=getattr(manual_selection, "skill_label", ""),
-                source=getattr(manual_selection, "source", ""),
+                plans=getattr(selection, "plans", None),
+                skill_name=getattr(selection, "skill_name", ""),
+                skill_label=getattr(selection, "skill_label", ""),
+                source=getattr(selection, "source", ""),
                 reason="本地回退识别到明确信号请求，触发重分析。",
             )
         has_correction = any(term in lowered for term in ("修正", "修复问题时间", "更正", "修改", "改成"))
         has_time = re.search(r"(?<!\d)\d{1,2}[:：]\d{2}(?:\s*分)?(?!\d)", route_content) is not None
         if has_correction and has_time:
+            selection = resolve_manual_selection() if self._followup_has_explicit_bug_route(route_content) else None
             return _BugReanalysisDecision(
                 True,
                 True,
-                plans=getattr(manual_selection, "plans", None),
-                skill_name=getattr(manual_selection, "skill_name", ""),
-                skill_label=getattr(manual_selection, "skill_label", ""),
-                source=getattr(manual_selection, "source", ""),
-                reason="本地回退识别到时间修正，触发重分析。",
+                plans=getattr(selection, "plans", None),
+                skill_name=getattr(selection, "skill_name", ""),
+                skill_label=getattr(selection, "skill_label", ""),
+                source=getattr(selection, "source", ""),
+                reason=(
+                    "本地回退识别到时间修正和新的分析方向，触发重分析。"
+                    if selection is not None
+                    else "本地回退识别到时间修正，沿用上一轮分析类型重分析。"
+                ),
             )
         agent_decision = None
         if hasattr(self.bug_runner, "decide_bug_followup"):
@@ -4143,16 +4665,43 @@ class BridgeApp:
                 provider=agent_decision.provider,
             )
         if not self._existing_bug_context_can_answer(route_content, followup_context):
+            selection = resolve_manual_selection() if self._followup_has_explicit_bug_route(route_content) else None
             return _BugReanalysisDecision(
                 True,
                 True,
-                plans=getattr(manual_selection, "plans", None),
-                skill_name=getattr(manual_selection, "skill_name", ""),
-                skill_label=getattr(manual_selection, "skill_label", ""),
-                source=getattr(manual_selection, "source", ""),
-                reason="现有上下文不足以直接回答，退回手动分类后重分析。",
+                plans=getattr(selection, "plans", None),
+                skill_name=getattr(selection, "skill_name", ""),
+                skill_label=getattr(selection, "skill_label", ""),
+                source=getattr(selection, "source", ""),
+                reason=(
+                    "现有上下文不足以直接回答，按本次明确方向重分析。"
+                    if selection is not None
+                    else "现有上下文不足以直接回答，沿用上一轮分析类型重分析。"
+                ),
             )
         return _BugReanalysisDecision(False, False)
+
+    def _followup_has_explicit_bug_route(self, route_content: str) -> bool:
+        text = route_content or ""
+        lowered = text.casefold()
+        if parse_signal_request(
+            text,
+            signal_aliases=self.config.signal_aliases,
+            command_prefixes=self.config.command_prefixes,
+            signal_resolver=self.signal_resolver,
+        ).signal:
+            return True
+        route_terms = (
+            STARTUP_ROUTE_TERMS
+            + STARTUP_BLOCK_ROUTE_TERMS
+            + STUCK_ROUTE_TERMS
+            + CRASH_ROUTE_TERMS
+            + SIGNAL_ROUTE_TERMS
+            + SCENE_SIGNAL_ROUTE_TERMS
+            + XTHEME_ROUTE_TERMS
+            + PERCEPTION_ROUTE_TERMS
+        )
+        return any(term.casefold() in lowered for term in route_terms)
 
     def _existing_bug_context_can_answer(self, route_content: str, followup_context) -> bool:
         question = route_content.strip()
