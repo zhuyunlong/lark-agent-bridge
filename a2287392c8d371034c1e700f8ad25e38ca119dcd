@@ -1,0 +1,71 @@
+lark_agent_bridge/knowledge/store.py
+  69f601c22a839d42 324
+lark_agent_bridge/knowledge/templates/adb_simulation_templates.json
+  c53016348525190e 236
+  69f601c22a839d42 21,215-226,228-235,237-245
+  8f13353a435bf084 227
+tests/test_knowledge.py
+  e89b824ea1c53342 10,668-742,980,1043-1120,1122-1370
+  c53016348525190e 339,343
+  8f13353a435bf084 333,346-449,457,459-460,463,468,471-472,474
+  69f601c22a839d42 113,278,336-337,340-342,344
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.20",
+  "base_commit_sha": "a2287392c8d371034c1e700f8ad25e38ca119dcd",
+  "prompts": {
+    "69f601c22a839d42": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e506f-485b-71c0-9c0f-a395298df0e8",
+        "model": "gpt-5.5"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 44,
+      "total_deletions": 39,
+      "accepted_lines": 41,
+      "overriden_lines": 0
+    },
+    "8f13353a435bf084": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e5070-a73d-7cc2-9daa-d2ad8aff4494",
+        "model": "gpt-5.4"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 132,
+      "total_deletions": 2,
+      "accepted_lines": 132,
+      "overriden_lines": 0
+    },
+    "c53016348525190e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e5088-4f62-7a20-91a6-62ab3451d41a",
+        "model": "gpt-5.4"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 3,
+      "total_deletions": 1,
+      "accepted_lines": 3,
+      "overriden_lines": 0
+    },
+    "e89b824ea1c53342": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e508a-e276-7d41-9ec0-d8b46f5b5c10",
+        "model": "gpt-5.4"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 405,
+      "total_deletions": 2,
+      "accepted_lines": 405,
+      "overriden_lines": 0
+    }
+  }
+}
