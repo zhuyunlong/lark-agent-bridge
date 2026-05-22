@@ -249,6 +249,35 @@ class SourceInvestigationOptions:
 
 
 @dataclass(slots=True)
+class AIProviderOptions:
+    """Direct LLM API configuration — replaces subprocess CLI calls."""
+
+    enabled: bool = False
+    # Primary model identifier: "provider:model" or just "model" when base_url is set.
+    # Examples: "claude-sonnet-4-6", "gpt-4.1-mini", "deepseek-chat"
+    primary_model: str = ""
+    fallback_model: str = ""
+    # Fast/cheap model for intent classification and lightweight tasks.
+    fast_model: str = ""
+    # API base URL (OpenAI-compatible). Supports Codex/Claude web endpoints.
+    # Leave empty to auto-detect from provider name.
+    base_url: str = ""
+    api_key: str = ""
+    # Fallback provider config (used when primary fails).
+    fallback_base_url: str = ""
+    fallback_api_key: str = ""
+    # Intent classification settings
+    intent_temperature: float = 0.0
+    intent_max_tokens: int = 1024
+    intent_timeout_seconds: float = 30
+    intent_max_retries: int = 2
+    # Summary generation settings
+    summary_temperature: float = 0.3
+    summary_max_tokens: int = 4096
+    summary_timeout_seconds: float = 120
+
+
+@dataclass(slots=True)
 class BridgeConfig:
     dry_run: bool = True
     workspace_root: Path = field(default_factory=lambda: Path.cwd())
@@ -274,6 +303,7 @@ class BridgeConfig:
     notifications: NotificationOptions = field(default_factory=NotificationOptions)
     dual_agent: DualAgentOptions = field(default_factory=DualAgentOptions)
     knowledge: KnowledgeOptions = field(default_factory=KnowledgeOptions)
+    ai_provider: AIProviderOptions = field(default_factory=AIProviderOptions)
     runner_timeout_seconds: int = 900
 
 

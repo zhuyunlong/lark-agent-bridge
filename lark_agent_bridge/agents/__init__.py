@@ -43,6 +43,7 @@ from .bug_runner import (
 )
 from .claude_runner import ClaudeSkillRunner
 from .intent_runner import IntentAnalysisFailure, IntentAnalysisRunner
+from .llm_client import LLMClient, LLMClientError, LLMResponse
 from .omlx_client import OmlxChatClient
 from .perception_runner import PerceptionSummaryRunner
 from .rom_version_runner import RomVersionLookupRunner
@@ -85,6 +86,9 @@ __all__ = [
     "IntentAnalysisRunner",
     "IntentDecision",
     "LarkEvent",
+    "LLMClient",
+    "LLMClientError",
+    "LLMResponse",
     "LogCoverage",
     "LogDownloader",
     "OmlxChatClient",

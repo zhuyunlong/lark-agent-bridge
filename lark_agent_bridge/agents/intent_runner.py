@@ -1,21 +1,28 @@
-"""Intent analysis runner."""
+"""Intent analysis runner.
+
+Supports two backends:
+1. **Direct API** (preferred) — when ``[ai_provider].enabled = true``,
+   calls the LLM directly via HTTP with JSON mode for structured output.
+   Typical latency: 3-10 seconds.
+2. **Subprocess CLI** (legacy fallback) — shells out to ``codex exec``
+   or ``claude --print``. Typical latency: 120-300 seconds.
+"""
 
 from __future__ import annotations
 
 import importlib
 import json
-import math
+import re
 from pathlib import Path
-import shlex
 import subprocess
 import tempfile
 import time
-import uuid
 
 from ..health import ProcessWatchdog, _safe_terminate
 from ..log import get_logger
 from ..models import BridgeConfig, IntentDecision, LarkEvent
 from ._helpers import _provider_candidates
+from .llm_client import LLMClient, LLMClientError
 
 logger = get_logger("agents")
 
@@ -57,8 +64,13 @@ class IntentAnalysisRunner:
     def __init__(self, config: BridgeConfig, process_watchdog: ProcessWatchdog | None = None) -> None:
         self.config = config
         self.process_watchdog = process_watchdog
+        self._llm_client: LLMClient | None = None
+        if config.ai_provider.enabled and config.ai_provider.base_url and config.ai_provider.primary_model:
+            self._llm_client = LLMClient(config.ai_provider)
 
     def is_enabled(self) -> bool:
+        if self._llm_client is not None and self._llm_client.is_available():
+            return True
         options = self.config.intent_analysis
         return bool(options.enabled and self._provider_candidates())
 
@@ -72,15 +84,14 @@ class IntentAnalysisRunner:
     ) -> IntentDecision:
         if not self.is_enabled():
             raise IntentAnalysisFailure("intent analysis is disabled", error_code="intent_analysis_disabled")
+
         prompt = self._build_prompt(
             event=event,
             route_content=route_content,
             explicit_followup_context=explicit_followup_context,
             latest_chat_context=latest_chat_context,
         )
-        primary_command, primary_output_path = self._build_command(prompt)
-        if not primary_command:
-            raise IntentAnalysisFailure("intent analysis command is not configured", error_code="intent_analysis_not_configured")
+
         if self.config.dry_run:
             return IntentDecision(
                 route="unsupported",
@@ -89,6 +100,60 @@ class IntentAnalysisRunner:
                 followup_action="none",
                 context_source="none",
             )
+
+        # --- Path 1: Direct API (fast, preferred) ---
+        if self._llm_client is not None and self._llm_client.is_available():
+            try:
+                return self._classify_via_api(prompt)
+            except (LLMClientError, ValueError) as exc:
+                logger.warning("Direct API intent classification failed, trying subprocess fallback: %s", exc)
+                # Fall through to subprocess path
+
+        # --- Path 2: Subprocess CLI (legacy fallback) ---
+        return self._classify_via_subprocess(prompt)
+
+    def _classify_via_api(self, prompt: str) -> IntentDecision:
+        """Classify intent via direct LLM API call (3-10 seconds)."""
+        assert self._llm_client is not None
+        system_prompt = self.config.intent_analysis.system_prompt
+        max_retries = self.config.ai_provider.intent_max_retries
+
+        last_error: Exception | None = None
+        for attempt in range(max_retries + 1):
+            try:
+                response = self._llm_client.classify_intent(
+                    system_prompt=system_prompt,
+                    user_prompt=prompt,
+                )
+                decision = self._parse_decision(response.content)
+                decision.raw_response = response.content
+                logger.info(
+                    "Intent classified via API: route=%s confidence=%s duration=%.1fs model=%s",
+                    decision.route,
+                    decision.confidence,
+                    response.duration_seconds,
+                    response.model,
+                )
+                return decision
+            except ValueError as exc:
+                last_error = exc
+                if attempt < max_retries:
+                    logger.warning("Intent parse failed (attempt %d/%d): %s", attempt + 1, max_retries + 1, exc)
+                    continue
+                raise
+            except LLMClientError:
+                raise
+
+        raise IntentAnalysisFailure(
+            f"Intent classification failed after {max_retries + 1} attempts: {last_error}",
+            error_code="intent_analysis_api_failed",
+        )
+
+    def _classify_via_subprocess(self, prompt: str) -> IntentDecision:
+        """Classify intent via subprocess CLI call (legacy, 120-300 seconds)."""
+        primary_command, primary_output_path = self._build_command(prompt)
+        if not primary_command:
+            raise IntentAnalysisFailure("intent analysis command is not configured", error_code="intent_analysis_not_configured")
         last_failure: IntentAnalysisFailure | None = None
         attempts: list[tuple[list[str], Path | None]] = [(primary_command, primary_output_path)]
         fallback_invocation = self._fallback_intent_invocation(prompt)

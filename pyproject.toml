@@ -1,8 +1,17 @@
 [project]
 name = "lark-agent-bridge"
-version = "0.1.0"
+version = "0.2.0"
 description = "Local Feishu Bot bridge for controlled AI agent tasks."
 requires-python = ">=3.11"
+dependencies = [
+    "openai>=1.50",
+]
+
+[project.optional-dependencies]
+anthropic = ["anthropic>=0.40"]
+all = [
+    "anthropic>=0.40",
+]
 
 [tool.setuptools.package-data]
 lark_agent_bridge = ["templates/*.html"]

@@ -9,6 +9,7 @@ from typing import Any
 import tomllib
 
 from .models import (
+    AIProviderOptions,
     BugAnalysisOptions,
     BridgeConfig,
     ApprovalOptions,
@@ -71,6 +72,7 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
     notifications_data = data.get("notifications") or {}
     dual_agent_data = data.get("dual_agent") or {}
     knowledge_data = data.get("knowledge") or {}
+    ai_provider_data = data.get("ai_provider") or {}
     guideengine_repo = _resolve_path(
         os.environ.get("LARK_AGENT_BRIDGE_GUIDEENGINE_REPO")
         or data.get("guideengine_repo", default_guideengine_repo),
@@ -328,6 +330,38 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
                 base_dir,
                 "source_investigation.add_dirs",
             ),
+        ),
+        ai_provider=AIProviderOptions(
+            enabled=bool(ai_provider_data.get("enabled", False)),
+            primary_model=str(
+                os.environ.get("LARK_AGENT_BRIDGE_AI_PRIMARY_MODEL")
+                or ai_provider_data.get("primary_model", "")
+            ),
+            fallback_model=str(ai_provider_data.get("fallback_model", "")),
+            fast_model=str(ai_provider_data.get("fast_model", "")),
+            base_url=str(
+                os.environ.get("LARK_AGENT_BRIDGE_AI_BASE_URL")
+                or ai_provider_data.get("base_url", "")
+            ),
+            api_key=str(
+                os.environ.get("LARK_AGENT_BRIDGE_AI_API_KEY")
+                or ai_provider_data.get("api_key", "")
+            ),
+            fallback_base_url=str(
+                os.environ.get("LARK_AGENT_BRIDGE_AI_FALLBACK_BASE_URL")
+                or ai_provider_data.get("fallback_base_url", "")
+            ),
+            fallback_api_key=str(
+                os.environ.get("LARK_AGENT_BRIDGE_AI_FALLBACK_API_KEY")
+                or ai_provider_data.get("fallback_api_key", "")
+            ),
+            intent_temperature=float(ai_provider_data.get("intent_temperature", 0.0)),
+            intent_max_tokens=int(ai_provider_data.get("intent_max_tokens", 1024)),
+            intent_timeout_seconds=float(ai_provider_data.get("intent_timeout_seconds", 30)),
+            intent_max_retries=int(ai_provider_data.get("intent_max_retries", 2)),
+            summary_temperature=float(ai_provider_data.get("summary_temperature", 0.3)),
+            summary_max_tokens=int(ai_provider_data.get("summary_max_tokens", 4096)),
+            summary_timeout_seconds=float(ai_provider_data.get("summary_timeout_seconds", 120)),
         ),
         runner_timeout_seconds=int(runner_data.get("timeout_seconds", 900)),
     )

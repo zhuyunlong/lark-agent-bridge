@@ -71,6 +71,48 @@ mention_sender_in_group = true
 bot_open_id = ""
 bot_name = ""
 
+[ai_provider]
+# Direct LLM API configuration — replaces subprocess CLI calls.
+# When enabled, the bridge calls LLM APIs directly via HTTP instead of
+# shelling out to codex/claude CLI, reducing latency from minutes to seconds.
+enabled = false
+# Model identifier. Examples:
+#   "claude-sonnet-4-6"       — Anthropic Claude
+#   "gpt-4.1-mini"            — OpenAI
+#   "deepseek-chat"           — DeepSeek (cost-effective for Chinese)
+#   "gemma-4-26b-a4b-it-4bit" — local Ollama/omlx model
+primary_model = ""
+fallback_model = ""
+# Fast/cheap model for intent classification.
+fast_model = ""
+# API base URL (OpenAI-compatible endpoint). Required.
+# Examples:
+#   "https://api.openai.com/v1"                — OpenAI
+#   "https://api.anthropic.com/v1"             — Anthropic
+#   "https://api.deepseek.com/v1"              — DeepSeek
+#   "http://127.0.0.1:8000/v1"                 — local omlx/Ollama
+#   Codex web endpoint or any OpenAI-compatible proxy
+base_url = ""
+# Prefer environment variables for secrets:
+#   export LARK_AGENT_BRIDGE_AI_API_KEY="sk-..."
+#   export LARK_AGENT_BRIDGE_AI_BASE_URL="https://..."
+#   export LARK_AGENT_BRIDGE_AI_PRIMARY_MODEL="gpt-4.1-mini"
+api_key = ""
+# Fallback provider (used when primary API fails).
+#   export LARK_AGENT_BRIDGE_AI_FALLBACK_BASE_URL="https://..."
+#   export LARK_AGENT_BRIDGE_AI_FALLBACK_API_KEY="sk-..."
+fallback_base_url = ""
+fallback_api_key = ""
+# Intent classification tuning
+intent_temperature = 0.0
+intent_max_tokens = 1024
+intent_timeout_seconds = 30
+intent_max_retries = 2
+# Bug summary generation tuning
+summary_temperature = 0.3
+summary_max_tokens = 4096
+summary_timeout_seconds = 120
+
 [claude_agent]
 # Optional compatibility route. Empty trigger_prefixes means the bot does not
 # expose legacy local skill-analysis chat triggers by default.
