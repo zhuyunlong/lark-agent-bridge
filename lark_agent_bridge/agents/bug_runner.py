@@ -6887,6 +6887,29 @@ class BugAnalysisRunner:
                 lightweight_provider="omlx",
                 lightweight_error=str(omlx_result.get("error") or ""),
             )
+        # --- Direct API path (fast, preferred when [ai_provider] is enabled) ---
+        if (
+            not explicit_file_agent
+            and not provider_session_id.strip()
+            and self.config.ai_provider.enabled
+            and self.config.ai_provider.base_url
+            and self.config.ai_provider.primary_model
+        ):
+            api_result = self._run_bug_agent_summary_via_api(
+                request_text=request_text,
+                request_artifact=request_artifact,
+                metadata_path=metadata_path,
+                output_path=output_path,
+                followup_text=followup_text,
+                previous_summary_path=previous_summary_path,
+                progress_callback=progress_callback,
+            )
+            if api_result["message"]:
+                return api_result
+            logger.warning(
+                "Direct API summary failed (error=%s), falling back to subprocess",
+                api_result.get("error", "unknown"),
+            )
         result = self._run_bug_agent_summary_once(
             invocation=invocation,
             output_path=output_path,
@@ -7209,6 +7232,220 @@ class BugAnalysisRunner:
             return output_path.read_text(encoding="utf-8").strip()
         except OSError:
             return ""
+
+    def _run_bug_agent_summary_via_api(
+        self,
+        *,
+        request_text: str,
+        request_artifact: Path,
+        metadata_path: Path,
+        output_path: Path,
+        followup_text: str = "",
+        previous_summary_path: Path | None = None,
+        progress_callback: Callable[[dict[str, object]], None] | None,
+    ) -> dict[str, object]:
+        """Run bug summary via direct LLM API (fast path, no subprocess)."""
+        from .llm_client import LLMClient, LLMClientError
+
+        ai_opts = self.config.ai_provider
+        provider_tag = "direct_api"
+        started = time.monotonic()
+        client = LLMClient(ai_opts)
+        if not client.is_available():
+            return {
+                "message": "",
+                "command": None,
+                "error": "direct_api_not_configured",
+                "provider": provider_tag,
+                "session_id": "",
+                "resumed": False,
+                "duration_seconds": time.monotonic() - started,
+                "usage": {},
+                "usage_scope": "",
+            }
+        prompt = self._build_bug_agent_summary_prompt_for_api(
+            request_text=request_text,
+            request_artifact=request_artifact,
+            metadata_path=metadata_path,
+            followup_text=followup_text,
+            previous_summary_path=previous_summary_path,
+        )
+        if not prompt.strip():
+            return {
+                "message": "",
+                "command": None,
+                "error": "direct_api_prompt_empty",
+                "provider": provider_tag,
+                "session_id": "",
+                "resumed": False,
+                "duration_seconds": time.monotonic() - started,
+                "usage": {},
+                "usage_scope": "",
+            }
+        self._emit_progress(
+            progress_callback,
+            stage="bug_agent_summary_direct_api",
+            message="直接调用 API 整理最终结论（快速通道）",
+            provider=provider_tag,
+            model=ai_opts.primary_model,
+        )
+        system_prompt = (
+            "你是一个通过飞书触发的 bug 分析总结 agent。"
+            "只读分析，不修改文件，不执行写入命令。"
+            "必须完整响应用户原始请求中的所有诉求，输出中文 Markdown，结论先行。"
+            "所有分析数据已内嵌在用户消息中，直接基于这些数据分析即可。"
+        )
+        timeout = int(ai_opts.summary_timeout_seconds or 120)
+        temperature = ai_opts.summary_temperature
+        try:
+            response = client.chat(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=temperature,
+                timeout=timeout,
+            )
+        except LLMClientError as exc:
+            logger.warning("Direct API bug summary failed: %s", exc)
+            return {
+                "message": "",
+                "command": None,
+                "error": f"direct_api_error: {exc}",
+                "provider": provider_tag,
+                "session_id": "",
+                "resumed": False,
+                "duration_seconds": time.monotonic() - started,
+                "usage": {},
+                "usage_scope": "",
+            }
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Direct API bug summary unexpected error: %s", exc)
+            return {
+                "message": "",
+                "command": None,
+                "error": f"direct_api_unexpected: {exc}",
+                "provider": provider_tag,
+                "session_id": "",
+                "resumed": False,
+                "duration_seconds": time.monotonic() - started,
+                "usage": {},
+                "usage_scope": "",
+            }
+        message = (response.content or "").strip()
+        if not message:
+            return {
+                "message": "",
+                "command": None,
+                "error": "direct_api_empty_response",
+                "provider": provider_tag,
+                "session_id": "",
+                "resumed": False,
+                "duration_seconds": time.monotonic() - started,
+                "usage": {},
+                "usage_scope": "",
+            }
+        try:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(message, encoding="utf-8")
+        except OSError:
+            pass
+        duration = time.monotonic() - started
+        self._emit_progress(
+            progress_callback,
+            stage="bug_agent_summary_completed",
+            message=f"直接 API 已整理最终结论（{duration:.1f}s）",
+            provider=provider_tag,
+            model=response.model or ai_opts.primary_model,
+            output_path=str(output_path),
+        )
+        return {
+            "message": message,
+            "command": None,
+            "error": "",
+            "provider": provider_tag,
+            "session_id": "",
+            "resumed": False,
+            "duration_seconds": duration,
+            "usage": {
+                "prompt_tokens": response.prompt_tokens,
+                "completion_tokens": response.completion_tokens,
+                "total_tokens": response.total_tokens,
+            },
+            "usage_scope": "direct_api",
+        }
+
+    def _build_bug_agent_summary_prompt_for_api(
+        self,
+        *,
+        request_text: str,
+        request_artifact: Path,
+        metadata_path: Path,
+        followup_text: str = "",
+        previous_summary_path: Path | None = None,
+    ) -> str:
+        """Build summary prompt with inlined file contents for direct API calls.
+
+        Unlike the subprocess path where codex/claude can read files via tools,
+        the direct API path must embed all relevant context inline.
+        """
+        max_file_chars = 12000
+        prompt = "请基于以下已内嵌的分析材料完成同一个 bug 会话的最终回答。\n"
+        prompt += "注意：所有相关文件内容已内嵌在本消息中，无需读取本地文件。\n\n要求：\n"
+        if followup_text.strip():
+            prompt += (
+                "1. 这是一条续聊/追问，必须直接回答这次新问题，并延续上一轮分析。\n"
+                "2. 优先复用已内嵌的元数据和报告材料，不要要求用户重新上传日志。\n"
+                "3. 只读分析，不修改任何文件。\n"
+                "4. 输出中文 Markdown，结论先行，再给出证据。\n"
+                "5. 如果现有材料仍不足以覆盖某个诉求，要明确指出缺口，但先回答已经能确认的部分。\n\n"
+            )
+        else:
+            prompt += (
+                "1. 本次是全新 bug 分析请求，不是续聊/修正；不要虚构\u201c上一轮分析\u201d\u201c本次修正\u201d\u201c延续上一轮\u201d这类诉求或标题。\n"
+                "2. 必须完整覆盖用户原始请求里的所有诉求，不要只回答其中一部分。\n"
+                "3. 只读分析，不修改任何文件。\n"
+                "4. 输出中文 Markdown，结论先行；若有多个诉求，按诉求分组说明结论和证据；若只有一个诉求，只在开头说明一次，"
+                "不要在每条结论或证据前重复写相同的诉求。诉求标题只能来自用户原始请求，不要自行添加不存在的诉求。\n"
+                "5. 如果材料无法覆盖用户某个诉求，要明确指出缺口。\n"
+                "6. 已内嵌元数据中的\u201c本轮脚本初步摘要\u201d只是当前自动脚本输出，不要把它写成\u201c上一轮结论\u201d；"
+                "只有显式提供 followup/previous summary 时，才能讨论修正上一轮结论。\n"
+                "7. 如果元数据或报告里已经明确给出故障时间对应的主会话 / 主 PID / focus session，"
+                "请优先围绕该主会话分析，不要展开无关会话；只有在需要证明时间不匹配时才提及其他会话。\n\n"
+            )
+        prompt += (
+            "统一输出结构：请按以下中文二级标题组织最终回答，并只填入本次 bug 自身的证据，不套用示例业务词。\n"
+            "## 结论摘要\n"
+            "- 先给 3 到 5 条最重要结论，必须标明置信边界。\n"
+            "## 关键证据\n"
+            "- 每条证据尽量带文件、行号、时间、进程/package 或源码位置。\n"
+            "## 最可能原因\n"
+            "- 按可能性排序，说明支持证据和缺口；证据不足时明确不要强行定根因。\n"
+            "## 待确认项\n"
+            "- 只列真实证据缺口，例如精确时间、日志片段、运行状态、源码链路缺口。\n"
+            "## 建议动作\n"
+            "- 给出下一轮可执行动作，例如补日志、重跑某个 skill、沿某个源码或日志点继续查。\n\n"
+        )
+        prompt += f"### 用户原始请求\n{request_text}\n\n"
+        if followup_text.strip():
+            prompt += f"### 本次追问/修正\n{followup_text.strip()}\n\n"
+        if previous_summary_path is not None:
+            prev_text = self._read_text_excerpt(previous_summary_path, max_file_chars)
+            if prev_text:
+                prompt += f"### 上一轮 Agent 总结\n{prev_text}\n\n"
+        request_text_content = self._read_text_excerpt(request_artifact, max_file_chars)
+        if request_text_content:
+            prompt += f"### Bug Agent Request 文件内容\n{request_text_content}\n\n"
+        metadata_text = self._read_text_excerpt(metadata_path, max_file_chars)
+        if metadata_text:
+            prompt += f"### Bug Metadata 文件内容\n{metadata_text}\n\n"
+        for item in self._bug_summary_referenced_context_files(metadata_path)[:5]:
+            path = Path(str(item["path"]))
+            title = str(item["title"])
+            content = self._read_bug_summary_context_excerpt(path, max_file_chars)
+            if content:
+                prompt += f"### {title}\n来源: {path}\n{content}\n\n"
+        return prompt
 
     def _run_bug_agent_summary_once(
         self,
