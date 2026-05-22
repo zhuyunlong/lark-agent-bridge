@@ -246,6 +246,7 @@ class IntentAnalysisRunner:
         if provider == "codex":
             with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json", prefix="lark-intent-", delete=False) as fh:
                 output_path = Path(fh.name)
+            model = (self.config.intent_analysis.model or self.config.bug_analysis.model or "").strip()
             command = [
                 command_name,
                 "exec",
@@ -254,10 +255,16 @@ class IntentAnalysisRunner:
                 "read-only",
                 "-C",
                 str(self._working_dir()),
-                "--output-last-message",
-                str(output_path),
-                f"{system_prompt}\n\n{prompt}",
             ]
+            if model:
+                command.extend(["-m", model])
+            command.extend(
+                [
+                    "--output-last-message",
+                    str(output_path),
+                    f"{system_prompt}\n\n{prompt}",
+                ]
+            )
             return command, output_path
         if provider in {"claude", "claude-code", "claude_code"}:
             command = [

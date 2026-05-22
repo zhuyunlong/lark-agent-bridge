@@ -137,6 +137,7 @@ class AgentTests(unittest.TestCase):
         command, output_path = runner._build_command("route this message")
 
         self.assertEqual(command[0:2], ["codex", "exec"])
+        self.assertEqual(command[command.index("-m") + 1], "gpt-5.4")
 
     def test_intent_analysis_falls_back_to_claude_when_codex_unavailable(self):
         config = BridgeConfig(dry_run=False)
@@ -313,6 +314,7 @@ class AgentTests(unittest.TestCase):
             command = invocation["command"]
 
         self.assertEqual(command[0:2], ["codex", "exec"])
+        self.assertEqual(command[command.index("-m") + 1], "gpt-5.4")
         self.assertIn("--json", command)
         self.assertIn("--output-last-message", command)
         self.assertIn("分析启动和卡顿", command[-1])
@@ -382,6 +384,7 @@ class AgentTests(unittest.TestCase):
             )
 
         self.assertEqual(invocation["command"][0:3], ["codex", "exec", "resume"])
+        self.assertEqual(invocation["command"][invocation["command"].index("-m") + 1], "gpt-5.4")
 
     def test_bug_agent_summary_followup_prompt_embeds_compact_context(self):
         with tempfile.TemporaryDirectory() as tmp:

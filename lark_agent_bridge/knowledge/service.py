@@ -42,6 +42,8 @@ _SOURCE_INVESTIGATION_TERMS = (
     "source investigation",
     "source investigate",
 )
+_TEMPLATE_MATCH_SEPARATOR_RE = re.compile(r"[\s\-_./:：,，、|()（）\[\]【】{}]+")
+_LOW_CONFIDENCE_GENERIC_TOPIC_TERMS = {"调试", "debug", "日志", "log"}
 
 
 class KnowledgeService:
@@ -193,7 +195,10 @@ class KnowledgeService:
                 details={"mode": "knowledge_qa", "question": cleaned, "knowledge_hits": []},
             )
         self._ensure_index_ready(query=cleaned)
-        hits = self.search(cleaned, limit=self.config.knowledge.max_hits)
+        hits = _filter_command_hits_by_specific_terms(
+            cleaned,
+            self.search(cleaned, limit=self.config.knowledge.max_hits),
+        )
         simulation_result = _build_simulation_result(cleaned, hits)
         if simulation_result is not None:
             return simulation_result
@@ -206,6 +211,9 @@ class KnowledgeService:
                 return low_confidence_result
         if self.config.source_investigation.enabled and _should_run_source_investigation(cleaned):
             return self._answer_from_source_investigation(cleaned, hits=hits)
+        signal_source_candidate_result = _build_signal_source_candidate_result(cleaned, hits)
+        if signal_source_candidate_result is not None:
+            return signal_source_candidate_result
         if hits:
             message = _generic_answer(cleaned, hits)
             return TaskResult(
@@ -295,7 +303,7 @@ class KnowledgeService:
         )
 
     def _answer_from_source_investigation(self, question: str, *, hits: list[SearchHit] | None = None) -> TaskResult:
-        result = source_investigation.SourceInvestigationRunner(self.config).run(question)
+        result = source_investigation.SourceInvestigationRunner(self.config).run(question, hits=hits or [])
         if not result.success:
             existing_hits = hits or []
             return TaskResult(
@@ -511,17 +519,17 @@ def _matching_simulation_templates(text: str) -> tuple[list[dict[str, Any]], boo
 
 
 def _template_positive_match(lowered_text: str, template: dict[str, Any]) -> bool:
-    return any(term in lowered_text for term in _template_terms(template))
+    return any(_template_term_matches(lowered_text, term) for term in _template_terms(template))
 
 
 def _template_negative_match(lowered_text: str, template: dict[str, Any]) -> bool:
-    return any(term in lowered_text for term in _template_terms(template, key="negative_aliases"))
+    return any(_template_term_matches(lowered_text, term) for term in _template_terms(template, key="negative_aliases"))
 
 
 def _template_terms(template: dict[str, Any], *, key: str = "aliases") -> list[str]:
     terms: list[str] = []
     if key == "aliases":
-        for field in ("signal", "code", "title", "summary", "category"):
+        for field in ("signal", "code", "title", "summary"):
             value = template.get(field)
             if value not in (None, ""):
                 terms.append(str(value).casefold())
@@ -530,6 +538,23 @@ def _template_terms(template: dict[str, Any], *, key: str = "aliases") -> list[s
         if isinstance(values, list):
             terms.extend(str(value).casefold() for value in values if str(value).strip())
     return [term for term in terms if term]
+
+
+def _template_term_matches(text: str, term: str) -> bool:
+    lowered_text = (text or "").casefold()
+    lowered_term = (term or "").casefold().strip()
+    if not lowered_text or not lowered_term:
+        return False
+    if lowered_term in lowered_text:
+        return True
+    normalized_term = _normalize_template_match_text(lowered_term)
+    if not normalized_term:
+        return False
+    return normalized_term in _normalize_template_match_text(lowered_text)
+
+
+def _normalize_template_match_text(value: str) -> str:
+    return _TEMPLATE_MATCH_SEPARATOR_RE.sub("", value.casefold())
 
 
 def _looks_like_complex_simulation_question(text: str) -> bool:
@@ -561,7 +586,7 @@ def _prefer_template_hits(hits: list[SearchHit], templates: list[dict[str, Any]]
     preferred = [
         hit
         for hit in hits
-        if any(keyword in (hit.title + "\n" + hit.content).casefold() for keyword in lowered_keywords)
+        if any(_template_term_matches(hit.title + "\n" + hit.content, keyword) for keyword in lowered_keywords)
     ]
     return preferred or hits
 
@@ -681,6 +706,97 @@ def _simulation_candidates_answer(matches: list[dict[str, Any]]) -> str:
     return "\n\n".join(lines)
 
 
+def _build_signal_source_candidate_result(question: str, hits: list[SearchHit]) -> TaskResult | None:
+    if not _looks_like_signal_simulation_question(question):
+        return None
+    candidates = _signal_source_candidates(hits)
+    if not candidates:
+        return None
+    return TaskResult(
+        success=True,
+        message=_signal_source_candidates_answer(question, candidates),
+        details={
+            "mode": "knowledge_qa",
+            "question": question,
+            "answer_type": "adb_signal_source_candidates",
+            "candidates": candidates,
+            "knowledge_hits": [
+                hit.to_dict(include_content=False)
+                for hit in hits
+                if hit.kind == "signal_proto_entry" and any(hit.chunk_id == candidate["chunk_id"] for candidate in candidates)
+            ],
+        },
+    )
+
+
+def _signal_source_candidates(hits: list[SearchHit]) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for hit in hits:
+        if hit.kind != "signal_proto_entry":
+            continue
+        signal = str(hit.metadata.get("signal") or _extract_signal_proto_field(hit.content, "signal") or "").strip()
+        if not signal or signal in seen:
+            continue
+        seen.add(signal)
+        code = str(hit.metadata.get("code") or _extract_signal_proto_field(hit.content, "code") or "").strip()
+        summary = _signal_proto_summary(hit)
+        title = hit.title.strip() or f"{signal} ({code})".strip()
+        candidates.append(
+            {
+                "chunk_id": hit.chunk_id,
+                "signal": signal,
+                "code": code,
+                "title": title,
+                "summary": summary,
+            }
+        )
+    return candidates[:_LOW_CONFIDENCE_MAX_CANDIDATES]
+
+
+def _signal_source_candidates_answer(question: str, candidates: list[dict[str, Any]]) -> str:
+    count = len(candidates)
+    if count == 1:
+        lines = ["当前命中 1 个可能相关的信号候选，但还不能直接确认这就是你要模拟的信号："]
+    else:
+        lines = [f"当前命中 {count} 个可能相关的信号候选，还不能直接确认你要的是哪一个："]
+    for index, candidate in enumerate(candidates, start=1):
+        title = str(candidate.get("title") or candidate.get("signal") or "候选信号")
+        summary = str(candidate.get("summary") or "源码里命中了相关信号定义，但还缺少已验证模板。").strip()
+        signal = str(candidate.get("signal") or "").strip()
+        lines.append(f"{index}. {title}\n适用提示：{summary}")
+        if signal:
+            lines.append(f"继续发：知识库 模拟 {signal}")
+    lines.append(
+        "边界：当前仅定位到候选信号，不能直接给可执行 ADB 命令；"
+        "只有命中已验证模板或完成源码调查后，才适合返回确定指令。"
+    )
+    lines.append(f"继续发：知识库 源码调查 {question}")
+    return "\n\n".join(lines)
+
+
+def _extract_signal_proto_field(content: str, field: str) -> str:
+    prefix = f"{field}:"
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(prefix):
+            return stripped[len(prefix) :].strip()
+    return ""
+
+
+def _signal_proto_summary(hit: SearchHit) -> str:
+    comment = _extract_signal_proto_field(hit.content, "comment")
+    if not comment:
+        return "源码里命中了相关信号定义，但还缺少已验证模板。"
+    cleaned = comment.strip()
+    if "|" in cleaned:
+        parts = [part.strip(" =") for part in cleaned.split("|") if part.strip(" =")]
+        if parts:
+            cleaned = parts[-1]
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" =|-")
+    return cleaned or "源码里命中了相关信号定义，但还缺少已验证模板。"
+
+
 def _generic_answer(question: str, hits: list[SearchHit]) -> str:
     top_hits = hits[:3]
     lines = [f"知识库命中 {len(hits)} 条，先列最相关摘要："]
@@ -696,9 +812,12 @@ def _generic_answer(question: str, hits: list[SearchHit]) -> str:
 def _build_command_hit_result(question: str, hits: list[SearchHit], *, max_hits: int) -> TaskResult | None:
     if not _is_command_lookup_question(question):
         return None
+    specific_terms = _specific_low_confidence_topic_terms(question)
     command_hits: list[tuple[SearchHit, list[str]]] = []
     for hit in hits:
         if hit.kind != "adb_command":
+            continue
+        if specific_terms and not _search_hit_matches_any_topic_term(hit, specific_terms):
             continue
         commands = _extract_command_lines(hit.content)
         if not commands:
@@ -741,7 +860,18 @@ def _low_confidence_topic_terms(question: str) -> list[str]:
     for term in query_terms(question):
         if _is_low_confidence_topic_term(term):
             terms.append(term)
-    return terms
+    specific_terms = _filter_specific_low_confidence_topic_terms(terms)
+    return specific_terms or terms
+
+
+def _specific_low_confidence_topic_terms(question: str) -> list[str]:
+    return _filter_specific_low_confidence_topic_terms(
+        [term for term in query_terms(question) if _is_low_confidence_topic_term(term)]
+    )
+
+
+def _filter_specific_low_confidence_topic_terms(terms: list[str]) -> list[str]:
+    return [term for term in terms if term.strip().casefold() not in _LOW_CONFIDENCE_GENERIC_TOPIC_TERMS]
 
 
 def _is_low_confidence_topic_term(term: str) -> bool:
@@ -764,10 +894,28 @@ def _should_offer_low_confidence_candidates(question: str, terms: list[str]) -> 
 def _should_prefer_executable_candidates(question: str, hits: list[SearchHit]) -> bool:
     if not hits:
         return False
+    if _has_specific_non_command_hits(hits):
+        return False
     terms = _low_confidence_topic_terms(question)
     if not _should_offer_low_confidence_candidates(question, terms):
         return False
     return not _has_explicit_signal_domain(question)
+
+
+def _filter_command_hits_by_specific_terms(question: str, hits: list[SearchHit]) -> list[SearchHit]:
+    specific_terms = _specific_low_confidence_topic_terms(question)
+    if not specific_terms:
+        return hits
+    return [
+        hit
+        for hit in hits
+        if hit.kind != "adb_command" or _search_hit_matches_any_topic_term(hit, specific_terms)
+    ]
+
+
+def _has_specific_non_command_hits(hits: list[SearchHit]) -> bool:
+    specific_kinds = {"guideengine_source", "signal_proto_entry"}
+    return any(hit.kind in specific_kinds for hit in hits)
 
 
 def _has_explicit_signal_domain(question: str) -> bool:
@@ -810,6 +958,24 @@ def _low_confidence_command_candidates(
     ranked = sorted(candidates.values(), key=lambda item: (-item[0].score, item[0].source_id, item[0].title))
     limit = min(_LOW_CONFIDENCE_MAX_CANDIDATES, max(1, max_hits))
     return ranked[:limit]
+
+
+def _search_hit_matches_any_topic_term(hit: SearchHit, terms: list[str]) -> bool:
+    metadata_keywords = hit.metadata.get("keywords")
+    keyword_text = ""
+    if isinstance(metadata_keywords, list):
+        keyword_text = "\n".join(str(item) for item in metadata_keywords)
+    text = f"{hit.title}\n{hit.content}\n{keyword_text}".casefold()
+    return any(_search_text_matches_topic_term(text, term) for term in terms)
+
+
+def _search_text_matches_topic_term(text: str, term: str) -> bool:
+    cleaned = term.strip().casefold()
+    if not cleaned:
+        return False
+    if re.fullmatch(r"[a-z0-9_]+", cleaned):
+        return re.search(rf"(?<![a-z0-9]){re.escape(cleaned)}(?![a-z0-9])", text) is not None
+    return cleaned in text
 
 
 def _extract_command_lines(content: str) -> list[str]:

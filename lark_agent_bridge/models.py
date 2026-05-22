@@ -80,6 +80,7 @@ class BugAnalysisOptions:
     enabled: bool = True
     provider: str = "claude"
     command: str = "claude"
+    model: str = "gpt-5.4"
     working_dir: Path | None = None
     timeout_seconds: int = 5400
     agent_summary_timeout_seconds: int = 300
@@ -107,6 +108,7 @@ class IntentAnalysisOptions:
     enabled: bool = False
     provider: str = ""
     command: str = ""
+    model: str = "gpt-5.4"
     working_dir: Path | None = None
     timeout_seconds: int = 180
     max_prompt_chars: int = 12000
@@ -238,7 +240,7 @@ class SourceInvestigationOptions:
     enabled: bool = True
     provider: str = "codex"
     command: str = "codex"
-    model: str = "gpt-5.3-codex-spark"
+    model: str = "gpt-5.4"
     fallback_model: str = "gpt-5.3-codex"
     timeout_seconds: int = 120
     max_evidence: int = 20

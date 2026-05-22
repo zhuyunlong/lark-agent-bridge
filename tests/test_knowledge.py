@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from lark_agent_bridge.knowledge import KnowledgeService
-from lark_agent_bridge.knowledge.models import KnowledgeChunk
+from lark_agent_bridge.knowledge.models import KnowledgeChunk, SearchHit
 from lark_agent_bridge.knowledge.source_investigation import SourceInvestigationRunner
 from lark_agent_bridge.models import BridgeConfig, KnowledgeOptions, KnowledgeSourceOptions
 from lark_agent_bridge.models import SourceInvestigationOptions
@@ -110,6 +110,7 @@ class KnowledgeServiceTests(unittest.TestCase):
         self.assertTrue(service.should_handle("3D天气信号如何模拟"))
         self.assertTrue(service.should_handle("3D场景信号如何模拟"))
         self.assertTrue(service.should_handle("上电P如何模拟"))
+        self.assertTrue(service.should_handle("ld调试命令"))
 
     def test_unrelated_simulation_question_does_not_match_generic_adb_templates(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -274,7 +275,7 @@ class KnowledgeServiceTests(unittest.TestCase):
         self.assertIn("carspeechservice.ACTION_SEND_TEXT", answer.message)
         self.assertNotIn("车窗已有源码沉淀摘要", answer.message)
 
-    def test_id_debug_command_query_returns_direct_adb_commands(self):
+    def test_ld_debug_command_query_returns_replay_receiver_commands(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             adb_path = root / "adb_data.json"
@@ -328,6 +329,124 @@ class KnowledgeServiceTests(unittest.TestCase):
             )
             service = KnowledgeService(config)
             service.sync_all()
+
+            answer = service.answer("ld调试 命令")
+
+        self.assertTrue(answer.success)
+        self.assertEqual(answer.details["answer_type"], "adb_signal_template")
+        self.assertEqual(answer.details["canonical_key"], "adb-sim:LD_DEBUG_SHOW")
+        self.assertNotIn("低置信候选", answer.message)
+        self.assertIn("LD 调试显示使用 ReplayReceiver 的专用广播", answer.message)
+        self.assertIn("com.xiaopeng.guide.action.hmi.showLD", answer.message)
+        self.assertIn("com.xiaopeng.guide.action.hmi.showLDReset", answer.message)
+        self.assertIn("SIGNAL_DEBUG_SHOW_LD_DEBUG_INFO", answer.message)
+        self.assertNotIn("I&D", answer.message)
+        self.assertNotIn("TEST_ENABLE_DETAIL_NAVI_LOG", answer.message)
+
+    def test_template_matching_normalizes_spaces_and_separators_for_ld_debug_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            service = KnowledgeService(
+                BridgeConfig(
+                    data_dir=root,
+                    knowledge=KnowledgeOptions(enabled=True, storage=root / "knowledge.sqlite"),
+                )
+            )
+
+            variants = ["ld调试命令", "ld调试 命令", "LD 调试 命令", "ld-debug 命令", "ld_debug命令"]
+            for question in variants:
+                with self.subTest(question=question):
+                    answer = service.answer(question)
+                    self.assertTrue(answer.success)
+                    self.assertEqual(answer.details["answer_type"], "adb_signal_template")
+                    self.assertEqual(answer.details["canonical_key"], "adb-sim:LD_DEBUG_SHOW")
+                    self.assertIn("com.xiaopeng.guide.action.hmi.showLD", answer.message)
+
+    def test_low_confidence_candidates_do_not_use_generic_debug_term_as_topic(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            adb_path = root / "adb_data.json"
+            adb_path.write_text(
+                json.dumps(
+                    {
+                        "commands": [
+                            {
+                                "name": "开启I&D级别日志",
+                                "command": (
+                                    "adb shell am broadcast -a "
+                                    "com.xiaopeng.montecarlo.TEST_ENABLE_DETAIL_NAVI_LOG --ei log_enable 2"
+                                ),
+                                "group": "开发调试",
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            service = KnowledgeService(
+                BridgeConfig(
+                    data_dir=root,
+                    knowledge=KnowledgeOptions(
+                        enabled=True,
+                        storage=root / "knowledge.sqlite",
+                        sources=[
+                            KnowledgeSourceOptions(
+                                id="guideengine-adb",
+                                type="local_json",
+                                path=str(adb_path),
+                            )
+                        ],
+                    ),
+                )
+            )
+            service.sync_all()
+
+            answer = service.answer("foo调试 命令")
+
+        self.assertFalse(answer.success)
+        self.assertEqual(answer.error_code, "knowledge_no_hits")
+        self.assertNotIn("TEST_ENABLE_DETAIL_NAVI_LOG", answer.message)
+
+    def test_signal_hits_are_not_replaced_by_generic_low_confidence_debug_commands(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            adb_path = root / "adb_data.json"
+            adb_path.write_text(
+                json.dumps(
+                    {
+                        "commands": [
+                            {
+                                "name": "开启I&D级别日志",
+                                "command": (
+                                    "adb shell am broadcast -a "
+                                    "com.xiaopeng.montecarlo.TEST_ENABLE_DETAIL_NAVI_LOG --ei log_enable 2"
+                                ),
+                                "group": "开发调试",
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            service = KnowledgeService(
+                BridgeConfig(
+                    data_dir=root,
+                    knowledge=KnowledgeOptions(
+                        enabled=True,
+                        storage=root / "knowledge.sqlite",
+                        sources=[
+                            KnowledgeSourceOptions(
+                                id="guideengine-adb",
+                                type="local_json",
+                                path=str(adb_path),
+                            )
+                        ],
+                    ),
+                )
+            )
+            service.sync_all()
             service.store.add_chunks(
                 source_id="guideengine-signals",
                 source_type="guideengine_signal",
@@ -335,39 +454,24 @@ class KnowledgeServiceTests(unittest.TestCase):
                 source_ref="",
                 chunks=[
                     KnowledgeChunk(
-                        id="signal-debug-noise",
+                        id="signal-debug-foo",
                         source_id="guideengine-signals",
-                        title="SIGNAL_ANDROID_UNITY_CONNECTOR_HEART (190007)",
-                        content=(
-                            "signal: SIGNAL_ANDROID_UNITY_CONNECTOR_HEART\n"
-                            "comment: SR调试信号 Android和Unity的连接器心跳\n"
-                            "tokens: signal android unity connector heart"
-                        ),
+                        title="SIGNAL_DEBUG_FOO (190020)",
+                        content="signal: SIGNAL_DEBUG_FOO\ncomment: FOO 调试信息\n",
                         source_ref="/path/signal.proto",
                         kind="signal_proto_entry",
-                        metadata={
-                            "keywords": [
-                                "SIGNAL_ANDROID_UNITY_CONNECTOR_HEART",
-                                "SR调试信号",
-                                "signal",
-                                "android",
-                                "unity",
-                            ]
-                        },
+                        metadata={"keywords": ["SIGNAL_DEBUG_FOO", "foo", "调试"]},
                     )
                 ],
             )
 
-            hits = service.search("ID调试 命令", limit=5)
-            answer = service.answer("ID调试 命令")
+            answer = service.answer("foo调试 命令")
 
-        self.assertEqual(hits[0].kind, "adb_command")
         self.assertTrue(answer.success)
-        self.assertEqual(answer.details["answer_type"], "adb_command_hits")
+        self.assertEqual(answer.details["answer_type"], "retrieval_summary")
+        self.assertIn("SIGNAL_DEBUG_FOO", answer.message)
         self.assertNotIn("低置信候选", answer.message)
-        self.assertIn("开启I&D级别日志", answer.message)
-        self.assertIn("TEST_ENABLE_DETAIL_NAVI_LOG", answer.message)
-        self.assertNotIn("SIGNAL_ANDROID_UNITY_CONNECTOR_HEART", answer.message)
+        self.assertNotIn("TEST_ENABLE_DETAIL_NAVI_LOG", answer.message)
 
     def test_answers_ota_signal_with_deterministic_adb_template(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -560,6 +664,81 @@ class KnowledgeServiceTests(unittest.TestCase):
         self.assertIn("timePeriod,themeMode", answer.message)
         self.assertIn("SIGNAL_SR_XTHEME_MSG", answer.message)
         self.assertIn("继续发：知识库 模拟 SIGNAL_SR_XTHEME", answer.message)
+
+    def test_signal_question_with_proto_only_hits_returns_source_candidates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            service = KnowledgeService(
+                BridgeConfig(
+                    data_dir=root,
+                    knowledge=KnowledgeOptions(enabled=True, storage=root / "knowledge.sqlite"),
+                )
+            )
+            service.store.add_chunks(
+                source_id="guideengine-signals",
+                source_type="guideengine_signal",
+                title="Signals",
+                source_ref="",
+                chunks=[
+                    KnowledgeChunk(
+                        id="custom-scene",
+                        source_id="guideengine-signals",
+                        title="SIGNAL_CUSTOM_SPECIAL_SCENE_TYPE (100010)",
+                        content=(
+                            "signal: SIGNAL_CUSTOM_SPECIAL_SCENE_TYPE\n"
+                            "code: 100010\n"
+                            "comment: SR 综合信号 100000 - 100999 | 特殊场景信号\n"
+                            "line: 652\n"
+                            "tokens: signal custom special scene type"
+                        ),
+                        source_ref="/path/signal.proto",
+                        kind="signal_proto_entry",
+                        metadata={
+                            "signal": "SIGNAL_CUSTOM_SPECIAL_SCENE_TYPE",
+                            "code": "100010",
+                            "line": 652,
+                            "keywords": ["SIGNAL_CUSTOM_SPECIAL_SCENE_TYPE", "100010", "特殊场景信号"],
+                        },
+                    ),
+                    KnowledgeChunk(
+                        id="first-frame-ready",
+                        source_id="guideengine-signals",
+                        title="SIGNAL_X3D_CARSCENE_CAMERA_FIRST_FRAME_READY (133011)",
+                        content=(
+                            "signal: SIGNAL_X3D_CARSCENE_CAMERA_FIRST_FRAME_READY\n"
+                            "code: 133011\n"
+                            "comment: ============================3D业务信号 130000 - 139999====================== | 特殊场景首帧渲染\n"
+                            "line: 889\n"
+                            "tokens: signal x3d carscene camera first frame ready"
+                        ),
+                        source_ref="/path/signal.proto",
+                        kind="signal_proto_entry",
+                        metadata={
+                            "signal": "SIGNAL_X3D_CARSCENE_CAMERA_FIRST_FRAME_READY",
+                            "code": "133011",
+                            "line": 889,
+                            "keywords": [
+                                "SIGNAL_X3D_CARSCENE_CAMERA_FIRST_FRAME_READY",
+                                "133011",
+                                "特殊场景首帧渲染",
+                            ],
+                        },
+                    ),
+                ],
+            )
+
+            answer = service.answer("知识库 特殊场景信号如何模拟")
+
+        self.assertTrue(answer.success)
+        self.assertEqual(answer.details["answer_type"], "adb_signal_source_candidates")
+        self.assertIn("当前命中 2 个可能相关的信号候选", answer.message)
+        self.assertIn("SIGNAL_CUSTOM_SPECIAL_SCENE_TYPE (100010)", answer.message)
+        self.assertIn("特殊场景信号", answer.message)
+        self.assertIn("SIGNAL_X3D_CARSCENE_CAMERA_FIRST_FRAME_READY (133011)", answer.message)
+        self.assertIn("特殊场景首帧渲染", answer.message)
+        self.assertIn("继续发：知识库 模拟 SIGNAL_CUSTOM_SPECIAL_SCENE_TYPE", answer.message)
+        self.assertIn("继续发：知识库 源码调查 特殊场景信号如何模拟", answer.message)
+        self.assertIn("不能直接给可执行 ADB 命令", answer.message)
 
     def test_exact_xtheme_followup_returns_adb_template(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -798,7 +977,7 @@ class KnowledgeServiceTests(unittest.TestCase):
         self.assertIn("--json", command)
         self.assertIn("--output-last-message", command)
         self.assertEqual(command[command.index("-s") + 1], "read-only")
-        self.assertEqual(command[command.index("-m") + 1], "gpt-5.3-codex-spark")
+        self.assertEqual(command[command.index("-m") + 1], "gpt-5.4")
         self.assertEqual(command[command.index("-C") + 1], str(root / "guideengine"))
         self.assertEqual(command[command.index("--add-dir") + 1], str(root / "Napa5"))
 
@@ -860,6 +1039,334 @@ class KnowledgeServiceTests(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertEqual(result.canonical_key, "adb-sim:3d-scene")
         self.assertIn("mock datacenter", result.answer)
+
+    def test_source_investigation_prompt_includes_prefetched_source_excerpts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            guideengine = root / "guideengine"
+            signal_proto = guideengine / "module_floorcenter/module_proto/src/main/proto/signal.proto"
+            signal_proto.parent.mkdir(parents=True, exist_ok=True)
+            signal_proto.write_text(
+                "enum SignalCode {\n"
+                "    SIGNAL_CTL_XPILOT_START_REMIDE_ST = 15012; // 前车起步开启状态\n"
+                "    SIGNAL_X3D_DATA_SERVICE_START_REMIND = 150006; // 前车起步 int\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            signal_mapping = (
+                guideengine
+                / "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/define/mapping/code/SignalMapping.kt"
+            )
+            signal_mapping.parent.mkdir(parents=True, exist_ok=True)
+            signal_mapping.write_text(
+                "put(CarCrlBizCode.set_StartRemind_State.value(), SignalCode.SIGNAL_CTL_XPILOT_START_REMIDE_ST)\n",
+                encoding="utf-8",
+            )
+            receiver = (
+                guideengine
+                / "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/debug/broadcast/DataCenterBroadcastReceiver.java"
+            )
+            receiver.parent.mkdir(parents=True, exist_ok=True)
+            receiver.write_text(
+                'public static final String ACTION_MOCK = "com.xiaopeng.guide.action.mock.datacenter";\n',
+                encoding="utf-8",
+            )
+            transport = (
+                guideengine
+                / "module_core/module_xdata_service/src/main/java/com/xiaopeng/guideengine/xdatanative/transport/XDataTransport.kt"
+            )
+            transport.parent.mkdir(parents=True, exist_ok=True)
+            transport.write_text(
+                "Signal.SignalCode.SIGNAL_CTL_XPILOT_START_REMIDE_ST,\n"
+                "Signal.SignalCode.SIGNAL_X3D_DATA_SERVICE_START_REMIND,\n",
+                encoding="utf-8",
+            )
+
+            config = BridgeConfig(
+                data_dir=root,
+                guideengine_repo=guideengine,
+                source_investigation=SourceInvestigationOptions(repo_roots=[guideengine]),
+            )
+            runner = SourceInvestigationRunner(config)
+            hits = [
+                SearchHit(
+                    chunk_id="guideengine-signals:1",
+                    source_id="guideengine-signals",
+                    title="SIGNAL_CTL_XPILOT_START_REMIDE_ST (15012)",
+                    content="",
+                    source_ref=str(signal_proto),
+                    kind="signal_proto_entry",
+                    score=7.0,
+                    metadata={"signal": "SIGNAL_CTL_XPILOT_START_REMIDE_ST", "code": "15012"},
+                ),
+                SearchHit(
+                    chunk_id="guideengine-signals:2",
+                    source_id="guideengine-signals",
+                    title="SIGNAL_X3D_DATA_SERVICE_START_REMIND (150006)",
+                    content="",
+                    source_ref=str(signal_proto),
+                    kind="signal_proto_entry",
+                    score=7.0,
+                    metadata={"signal": "SIGNAL_X3D_DATA_SERVICE_START_REMIND", "code": "150006"},
+                ),
+            ]
+
+            prompt = runner._prompt("如何模拟 前车起步信号 源码分析", hits=hits)
+
+        self.assertIn("预采样源码摘录", prompt)
+        self.assertIn("SIGNAL_CTL_XPILOT_START_REMIDE_ST = 15012", prompt)
+        self.assertIn("SIGNAL_X3D_DATA_SERVICE_START_REMIND = 150006", prompt)
+        self.assertIn("ACTION_MOCK = \"com.xiaopeng.guide.action.mock.datacenter\"", prompt)
+        self.assertIn("Signal.SignalCode.SIGNAL_CTL_XPILOT_START_REMIDE_ST", prompt)
+
+    def test_source_investigation_uses_local_signal_probe_before_subprocess(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            guideengine = root / "guideengine"
+            signal_proto = guideengine / "module_floorcenter/module_proto/src/main/proto/signal.proto"
+            signal_proto.parent.mkdir(parents=True, exist_ok=True)
+            signal_proto.write_text(
+                "enum SignalCode {\n"
+                "    SIGNAL_CTL_XPILOT_START_REMIDE_ST = 15012; // 前车起步开启状态 0 关闭 1 开启 SIGNAL_StartRemind_State\n"
+                "    SIGNAL_X3D_DATA_SERVICE_START_REMIND = 150006; // 前车起步 int\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            signal_mapping = (
+                guideengine
+                / "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/define/mapping/code/SignalMapping.kt"
+            )
+            signal_mapping.parent.mkdir(parents=True, exist_ok=True)
+            signal_mapping.write_text(
+                "put(CarCrlBizCode.set_StartRemind_State.value(), SignalCode.SIGNAL_CTL_XPILOT_START_REMIDE_ST)\n",
+                encoding="utf-8",
+            )
+            receiver = (
+                guideengine
+                / "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/debug/broadcast/DataCenterBroadcastReceiver.java"
+            )
+            receiver.parent.mkdir(parents=True, exist_ok=True)
+            receiver.write_text(
+                'public static final String ACTION_MOCK = "com.xiaopeng.guide.action.mock.datacenter";\n'
+                "private final List<Signal.SignalFormat> supportFormat = Arrays.asList(Signal.SignalFormat.Int32, Signal.SignalFormat.String);\n",
+                encoding="utf-8",
+            )
+            helper = (
+                guideengine
+                / "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/helper/carcontrol/CarCtlXpilotHelper.kt"
+            )
+            helper.parent.mkdir(parents=True, exist_ok=True)
+            helper.write_text(
+                "private fun startRemindCallback(eventValue: EventValue) {\n"
+                "    // 前车起步提醒 0 关闭 1 开启\n"
+                "    onNextData(\n"
+                "        SignalCode.SIGNAL_CTL_XPILOT_START_REMIDE_ST,\n"
+                "        Signal.SignalFormat.Int32,\n"
+                "        if (enable != null && enable) 1 else 0\n"
+                "    )\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            tips_biz = (
+                guideengine
+                / "module_core/subreality_biz/src/main/java/com/xiaopeng/ainavi/subreality_biz/tips/TipsBizService.kt"
+            )
+            tips_biz.parent.mkdir(parents=True, exist_ok=True)
+            tips_biz.write_text(
+                "Signal.SignalCode.SIGNAL_X3D_DATA_SERVICE_START_REMIND to startRemind,\n",
+                encoding="utf-8",
+            )
+            tips_repo = (
+                guideengine
+                / "module_display/launcher_subreality_service/src/main/java/com/xiaopeng/ainavi/tips/TipsServiceRepository.kt"
+            )
+            tips_repo.parent.mkdir(parents=True, exist_ok=True)
+            tips_repo.write_text(
+                "private fun handleStartStateTips(tipsInfo: TipsBizState.StartState) {\n"
+                "    val title = TipsMsgHelper.matchStartTipsTxt(tipsInfo.startSignal)\n"
+                "}\n",
+                encoding="utf-8",
+            )
+            tips_msg = (
+                guideengine
+                / "module_display/launcher_subreality_service/src/main/java/com/xiaopeng/ainavi/utils/TipsMsgHelper.kt"
+            )
+            tips_msg.parent.mkdir(parents=True, exist_ok=True)
+            tips_msg.write_text(
+                "fun matchStartTipsTxt(signal: Int): Int? {\n"
+                "    return when(signal) {\n"
+                "        0x01 -> R.string.Key_Tips_HU_START_REMIND\n"
+                "        else -> null\n"
+                "    }\n"
+                "}\n",
+                encoding="utf-8",
+            )
+
+            config = BridgeConfig(
+                data_dir=root,
+                guideengine_repo=guideengine,
+                knowledge=KnowledgeOptions(enabled=True, storage=root / "knowledge.sqlite"),
+                source_investigation=SourceInvestigationOptions(repo_roots=[guideengine]),
+            )
+            service = KnowledgeService(config)
+            service.store.add_chunks(
+                source_id="guideengine-signals",
+                source_type="guideengine_signal",
+                title="Signals",
+                source_ref="",
+                chunks=[
+                    KnowledgeChunk(
+                        id="front-start-switch",
+                        source_id="guideengine-signals",
+                        title="SIGNAL_CTL_XPILOT_START_REMIDE_ST (15012)",
+                        content="signal: SIGNAL_CTL_XPILOT_START_REMIDE_ST\ncode: 15012\ncomment: 前车起步开启状态 0 关闭 1 开启 SIGNAL_StartRemind_State\n",
+                        source_ref=str(signal_proto),
+                        kind="signal_proto_entry",
+                        metadata={
+                            "signal": "SIGNAL_CTL_XPILOT_START_REMIDE_ST",
+                            "code": "15012",
+                            "line": "2",
+                            "keywords": ["SIGNAL_CTL_XPILOT_START_REMIDE_ST", "15012", "前车起步开启状态"],
+                        },
+                    ),
+                    KnowledgeChunk(
+                        id="front-start-3d",
+                        source_id="guideengine-signals",
+                        title="SIGNAL_X3D_DATA_SERVICE_START_REMIND (150006)",
+                        content="signal: SIGNAL_X3D_DATA_SERVICE_START_REMIND\ncode: 150006\ncomment: 前车起步 int\n",
+                        source_ref=str(signal_proto),
+                        kind="signal_proto_entry",
+                        metadata={
+                            "signal": "SIGNAL_X3D_DATA_SERVICE_START_REMIND",
+                            "code": "150006",
+                            "line": "3",
+                            "keywords": ["SIGNAL_X3D_DATA_SERVICE_START_REMIND", "150006", "前车起步 int"],
+                        },
+                    ),
+                ],
+            )
+
+            with patch("lark_agent_bridge.knowledge.source_investigation.subprocess.run") as mocked_run:
+                answer = service.answer("源码调查 前车起步信号如何模拟")
+
+        mocked_run.assert_not_called()
+        self.assertTrue(answer.success)
+        self.assertEqual(answer.details["answer_type"], "source_investigation")
+        self.assertIn("SIGNAL_CTL_XPILOT_START_REMIDE_ST", answer.message)
+        self.assertIn("SIGNAL_X3D_DATA_SERVICE_START_REMIND", answer.message)
+        self.assertIn("com.xiaopeng.guide.action.mock.datacenter", answer.message)
+        self.assertIn("--ei code 15012", answer.message)
+        self.assertIn("0 关闭，1 开启", answer.message)
+
+    def test_source_investigation_prompt_includes_filters_candidates_and_priority_modules(self):
+        payload = {
+            "answer": "前车起步信号需要继续区分车控开关态和 3D 数据服务态。",
+            "canonical_key": "adb-sim:front-car-start",
+            "confidence": 0.84,
+            "commands": [],
+            "source_evidence": [
+                {"file": "module_floorcenter/module_proto/src/main/proto/signal.proto", "line": 187, "text": "SIGNAL_CTL_XPILOT_START_REMIDE_ST"}
+            ],
+            "coverage_boundary": "scanned datacenter and xdata transport modules",
+            "writeback_allowed": False,
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = BridgeConfig(
+                data_dir=root,
+                guideengine_repo=root / "guideengine",
+                knowledge=KnowledgeOptions(enabled=True, storage=root / "knowledge.sqlite"),
+            )
+            service = KnowledgeService(config)
+            service.store.add_chunks(
+                source_id="guideengine-signals",
+                source_type="guideengine_signal",
+                title="Signals",
+                source_ref="",
+                chunks=[
+                    KnowledgeChunk(
+                        id="front-start-switch",
+                        source_id="guideengine-signals",
+                        title="SIGNAL_CTL_XPILOT_START_REMIDE_ST (15012)",
+                        content="signal: SIGNAL_CTL_XPILOT_START_REMIDE_ST\ncode: 15012\ncomment: 前车起步开启状态\n",
+                        source_ref="/Users/zhuyl/Documents/workspace/xp/guideengine/.worktrees/os6_xpdev/module_floorcenter/module_proto/src/main/proto/signal.proto",
+                        kind="signal_proto_entry",
+                        metadata={
+                            "signal": "SIGNAL_CTL_XPILOT_START_REMIDE_ST",
+                            "code": "15012",
+                            "line": "187",
+                            "keywords": ["SIGNAL_CTL_XPILOT_START_REMIDE_ST", "15012", "前车起步开启状态"],
+                        },
+                    ),
+                    KnowledgeChunk(
+                        id="front-start-3d",
+                        source_id="guideengine-signals",
+                        title="SIGNAL_X3D_DATA_SERVICE_START_REMIND (150006)",
+                        content="signal: SIGNAL_X3D_DATA_SERVICE_START_REMIND\ncode: 150006\ncomment: 前车起步 int\n",
+                        source_ref="/Users/zhuyl/Documents/workspace/xp/guideengine/.worktrees/os6_xpdev/module_floorcenter/module_proto/src/main/proto/signal.proto",
+                        kind="signal_proto_entry",
+                        metadata={
+                            "signal": "SIGNAL_X3D_DATA_SERVICE_START_REMIND",
+                            "code": "150006",
+                            "line": "962",
+                            "keywords": ["SIGNAL_X3D_DATA_SERVICE_START_REMIND", "150006", "前车起步 int"],
+                        },
+                    ),
+                ],
+            )
+
+            def fake_run(command, cwd, capture_output, text, timeout, check):
+                prompt = command[-1]
+                self.assertIn("你是被主流程派发的子 agent", prompt)
+                self.assertIn("不要做 memory pass", prompt)
+                self.assertIn("不要使用 using-superpowers、ask、brainstorming", prompt)
+                self.assertIn("最多执行 12 个命令", prompt)
+                self.assertIn("第一阶段只允许读取上面的重点模块", prompt)
+                self.assertIn("第二阶段若仍不足，只允许在重点模块所在目录内补充 rg", prompt)
+                self.assertIn("第三阶段如果仍不能确认，直接输出低置信边界", prompt)
+                self.assertIn("只要已经确认信号定义、映射/生产链、注入能力、至少一条消费/transport 证据，就立即停止搜索并输出 JSON", prompt)
+                self.assertIn("候选锚点", prompt)
+                self.assertIn("仅用于缩小搜索范围，不代表最终结论", prompt)
+                self.assertIn("如果候选与源码不符，必须推翻候选", prompt)
+                self.assertIn("SIGNAL_CTL_XPILOT_START_REMIDE_ST", prompt)
+                self.assertIn("SIGNAL_X3D_DATA_SERVICE_START_REMIND", prompt)
+                self.assertIn("忽略以下低价值路径或文件", prompt)
+                self.assertIn("src/test", prompt)
+                self.assertIn("src/androidTest", prompt)
+                self.assertIn("build/", prompt)
+                self.assertIn("generated/", prompt)
+                self.assertIn("third_party/", prompt)
+                self.assertIn("*.pb.cc", prompt)
+                self.assertIn("*.pb.h", prompt)
+                self.assertIn("优先阅读这些重点模块", prompt)
+                self.assertIn("module_floorcenter/module_proto/src/main/proto/signal.proto", prompt)
+                self.assertIn(
+                    "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/define/mapping/code/SignalMapping.kt",
+                    prompt,
+                )
+                self.assertIn(
+                    "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/debug/broadcast/DataCenterBroadcastReceiver.java",
+                    prompt,
+                )
+                self.assertIn(
+                    "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/helper/carcontrol/CarCtlXpilotHelper.kt",
+                    prompt,
+                )
+                self.assertIn(
+                    "module_core/module_xdata_service/src/main/java/com/xiaopeng/guideengine/xdatanative/transport/XDataTransport.kt",
+                    prompt,
+                )
+                output_path = Path(command[command.index("--output-last-message") + 1])
+                output_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with patch("lark_agent_bridge.knowledge.source_investigation.subprocess.run", side_effect=fake_run):
+                answer = service.answer("源码调查 前车起步信号如何模拟")
+
+        self.assertTrue(answer.success)
+        self.assertEqual(answer.details["answer_type"], "source_investigation")
+        self.assertEqual(answer.details["canonical_key"], "adb-sim:front-car-start")
 
     def test_source_investigation_runs_when_explicit_even_with_generic_source_hit(self):
         payload = {

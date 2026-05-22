@@ -321,7 +321,7 @@ def _append_query_term(terms: list[str], term: str) -> None:
 
 def _contains_query_term(value: str, term: str) -> bool:
     if re.fullmatch(r"[a-z0-9_]+", term):
-        return re.search(rf"(?<![a-z0-9_]){re.escape(term)}(?![a-z0-9_])", value) is not None
+        return re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", value) is not None
     return term in value
 
 

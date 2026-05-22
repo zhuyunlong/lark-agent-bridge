@@ -712,6 +712,7 @@ class BugAnalysisRunner:
         if provider == "codex":
             with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".json", prefix="lark-bug-decision-", delete=False) as fh:
                 output_path = Path(fh.name)
+            model = (self.config.bug_analysis.model or "").strip()
             command = [
                 command_name,
                 "exec",
@@ -720,10 +721,16 @@ class BugAnalysisRunner:
                 "read-only",
                 "-C",
                 str(self._working_dir()),
-                "--output-last-message",
-                str(output_path),
-                f"{system_prompt}\n\n{prompt}",
             ]
+            if model:
+                command.extend(["-m", model])
+            command.extend(
+                [
+                    "--output-last-message",
+                    str(output_path),
+                    f"{system_prompt}\n\n{prompt}",
+                ]
+            )
             return command, output_path
         if provider in {"claude", "claude-code", "claude_code"}:
             command = [
@@ -8607,6 +8614,7 @@ class BugAnalysisRunner:
         )
         session_id = provider_session_id.strip()
         if provider == "codex":
+            model = (self.config.bug_analysis.model or "").strip()
             if session_id:
                 command = [
                     command_name,
@@ -8614,11 +8622,17 @@ class BugAnalysisRunner:
                     "resume",
                     "--skip-git-repo-check",
                     "--json",
-                    "--output-last-message",
-                    str(output_path),
-                    session_id,
-                    prompt,
                 ]
+                if model:
+                    command.extend(["-m", model])
+                command.extend(
+                    [
+                        "--output-last-message",
+                        str(output_path),
+                        session_id,
+                        prompt,
+                    ]
+                )
             else:
                 command = [
                     command_name,
@@ -8628,11 +8642,17 @@ class BugAnalysisRunner:
                     "read-only",
                     "-C",
                     str(self._working_dir()),
-                    "--json",
-                    "--output-last-message",
-                    str(output_path),
-                    prompt,
                 ]
+                if model:
+                    command.extend(["-m", model])
+                command.extend(
+                    [
+                        "--json",
+                        "--output-last-message",
+                        str(output_path),
+                        prompt,
+                    ]
+                )
             return {
                 "command": command,
                 "provider": provider,

@@ -72,6 +72,7 @@ Example:
 enabled = true
 provider = "codex"
 command = "codex"
+model = "gpt-5.4"
 working_dir = "../.."
 agent_summary_timeout_seconds = 300
 resume_followup_sessions = false
@@ -91,6 +92,7 @@ Behavior:
 
 - `provider = "codex"` means prefer Codex first
 - `provider = "claude"` means prefer Claude Code first
+- when `provider = "codex"`, the bridge passes `-m` using `model`; the default is `gpt-5.4`
 - if the preferred provider cannot start or returns non-zero, the bridge automatically tries the other provider
 - `agent_summary_timeout_seconds` only limits the final Agent-written conclusion; if the Agent is silent longer than this window, the bridge falls back to the script summary and still returns the generated report
 - leave `default_prompt` empty unless you intentionally want a configured fallback; generic bug links should ask for a concrete analysis direction instead of silently defaulting to startup
@@ -196,7 +198,7 @@ Knowledge auto-probe is intentionally narrow. `auto_probe_intent_terms` should c
 enabled = true
 provider = "codex"
 command = "codex"
-model = "gpt-5.3-codex-spark"
+model = "gpt-5.4"
 fallback_model = "gpt-5.3-codex"
 timeout_seconds = 120
 max_evidence = 20
@@ -204,7 +206,7 @@ repo_roots = ["/path/to/guideengine"]
 add_dirs = ["/path/to/Napa5"]
 ```
 
-The runner invokes `codex exec --json --output-last-message -s read-only -m gpt-5.3-codex-spark`, sets `-C` to the primary repo root, and appends `--add-dir` for optional cross-repo lookups. The prompt tells Codex to use `rg` anchors first, read only key snippets, avoid whole-repo context dumps, and return a fixed JSON schema: `answer`, `canonical_key`, `confidence`, `commands`, `source_evidence`, `coverage_boundary`, `writeback_allowed`. Write-back is allowed only when confidence is high enough, a canonical key exists, and source evidence is present. Spark is for short source investigations only; big logs, long reports, and bug-analysis summaries stay on the existing analysis runners.
+The runner invokes `codex exec --json --output-last-message -s read-only -m gpt-5.4`, sets `-C` to the primary repo root, and appends `--add-dir` for optional cross-repo lookups. The prompt tells Codex to use `rg` anchors first, read only key snippets, avoid whole-repo context dumps, and return a fixed JSON schema: `answer`, `canonical_key`, `confidence`, `commands`, `source_evidence`, `coverage_boundary`, `writeback_allowed`. Write-back is allowed only when confidence is high enough, a canonical key exists, and source evidence is present. This path is for short source investigations only; big logs, long reports, and bug-analysis summaries stay on the existing analysis runners.
 
 ## Event consumer health
 
@@ -308,6 +310,7 @@ To let a local `codex` / `claude` decide whether a message is ordinary chat, a f
 enabled = true
 provider = "codex"
 command = "codex"
+model = "gpt-5.4"
 working_dir = "../.."
 timeout_seconds = 180
 max_prompt_chars = 12000
@@ -316,6 +319,7 @@ max_prompt_chars = 12000
 Notes:
 
 - if `provider` / `command` are empty, the bridge reuses `[bug_analysis]`
+- when the selected provider is `codex`, the bridge passes `-m` using this block's `model`, or falls back to `[bug_analysis].model`
 - the preferred provider is still selected from this block first; if it fails, the bridge tries the alternate provider automatically
 - this agent only classifies intent; it does not replace the heavy local bug/log analyzers
 - for bug follow-up messages, the classifier chooses whether the existing report context can answer or a reanalysis is needed; reanalysis reuses cached logs and source metadata but starts a fresh Agent summary session

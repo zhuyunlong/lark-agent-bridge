@@ -18,7 +18,7 @@
     {
       "title": "ReplayReceiver/ProtocolFile record 回放入口",
       "path": "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/debug/broadcast/ReplayReceiver.kt",
-      "keywords": ["REPLAY_FILE", "REPLAY_FATH", "START_RECORD", "STOP_RECORD", "record", "replay"]
+      "keywords": ["REPLAY_FILE", "REPLAY_FATH", "START_RECORD", "STOP_RECORD", "LD_SHOW", "LD_SHOW_RESET", "showLD", "showLDReset", "SIGNAL_DEBUG_SHOW_LD_DEBUG_INFO", "SIGNAL_DEBUG_SHOW_LD_TILE", "record", "replay"]
     },
     {
       "title": "ProtocolFile ByteArray 回放调度",
@@ -210,6 +210,39 @@
       "evidence": [
         {"file": "module_display/launcher_subreality_service/src/main/java/com/xiaopeng/ainavi/scene/SceneTypeBroadcastReceiver.java", "text": "TYPE_P value 0 -> tryExitImmersivePScene, else -> tryEntryImmersivePScene"},
         {"file": "module_display/launcher_subreality_service/src/main/java/com/xiaopeng/ainavi/scene/UnitySceneTypeService.kt", "text": "tryEntryImmersivePScene / tryExitImmersivePScene update immersiveFlag"}
+      ]
+    },
+    {
+      "id": "ld_debug_show",
+      "canonical_key": "adb-sim:LD_DEBUG_SHOW",
+      "signal": "LD_DEBUG_SHOW",
+      "code": "showLD/showLDReset",
+      "format": "replay-broadcast",
+      "title": "LD 调试显示开关 ADB 命令",
+      "summary": "通过 ReplayReceiver 的 showLD/showLDReset 广播开启或关闭 LD 调试信息与 LD tile 显示。",
+      "category": "ld_command",
+      "direct": true,
+      "support": "verified",
+      "capability": "direct",
+      "aliases": ["ld调试命令", "ld调试 命令", "ld 调试命令", "ld 调试 命令", "LD调试命令", "LD调试 命令", "ld debug命令", "ld debug 命令", "showLD", "showLDReset", "ld显示命令", "ld tile命令"],
+      "negative_aliases": ["i&d", "I&D", "id日志", "navi log", "detail navi"],
+      "example": "adb shell am broadcast -a com.xiaopeng.guide.action.hmi.showLD",
+      "format_note": "ReplayReceiver 内部把 SIGNAL_DEBUG_SHOW_LD_DEBUG_INFO、SIGNAL_DEBUG_SHOW_LD_TILE、SIGNAL_SR_LD_SHOW_WHEN_XPU 写成 Int32 1/0。",
+      "commands": [
+        "adb shell am broadcast -a com.xiaopeng.guide.action.hmi.showLD",
+        "adb shell am broadcast -a com.xiaopeng.guide.action.hmi.showLDReset"
+      ],
+      "answer_blocks": [
+        "LD 调试显示使用 ReplayReceiver 的专用广播：",
+        "1. 开启 LD 调试显示\nadb shell am broadcast -a com.xiaopeng.guide.action.hmi.showLD",
+        "2. 关闭 / 重置 LD 调试显示\nadb shell am broadcast -a com.xiaopeng.guide.action.hmi.showLDReset",
+        "源码行为：showLD 会向 DataCenter dispatch 三个 Int32=1 信号：SIGNAL_DEBUG_SHOW_LD_DEBUG_INFO(190015)、SIGNAL_DEBUG_SHOW_LD_TILE(190014)、SIGNAL_SR_LD_SHOW_WHEN_XPU(106013)；showLDReset 写入对应 Int32=0。",
+        "边界：这是 HMI/ReplayReceiver 调试入口，适合开关 LD debug overlay；如果要单独 mock 某个 LD 原始信号，再用具体 SIGNAL_* 名称查询。"
+      ],
+      "evidence": [
+        {"file": "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/debug/broadcast/ReplayReceiver.kt", "text": "LD_SHOW = com.xiaopeng.guide.action.hmi.showLD; LD_SHOW_RESET = com.xiaopeng.guide.action.hmi.showLDReset"},
+        {"file": "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/debug/broadcast/ReplayReceiver.kt", "text": "mockLDSignal dispatches SIGNAL_DEBUG_SHOW_LD_DEBUG_INFO, SIGNAL_DEBUG_SHOW_LD_TILE, SIGNAL_SR_LD_SHOW_WHEN_XPU with Int32 value 1"},
+        {"file": "module_floorcenter/module_proto/src/main/proto/signal.proto", "text": "SIGNAL_DEBUG_SHOW_LD_TILE=190014; SIGNAL_DEBUG_SHOW_LD_DEBUG_INFO=190015; SIGNAL_SR_LD_SHOW_WHEN_XPU=106013"}
       ]
     },
     {

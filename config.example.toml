@@ -94,6 +94,7 @@ enabled = true
 # the bridge automatically falls back to the other one.
 provider = "codex"
 command = "codex"
+model = "gpt-5.4"
 working_dir = "../.."
 timeout_seconds = 5400
 # Final Agent summary is an enhancement step. Use a longer idle window so
@@ -113,6 +114,7 @@ force_reanalysis_terms = ["结果不合理", "信号定义", "源码", "源代�
 
 [intent_analysis]
 enabled = false
+model = "gpt-5.4"
 # Leave provider/command empty to reuse [bug_analysis].
 # When enabled:
 # - the preferred provider is chosen by provider/command here
@@ -184,13 +186,13 @@ title = "guideengine 信号模拟源码"
 [source_investigation]
 # Read-only Codex CLI fallback for explicit source-investigation knowledge
 # requests such as "源码调查/查源码/基于源码". Ordinary fuzzy signal questions
-# should answer from verified/source-derived templates first. Spark is intended
+# should answer from verified/source-derived templates first. This path is intended
 # only for short source investigations; large logs and long reports stay on the
 # existing bug-analysis path.
 enabled = true
 provider = "codex"
 command = "codex"
-model = "gpt-5.3-codex-spark"
+model = "gpt-5.4"
 fallback_model = "gpt-5.3-codex"
 timeout_seconds = 120
 max_evidence = 20
