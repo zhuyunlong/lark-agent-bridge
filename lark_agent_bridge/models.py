@@ -11,6 +11,13 @@ from typing import Any
 
 
 @dataclass(slots=True)
+class SignalResolverOptions:
+    preferred_paths: list[str] = field(default_factory=list)
+    source_suffixes: list[str] = field(default_factory=list)
+    cache_ttl_seconds: float = 3600.0
+
+
+@dataclass(slots=True)
 class DownloadConfig:
     max_bytes: int = 5 * 1024 * 1024 * 1024
     timeout_seconds: int = 60
@@ -246,6 +253,9 @@ class SourceInvestigationOptions:
     max_evidence: int = 20
     repo_roots: list[Path] = field(default_factory=list)
     add_dirs: list[Path] = field(default_factory=list)
+    priority_modules: list[str] = field(default_factory=list)
+    signal_priority_modules: dict[str, list[str]] = field(default_factory=dict)
+    exclude_paths: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -322,6 +332,7 @@ class BridgeConfig:
     dual_agent: DualAgentOptions = field(default_factory=DualAgentOptions)
     knowledge: KnowledgeOptions = field(default_factory=KnowledgeOptions)
     ai_provider: AIProviderOptions = field(default_factory=AIProviderOptions)
+    signal_resolver: SignalResolverOptions = field(default_factory=SignalResolverOptions)
     runner_timeout_seconds: int = 900
 
 

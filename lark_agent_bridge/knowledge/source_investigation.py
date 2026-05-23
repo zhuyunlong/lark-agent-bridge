@@ -77,6 +77,14 @@ class SourceInvestigationResult:
 class SourceInvestigationRunner:
     def __init__(self, config: BridgeConfig) -> None:
         self.config = config
+        opts = config.source_investigation
+        self._priority_modules = tuple(opts.priority_modules) if opts.priority_modules else _DEFAULT_PRIORITY_MODULES
+        self._signal_priority_modules = (
+            {k: tuple(v) for k, v in opts.signal_priority_modules.items()}
+            if opts.signal_priority_modules
+            else _SIGNAL_PRIORITY_MODULES
+        )
+        self._exclude_paths = tuple(opts.exclude_paths) if opts.exclude_paths else _LOW_VALUE_PATH_HINTS
 
     def run(self, question: str, *, hits: list[SearchHit] | None = None) -> SourceInvestigationResult:
         options = self.config.source_investigation
@@ -270,10 +278,18 @@ class SourceInvestigationRunner:
         ]
         if add_dirs:
             prompt_parts.extend(["附加只读目录：", *[f"- {path}" for path in add_dirs]])
-        prompt_parts.extend(_source_filter_prompt_lines(question))
+        prompt_parts.extend(_source_filter_prompt_lines(question, exclude_paths=self._exclude_paths))
         prompt_parts.extend(_candidate_hint_prompt_lines(hits or [], repo_roots))
-        prompt_parts.extend(_priority_module_prompt_lines(question, hits or [], repo_roots))
-        prompt_parts.extend(_prefetched_excerpt_prompt_lines(question, hits or [], repo_roots))
+        prompt_parts.extend(_priority_module_prompt_lines(
+            question, hits or [], repo_roots,
+            default_modules=self._priority_modules,
+            signal_modules=self._signal_priority_modules,
+        ))
+        prompt_parts.extend(_prefetched_excerpt_prompt_lines(
+            question, hits or [], repo_roots,
+            default_modules=self._priority_modules,
+            signal_modules=self._signal_priority_modules,
+        ))
         prompt_parts.append(
             "输出必须是一个 JSON 对象，不要 Markdown，不要代码块。字段："
             "answer(string), canonical_key(string), confidence(number 0-1), commands(array string), "
@@ -289,7 +305,11 @@ class SourceInvestigationRunner:
         return (base / f"source_investigation_{int(time.time() * 1000)}.json").resolve()
 
 
-def _source_filter_prompt_lines(question: str) -> list[str]:
+def _source_filter_prompt_lines(
+    question: str,
+    *,
+    exclude_paths: tuple[str, ...] = _LOW_VALUE_PATH_HINTS,
+) -> list[str]:
     native_clause = (
         "问题明确涉及 native/JNI/C++ 时，才允许扩展到手写 .cpp/.cc/.h；否则不要读取这些文件。"
         if _looks_like_native_question(question)
@@ -298,7 +318,7 @@ def _source_filter_prompt_lines(question: str) -> list[str]:
     return [
         "搜索/读码规则：",
         "1. 默认只看手写 .kt/.java/.proto；先定义/映射/分发，再看下游消费。",
-        f"2. 忽略以下低价值路径或文件：{', '.join(_LOW_VALUE_PATH_HINTS)}。",
+        f"2. 忽略以下低价值路径或文件：{', '.join(exclude_paths)}。",
         f"3. {native_clause}",
         "4. 使用 rg 时优先带排除条件，避免扫测试、generated、第三方和 proto 生成产物。",
     ]
@@ -329,8 +349,19 @@ def _candidate_hint_prompt_lines(hits: list[SearchHit], repo_roots: list[Path]) 
     return lines
 
 
-def _priority_module_prompt_lines(question: str, hits: list[SearchHit], repo_roots: list[Path]) -> list[str]:
-    modules = _priority_modules(question, hits, repo_roots)
+def _priority_module_prompt_lines(
+    question: str,
+    hits: list[SearchHit],
+    repo_roots: list[Path],
+    *,
+    default_modules: tuple[str, ...] = _DEFAULT_PRIORITY_MODULES,
+    signal_modules: dict[str, tuple[str, ...]] = _SIGNAL_PRIORITY_MODULES,
+) -> list[str]:
+    modules = _priority_modules(
+        question, hits, repo_roots,
+        default_modules=default_modules,
+        signal_modules=signal_modules,
+    )
     if not modules:
         return []
     roots = _priority_module_roots(modules)
@@ -346,7 +377,14 @@ def _priority_module_prompt_lines(question: str, hits: list[SearchHit], repo_roo
     ]
 
 
-def _priority_modules(question: str, hits: list[SearchHit], repo_roots: list[Path]) -> list[str]:
+def _priority_modules(
+    question: str,
+    hits: list[SearchHit],
+    repo_roots: list[Path],
+    *,
+    default_modules: tuple[str, ...] = _DEFAULT_PRIORITY_MODULES,
+    signal_modules: dict[str, tuple[str, ...]] = _SIGNAL_PRIORITY_MODULES,
+) -> list[str]:
     modules: list[str] = []
     seen: set[str] = set()
 
@@ -359,14 +397,14 @@ def _priority_modules(question: str, hits: list[SearchHit], repo_roots: list[Pat
 
     has_signal_hits = any(hit.kind == "signal_proto_entry" or str(hit.metadata.get("signal") or "").strip() for hit in hits)
     if "信号" in question or has_signal_hits:
-        for path in _DEFAULT_PRIORITY_MODULES:
+        for path in default_modules:
             add(path)
     for hit in hits[:5]:
         source = _display_repo_relative(hit.source_ref, repo_roots)
         if source.endswith((".kt", ".java", ".proto")):
             add(source)
         signal = str(hit.metadata.get("signal") or "").strip()
-        for prefix, paths in _SIGNAL_PRIORITY_MODULES.items():
+        for prefix, paths in signal_modules.items():
             if signal.startswith(prefix):
                 for path in paths:
                     add(path)
@@ -388,8 +426,19 @@ def _priority_module_roots(modules: list[str]) -> list[str]:
     return roots
 
 
-def _prefetched_excerpt_prompt_lines(question: str, hits: list[SearchHit], repo_roots: list[Path]) -> list[str]:
-    modules = _priority_modules(question, hits, repo_roots)
+def _prefetched_excerpt_prompt_lines(
+    question: str,
+    hits: list[SearchHit],
+    repo_roots: list[Path],
+    *,
+    default_modules: tuple[str, ...] = _DEFAULT_PRIORITY_MODULES,
+    signal_modules: dict[str, tuple[str, ...]] = _SIGNAL_PRIORITY_MODULES,
+) -> list[str]:
+    modules = _priority_modules(
+        question, hits, repo_roots,
+        default_modules=default_modules,
+        signal_modules=signal_modules,
+    )
     excerpts: list[str] = []
     for module in modules:
         full_path = _resolve_module_path(module, repo_roots)

@@ -21,6 +21,16 @@ bug_url_domains = []
 "tile over all" = "SIGNAL_X3D_LD_TILE_OVER_ALL_DATA"
 "SD over all" = "SIGNAL_X3D_SD_OVER_ALL_DATA"
 
+# Signal resolver: preferred proto/header paths and source file suffixes.
+# Empty = use built-in defaults.
+[signal_resolver]
+# preferred_paths = [
+#     "module_floorcenter/module_proto/src/main/proto/signal.proto",
+#     "module_foundation/module_proto/src/main/proto/signal.proto",
+# ]
+# source_suffixes = [".kt", ".java", ".cpp", ".cc", ".c", ".h", ".hpp", ".proto", ".xml", ".md"]
+cache_ttl_seconds = 3600.0
+
 [download]
 max_bytes = 5368709120
 timeout_seconds = 60
@@ -271,6 +281,17 @@ max_evidence = 20
 repo_roots = ["/Users/zhuyl/Documents/workspace/xp/guideengine/.worktrees/os6_xpdev"]
 # Add extra read-only roots for cross-repo source lookup when needed, for example Napa5.
 add_dirs = []
+# Priority modules for source investigation prompts. Empty = use built-in defaults.
+# priority_modules = [
+#     "module_floorcenter/module_proto/src/main/proto/signal.proto",
+#     "module_floorcenter/module_datacenter/.../SignalMapping.kt",
+# ]
+# Signal-prefix-specific priority modules. Empty = use built-in defaults.
+# [source_investigation.signal_priority_modules]
+# "SIGNAL_CTL_" = ["module_floorcenter/.../CarCtlXpilotHelper.kt"]
+# "SIGNAL_X3D_" = ["module_core/.../XDataTransport.kt"]
+# Low-value paths to exclude from source search. Empty = use built-in defaults.
+# exclude_paths = ["src/test", "src/androidTest", "build/", "generated/"]
 
 [report_server]
 enabled = true

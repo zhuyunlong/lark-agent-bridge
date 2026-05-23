@@ -26,6 +26,7 @@ from .models import (
     NotificationOptions,
     OmlxChatOptions,
     ReportServerOptions,
+    SignalResolverOptions,
     SourceInvestigationOptions,
     WorkflowArchiveOptions,
 )
@@ -393,6 +394,28 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
                 source_investigation_data.get("add_dirs", SourceInvestigationOptions().add_dirs),
                 base_dir,
                 "source_investigation.add_dirs",
+            ),
+            priority_modules=[
+                str(m) for m in source_investigation_data.get("priority_modules", [])
+            ],
+            signal_priority_modules={
+                str(k): [str(v) for v in vs]
+                for k, vs in (source_investigation_data.get("signal_priority_modules") or {}).items()
+                if isinstance(vs, list)
+            },
+            exclude_paths=[
+                str(p) for p in source_investigation_data.get("exclude_paths", [])
+            ],
+        ),
+        signal_resolver=SignalResolverOptions(
+            preferred_paths=[
+                str(p) for p in (data.get("signal_resolver", {}).get("preferred_paths", []))
+            ],
+            source_suffixes=[
+                str(s) for s in (data.get("signal_resolver", {}).get("source_suffixes", []))
+            ],
+            cache_ttl_seconds=float(
+                data.get("signal_resolver", {}).get("cache_ttl_seconds", 3600.0)
             ),
         ),
         ai_provider=_apply_ai_preset(AIProviderOptions(

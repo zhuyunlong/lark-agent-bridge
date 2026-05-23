@@ -304,6 +304,9 @@ class BridgeApp:
         self.signal_resolver = SignalResolver(
             config.guideengine_repo,
             cache_dir=config.data_dir / "cache",
+            cache_ttl_seconds=config.signal_resolver.cache_ttl_seconds,
+            preferred_paths=config.signal_resolver.preferred_paths or None,
+            source_suffixes=config.signal_resolver.source_suffixes or None,
         )
         self.bug_url_re = build_bug_url_re(config.bug_url_domains) if config.bug_url_domains else None
         self.escalation_checker = EscalationChecker()

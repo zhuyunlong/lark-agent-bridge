@@ -18,6 +18,12 @@ SIGNAL_ENUM_DEFINITION_RE = re.compile(
     r"(?<![A-Za-z0-9_])(SIGNAL_[A-Za-z0-9_]+)\s*(?:=\s*(\d+))?"
 )
 SIGNAL_SOURCE_SUFFIXES = {".kt", ".java", ".cpp", ".cc", ".c", ".h", ".hpp", ".proto", ".xml", ".md"}
+_DEFAULT_PREFERRED_PATHS = (
+    "module_floorcenter/module_proto/src/main/proto/signal.proto",
+    "module_foundation/module_proto/src/main/proto/signal.proto",
+    "module_floorcenter/module_xdata/src/main/cpp/core/generated/proto/signal.pb.h",
+    "module_floorcenter/module_xdata/src/main/cpp/core/generated/proto/win/signal.pb.h",
+)
 MAX_SIGNAL_SOURCE_FILES = 256
 
 
@@ -37,6 +43,8 @@ class SignalResolver:
         *,
         cache_dir: Path | str | None = None,
         cache_ttl_seconds: float = 3600.0,
+        preferred_paths: list[str] | None = None,
+        source_suffixes: list[str] | None = None,
     ) -> None:
         self.repo = Path(repo).expanduser() if repo else None
         self._catalog: dict[str, str] | None = None
@@ -44,6 +52,8 @@ class SignalResolver:
             Path(cache_dir) / "signal_catalog.json" if cache_dir else None
         )
         self._cache_ttl = cache_ttl_seconds
+        self._preferred_paths = tuple(preferred_paths) if preferred_paths else _DEFAULT_PREFERRED_PATHS
+        self._source_suffixes = set(source_suffixes) if source_suffixes else SIGNAL_SOURCE_SUFFIXES
 
     def resolve(self, value: str) -> SignalResolution | None:
         requested = (value or "").strip()
@@ -81,7 +91,7 @@ class SignalResolver:
             self._catalog = cached
             return cached
 
-        for path in _candidate_signal_files(repo):
+        for path in _candidate_signal_files(repo, self._preferred_paths, self._source_suffixes):
             try:
                 text = path.read_text(encoding="utf-8", errors="replace")
             except OSError:
@@ -133,13 +143,12 @@ class SignalResolver:
             pass
 
 
-def _candidate_signal_files(repo: Path) -> list[Path]:
-    preferred = [
-        repo / "module_floorcenter/module_proto/src/main/proto/signal.proto",
-        repo / "module_foundation/module_proto/src/main/proto/signal.proto",
-        repo / "module_floorcenter/module_xdata/src/main/cpp/core/generated/proto/signal.pb.h",
-        repo / "module_floorcenter/module_xdata/src/main/cpp/core/generated/proto/win/signal.pb.h",
-    ]
+def _candidate_signal_files(
+    repo: Path,
+    preferred_paths: tuple[str, ...] = _DEFAULT_PREFERRED_PATHS,
+    source_suffixes: set[str] = SIGNAL_SOURCE_SUFFIXES,
+) -> list[Path]:
+    preferred = [repo / p for p in preferred_paths]
     files: list[Path] = []
     for path in preferred:
         _append_path(files, path)
@@ -149,7 +158,7 @@ def _candidate_signal_files(repo: Path) -> list[Path]:
     for path in repo.rglob("signal.pb.h"):
         if not _is_ignored_path(path):
             _append_path(files, path)
-    for path in _source_files_with_signal_refs(repo):
+    for path in _source_files_with_signal_refs(repo, source_suffixes):
         _append_path(files, path)
     return files
 
@@ -172,23 +181,30 @@ def _repo_head_hash(repo: Path) -> str | None:
     return None
 
 
-def _source_files_with_signal_refs(repo: Path) -> list[Path]:
-    rg_paths = _source_files_with_signal_refs_rg(repo)
+def _source_files_with_signal_refs(
+    repo: Path,
+    source_suffixes: set[str] = SIGNAL_SOURCE_SUFFIXES,
+) -> list[Path]:
+    rg_paths = _source_files_with_signal_refs_rg(repo, source_suffixes)
     if rg_paths is not None:
         return rg_paths
-    return _source_files_with_signal_refs_scan(repo)
+    return _source_files_with_signal_refs_scan(repo, source_suffixes)
 
 
-def _source_files_with_signal_refs_rg(repo: Path) -> list[Path] | None:
+def _source_files_with_signal_refs_rg(
+    repo: Path,
+    source_suffixes: set[str] = SIGNAL_SOURCE_SUFFIXES,
+) -> list[Path] | None:
     if shutil.which("rg") is None:
         return None
+    suffix_glob = ",".join(s.lstrip(".") for s in sorted(source_suffixes))
     command = [
         "rg",
         "--files-with-matches",
         "--color",
         "never",
         "--glob",
-        "*.{kt,java,cpp,cc,c,h,hpp,proto,xml,md}",
+        f"*.{{{suffix_glob}}}",
         "--glob",
         "!.git/**",
         "--glob",
@@ -224,12 +240,15 @@ def _source_files_with_signal_refs_rg(repo: Path) -> list[Path] | None:
     return paths
 
 
-def _source_files_with_signal_refs_scan(repo: Path) -> list[Path]:
+def _source_files_with_signal_refs_scan(
+    repo: Path,
+    source_suffixes: set[str] = SIGNAL_SOURCE_SUFFIXES,
+) -> list[Path]:
     files: list[Path] = []
     for path in sorted(repo.rglob("*")):
         if len(files) >= MAX_SIGNAL_SOURCE_FILES:
             break
-        if not path.is_file() or path.suffix not in SIGNAL_SOURCE_SUFFIXES or _is_ignored_path(path):
+        if not path.is_file() or path.suffix not in source_suffixes or _is_ignored_path(path):
             continue
         try:
             if path.stat().st_size > 2_000_000:

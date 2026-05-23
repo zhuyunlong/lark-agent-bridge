@@ -199,6 +199,9 @@ class BugAnalysisRunner:
         self.signal_resolver = SignalResolver(
             config.guideengine_repo,
             cache_dir=config.data_dir / "cache",
+            cache_ttl_seconds=config.signal_resolver.cache_ttl_seconds,
+            preferred_paths=config.signal_resolver.preferred_paths or None,
+            source_suffixes=config.signal_resolver.source_suffixes or None,
         )
         self._lark_client = lark_client
         self.skill_manager = skill_manager or SkillManager(config)
