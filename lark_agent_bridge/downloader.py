@@ -152,7 +152,8 @@ class LogDownloader:
         try:
             self._wait_for_download_output(staging_target, validate_zip=target.suffix.casefold() == ".zip")
             self._publish_download_output(staging_target, target)
-        except Exception:
+        except Exception as exc:
+            logger.error("download post-processing failed for %s: %s", resource.value, exc, exc_info=True)
             self._remove_path(staging_target)
             raise
         return DownloadedResource(resource=resource, path=target, dry_run=result.dry_run, command=result.command)
@@ -170,7 +171,8 @@ class LogDownloader:
         try:
             self._wait_for_download_output(staging_target, expect_dir=True)
             self._publish_download_output(staging_target, target)
-        except Exception:
+        except Exception as exc:
+            logger.error("drive folder post-processing failed for %s: %s", folder_token, exc, exc_info=True)
             self._remove_path(staging_target)
             raise
         return DownloadedResource(resource=resource, path=target, dry_run=result.dry_run, command=result.command)

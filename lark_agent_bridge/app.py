@@ -4257,7 +4257,8 @@ class BridgeApp:
             if event.message_id:
                 try:
                     self.lark_client.reply(event.message_id, self._reply_payload(event, message))
-                except Exception:
+                except Exception as reply_exc:
+                    logger.error("failed to send followup ack for %s: %s", event.message_id, reply_exc)
                     return
 
     def _answer_bug_followup_from_existing(
