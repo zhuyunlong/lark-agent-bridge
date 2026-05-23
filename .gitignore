@@ -6,6 +6,8 @@ __pycache__/
 .DS_Store
 
 config.toml
+config.cc-switch.toml
+config.openai.toml
 data/
 
 .pytest_cache/
