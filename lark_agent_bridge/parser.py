@@ -20,10 +20,22 @@ from .signal_resolver import SignalResolver
 
 URL_RE = re.compile(r"https?://[^\s<>\"]+")
 DRIVE_FOLDER_URL_RE = re.compile(r"https?://[^\s<>\"]*/drive/folder/(?P<token>[^/?#\s<>\"]+)")
-BUG_URL_RE = re.compile(
-    r"https?://(?:project\.feishu\.cn|(?:www\.)?meegle\.com)[^\s<>\"]*/buglo/detail/\d+"
-    r"(?:[/?#][^\s<>\"，。；;、)）\]】}]*)?"
-)
+_DEFAULT_BUG_URL_DOMAINS = ("project.feishu.cn", "meegle.com")
+
+
+def build_bug_url_re(domains: tuple[str, ...] | list[str] = _DEFAULT_BUG_URL_DOMAINS) -> re.Pattern[str]:
+    """Build a bug URL regex from a list of domain patterns."""
+    escaped = [re.escape(d) if "." in d else d for d in domains]
+    # Allow optional www. prefix for domains that don't already specify it
+    parts = [f"(?:www\\.)?{d}" if not d.startswith("www\\.") and not d.startswith("(?:") else d for d in escaped]
+    domain_alt = "|".join(parts)
+    return re.compile(
+        rf"https?://(?:{domain_alt})[^\s<>\"]*/buglo/detail/\d+"
+        r"(?:[/?#][^\s<>\"，。；;、)）\]】}]*)?"
+    )
+
+
+BUG_URL_RE = build_bug_url_re()
 SIGNAL_ENUM_RE = re.compile(r"(?<![A-Za-z0-9_])SIGNAL_[A-Z0-9_]+(?![A-Za-z0-9_])")
 SIGNAL_BARE_NAME_RE = re.compile(r"(?<![A-Za-z0-9_])([A-Z][A-Z0-9]+(?:_[A-Z0-9]+)+)(?![A-Za-z0-9_])")
 SIGNAL_CODE_RE = re.compile(r"(?<![A-Za-z0-9_])\d{5,6}(?![A-Za-z0-9_])")
@@ -483,7 +495,9 @@ def parse_direct_analysis_request(text: str) -> DirectAnalysisRequest:
     )
 
 
-def looks_like_direct_analysis_prompt(text: str, *, resources_present: bool = False) -> bool:
+def looks_like_direct_analysis_prompt(
+    text: str, *, resources_present: bool = False, bug_url_re: re.Pattern[str] | None = None
+) -> bool:
     normalized_text = text or ""
     cleaned = _strip_leading_mentions(normalized_text).strip()
     lowered = cleaned.casefold()
@@ -491,7 +505,7 @@ def looks_like_direct_analysis_prompt(text: str, *, resources_present: bool = Fa
         return False
     if build_basic_chat_reply(cleaned) is not None:
         return False
-    if parse_bug_request(cleaned).triggered:
+    if parse_bug_request(cleaned, bug_url_re=bug_url_re).triggered:
         return False
     has_action = _contains_any(cleaned, lowered, DIRECT_ANALYSIS_ACTION_TERMS)
     has_domain = _contains_any(cleaned, lowered, DIRECT_ANALYSIS_DOMAIN_TERMS)
@@ -500,10 +514,10 @@ def looks_like_direct_analysis_prompt(text: str, *, resources_present: bool = Fa
     return has_action and has_domain
 
 
-def parse_bug_request(text: str) -> BugRequest:
+def parse_bug_request(text: str, *, bug_url_re: re.Pattern[str] | None = None) -> BugRequest:
     normalized_text = text or ""
     cleaned = _strip_leading_mentions(normalized_text).strip()
-    match = BUG_URL_RE.search(cleaned)
+    match = (bug_url_re or BUG_URL_RE).search(cleaned)
     if not match:
         return BugRequest(bug_url="", prompt="", raw_text=normalized_text, triggered=False)
     bug_url = match.group(0).rstrip(TRAILING_URL_PUNCTUATION)

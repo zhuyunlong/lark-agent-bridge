@@ -68,6 +68,7 @@ from .models import (
 )
 from .parser import (
     build_basic_chat_reply,
+    build_bug_url_re,
     extract_first_keyword_payload,
     find_resources,
     looks_like_direct_analysis_prompt,
@@ -301,6 +302,7 @@ class BridgeApp:
         self.version_store = ReportVersionStore(config.data_dir / "state" / "report_versions.json")
         self.workflow_archiver = WorkflowArchiver(config, self.lark_client)
         self.signal_resolver = SignalResolver(config.guideengine_repo)
+        self.bug_url_re = build_bug_url_re(config.bug_url_domains) if config.bug_url_domains else None
         self.escalation_checker = EscalationChecker()
         self.notification_history = NotificationHistory(config.data_dir / "state" / "notification_history.json")
         self.lifecycle_store = LifecycleStore()
@@ -498,7 +500,7 @@ class BridgeApp:
         signal_request = self._build_signal_request(route_content, referenced_resources)
         rom_version_request = parse_rom_version_lookup_request(route_content)
         addr2line_request = self._build_addr2line_request(route_content, event, referenced_resources)
-        bug_request = parse_bug_request(route_content)
+        bug_request = parse_bug_request(route_content, bug_url_re=self.bug_url_re)
         if bug_request.triggered and signal_request.error == "missing_signal":
             signal_request = SignalRequest(
                 signal="",
@@ -828,7 +830,7 @@ class BridgeApp:
         inline_request = parse_direct_analysis_request(ctx.route_content)
         if inline_request.triggered:
             return False
-        if looks_like_direct_analysis_prompt(ctx.route_content, resources_present=False):
+        if looks_like_direct_analysis_prompt(ctx.route_content, resources_present=False, bug_url_re=self.bug_url_re):
             return False
         return True
 
@@ -2097,7 +2099,7 @@ class BridgeApp:
         route_content = str(metadata.get("route_content") or "")
         self.activity_store.record_event(event, content=route_content)
         if operation.operation_type == "bug_analysis":
-            request = parse_bug_request(route_content)
+            request = parse_bug_request(route_content, bug_url_re=self.bug_url_re)
             result = self._run_bug_request(event, request, route_content)
         elif operation.operation_type == "direct_analysis":
             referenced_resources = self._fetch_referenced_message_resources(event, route_content=route_content)
@@ -2954,7 +2956,7 @@ class BridgeApp:
         return ""
 
     def _bug_url_from_request_text(self, request_text: str) -> str:
-        request = parse_bug_request(request_text)
+        request = parse_bug_request(request_text, bug_url_re=self.bug_url_re)
         return request.bug_url if request.triggered else ""
 
     def _handle_intent_routed_event(
@@ -3766,7 +3768,7 @@ class BridgeApp:
         return False
 
     def _looks_like_direct_analysis_prompt(self, route_content: str) -> bool:
-        return looks_like_direct_analysis_prompt(route_content, resources_present=True)
+        return looks_like_direct_analysis_prompt(route_content, resources_present=True, bug_url_re=self.bug_url_re)
 
     def _extract_resources_from_message_payload(self, payload_text: str, *, fallback_message_id: str = "") -> list[DownloadResource]:
         try:
@@ -3904,7 +3906,7 @@ class BridgeApp:
         return self._deliver_result(event, result, request_text=skill_request.raw_text or route_content)
 
     def _handle_bug_intent(self, event: LarkEvent, route_content: str) -> TaskResult:
-        bug_request = parse_bug_request(route_content)
+        bug_request = parse_bug_request(route_content, bug_url_re=self.bug_url_re)
         if not bug_request.triggered:
             bug_request = bug_request.__class__(bug_url="", prompt=route_content.strip(), raw_text=route_content, triggered=True, error="missing_bug_url")
         if not self.state_store.mark_seen(event):
@@ -4166,7 +4168,7 @@ class BridgeApp:
         request_text = str(getattr(followup_context, "request_text", "") or "").strip()
         if not request_text:
             return None
-        bug_request = parse_bug_request(request_text)
+        bug_request = parse_bug_request(request_text, bug_url_re=self.bug_url_re)
         if not bug_request.triggered:
             return None
         followup = followup_text.strip()
@@ -4560,7 +4562,7 @@ class BridgeApp:
             if current_id and current_id != message_id:
                 continue
             request_text = self._message_content_text(message).strip()
-            bug_request = parse_bug_request(request_text)
+            bug_request = parse_bug_request(request_text, bug_url_re=self.bug_url_re)
             if not bug_request.triggered:
                 continue
             return ConversationContext(

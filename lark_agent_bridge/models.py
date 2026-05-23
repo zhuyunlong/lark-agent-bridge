@@ -304,6 +304,7 @@ class BridgeConfig:
     allowed_users: list[str] = field(default_factory=list)
     command_prefixes: list[str] = field(default_factory=list)
     signal_aliases: dict[str, str] = field(default_factory=dict)
+    bug_url_domains: list[str] = field(default_factory=list)
     download: DownloadConfig = field(default_factory=DownloadConfig)
     local_resources: LocalResourceOptions = field(default_factory=LocalResourceOptions)
     job_retention: JobRetentionOptions = field(default_factory=JobRetentionOptions)

@@ -8,6 +8,12 @@ allowed_chats = []
 allowed_users = []
 command_prefixes = []
 
+# Bug tracker URL domain patterns for recognizing bug links in messages.
+# Default domains (used when list is empty): project.feishu.cn, meegle.com
+# Add your own domains if using a self-hosted Meegle instance or other tracker.
+# bug_url_domains = ["project.feishu.cn", "meegle.com", "bugs.internal.example.com"]
+bug_url_domains = []
+
 [signal_aliases]
 "LD normal" = "SIGNAL_X3D_LD_NORMAL_OVER_ALL_DATA"
 "normal over all" = "SIGNAL_X3D_LD_NORMAL_OVER_ALL_DATA"

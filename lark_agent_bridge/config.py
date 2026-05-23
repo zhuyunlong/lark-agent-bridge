@@ -205,6 +205,7 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
         allowed_users=_env_string_list("LARK_AGENT_BRIDGE_ALLOWED_USERS", data.get("allowed_users", []), "allowed_users"),
         command_prefixes=_string_list(data.get("command_prefixes", []), "command_prefixes"),
         signal_aliases=aliases,
+        bug_url_domains=_string_list(data.get("bug_url_domains", []), "bug_url_domains"),
         download=DownloadConfig(
             max_bytes=int(download_data.get("max_bytes", 5 * 1024 * 1024 * 1024)),
             timeout_seconds=int(download_data.get("timeout_seconds", 60)),
