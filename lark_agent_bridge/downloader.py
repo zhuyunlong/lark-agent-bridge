@@ -5,9 +5,12 @@ from __future__ import annotations
 import ipaddress
 from pathlib import Path
 import re
+import shutil
 import socket
+import time
 from urllib.parse import unquote, urlparse
 import urllib.request
+import zipfile
 
 from .lark_client import LarkClient
 from .log import get_logger
@@ -25,6 +28,9 @@ class DownloadError(RuntimeError):
 # ---------------------------------------------------------------------------
 
 _SSRF_SAFE_SCHEMES = {"http", "https"}
+_DOWNLOAD_OUTPUT_WAIT_SECONDS = 10.0
+_DOWNLOAD_OUTPUT_POLL_SECONDS = 0.05
+_DOWNLOAD_OUTPUT_STABLE_SECONDS = 0.5
 
 
 def _is_private_ip(host: str) -> bool:
@@ -92,18 +98,20 @@ class LogDownloader:
         if not self.config.download.allow_private_urls and _is_private_ip(parsed.hostname or ""):
             raise DownloadError(f"Download from private/reserved IP blocked: {parsed.hostname}")
         target = context.input_dir / safe_filename_from_url(resource.value)
+        staging_target = self._staging_path(target)
         if self.config.dry_run:
             return DownloadedResource(resource=resource, path=target, dry_run=True)
 
         request = urllib.request.Request(resource.value, headers={"User-Agent": "lark-agent-bridge/0.1"})
         opener = urllib.request.build_opener(_NoRedirectHandler)
+        self._remove_path(staging_target)
         try:
             with opener.open(request, timeout=self.config.download.timeout_seconds) as response:
                 content_length = response.headers.get("Content-Length")
                 if content_length and int(content_length) > self.config.download.max_bytes:
                     raise DownloadError("Download exceeds configured max_bytes")
                 total = 0
-                with target.open("wb") as fh:
+                with staging_target.open("wb") as fh:
                     while True:
                         chunk = response.read(1024 * 1024)
                         if not chunk:
@@ -112,11 +120,12 @@ class LogDownloader:
                         if total > self.config.download.max_bytes:
                             raise DownloadError("Download exceeds configured max_bytes")
                         fh.write(chunk)
+            self._publish_download_output(staging_target, target)
         except DownloadError:
-            if target.exists():
-                target.unlink()
+            self._remove_path(staging_target)
             raise
         except OSError as exc:
+            self._remove_path(staging_target)
             raise DownloadError(str(exc)) from exc
         return DownloadedResource(resource=resource, path=target)
 
@@ -130,14 +139,22 @@ class LogDownloader:
         if not effective_message_id:
             raise DownloadError("message_id is required for Feishu resource downloads")
         target = context.input_dir / safe_filename(resource.value)
+        staging_target = self._staging_path(target)
+        self._remove_path(staging_target)
         result = self.lark_client.download_resource(
             message_id=effective_message_id,
             file_key=resource.value,
             resource_type=resource.resource_type,
-            output=target,
+            output=staging_target,
         )
         if result.returncode != 0:
             raise DownloadError(result.stderr or "lark-cli resource download failed")
+        try:
+            self._wait_for_download_output(staging_target, validate_zip=target.suffix.casefold() == ".zip")
+            self._publish_download_output(staging_target, target)
+        except Exception:
+            self._remove_path(staging_target)
+            raise
         return DownloadedResource(resource=resource, path=target, dry_run=result.dry_run, command=result.command)
 
     def _download_drive_folder(self, resource: DownloadResource, context: JobContext) -> DownloadedResource:
@@ -145,10 +162,59 @@ class LogDownloader:
         if not folder_token:
             raise DownloadError("folder_token is required for Feishu Drive folder downloads")
         target = context.input_dir / safe_filename(folder_token)
-        result = self.lark_client.download_drive_folder(folder_token=folder_token, output_dir=target)
+        staging_target = self._staging_path(target)
+        self._remove_path(staging_target)
+        result = self.lark_client.download_drive_folder(folder_token=folder_token, output_dir=staging_target)
         if result.returncode != 0:
             raise DownloadError(result.stderr or "lark-cli Drive folder pull failed")
+        try:
+            self._wait_for_download_output(staging_target, expect_dir=True)
+            self._publish_download_output(staging_target, target)
+        except Exception:
+            self._remove_path(staging_target)
+            raise
         return DownloadedResource(resource=resource, path=target, dry_run=result.dry_run, command=result.command)
+
+    def _wait_for_download_output(self, target: Path, *, expect_dir: bool = False, validate_zip: bool = False) -> None:
+        deadline = time.monotonic() + _DOWNLOAD_OUTPUT_WAIT_SECONDS
+        last_size: int | None = None
+        stable_since: float | None = None
+        while True:
+            if expect_dir:
+                if target.is_dir():
+                    return
+            elif target.is_file():
+                try:
+                    size = target.stat().st_size
+                except OSError:
+                    size = None
+                if size:
+                    if last_size == size:
+                        stable_since = stable_since or time.monotonic()
+                        if time.monotonic() - stable_since >= _DOWNLOAD_OUTPUT_STABLE_SECONDS:
+                            if not validate_zip or zipfile.is_zipfile(target):
+                                return
+                    else:
+                        stable_since = None
+                        last_size = size
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(_DOWNLOAD_OUTPUT_POLL_SECONDS)
+        raise DownloadError(f"Download output was not ready: {target}")
+
+    def _staging_path(self, target: Path) -> Path:
+        return target.with_name(f"{target.name}.part")
+
+    def _publish_download_output(self, staging_target: Path, target: Path) -> None:
+        self._remove_path(target)
+        staging_target.rename(target)
+
+    def _remove_path(self, path: Path) -> None:
+        if path.is_dir():
+            shutil.rmtree(path, ignore_errors=True)
+            return
+        if path.exists() or path.is_symlink():
+            path.unlink(missing_ok=True)
 
 
 def safe_filename_from_url(url: str) -> str:

@@ -3,7 +3,50 @@ import tempfile
 import unittest
 
 from lark_agent_bridge.models import LarkEvent, TaskResult
-from lark_agent_bridge.state import AgentActivityStore
+from lark_agent_bridge.state import AgentActivityStore, ConversationContextStore
+
+
+class ConversationContextStoreTests(unittest.TestCase):
+    def test_lookup_alias_keeps_snapshot_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "contexts.json"
+            store = ConversationContextStore(path)
+            store.remember(
+                root_message_id="om_root",
+                chat_id="oc_1",
+                mode="omlx_chat",
+                request_text="你好",
+                summary_text="第一轮回答",
+                report_url="",
+                report_excerpt="",
+            )
+            store.append_exchange("om_root", user_text="第一问", assistant_text="第一答")
+            store.remember_alias(alias_message_id="om_bot_reply_1", root_message_id="om_root")
+            store.append_exchange("om_root", user_text="第二问", assistant_text="第二答")
+
+            alias_context = store.lookup("om_bot_reply_1")
+            root_context = store.lookup("om_root")
+
+        self.assertIsNotNone(alias_context)
+        assert alias_context is not None
+        self.assertEqual(
+            alias_context.history,
+            [
+                {"role": "user", "content": "第一问"},
+                {"role": "assistant", "content": "第一答"},
+            ],
+        )
+        self.assertIsNotNone(root_context)
+        assert root_context is not None
+        self.assertEqual(
+            root_context.history,
+            [
+                {"role": "user", "content": "第一问"},
+                {"role": "assistant", "content": "第一答"},
+                {"role": "user", "content": "第二问"},
+                {"role": "assistant", "content": "第二答"},
+            ],
+        )
 
 
 class AgentActivityStoreTests(unittest.TestCase):

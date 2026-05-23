@@ -651,7 +651,7 @@ def build_knowledge_answer_card(
 ) -> dict[str, Any]:
     """Build a card for knowledge-base QA answers."""
     elements: list[dict[str, Any]] = [
-        _md_element(_truncate_summary(answer, max_chars=1600)),
+        _md_element(_truncate_card_body(answer, max_chars=1600)),
     ]
     valid_hits = [hit for hit in hits or [] if isinstance(hit, dict)]
     if valid_hits:
@@ -901,6 +901,17 @@ def _truncate_summary(text: str, *, max_chars: int = 800) -> str:
     if last_newline > max_chars // 2:
         truncated = truncated[:last_newline]
     return truncated + "\n\n_(完整内容请查看报告)_"
+
+
+def _truncate_card_body(text: str, *, max_chars: int = 1600) -> str:
+    cleaned = (text or "").strip()
+    if len(cleaned) <= max_chars:
+        return cleaned
+    truncated = cleaned[:max_chars]
+    last_newline = truncated.rfind("\n")
+    if last_newline >= max_chars // 2:
+        truncated = truncated[:last_newline]
+    return truncated.rstrip() + "\n\n(内容较长，已截断显示)"
 
 
 def _card_result_note_preview(text: str, *, max_chars: int) -> str:

@@ -252,6 +252,19 @@ class TestBuildKnowledgeAnswerCard:
         assert "guideengine-signals" not in rendered
         assert "ADB 命令集" in rendered
 
+    def test_knowledge_answer_card_keeps_readable_body_without_report_hint(self):
+        answer = "结论摘要\n" + ("第一条结论\n" * 300)
+
+        card = build_knowledge_answer_card(
+            title="知识库回答",
+            answer=answer,
+            hits=[],
+        )
+
+        rendered = str(card)
+        assert "结论摘要" in rendered
+        assert "完整内容请查看报告" not in rendered
+
 
 class TestBuildConfirmationCard:
     def test_basic_confirmation(self):

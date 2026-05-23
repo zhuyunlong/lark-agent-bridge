@@ -9,6 +9,7 @@ from lark_agent_bridge.parser import (
     parse_bug_request,
     parse_claude_skill_request,
     parse_direct_analysis_request,
+    parse_followup_action,
     parse_perception_summary_request,
     parse_rom_version_lookup_request,
     parse_signal_request,
@@ -153,6 +154,19 @@ class ParserTests(unittest.TestCase):
                 request = parse_addr2line_request(text, allow_missing_address=True)
 
                 self.assertFalse(request.triggered)
+
+    def test_parse_followup_action_recognizes_generic_retry_terms(self):
+        for text in ("重试一次", "再来一次", "重新跑", "再查一次"):
+            with self.subTest(text=text):
+                self.assertEqual(parse_followup_action(text), "retry")
+
+    def test_parse_followup_action_recognizes_generic_continue_terms(self):
+        for text in ("继续", "继续分析", "接着查"):
+            with self.subTest(text=text):
+                self.assertEqual(parse_followup_action(text), "continue")
+
+    def test_parse_followup_action_treats_question_as_ask(self):
+        self.assertEqual(parse_followup_action("这个结论是什么意思"), "ask")
 
     def test_help_bug_theme_example_is_a_valid_bug_request(self):
         text = "@bot https://project.feishu.cn/xpfailuremgmt/buglo/detail/6991604970 分析主题变化"

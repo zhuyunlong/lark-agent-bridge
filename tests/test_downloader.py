@@ -1,6 +1,10 @@
 from pathlib import Path
 import tempfile
+import threading
+import time
 import unittest
+import unittest.mock
+import zipfile
 
 from lark_agent_bridge.downloader import DownloadError, LogDownloader, safe_filename_from_url
 from lark_agent_bridge.lark_client import LarkClient
@@ -27,6 +31,58 @@ class FakeLarkClient:
         (output / "log.txt").write_text("ok", encoding="utf-8")
         return __import__("lark_agent_bridge.lark_client", fromlist=["CommandResult"]).CommandResult(
             command=["pull"],
+            returncode=0,
+        )
+
+
+class DelayedFileLarkClient:
+    def __init__(self, delay_seconds: float = 0.2):
+        self.delay_seconds = delay_seconds
+        self.thread = None
+        self.calls = []
+        self.final_existed_while_writing = False
+
+    def download_resource(self, **kwargs):
+        self.calls.append(kwargs)
+        output = Path(kwargs["output"])
+        final_output = output.with_name(output.name.removesuffix(".part"))
+
+        def write_later():
+            time.sleep(self.delay_seconds)
+            self.final_existed_while_writing = final_output.exists()
+            output.write_text("ok", encoding="utf-8")
+
+        self.thread = threading.Thread(target=write_later)
+        self.thread.start()
+        return __import__("lark_agent_bridge.lark_client", fromlist=["CommandResult"]).CommandResult(
+            command=["download"],
+            returncode=0,
+        )
+
+
+class SlowlyCompletedZipLarkClient:
+    def __init__(self, pause_seconds: float = 0.2):
+        self.pause_seconds = pause_seconds
+        self.thread = None
+        self.calls = []
+        self.final_existed_while_writing = False
+
+    def download_resource(self, **kwargs):
+        self.calls.append(kwargs)
+        output = Path(kwargs["output"])
+        final_output = output.with_name(output.name.removesuffix(".part"))
+
+        def write_later():
+            self.final_existed_while_writing = final_output.exists()
+            output.write_bytes(b"PK\x03\x04partial")
+            time.sleep(self.pause_seconds)
+            with zipfile.ZipFile(output, "w") as zf:
+                zf.writestr("crash.txt", "#00 pc 0000000000f385e4 /system/app/xp_envirodrive/lib/arm64/libunity.so\n")
+
+        self.thread = threading.Thread(target=write_later)
+        self.thread.start()
+        return __import__("lark_agent_bridge.lark_client", fromlist=["CommandResult"]).CommandResult(
+            command=["download"],
             returncode=0,
         )
 
@@ -74,6 +130,45 @@ class DownloaderTests(unittest.TestCase):
 
         self.assertEqual(fake_lark.calls[0]["message_id"], "om_file_msg")
         self.assertEqual(result.path.name, "file_abc123")
+
+    def test_file_resource_waits_until_download_output_exists(self):
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        config = BridgeConfig(dry_run=False, data_dir=Path(tmpdir.name))
+        context = create_job_context(config.data_dir, job_id="job1")
+        fake_lark = DelayedFileLarkClient()
+        self.addCleanup(lambda: fake_lark.thread and fake_lark.thread.join(timeout=1))
+        downloader = LogDownloader(config, fake_lark)
+
+        result = downloader.download(
+            DownloadResource(kind="file", value="file_abc123", source_message_id="om_file_msg"),
+            context=context,
+            message_id="om_followup_msg",
+        )
+
+        self.assertTrue(result.path.exists())
+        self.assertEqual(result.path.read_text(encoding="utf-8"), "ok")
+        self.assertFalse(fake_lark.final_existed_while_writing)
+        self.assertTrue(str(fake_lark.calls[0]["output"]).endswith(".part"))
+
+    def test_file_resource_waits_until_zip_output_is_complete(self):
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        config = BridgeConfig(dry_run=False, data_dir=Path(tmpdir.name))
+        context = create_job_context(config.data_dir, job_id="job1")
+        fake_lark = SlowlyCompletedZipLarkClient()
+        self.addCleanup(lambda: fake_lark.thread and fake_lark.thread.join(timeout=1))
+        downloader = LogDownloader(config, fake_lark)
+
+        result = downloader.download(
+            DownloadResource(kind="file", value="crash.zip", source_message_id="om_file_msg"),
+            context=context,
+            message_id="om_followup_msg",
+        )
+
+        self.assertTrue(zipfile.is_zipfile(result.path))
+        self.assertFalse(fake_lark.final_existed_while_writing)
+        self.assertTrue(str(fake_lark.calls[0]["output"]).endswith(".part"))
 
     def test_folder_resource_pulls_drive_folder_to_input_subdirectory(self):
         with tempfile.TemporaryDirectory() as tmp:

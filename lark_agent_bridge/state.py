@@ -112,6 +112,7 @@ class ConversationContext:
     history: list[dict[str, str]] = field(default_factory=list)
     created_at: str = ""
     updated_at: str = ""
+    context_key: str = ""
 
 
 class ConversationContextStore:
@@ -134,9 +135,7 @@ class ConversationContextStore:
         context = self._contexts.get(normalized)
         if context is None:
             return None
-        root_key = context.root_message_id.strip()
-        if root_key and root_key != normalized:
-            return self._contexts.get(root_key) or context
+        context.context_key = normalized
         return context
 
     def remember_alias(self, *, alias_message_id: str, root_message_id: str) -> ConversationContext | None:
@@ -148,6 +147,7 @@ class ConversationContextStore:
         if context is None:
             return None
         self._contexts[alias] = ConversationContext(
+            context_key=alias,
             root_message_id=context.root_message_id,
             chat_id=context.chat_id,
             mode=context.mode,
@@ -179,6 +179,7 @@ class ConversationContextStore:
         now = datetime.now(timezone.utc).isoformat()
         previous = self._contexts.get(key)
         context = ConversationContext(
+            context_key=key,
             root_message_id=key,
             chat_id=chat_id,
             mode=mode,
@@ -198,18 +199,42 @@ class ConversationContextStore:
         context = self._contexts.get(root_message_id)
         if context is None:
             return
+        context.history = self._history_with_exchange(context.history, user_text=user_text, assistant_text=assistant_text)
+        context.updated_at = datetime.now(timezone.utc).isoformat()
+        self._save()
+
+    def rewrite_branch(
+        self,
+        root_message_id: str,
+        *,
+        base_history: list[dict[str, str]],
+        user_text: str,
+        assistant_text: str,
+    ) -> None:
+        context = self._contexts.get(root_message_id)
+        if context is None:
+            return
         now = datetime.now(timezone.utc).isoformat()
-        if user_text.strip():
-            context.history.append({"role": "user", "content": user_text.strip()})
-        if assistant_text.strip():
-            context.history.append({"role": "assistant", "content": assistant_text.strip()})
-        max_entries = self.max_history_turns * 2
-        if max_entries > 0:
-            context.history = context.history[-max_entries:]
-        else:
-            context.history = []
+        context.history = self._history_with_exchange(base_history, user_text=user_text, assistant_text=assistant_text)
         context.updated_at = now
         self._save()
+
+    def _history_with_exchange(
+        self,
+        base_history: list[dict[str, str]],
+        *,
+        user_text: str,
+        assistant_text: str,
+    ) -> list[dict[str, str]]:
+        history = [dict(item) for item in base_history]
+        if user_text.strip():
+            history.append({"role": "user", "content": user_text.strip()})
+        if assistant_text.strip():
+            history.append({"role": "assistant", "content": assistant_text.strip()})
+        max_entries = self.max_history_turns * 2
+        if max_entries > 0:
+            return history[-max_entries:]
+        return []
 
     def clear(self) -> int:
         count = len(self._contexts)
@@ -288,6 +313,7 @@ class ConversationContextStore:
             if not isinstance(key, str) or not isinstance(value, dict):
                 continue
             contexts[key] = ConversationContext(
+                context_key=str(value.get("context_key") or key),
                 root_message_id=str(value.get("root_message_id") or key),
                 chat_id=str(value.get("chat_id", "")),
                 mode=str(value.get("mode", "")),

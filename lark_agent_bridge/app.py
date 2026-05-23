@@ -67,6 +67,7 @@ from .models import (
     DownloadResource,
     IntentDecision,
     LarkEvent,
+    RomVersionLookupRequest,
     SignalRequest,
     TaskResult,
     create_job_context,
@@ -75,6 +76,7 @@ from .parser import (
     build_basic_chat_reply,
     extract_first_keyword_payload,
     find_resources,
+    parse_followup_action,
     parse_claude_skill_request,
     parse_bug_request,
     parse_direct_analysis_request,
@@ -470,7 +472,10 @@ class BridgeApp:
             addressed_content = self._strip_group_chat_mention(event.content)
             if addressed_content is None:
                 followup_context = self._resolve_followup_context(event)
-                addressed_content = self._strip_bot_mention_anywhere(event.content) if followup_context is not None else None
+                if followup_context is not None:
+                    addressed_content = self._strip_bot_mention_anywhere(event.content)
+                    if addressed_content is None and self._allows_reply_chain_without_mention(followup_context):
+                        addressed_content = event.content.strip()
             if addressed_content is None:
                 if not self.state_store.mark_seen(event):
                     return TaskResult(True, f"duplicate event skipped: {event.event_id}", skipped=True)
@@ -616,18 +621,28 @@ class BridgeApp:
         return None
 
     def _route_addr2line_resolve(self, ctx: _RouteContext) -> TaskResult | None:
-        if ctx.addr2line_request is None or not ctx.addr2line_request.triggered:
+        request = ctx.addr2line_request
+        if request is None:
             return None
+        if not request.triggered:
+            request = self._followup_addr2line_request(ctx)
+            if request is None:
+                return None
         if not self.state_store.mark_seen(ctx.event):
             return TaskResult(True, f"duplicate event skipped: {ctx.event.event_id}", skipped=True)
-        return self._run_addr2line_resolve_request(ctx.event, ctx.addr2line_request)
+        return self._run_addr2line_resolve_request(ctx.event, request)
 
     def _route_rom_version_lookup(self, ctx: _RouteContext) -> TaskResult | None:
-        if ctx.rom_version_request is None or not getattr(ctx.rom_version_request, "triggered", False):
+        request = ctx.rom_version_request
+        if request is None:
             return None
+        if not getattr(request, "triggered", False):
+            request = self._followup_rom_lookup_request(ctx)
+            if request is None:
+                return None
         if not self.state_store.mark_seen(ctx.event):
             return TaskResult(True, f"duplicate event skipped: {ctx.event.event_id}", skipped=True)
-        return self._run_rom_version_lookup_request(ctx.event, ctx.rom_version_request)
+        return self._run_rom_version_lookup_request(ctx.event, request)
 
     def _route_intent_router(self, ctx: _RouteContext) -> TaskResult | None:
         if not self.intent_runner.is_enabled():
@@ -748,6 +763,8 @@ class BridgeApp:
                 error_code="knowledge_probe_no_hits",
                 details={"mode": "knowledge_probe", "knowledge_hits": []},
             )
+            result.details["delivery"] = "reply"
+            result.details["conversation_root_message_id"] = ctx.event.root_id or ctx.event.message_id
             return self._deliver_result(ctx.event, result, request_text=ctx.route_content)
         if not self.state_store.mark_seen(ctx.event):
             return TaskResult(True, f"duplicate event skipped: {ctx.event.event_id}", skipped=True)
@@ -2795,11 +2812,14 @@ class BridgeApp:
         self._apply_dual_agent_arbitration(result)
         published = self.report_publisher.publish_result(result)
         if published is None:
-            if result.success and result.details.get("needs_user_direction"):
+            mode = str(result.details.get("mode", "") or "").strip()
+            if result.success and (
+                result.details.get("needs_user_direction") or mode in self._threaded_reply_context_modes()
+            ):
                 details = dict(result.details)
                 context_root_message_id = root_message_id or event.root_id or event.message_id
-                details["delivery"] = "reply"
-                details["conversation_root_message_id"] = context_root_message_id
+                details.setdefault("delivery", "reply")
+                details.setdefault("conversation_root_message_id", context_root_message_id)
                 bug_url = str(details.get("bug_url") or self._bug_url_from_request_text(request_text))
                 if bug_url:
                     details["bug_url"] = bug_url
@@ -3106,6 +3126,21 @@ class BridgeApp:
             "signal_lifecycle",
         }
 
+    def _threaded_reply_context_modes(self) -> set[str]:
+        return {
+            *self._analysis_context_modes(),
+            "knowledge_qa",
+            "knowledge_probe",
+            "basic_chat",
+            "omlx_chat",
+            "analysis_followup",
+            "addr2line_resolve",
+            "rom_version_lookup",
+        }
+
+    def _allows_reply_chain_without_mention(self, followup_context) -> bool:
+        return str(getattr(followup_context, "mode", "") or "").strip() in self._threaded_reply_context_modes()
+
     def _latest_analysis_context(self, chat_id: str, *, explicit_followup_context=None):
         latest = self.conversation_store.latest_for_chat(chat_id, modes=self._analysis_context_modes())
         if latest is None:
@@ -3230,6 +3265,63 @@ class BridgeApp:
             prompt=request.prompt,
             triggered=True,
             error=None if request.error == "missing_symbol_version" else request.error,
+        )
+
+    def _followup_addr2line_request(self, ctx: _RouteContext) -> Addr2LineRequest | None:
+        followup_context = ctx.followup_context
+        if followup_context is None or str(getattr(followup_context, "mode", "") or "") != "addr2line_resolve":
+            return None
+        if parse_followup_action(ctx.route_content) != "retry":
+            return None
+        previous_request = parse_addr2line_request(
+            str(getattr(followup_context, "request_text", "") or ""),
+            allow_missing_address=True,
+        )
+        resources = self._reference_chain_log_resources(ctx.event) or self._log_resources_from_context(followup_context)
+        session = self.activity_store.get_session(followup_context.root_message_id) or {}
+        session_details = session.get("details") if isinstance(session.get("details"), dict) else {}
+        session_rom = str(session_details.get("rom_version") or "")
+        session_symbol = str(session_details.get("symbol_version") or "")
+        session_symbol_kind = str(session_details.get("symbol_version_kind") or "")
+        rom_version = previous_request.rom_version or session_rom or self._recent_rom_version_for_chat(ctx.event)
+        apk_version = previous_request.apk_version
+        napa_version = previous_request.napa_version
+        if session_symbol:
+            if session_symbol_kind == "apk" and not apk_version:
+                apk_version = session_symbol
+            elif session_symbol_kind == "napa" and not napa_version:
+                napa_version = session_symbol
+            elif session_symbol_kind == "rom" and not rom_version:
+                rom_version = session_symbol
+        if not apk_version and rom_version:
+            apk_version = self._recent_navigation_version_for_chat(ctx.event, rom_version) or apk_version
+        return Addr2LineRequest(
+            addr_text=previous_request.addr_text,
+            resources=resources,
+            raw_text=ctx.route_content,
+            rom_version=rom_version,
+            napa_version=napa_version,
+            apk_version=apk_version,
+            target=previous_request.target or "auto",
+            prompt=ctx.route_content.strip(),
+            triggered=True,
+        )
+
+    def _followup_rom_lookup_request(self, ctx: _RouteContext) -> RomVersionLookupRequest | None:
+        followup_context = ctx.followup_context
+        if followup_context is None or str(getattr(followup_context, "mode", "") or "") != "rom_version_lookup":
+            return None
+        if parse_followup_action(ctx.route_content) != "retry":
+            return None
+        previous_request = parse_rom_version_lookup_request(str(getattr(followup_context, "request_text", "") or ""))
+        rom_version = previous_request.rom_version or self._recent_rom_version_for_chat(ctx.event)
+        if not rom_version:
+            return None
+        return RomVersionLookupRequest(
+            rom_version=rom_version,
+            prompt=ctx.route_content.strip(),
+            raw_text=ctx.route_content,
+            triggered=True,
         )
 
     def _recent_rom_version_for_chat(self, event: LarkEvent) -> str:
@@ -4273,6 +4365,7 @@ class BridgeApp:
         result.details["delivery"] = "reply"
         result.details["conversation_root_message_id"] = followup_context.root_message_id
         result.details.setdefault("followup_text", route_content)
+        is_bug_followup = "bug" in str(followup_context.mode).casefold()
         if followup_context.report_url:
             result.details.setdefault("published_report_url", followup_context.report_url)
             result.details.setdefault("report_url", followup_context.report_url)
@@ -4281,7 +4374,23 @@ class BridgeApp:
                 result.message = f"{result.message}\n\n报告链接：{followup_context.report_url}"
             else:
                 result.message = f"报告链接：{followup_context.report_url}"
-        if result.success:
+        if result.success and not is_bug_followup:
+            self.conversation_store.remember(
+                root_message_id=followup_context.root_message_id,
+                chat_id=followup_context.chat_id,
+                mode=str(result.details.get("mode") or followup_context.mode or ""),
+                request_text=followup_context.request_text,
+                summary_text=result.message,
+                report_url=followup_context.report_url,
+                report_excerpt=str(getattr(followup_context, "report_excerpt", "") or ""),
+            )
+            self.conversation_store.rewrite_branch(
+                followup_context.root_message_id,
+                base_history=list(getattr(followup_context, "history", []) or []),
+                user_text=route_content,
+                assistant_text=result.message,
+            )
+        if result.success and is_bug_followup:
             self.conversation_store.append_exchange(
                 followup_context.root_message_id,
                 user_text=route_content,
@@ -4359,7 +4468,7 @@ class BridgeApp:
         mode = str(session.get("mode") or details.get("mode") or "").strip()
         if bug_url and "bug" not in mode.casefold():
             mode = "bug_analysis"
-        if mode not in self._analysis_context_modes():
+        if mode not in self._threaded_reply_context_modes():
             return None
         summary_text = str(session.get("message") or "").strip()
         report_url = str(session.get("report_url") or details.get("published_report_url") or details.get("report_url") or "")
@@ -4544,6 +4653,9 @@ class BridgeApp:
         return bool(event.reply_to or event.parent_id or event.root_id or event.thread_id)
 
     def _is_followup_intent(self, route_content: str) -> bool:
+        action = parse_followup_action(route_content)
+        if action in {"retry", "continue"}:
+            return True
         lowered = route_content.casefold()
         return any(
             term in lowered
@@ -4585,6 +4697,7 @@ class BridgeApp:
             return _BugReanalysisDecision(False, False)
         previous_session = self.activity_store.get_session(followup_context.root_message_id) or {}
         lowered = route_content.casefold()
+        followup_action = parse_followup_action(route_content)
         force_terms = tuple(term.casefold() for term in self.config.bug_analysis.force_reanalysis_terms)
         manual_selection = None
 
@@ -4611,6 +4724,21 @@ class BridgeApp:
                     "命中本地强制重分析词，并识别到新的分析方向。"
                     if selection is not None
                     else "命中本地强制重分析词，沿用上一轮分析类型重新执行。"
+                ),
+            )
+        if followup_action == "retry":
+            selection = resolve_manual_selection() if self._followup_has_explicit_bug_route(route_content) else None
+            return _BugReanalysisDecision(
+                True,
+                True,
+                plans=getattr(selection, "plans", None),
+                skill_name=getattr(selection, "skill_name", ""),
+                skill_label=getattr(selection, "skill_label", ""),
+                source=getattr(selection, "source", ""),
+                reason=(
+                    "命中统一续跑动作，并识别到新的分析方向。"
+                    if selection is not None
+                    else "命中统一续跑动作，沿用上一轮分析类型重新执行。"
                 ),
             )
         if parse_signal_request(

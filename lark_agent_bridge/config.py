@@ -60,7 +60,7 @@ _PROVIDER_PRESETS: dict[str, dict[str, str]] = {
     # Xiaomi MiMo — SK (pay-as-you-go) account
     "xiaomi-sk": {
         "base_url": "https://api.xiaomimimo.com/anthropic",
-        "primary_model": "mimo-v2.5",
+        "primary_model": "mimo-v2.5-pro",
         "fast_model": "mimo-v2.5",
         "api_format": "anthropic",
     },
@@ -72,12 +72,28 @@ _PROVIDER_PRESETS: dict[str, dict[str, str]] = {
         "fallback_model": "claude-opus-4-6",
         "api_format": "anthropic",
     },
-    # yybb HK endpoint — Codex/GPT models via Anthropic-compat gateway
+    # yybb endpoint — Codex/GPT models via Anthropic-compat gateway
     "yybb-codex": {
-        "base_url": "https://hk.yybb.codes",
-        "primary_model": "gpt-5.5",
-        "fast_model": "gpt-5.4",
+        "base_url": "https://yybb.codes",
+        "primary_model": "gpt-5.4",
+        "fast_model": "gpt-5.4-mini",
         "api_format": "anthropic",
+    },
+    # yybb endpoint — Codex/GPT models via OpenAI-compat gateway
+    # yybb.codes 同时支持 /v1/chat/completions，base_url 需带 /v1
+    "yybb-codex-openai": {
+        "base_url": "https://yybb.codes/v1",
+        "primary_model": "gpt-5.4",
+        "fast_model": "gpt-5.4-mini",
+        "api_format": "openai",
+    },
+    # TokenPanda proxy — OpenAI-compat gateway (hub.tokenpanda.top)
+    # panda 的 base_url 自带 /v1
+    "panda": {
+        "base_url": "https://hub.tokenpanda.top/v1",
+        "primary_model": "gpt-5.4",
+        "fast_model": "gpt-4.1-mini",
+        "api_format": "openai",
     },
     # Official Codex endpoint (requires cc-switch to inject browser token)
     "codex-official": {
@@ -98,7 +114,7 @@ _PROVIDER_PRESETS: dict[str, dict[str, str]] = {
     # Standard OpenAI API
     "openai": {
         "base_url": "https://api.openai.com/v1",
-        "primary_model": "gpt-4.1",
+        "primary_model": "gpt-5.4",
         "fast_model": "gpt-4.1-mini",
         "api_format": "openai",
     },

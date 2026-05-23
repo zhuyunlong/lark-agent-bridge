@@ -85,14 +85,16 @@ enabled = false
 # Individual fields below override the preset if set.
 #
 # Built-in presets:
-#   "xiaomi-tp"       Xiaomi MiMo token-plan subscription  (Anthropic format)
-#   "xiaomi-sk"       Xiaomi MiMo SK pay-as-you-go         (Anthropic format)
-#   "yybb"            yybb.codes Claude proxy               (Anthropic format)
-#   "yybb-codex"      yybb.codes Codex/GPT endpoint         (Anthropic format)
-#   "codex-official"  chatgpt.com Codex (requires cc-switch)(Anthropic format)
-#   "cc-switch"       Local cc-switch proxy 127.0.0.1:15721 (zero-config!)
-#   "openai"          Standard OpenAI API                   (OpenAI format)
-#   "deepseek"        DeepSeek API                          (OpenAI format)
+#   "xiaomi-tp"         Xiaomi MiMo token-plan subscription  (Anthropic format)
+#   "xiaomi-sk"         Xiaomi MiMo SK pay-as-you-go         (Anthropic format)
+#   "yybb"              yybb.codes Claude proxy               (Anthropic format)
+#   "yybb-codex"        yybb.codes Codex/GPT endpoint         (Anthropic format)
+#   "yybb-codex-openai" yybb.codes Codex/GPT endpoint         (OpenAI format)
+#   "panda"             TokenPanda hub.tokenpanda.top          (OpenAI format)
+#   "codex-official"    chatgpt.com Codex (requires cc-switch)(Anthropic format)
+#   "cc-switch"         Local cc-switch proxy 127.0.0.1:15721 (zero-config!)
+#   "openai"            Standard OpenAI API                   (OpenAI format)
+#   "deepseek"          DeepSeek API                          (OpenAI format)
 #
 # Minimal Xiaomi example:
 #   preset = "xiaomi-tp"

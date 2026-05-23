@@ -199,6 +199,21 @@ TASK_TERMS = (
     "命令",
     "权限",
 )
+FOLLOWUP_RETRY_TERMS = (
+    "重试",
+    "重试一次",
+    "再来一次",
+    "重新跑",
+    "重新执行",
+    "再跑一次",
+    "重跑",
+)
+FOLLOWUP_CONTINUE_TERMS = (
+    "继续",
+    "继续分析",
+    "接着查",
+    "继续查",
+)
 DIRECT_ANALYSIS_TERMS = (
     "分析",
     "排查",
@@ -301,6 +316,18 @@ def parse_addr2line_request(text: str, *, allow_missing_address: bool = False) -
         triggered=True,
         error=error,
     )
+
+
+def parse_followup_action(text: str) -> str:
+    cleaned = _strip_leading_mentions(text or "").strip()
+    lowered = cleaned.casefold()
+    if _contains_any(cleaned, lowered, FOLLOWUP_RETRY_TERMS) or re.search(r"^(?:再|重新).{0,12}(?:一次|一遍)$", cleaned):
+        return "retry"
+    if _contains_any(cleaned, lowered, FOLLOWUP_CONTINUE_TERMS):
+        return "continue"
+    if cleaned:
+        return "ask"
+    return "unknown"
 
 
 def build_basic_chat_reply(text: str, *, command_prefixes: list[str] | None = None) -> str | None:

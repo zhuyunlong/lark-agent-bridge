@@ -68,7 +68,12 @@ class FakeLarkClient:
 
     def reply(self, message_id, text, *, markdown=False):
         self.replies.append({"message_id": message_id, "text": text, "markdown": markdown})
-        return CommandResult(command=["reply"], returncode=0)
+        reply_message_id = f"om_reply_{len(self.replies)}"
+        return CommandResult(
+            command=["reply"],
+            returncode=0,
+            stdout=f'{{"data":{{"message_id":"{reply_message_id}"}}}}',
+        )
 
     def reply_card(self, message_id, card_json):
         card_message_id = f"om_card_{len(self.card_replies) + 1}"
@@ -1709,7 +1714,7 @@ class AppTests(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertEqual(result.message, "omlx 模型回复")
         self.assertEqual(fake_chat.prompts, ["帮我解释一下什么是 token？"])
-        self.assertEqual(len(fake_lark.sent), 1)
+        self.assertIn("om_1", _all_reply_message_ids(fake_lark))
 
     def test_knowledge_question_uses_knowledge_card_before_omlx(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1743,8 +1748,164 @@ class AppTests(unittest.TestCase):
         self.assertEqual(fake_knowledge.questions, ["知识库 OTA信号如何模拟"])
         self.assertEqual(fake_chat.prompts, [])
         self.assertEqual(len(fake_lark.card_replies), 1)
+        self.assertEqual(fake_lark.card_replies[0]["message_id"], "om_kb")
         self.assertIn("知识库回答", fake_lark.card_replies[0]["card_json"])
         self.assertIn("SIGNAL_OTA_ST 定义", fake_lark.card_replies[0]["card_json"])
+
+    def test_group_knowledge_followup_in_reply_chain_without_mention(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_lark = FakeLarkClient()
+            fake_chat = FakeOmlxChatClient()
+            fake_knowledge = FakeKnowledgeService()
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    allowed_chats=["oc_denied"],
+                    knowledge=KnowledgeOptions(enabled=True),
+                ),
+                lark_client=fake_lark,
+                chat_client=fake_chat,
+                intent_runner=FakeIntentRunner(enabled=False),
+                knowledge_service=fake_knowledge,
+            )
+            app.conversation_store.remember(
+                root_message_id="om_root_request",
+                chat_id="oc_denied",
+                mode="knowledge_qa",
+                request_text="知识库 OTA信号如何模拟",
+                summary_text="第一轮知识回答",
+                report_url="",
+                report_excerpt="",
+            )
+            app.conversation_store.remember_alias(
+                alias_message_id="om_bot_kb_reply",
+                root_message_id="om_root_request",
+            )
+
+            result = app.handle_event(
+                event(
+                    event_id="evt_group_followup_no_mention",
+                    message_id="om_group_followup_no_mention",
+                    reply_to="om_bot_kb_reply",
+                    content="知识库 OTA信号如何模拟",
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.details["mode"], "knowledge_qa")
+        self.assertEqual(fake_knowledge.questions[-1], "知识库 OTA信号如何模拟")
+        self.assertEqual(len(fake_lark.card_replies), 1)
+        self.assertEqual(fake_lark.card_replies[0]["message_id"], "om_group_followup_no_mention")
+
+    def test_group_bug_followup_in_reply_chain_without_mention(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = Path(tmp) / "bug_metadata.md"
+            html = Path(tmp) / "bug_report.html"
+            metadata.write_text("bug", encoding="utf-8")
+            html.write_text("<html><body>根因是首帧超时</body></html>", encoding="utf-8")
+            fake_lark = FakeLarkClient()
+            fake_bug = FakeBugRunner(metadata, html)
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    allowed_chats=["oc_denied"],
+                ),
+                lark_client=fake_lark,
+                bug_runner=fake_bug,
+                chat_client=FakeOmlxChatClient(),
+            )
+            app.conversation_store.remember(
+                root_message_id="om_bug_root",
+                chat_id="oc_denied",
+                mode="bug_analysis",
+                request_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722 调查3D启动时序",
+                summary_text="bug 分析完成",
+                report_url="http://report",
+                report_excerpt="SceneType=Main",
+            )
+            app.conversation_store.remember_alias(
+                alias_message_id="om_bug_reply",
+                root_message_id="om_bug_root",
+            )
+
+            followup = app.handle_event(
+                event(
+                    event_id="evt_group_bug_followup_no_mention",
+                    message_id="om_group_bug_followup_no_mention",
+                    reply_to="om_bug_reply",
+                    content="问题时间是2026-05-11 23:12分左右",
+                )
+            )
+
+        self.assertTrue(followup.success)
+        self.assertEqual(followup.details["mode"], "bug_agent_followup")
+        self.assertEqual(len(fake_bug.agent_followup_calls), 1)
+        self.assertEqual(fake_bug.agent_followup_calls[0]["followup_text"], "问题时间是2026-05-11 23:12分左右")
+
+    def test_group_bug_followup_retry_once_routes_to_bug_reanalysis(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = Path(tmp) / "bug_metadata.md"
+            html = Path(tmp) / "bug_report.html"
+            metadata.write_text("bug", encoding="utf-8")
+            html.write_text("<html><body>根因是首帧超时</body></html>", encoding="utf-8")
+            fake_lark = FakeLarkClient()
+            fake_bug = FakeBugRunner(metadata, html)
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    allowed_chats=["oc_denied"],
+                ),
+                lark_client=fake_lark,
+                bug_runner=fake_bug,
+                chat_client=FakeOmlxChatClient(),
+            )
+            app.conversation_store.remember(
+                root_message_id="om_bug_retry_root",
+                chat_id="oc_denied",
+                mode="bug_analysis",
+                request_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722 调查3D启动时序",
+                summary_text="bug 分析完成",
+                report_url="http://report",
+                report_excerpt="SceneType=Main",
+            )
+            app.conversation_store.remember_alias(
+                alias_message_id="om_bug_retry_reply",
+                root_message_id="om_bug_retry_root",
+            )
+            original = event(
+                event_id="evt_bug_retry_original",
+                message_id="om_bug_retry_root",
+                content="@bot https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722 调查3D启动时序",
+            )
+            app.activity_store.record_event(original)
+            app.activity_store.record_result(
+                original,
+                TaskResult(
+                    success=True,
+                    message="bug 分析完成",
+                    details={
+                        "mode": "bug_analysis",
+                        "conversation_root_message_id": "om_bug_retry_root",
+                    },
+                ),
+            )
+
+            followup = app.handle_event(
+                event(
+                    event_id="evt_group_bug_retry_once",
+                    message_id="om_group_bug_retry_once",
+                    reply_to="om_bug_retry_reply",
+                    content="重试一次",
+                )
+            )
+
+        self.assertTrue(followup.success)
+        self.assertEqual(followup.details["mode"], "bug_reanalysis")
+        self.assertEqual(len(fake_bug.reanalysis_calls), 1)
+        self.assertTrue(fake_bug.reanalysis_calls[0]["force_rerun"])
 
     def test_internal_operation_question_with_knowledge_hit_uses_knowledge_probe_before_chat(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1834,7 +1995,8 @@ class AppTests(unittest.TestCase):
         self.assertEqual(fake_knowledge.search_questions, ["上下电如何模拟"])
         self.assertEqual(fake_knowledge.questions, [])
         self.assertEqual(fake_chat.prompts, [])
-        self.assertIn("知识库未命中", fake_lark.sent[0]["text"])
+        self.assertEqual(fake_lark.replies[0]["message_id"], "om_1")
+        self.assertIn("知识库未命中", fake_lark.replies[0]["text"])
 
     def test_knowledge_probe_can_reply_with_low_confidence_command_candidates(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2017,9 +2179,10 @@ class AppTests(unittest.TestCase):
         self.assertEqual(result.details["mode"], "basic_chat")
         self.assertEqual(fake_lark.card_replies, [])
         self.assertEqual(fake_lark.updated_cards, [])
-        self.assertEqual(len(fake_lark.sent), 1)
-        self.assertIn("常用触发方式", fake_lark.sent[0]["text"])
-        self.assertIn("| Bug 分析 |", fake_lark.sent[0]["text"])
+        self.assertEqual(len(fake_lark.replies), 1)
+        self.assertEqual(fake_lark.replies[0]["message_id"], "om_1")
+        self.assertIn("常用触发方式", fake_lark.replies[0]["text"])
+        self.assertIn("| Bug 分析 |", fake_lark.replies[0]["text"])
 
     def test_stale_help_replayed_before_listener_ready_is_skipped(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2118,8 +2281,9 @@ class AppTests(unittest.TestCase):
         self.assertEqual(result.details["mode"], "basic_chat")
         self.assertEqual(fake_lark.card_replies, [])
         self.assertEqual(fake_lark.updated_cards, [])
-        self.assertEqual(len(fake_lark.sent), 1)
-        self.assertIn("Lark Agent Bridge", fake_lark.sent[0]["text"])
+        self.assertEqual(len(fake_lark.replies), 1)
+        self.assertEqual(fake_lark.replies[0]["message_id"], "om_1")
+        self.assertIn("Lark Agent Bridge", fake_lark.replies[0]["text"])
 
     def test_agent_intent_routes_simple_question_to_chat(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2640,8 +2804,9 @@ class AppTests(unittest.TestCase):
         self.assertEqual(result.details["mode"], "rom_version_lookup")
         self.assertEqual(len(fake_rom.requests), 1)
         self.assertEqual(fake_handler.requests, [])
-        self.assertEqual(len(fake_lark.sent), 1)
-        self.assertIn("导航版本", fake_lark.sent[0]["text"])
+        self.assertEqual(len(fake_lark.replies), 1)
+        self.assertEqual(fake_lark.replies[0]["message_id"], "om_1")
+        self.assertIn("导航版本", fake_lark.replies[0]["text"])
 
     def test_addr2line_request_routes_to_runner_with_rom(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2736,7 +2901,7 @@ class AppTests(unittest.TestCase):
         self.assertEqual(len(fake_addr2line.requests), 1)
         self.assertEqual(fake_addr2line.requests[0].rom_version, rom)
         self.assertEqual(fake_addr2line.requests[0].apk_version, "V6.1.0_20260327175820_Release")
-        self.assertIn("addr2line 反解完成", fake_lark.sent[-1]["text"])
+        self.assertIn("addr2line 反解完成", fake_lark.replies[-1]["text"])
 
     def test_addr2line_request_reuses_recent_same_chat_rom_lookup(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -3639,6 +3804,55 @@ class AppTests(unittest.TestCase):
         self.assertEqual(fake_bug.agent_followup_calls[0]["followup_text"], "问题时间是2026-05-11 23:12分左右")
         self.assertIn("om_followup_chain", _all_reply_message_ids(fake_lark))
 
+    def test_chat_followup_from_middle_reply_ignores_later_branch_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_lark = FakeLarkClient()
+            fake_chat = FakeOmlxChatClient()
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    allowed_chats=["oc_denied"],
+                ),
+                lark_client=fake_lark,
+                chat_client=fake_chat,
+                intent_runner=FakeIntentRunner(enabled=False),
+            )
+            app.conversation_store.remember(
+                root_message_id="om_root_chat",
+                chat_id="ou_chat_1",
+                mode="omlx_chat",
+                request_text="第一问",
+                summary_text="第一答",
+                report_url="",
+                report_excerpt="",
+            )
+            app.conversation_store.append_exchange("om_root_chat", user_text="第一问", assistant_text="第一答")
+            app.conversation_store.remember_alias(alias_message_id="om_bot_reply_1", root_message_id="om_root_chat")
+            app.conversation_store.append_exchange("om_root_chat", user_text="第二问", assistant_text="第二答")
+
+            result = app.handle_event(
+                event(
+                    event_id="evt_mid_branch_followup",
+                    message_id="om_mid_branch_followup",
+                    chat_id="ou_chat_1",
+                    chat_type="p2p",
+                    reply_to="om_bot_reply_1",
+                    content="第三问",
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.details["mode"], "analysis_followup")
+        self.assertEqual(len(fake_chat.context_calls), 1)
+        self.assertEqual(
+            fake_chat.context_calls[0]["history"],
+            [
+                {"role": "user", "content": "第一问"},
+                {"role": "assistant", "content": "第一答"},
+            ],
+        )
+
     def test_followup_reply_to_progress_card_resolves_original_bug_context(self):
         with tempfile.TemporaryDirectory() as tmp:
             metadata = Path(tmp) / "bug_metadata.md"
@@ -3807,6 +4021,179 @@ class AppTests(unittest.TestCase):
         text_replies_for_p2p = [r for r in fake_lark.replies if r["message_id"] == "om_followup_p2p"]
         if text_replies_for_p2p:
             self.assertFalse(text_replies_for_p2p[-1]["text"].startswith("<at "))
+
+    def test_group_addr2line_followup_in_reply_chain_without_mention(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_lark = FakeLarkClient()
+            fake_addr2line = FakeAddr2LineRunner()
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    allowed_chats=["oc_denied"],
+                ),
+                lark_client=fake_lark,
+                addr2line_runner=fake_addr2line,
+            )
+            app.conversation_store.remember(
+                root_message_id="om_addr_root",
+                chat_id="oc_denied",
+                mode="addr2line_resolve",
+                request_text="@bot ROM版本号XMARTQGZHE29E5_V6.1.0.8810_20260327200937.9_REV01_USER_Release 反解堆栈",
+                summary_text="addr2line 反解完成",
+                report_url="",
+                report_excerpt="",
+            )
+            app.conversation_store.remember_alias(
+                alias_message_id="om_addr_reply",
+                root_message_id="om_addr_root",
+            )
+            app.activity_store.record_result(
+                event(message_id="om_addr_root", content="@bot ROM版本号XMARTQGZHE29E5_V6.1.0.8810_20260327200937.9_REV01_USER_Release 反解堆栈"),
+                TaskResult(
+                    success=True,
+                    message="addr2line 反解完成",
+                    details={
+                        "mode": "addr2line_resolve",
+                        "rom_version": "XMARTQGZHE29E5_V6.1.0.8810_20260327200937.9_REV01_USER_Release",
+                        "resources": [
+                            {"kind": "local", "value": str(Path(tmp) / "crash_bundle.zip")},
+                        ],
+                    },
+                ),
+            )
+
+            result = app.handle_event(
+                event(
+                    event_id="evt_group_addr_followup_no_mention",
+                    message_id="om_group_addr_followup_no_mention",
+                    reply_to="om_addr_reply",
+                    content="再反解一次",
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.details["mode"], "addr2line_resolve")
+        self.assertEqual(len(fake_addr2line.requests), 1)
+        self.assertEqual(
+            fake_addr2line.requests[0].rom_version,
+            "XMARTQGZHE29E5_V6.1.0.8810_20260327200937.9_REV01_USER_Release",
+        )
+        self.assertEqual(fake_addr2line.requests[0].resources[0].value, str(Path(tmp) / "crash_bundle.zip"))
+
+    def test_group_addr2line_followup_retry_once_reuses_addr2line_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_lark = FakeLarkClient()
+            fake_addr2line = FakeAddr2LineRunner()
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    allowed_chats=["oc_denied"],
+                ),
+                lark_client=fake_lark,
+                addr2line_runner=fake_addr2line,
+                chat_client=FakeOmlxChatClient(),
+            )
+            app.conversation_store.remember(
+                root_message_id="om_addr_root_retry",
+                chat_id="oc_denied",
+                mode="addr2line_resolve",
+                request_text="@bot ROM版本号XMARTQGZHE29E5_V6.1.0.8810_20260327200937.9_REV01_USER_Release 反解堆栈",
+                summary_text="addr2line 反解完成",
+                report_url="",
+                report_excerpt="",
+            )
+            app.conversation_store.remember_alias(
+                alias_message_id="om_addr_reply_retry",
+                root_message_id="om_addr_root_retry",
+            )
+            app.activity_store.record_result(
+                event(message_id="om_addr_root_retry", content="@bot ROM版本号XMARTQGZHE29E5_V6.1.0.8810_20260327200937.9_REV01_USER_Release 反解堆栈"),
+                TaskResult(
+                    success=True,
+                    message="addr2line 反解完成",
+                    details={
+                        "mode": "addr2line_resolve",
+                        "rom_version": "XMARTQGZHE29E5_V6.1.0.8810_20260327200937.9_REV01_USER_Release",
+                        "resources": [
+                            {"kind": "local", "value": str(Path(tmp) / "retry_bundle.zip")},
+                        ],
+                    },
+                ),
+            )
+
+            result = app.handle_event(
+                event(
+                    event_id="evt_group_addr_retry_once",
+                    message_id="om_group_addr_retry_once",
+                    reply_to="om_addr_reply_retry",
+                    content="重试一次",
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.details["mode"], "addr2line_resolve")
+        self.assertEqual(len(fake_addr2line.requests), 1)
+        self.assertEqual(fake_addr2line.requests[0].resources[0].value, str(Path(tmp) / "retry_bundle.zip"))
+
+    def test_group_rom_lookup_followup_in_reply_chain_without_mention(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_lark = FakeLarkClient()
+            fake_rom = FakeRomVersionRunner()
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    allowed_chats=["oc_denied"],
+                ),
+                lark_client=fake_lark,
+                rom_version_runner=fake_rom,
+            )
+            app.conversation_store.remember(
+                root_message_id="om_rom_root",
+                chat_id="oc_denied",
+                mode="rom_version_lookup",
+                request_text="@bot ROM版本号XMARTQGZHE29E5_V6.1.0.8810_20260327200937.9_REV01_USER_Release 查导航版本",
+                summary_text="ROM 版本查询完成",
+                report_url="",
+                report_excerpt="",
+            )
+            app.conversation_store.remember_alias(
+                alias_message_id="om_rom_reply",
+                root_message_id="om_rom_root",
+            )
+            app.activity_store.record_result(
+                event(message_id="om_rom_root", content="@bot ROM版本号XMARTQGZHE29E5_V6.1.0.8810_20260327200937.9_REV01_USER_Release 查导航版本"),
+                TaskResult(
+                    success=True,
+                    message="ROM 版本查询完成",
+                    details={
+                        "mode": "rom_version_lookup",
+                        "rom_version": "XMARTQGZHE29E5_V6.1.0.8810_20260327200937.9_REV01_USER_Release",
+                        "required_outputs": {
+                            "navigation_version": "V6.1.0_20260327175820_Release",
+                        },
+                    },
+                ),
+            )
+
+            result = app.handle_event(
+                event(
+                    event_id="evt_group_rom_followup_no_mention",
+                    message_id="om_group_rom_followup_no_mention",
+                    reply_to="om_rom_reply",
+                    content="再查一次",
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.details["mode"], "rom_version_lookup")
+        self.assertEqual(len(fake_rom.requests), 1)
+        self.assertEqual(
+            fake_rom.requests[0].rom_version,
+            "XMARTQGZHE29E5_V6.1.0.8810_20260327200937.9_REV01_USER_Release",
+        )
 
     def test_followup_reanalysis_fetches_current_message_reply_to_when_event_lacks_it(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -5256,7 +5643,8 @@ class AppTests(unittest.TestCase):
         self.assertFalse(result.skipped)
         self.assertEqual(result.details["mode"], "omlx_chat")
         self.assertEqual(fake_chat.prompts, ["讲个笑话"])
-        self.assertEqual(fake_lark.sent[0]["text"], "omlx 模型回复")
+        self.assertEqual(fake_lark.replies[0]["message_id"], "om_1")
+        self.assertEqual(fake_lark.replies[0]["text"], "omlx 模型回复")
 
     def test_group_chat_command_requires_mention(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -5299,7 +5687,8 @@ class AppTests(unittest.TestCase):
         self.assertFalse(result.skipped)
         self.assertEqual(result.details["mode"], "omlx_chat")
         self.assertEqual(fake_chat.prompts, ["讲个笑话"])
-        self.assertEqual(len(fake_lark.sent), 1)
+        self.assertEqual(len(fake_lark.replies), 1)
+        self.assertEqual(fake_lark.replies[0]["message_id"], "om_1")
 
     def test_group_mentioned_chat_command_accepts_prefix_without_slash(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -5379,7 +5768,8 @@ class AppTests(unittest.TestCase):
         self.assertEqual(result.details["mode"], "omlx_chat")
         self.assertEqual(fake_lark.card_replies, [])
         self.assertEqual(fake_lark.updated_cards, [])
-        self.assertEqual(fake_lark.sent[0]["text"], "omlx 模型回复")
+        self.assertEqual(fake_lark.replies[0]["message_id"], "om_1")
+        self.assertEqual(fake_lark.replies[0]["text"], '<at user_id="ou_1"></at> omlx 模型回复')
 
     def test_explicit_bug_link_bypasses_intent_classifier(self):
         class FailingIntentRunner(FakeIntentRunner):
@@ -5475,7 +5865,8 @@ class AppTests(unittest.TestCase):
         self.assertEqual(result.details["mode"], "omlx_chat")
         self.assertEqual(fake_lark.card_replies, [])
         self.assertEqual(fake_lark.updated_cards, [])
-        self.assertEqual(fake_lark.sent[0]["text"], "omlx 模型回复")
+        self.assertEqual(fake_lark.replies[0]["message_id"], "om_1")
+        self.assertEqual(fake_lark.replies[0]["text"], '<at user_id="ou_1"></at> omlx 模型回复')
 
     def test_group_bug_request_accepts_configured_bot_name_at_end(self):
         with tempfile.TemporaryDirectory() as tmp:

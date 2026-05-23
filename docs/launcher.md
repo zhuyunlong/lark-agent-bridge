@@ -1,292 +1,323 @@
 # Multi-Config Launcher Guide
 
-## Overview
+## 启动命令速查
 
-The `run.sh` launcher simplifies starting the lark-agent-bridge service with different AI provider configurations.
+```bash
+./run.sh cc-switch      # cc-switch 代理（零配置）
+./run.sh claude-oauth   # Claude 官方 OAuth（经 cc-switch）
+./run.sh claude-key     # Anthropic API Key 直连
+./run.sh openai-oauth   # OpenAI 官方 OAuth（经 cc-switch）
+./run.sh openai-key     # OpenAI API Key 直连
+./run.sh xiaomi-tp      # 小米 MiMo Token Plan（默认 config.toml）
+./run.sh                # 默认 config.toml
+```
 
-## Available Presets
+其他启动脚本:
+```bash
+./run-openai.sh                    # OpenAI 兼容模式（支持 .env 加载 + --preset 覆盖）
+./run-openai.sh --preset panda     # 覆盖 preset
+scripts/run-listener.sh listen     # 手动运行（默认 config.toml）
+scripts/run-listener.sh check      # 环境/配置诊断
+scripts/run-listener.sh dry-run    # 验证不执行
+LARK_AGENT_BRIDGE_CONFIG=config.cc-switch.toml scripts/run-listener.sh listen  # 指定配置
+```
 
-### 1. CC-Switch Preset (Recommended)
+---
+
+## 两种接入模式
+
+### 模式 A: cc-switch 代理
+
+```
+bridge → Anthropic 格式 → cc-switch:15721 → [协议转换] → 后端供应商
+```
+
+- bridge 固定发 Anthropic 格式到 `127.0.0.1:15721`
+- cc-switch 负责路由、协议转换、token 注入
+- 在 cc-switch UI 里切换 provider，bridge 配置不用动
+- `api_key = "PROXY_MANAGED"`（无需填真实 key）
+
+### 模式 B: API Key 直连
+
+```
+bridge → [Anthropic 或 OpenAI 格式] → 供应商 API
+```
+
+- bridge 直接调用供应商 API
+- 需要填 api_key（或环境变量 `LARK_AGENT_BRIDGE_AI_API_KEY`）
+- 不依赖 cc-switch
+
+---
+
+## cc-switch 代理架构（重要）
+
+### proxy 是 per app_type 排他的
+
+cc-switch 的 `proxy_config` 表按 app_type 管理，**同一时刻只有一个 app_type 的 proxy 生效**：
+
+```
+app_type='claude'  listen_port=15721  enabled=1   ← 当前
+app_type='codex'   listen_port=15721  enabled=0
+app_type='gemini'  listen_port=15721  enabled=0
+```
+
+三个 app_type 共用同一个端口 `15721`，但同时只能开一个。
+
+### 两层选择
+
+在 cc-switch UI 里的操作分两层：
+
+1. **选 app_type**：Claude / Codex / Gemini（决定 proxy 入口 + 接受的协议格式）
+2. **选 provider**：该 app_type 下的某个供应商（NextApi / yybb / Codex OAuth 等）
+
+### 协议约束
+
+| proxy app_type | 接受的入口协议 | 能否转成 OpenAI 发给后端 |
+|---|---|---|
+| claude | Anthropic（`/v1/messages` + `x-api-key`） | 能，cc-switch 内部转 |
+| codex | OpenAI（`/v1/chat/completions`） | — |
+| gemini | Gemini 格式 | — |
+
+**关键**：proxy 在 claude 时，bridge 只能发 Anthropic 格式。cc-switch 可以在后端转成 OpenAI，但入口协议锁死。如果必须用 OpenAI 协议入口，需要切 proxy 到 codex。
+
+### Provider 挂载位置
+
+Provider 可以挂在不同 app_type 下。例如你 cc-switch 里的数据：
+
+```
+"NextApi"        → app_type="claude",  Anthropic 格式, API Key 认证
+"Codex"          → app_type="claude",  OpenAI Responses 格式, codex_oauth 认证
+"codex-official" → app_type="codex",   OpenAI 格式, ChatGPT OAuth token
+"YyBbCode"       → app_type="codex",   OpenAI 格式, API Key 认证
+```
+
+**"Codex" provider 虽然底层是 OpenAI 协议，但它挂在 claude app_type 下**，所以 proxy 在 claude 时也能用——cc-switch 会把入口的 Anthropic 请求转成 OpenAI Responses 给 chatgpt.com。
+
+---
+
+## Preset 详解
+
+### 1. cc-switch
 
 **Config**: `config.cc-switch.toml`
+**协议**: Anthropic → cc-switch:15721
 
 ```bash
 ./run.sh cc-switch
 ```
 
-**What it does:**
-- Routes all AI requests to local `cc-switch` proxy at `127.0.0.1:15721`
-- `cc-switch` manages multiple LLM providers (Claude, Codex, DeepSeek, etc.)
-- **Zero configuration**: no API keys needed
-- Provider can be switched dynamically via cc-switch UI
-- Supports fallback chains configured in cc-switch
+- 零配置，无需 API key
+- 在 cc-switch UI 切换 provider 即可改变后端
+- 适用于开发/测试，灵活切换多个供应商
 
-**Requirements:**
-- cc-switch service running: `lsof -i :15721` should show LISTEN
-- Valid Feishu bot credentials in config
-
-**Use case:**
-- Development / testing with multiple providers
-- Flexibility: switch providers without restarting
-- Cost control: route expensive queries to cheaper providers
-
-**Status of cc-switch:**
-```bash
-# Check if cc-switch is running
-lsof -i :15721
-
-# Typical output if running:
-# cc-switch  6715 zhuyl   21u  IPv4 0xabcdef  0t0  TCP 127.0.0.1:15721 (LISTEN)
-```
+**要求**: cc-switch 运行中 (`lsof -i :15721`)
 
 ---
 
-### 2. OpenAI Direct API
+### 2. claude-oauth
 
-**Config**: `config.openai.toml`
+**Config**: `config.claude-oauth.toml`
+**协议**: Anthropic → cc-switch:15721 → Anthropic（或 cc-switch 转协议）
 
 ```bash
-./run.sh openai
+./run.sh claude-oauth
 ```
 
-**What it does:**
-- Routes all AI requests directly to OpenAI API
-- No local proxy or cc-switch needed
-- Requires valid OpenAI API key
+- 经 cc-switch 代理，cc-switch 管理 OAuth token 刷新和注入
+- proxy 必须在 claude app_type
+- 适用于使用 Anthropic 官方 OAuth 或挂在 claude app_type 下的其他 provider
 
-**Requirements:**
-- OpenAI API key: `export LARK_AGENT_BRIDGE_AI_API_KEY=sk-...`
-- Valid Feishu bot credentials in config
+**要求**: cc-switch 运行中 + proxy 在 claude + 已激活目标 provider
 
-**API key setup (choose one):**
+**注意**: 即使后端是 OpenAI 协议的 provider（如 "Codex"），只要它挂在 claude app_type 下就能用，cc-switch 会自动转协议。
+
+---
+
+### 3. claude-key
+
+**Config**: `config.claude-key.toml`
+**协议**: Anthropic → api.anthropic.com
 
 ```bash
-# Option A: Environment variable (preferred for security)
+export LARK_AGENT_BRIDGE_AI_API_KEY="sk-ant-..."
+./run.sh claude-key
+```
+
+- 直连 Anthropic API，无需 cc-switch
+- 需要 Anthropic API Key: https://console.anthropic.com/settings/keys
+
+---
+
+### 4. openai-oauth
+
+**Config**: `config.openai-oauth.toml`
+**协议**: Anthropic → cc-switch:15721 → cc-switch 转 OpenAI → 后端
+
+```bash
+./run.sh openai-oauth
+```
+
+- 经 cc-switch 代理，bridge 发 Anthropic 格式，cc-switch 转协议给 OpenAI 后端
+- proxy 必须在 claude app_type（bridge 入口是 Anthropic 格式）
+- 适用于使用挂在 claude app_type 下的 OpenAI 协议 provider
+
+**要求**: cc-switch 运行中 + proxy 在 claude + 已激活目标 provider
+
+**与 claude-oauth 的区别**: 仅 `primary_model` 不同（`gpt-4.1` vs `claude-sonnet-4-6`），其他完全一样。都是发 Anthropic 格式到 cc-switch。
+
+---
+
+### 5. openai-key
+
+**Config**: `config.openai-key.toml`
+**协议**: OpenAI → api.openai.com
+
+```bash
 export LARK_AGENT_BRIDGE_AI_API_KEY="sk-proj-..."
-./run.sh openai
-
-# Option B: Edit config.openai.toml directly (not recommended)
-# config.openai.toml
-# [ai_provider]
-# api_key = "sk-proj-..."  # ⚠️ Never commit this to Git!
+./run.sh openai-key
 ```
 
-**Use case:**
-- Production deployments with stable OpenAI pricing
-- No dependency on local infrastructure
-- Cost predictable with GPT-4 / GPT-4.1 mini
-
-**Cost example (approximate):**
-- Intent classification: $0.0001-0.0005 per call
-- Bug summary: $0.001-0.005 per call
+- 直连 OpenAI API，无需 cc-switch
+- `api_format = "openai"`（走 `/v1/chat/completions`）
+- 也支持 DeepSeek 等 OpenAI 兼容接口（改 preset）
 
 ---
 
-## Usage Examples
+### 6. xiaomi-tp（默认）
 
-### Default Launch (cc-switch)
+**Config**: `config.toml`
+**协议**: Anthropic → token-plan-cn.xiaomimimo.com
 
 ```bash
-cd /path/to/lark-agent-bridge
+export LARK_AGENT_BRIDGE_AI_API_KEY="tp-..."
 ./run.sh
-
-# Output:
-# 🔌 Starting lark-agent-bridge with cc-switch preset...
-#    (cc-switch proxy at 127.0.0.1:15721 must be running)
-#    Check: lsof -i :15721
-# 📝 Config: /path/to/config.cc-switch.toml
-# 📡 Reports: http://localhost:18888
-# Press Ctrl+C to stop
 ```
 
-### Launch with OpenAI
+- 直连小米 MiMo Token Plan
+- `primary_model = "mimo-v2.5-pro"`
+- 项目默认配置
 
-```bash
-export LARK_AGENT_BRIDGE_AI_API_KEY="sk-..."
-./run.sh openai
+---
 
-# Output:
-# 🔑 Starting lark-agent-bridge with OpenAI direct API...
-#    Requires: LARK_AGENT_BRIDGE_AI_API_KEY or config.openai.toml api_key
-# 📝 Config: /path/to/config.openai.toml
-# 📡 Reports: http://localhost:18888
-# Press Ctrl+C to stop
-```
+## 配置文件总览
 
-### Show Help
+| 文件 | 接入方式 | 入口协议 | 需要 API Key | 需要 cc-switch | git |
+|---|---|---|---|---|---|
+| `config.cc-switch.toml` | cc-switch 代理 | Anthropic | 否 | 是 | ignored |
+| `config.claude-oauth.toml` | cc-switch 代理 | Anthropic | 否 | 是 | tracked |
+| `config.claude-key.toml` | Anthropic 直连 | Anthropic | 是 | 否 | ignored |
+| `config.openai-oauth.toml` | cc-switch 代理 | Anthropic | 否 | 是 | tracked |
+| `config.openai-key.toml` | OpenAI 直连 | OpenAI | 是 | 否 | ignored |
+| `config.toml` | 小米 MiMo 直连 | Anthropic | 是 | 否 | ignored |
+| `config.example.toml` | 参考模板 | — | — | — | tracked |
 
-```bash
-./run.sh invalid
+### claude-oauth vs openai-oauth
 
-# Output:
-# Usage: ./run.sh {cc-switch|openai}
-# 
-# Presets:
-#   cc-switch  - Use local cc-switch proxy (127.0.0.1:15721)
-#   openai     - Direct OpenAI API (requires API key)
-# 
-# Other cc-switch presets available in code:
-#   xiaomi-tp, xiaomi-sk, yybb, yybb-codex, deepseek
+两者都是 cc-switch 代理模式，入口都是 Anthropic 格式到 `127.0.0.1:15721`。区别仅在于预设的 `primary_model`：
+
+| | claude-oauth | openai-oauth |
+|---|---|---|
+| primary_model | `claude-sonnet-4-6` | `gpt-4.1` |
+| fast_model | `claude-haiku-4-5-20251001` | `gpt-4.1-mini` |
+| 适用场景 | Claude 系列模型 | GPT 系列模型 |
+
+实际走哪个后端，完全取决于 cc-switch UI 里激活的是哪个 provider。
+
+### cc-switch 代理 vs API Key 直连
+
+| | cc-switch 代理 | API Key 直连 |
+|---|---|---|
+| 配置复杂度 | 需要 cc-switch 运行 | 只需 API Key |
+| 切换供应商 | cc-switch UI 切换，bridge 不用动 | 改 TOML 配置或重启 |
+| OAuth 支持 | cc-switch 管理 token 生命周期 | 不支持（需手动抓 token） |
+| 协议转换 | cc-switch 自动转 | bridge 直接用目标协议 |
+| 延迟 | 多一跳代理 | 直连 |
+| 可用性 | 依赖 cc-switch 进程 | 依赖供应商 API |
+
+---
+
+## 所有配置共用的 section
+
+除了 `[ai_provider]`，所有 preset TOML 共享相同的 section 结构：
+
+- `[lark]` — 飞书 Bot 身份 (`bot_open_id`, `bot_name`)
+- `[bug_analysis]` — Bug 分析引擎 (subprocess 阶段)
+- `[intent_analysis]` — 意图分类
+- `[claude_agent]` — Claude Code skill 集成
+- `[source_investigation]` — 源码调查
+- `[omlx_chat]` — 本地模型轻量聊天
+- `[knowledge]` — 知识库 QA
+- `[report_server]` — HTTP 报告服务
+- `[download]` / `[job_retention]` / `[approval]` / `[notifications]`
+
+---
+
+## AI Provider Preset 列表
+
+`[ai_provider].preset` 可选值（定义在 `config.py` 的 `_PROVIDER_PRESETS`）：
+
+| Preset | Base URL | Primary Model | API Format | 需要 Key |
+|---|---|---|---|---|
+| `xiaomi-tp` | token-plan-cn.xiaomimimo.com | mimo-v2.5-pro | anthropic | 是 |
+| `xiaomi-sk` | api.xiaomimimo.com | mimo-v2.5 | anthropic | 是 |
+| `yybb` | yybb.codes | claude-sonnet-4-6 | anthropic | 是 |
+| `yybb-codex` | hk.yybb.codes | gpt-5.5 | anthropic | 是 |
+| `codex-official` | chatgpt.com/backend-api/codex | gpt-5.4 | anthropic | 是（需 cc-switch 注入） |
+| `cc-switch` | 127.0.0.1:15721 | mimo-v2.5-pro | anthropic | 否 |
+| `openai` | api.openai.com | gpt-4.1 | openai | 是 |
+| `deepseek` | api.deepseek.com | deepseek-chat | openai | 是 |
+
+使用方式：
+```toml
+[ai_provider]
+enabled = true
+preset = "yybb"
+api_key = "sk-..."    # 或 env: LARK_AGENT_BRIDGE_AI_API_KEY
 ```
 
 ---
 
-## Advanced: Custom Config
+## 环境变量
 
-If you need a custom configuration beyond the two presets, use the CLI directly:
-
-```bash
-python3 -m lark_agent_bridge listen --config config.custom.toml
-```
-
-Or with environment variable override:
-
-```bash
-export LARK_AGENT_BRIDGE_AI_PRESET="deepseek"
-export LARK_AGENT_BRIDGE_AI_API_KEY="sk-..."
-python3 -m lark_agent_bridge listen --config config.custom.toml
-```
+| 变量 | 用途 |
+|---|---|
+| `LARK_AGENT_BRIDGE_AI_API_KEY` | AI 供应商 API Key |
+| `LARK_AGENT_BRIDGE_AI_PRESET` | 覆盖 preset |
+| `LARK_AGENT_BRIDGE_AI_BASE_URL` | 覆盖 base_url |
+| `LARK_AGENT_BRIDGE_AI_PRIMARY_MODEL` | 覆盖 primary_model |
+| `LARK_AGENT_BRIDGE_BOT_OPEN_ID` | 飞书 Bot Open ID |
+| `LARK_AGENT_BRIDGE_BOT_NAME` | 飞书 Bot 名称 |
+| `LARK_AGENT_BRIDGE_DRY_RUN` | 干跑模式 |
+| `LARK_AGENT_BRIDGE_ADMIN_TOKEN` | 报告服务 Admin Token |
+| `LARK_AGENT_BRIDGE_CONFIG` | run-listener.sh 配置文件路径 |
 
 ---
 
-## Troubleshooting
+## 故障排查
 
-### cc-switch preset fails to connect
-
-**Error**: `Connection refused at 127.0.0.1:15721`
-
-**Solution:**
+### cc-switch 连接失败
 ```bash
-# 1. Check if cc-switch is running
-lsof -i :15721
-
-# 2. If not running, start it
-cc-switch  # or your local cc-switch launcher
-
-# 3. Verify it responds
-curl http://127.0.0.1:15721/health  # if it has a health endpoint
+lsof -i :15721                    # 检查 cc-switch 是否运行
 ```
 
-### OpenAI preset fails with invalid API key
-
-**Error**: `Invalid API key provided`
-
-**Solution:**
+### API Key 未设置
 ```bash
-# 1. Verify API key is set
 echo $LARK_AGENT_BRIDGE_AI_API_KEY
-
-# 2. If empty, set it
-export LARK_AGENT_BRIDGE_AI_API_KEY="sk-proj-..."
-
-# 3. Retry
-./run.sh openai
+export LARK_AGENT_BRIDGE_AI_API_KEY="your-key"
 ```
 
-### Script permission denied
-
-**Error**: `Permission denied: ./run.sh`
-
-**Solution:**
+### 配置文件不存在
 ```bash
-chmod +x run.sh
-./run.sh cc-switch
+ls config*.toml                   # 检查哪些配置文件存在
 ```
 
-### Reports server not accessible
+### OAuth token 过期
+cc-switch 管理 OAuth token 生命周期。如果 token 过期：
+1. 打开 cc-switch UI
+2. 找到对应的 OAuth provider（如 "Codex"、"Claude Official"）
+3. 重新登录刷新 token
 
-**Verify** port 18888 is not blocked:
-```bash
-lsof -i :18888
-# Should show LISTEN on 127.0.0.1:18888
-```
-
-**Access reports:**
-```
-http://127.0.0.1:18888/reports
-```
-
----
-
-## Configuration Files Reference
-
-### config.cc-switch.toml
-
-```toml
-[ai_provider]
-enabled = true
-preset = "cc-switch"    # Zero-config: cc-switch handles everything
-```
-
-**Advantages:**
-- Simplest config
-- Supports multiple providers without restarting
-- Provider switching via UI
-
-**Limitations:**
-- Requires cc-switch running
-- No direct control over model selection (managed by cc-switch)
-
----
-
-### config.openai.toml
-
-```toml
-[ai_provider]
-enabled = true
-preset = "openai"
-api_key = ""            # Set via env var (preferred) or here (not recommended)
-
-[ai_provider]
-intent_timeout_seconds = 30
-summary_timeout_seconds = 120
-summary_max_tokens = 4096
-```
-
-**Advantages:**
-- No local dependencies
-- Full model control
-- Predictable pricing with OpenAI
-
-**Limitations:**
-- Requires API key management
-- Outbound internet required
-
----
-
-## Performance Comparison
-
-| Metric | cc-switch | OpenAI Direct |
-|--------|-----------|---------------|
-| **Setup** | Complex (needs cc-switch running) | Simple (export API key) |
-| **Latency** | ~3-10s (HTTP to proxy) | ~3-10s (HTTP to OpenAI) |
-| **Provider Switching** | Dynamic (UI) | Requires restart |
-| **Cost** | Depends on cc-switch routing | Fixed OpenAI rates |
-| **Availability** | Depends on cc-switch | Depends on OpenAI API |
-
----
-
-## Environment Variables
-
-All presets support these environment variables:
-
-| Variable | Purpose | Example |
-|----------|---------|---------|
-| `LARK_AGENT_BRIDGE_AI_API_KEY` | API key for OpenAI / presets | `sk-...` |
-| `LARK_AGENT_BRIDGE_AI_PRESET` | Override preset | `openai`, `cc-switch` |
-| `LARK_AGENT_BRIDGE_BOT_NAME` | Bot name for Feishu | `My Feishu Bot` |
-| `LARK_AGENT_BRIDGE_DRY_RUN` | Dry-run mode | `1` (enabled) |
-
-See [configuration.md](configuration.md) for full reference.
-
----
-
-## Next Steps
-
-1. **Choose a preset** — Start with `./run.sh cc-switch` if cc-switch is running, otherwise `./run.sh openai`
-2. **Configure Feishu credentials** — Update config file with bot_id, bot_secret, webhook_secret
-3. **Test it** — Send a test message to the Feishu bot
-4. **Monitor reports** — Check http://127.0.0.1:18888/reports
-5. **Adjust settings** — Tune timeouts, token limits, or provider preferences as needed
-
-See [configuration.md](configuration.md) for detailed config options.
+### cc-switch proxy app_type 不匹配
+如果报错或请求被拒，检查 cc-switch UI 里当前激活的 proxy app_type：
+- `claude-oauth` / `openai-oauth` 都要求 proxy 在 **claude** app_type
+- 如果 proxy 在 codex，需要先切换

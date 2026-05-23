@@ -7,7 +7,12 @@ __pycache__/
 
 config.toml
 config.cc-switch.toml
+config.claude.toml
+config.claude-key.toml
+config.claude-oauth.toml
 config.openai.toml
+config.openai-key.toml
+config.openai-oauth.toml
 data/
 
 .pytest_cache/
