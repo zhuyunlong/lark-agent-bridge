@@ -39,6 +39,104 @@ DEFAULT_SIGNAL_ALIASES = {
     "SD over all": "SIGNAL_X3D_SD_OVER_ALL_DATA",
 }
 
+# ---------------------------------------------------------------------------
+# Built-in AI provider presets
+# ---------------------------------------------------------------------------
+# Setting ``preset = "..."`` in [ai_provider] auto-fills base_url, model names
+# and api_format.  You only need to supply ``api_key`` (or set the env var
+# LARK_AGENT_BRIDGE_AI_API_KEY).  Individual fields override the preset.
+#
+# Special case "cc-switch": the local cc-switch proxy at 127.0.0.1:15721 does
+# not need an api_key — it manages auth internally.
+# ---------------------------------------------------------------------------
+_PROVIDER_PRESETS: dict[str, dict[str, str]] = {
+    # Xiaomi MiMo — token-plan (subscription) account
+    "xiaomi-tp": {
+        "base_url": "https://token-plan-cn.xiaomimimo.com/anthropic",
+        "primary_model": "mimo-v2.5-pro",
+        "fast_model": "mimo-v2.5",
+        "api_format": "anthropic",
+    },
+    # Xiaomi MiMo — SK (pay-as-you-go) account
+    "xiaomi-sk": {
+        "base_url": "https://api.xiaomimimo.com/anthropic",
+        "primary_model": "mimo-v2.5",
+        "fast_model": "mimo-v2.5",
+        "api_format": "anthropic",
+    },
+    # yybb.codes — Claude-compatible proxy (Claude models)
+    "yybb": {
+        "base_url": "https://yybb.codes",
+        "primary_model": "claude-sonnet-4-6",
+        "fast_model": "claude-haiku-4-5-20251001",
+        "fallback_model": "claude-opus-4-6",
+        "api_format": "anthropic",
+    },
+    # yybb HK endpoint — Codex/GPT models via Anthropic-compat gateway
+    "yybb-codex": {
+        "base_url": "https://hk.yybb.codes",
+        "primary_model": "gpt-5.5",
+        "fast_model": "gpt-5.4",
+        "api_format": "anthropic",
+    },
+    # Official Codex endpoint (requires cc-switch to inject browser token)
+    "codex-official": {
+        "base_url": "https://chatgpt.com/backend-api/codex",
+        "primary_model": "gpt-5.4",
+        "fast_model": "gpt-5.4-mini",
+        "api_format": "anthropic",
+    },
+    # Local cc-switch proxy — zero-config, routes to whichever provider is
+    # currently active in cc-switch (no api_key needed).
+    "cc-switch": {
+        "base_url": "http://127.0.0.1:15721",
+        "primary_model": "mimo-v2.5-pro",
+        "fast_model": "mimo-v2.5",
+        "api_format": "anthropic",
+        "api_key": "PROXY_MANAGED",
+    },
+    # Standard OpenAI API
+    "openai": {
+        "base_url": "https://api.openai.com/v1",
+        "primary_model": "gpt-4.1",
+        "fast_model": "gpt-4.1-mini",
+        "api_format": "openai",
+    },
+    # DeepSeek — OpenAI-compatible
+    "deepseek": {
+        "base_url": "https://api.deepseek.com/v1",
+        "primary_model": "deepseek-chat",
+        "fast_model": "deepseek-chat",
+        "api_format": "openai",
+    },
+}
+
+
+def _apply_ai_preset(opts: AIProviderOptions) -> AIProviderOptions:
+    """Fill missing fields from a named preset. User-set values take precedence."""
+    preset_name = opts.preset.strip().lower()
+    if not preset_name:
+        return opts
+    preset = _PROVIDER_PRESETS.get(preset_name)
+    if not preset:
+        return opts
+    overrides: dict[str, Any] = {}
+    if not opts.base_url:
+        overrides["base_url"] = preset.get("base_url", "")
+    if not opts.primary_model:
+        overrides["primary_model"] = preset.get("primary_model", "")
+    if not opts.fast_model and preset.get("fast_model"):
+        overrides["fast_model"] = preset["fast_model"]
+    if not opts.fallback_model and preset.get("fallback_model"):
+        overrides["fallback_model"] = preset["fallback_model"]
+    if not opts.api_format and preset.get("api_format"):
+        overrides["api_format"] = preset["api_format"]
+    if not opts.api_key and preset.get("api_key"):
+        overrides["api_key"] = preset["api_key"]
+    if not overrides:
+        return opts
+    return replace(opts, **overrides)
+
 
 def load_config(config_path: str | Path | None = None) -> BridgeConfig:
     path = Path(config_path).expanduser() if config_path else None
@@ -331,8 +429,13 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
                 "source_investigation.add_dirs",
             ),
         ),
-        ai_provider=AIProviderOptions(
+        ai_provider=_apply_ai_preset(AIProviderOptions(
             enabled=bool(ai_provider_data.get("enabled", False)),
+            preset=str(
+                os.environ.get("LARK_AGENT_BRIDGE_AI_PRESET")
+                or ai_provider_data.get("preset", "")
+            ),
+            api_format=str(ai_provider_data.get("api_format", "")),
             primary_model=str(
                 os.environ.get("LARK_AGENT_BRIDGE_AI_PRIMARY_MODEL")
                 or ai_provider_data.get("primary_model", "")
@@ -362,7 +465,7 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
             summary_temperature=float(ai_provider_data.get("summary_temperature", 0.3)),
             summary_max_tokens=int(ai_provider_data.get("summary_max_tokens", 4096)),
             summary_timeout_seconds=float(ai_provider_data.get("summary_timeout_seconds", 120)),
-        ),
+        )),
         runner_timeout_seconds=int(runner_data.get("timeout_seconds", 900)),
     )
 

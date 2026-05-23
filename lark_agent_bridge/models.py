@@ -250,17 +250,34 @@ class SourceInvestigationOptions:
 
 @dataclass(slots=True)
 class AIProviderOptions:
-    """Direct LLM API configuration — replaces subprocess CLI calls."""
+    """Direct LLM API configuration — replaces subprocess CLI calls.
+
+    Quick-start with a named preset (no need to fill base_url/models manually):
+
+        [ai_provider]
+        enabled = true
+        preset = "xiaomi-tp"   # or "yybb", "cc-switch", "openai", …
+        api_key  = "tp-xxx"    # or set LARK_AGENT_BRIDGE_AI_API_KEY
+    """
 
     enabled: bool = False
+    # Named preset — auto-fills base_url, models and api_format.
+    # Built-in values: "xiaomi-tp", "xiaomi-sk", "yybb", "yybb-codex",
+    #                  "codex-official", "cc-switch", "openai", "deepseek"
+    preset: str = ""
+    # Wire protocol used to call the endpoint.
+    #   "openai"    – /v1/chat/completions  (Authorization: Bearer <key>)
+    #   "anthropic" – /v1/messages          (x-api-key: <key>)
+    # Leave empty; the preset or base_url suffix sets it automatically.
+    api_format: str = ""
     # Primary model identifier: "provider:model" or just "model" when base_url is set.
-    # Examples: "claude-sonnet-4-6", "gpt-4.1-mini", "deepseek-chat"
+    # Examples: "claude-sonnet-4-6", "gpt-4.1-mini", "deepseek-chat", "mimo-v2.5-pro"
     primary_model: str = ""
     fallback_model: str = ""
     # Fast/cheap model for intent classification and lightweight tasks.
     fast_model: str = ""
-    # API base URL (OpenAI-compatible). Supports Codex/Claude web endpoints.
-    # Leave empty to auto-detect from provider name.
+    # API base URL (OpenAI- or Anthropic-compatible endpoint).
+    # Leave empty when using a preset.
     base_url: str = ""
     api_key: str = ""
     # Fallback provider config (used when primary fails).

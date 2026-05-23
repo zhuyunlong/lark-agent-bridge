@@ -74,35 +74,57 @@ bot_name = ""
 [ai_provider]
 # Direct LLM API configuration — replaces subprocess CLI calls.
 # When enabled, the bridge calls LLM APIs directly via HTTP instead of
-# shelling out to codex/claude CLI, reducing latency from minutes to seconds.
+# shelling out to codex/claude CLI, reducing latency from ~3 minutes to ~30s.
 enabled = false
-# Model identifier. Examples:
-#   "claude-sonnet-4-6"       — Anthropic Claude
-#   "gpt-4.1-mini"            — OpenAI
-#   "deepseek-chat"           — DeepSeek (cost-effective for Chinese)
-#   "gemma-4-26b-a4b-it-4bit" — local Ollama/omlx model
+
+# ---------------------------------------------------------------------------
+# Quick-start with a named preset (recommended)
+# ---------------------------------------------------------------------------
+# Set preset = "<name>" to auto-fill base_url, models, and api_format.
+# Then provide api_key (or set LARK_AGENT_BRIDGE_AI_API_KEY env var).
+# Individual fields below override the preset if set.
+#
+# Built-in presets:
+#   "xiaomi-tp"       Xiaomi MiMo token-plan subscription  (Anthropic format)
+#   "xiaomi-sk"       Xiaomi MiMo SK pay-as-you-go         (Anthropic format)
+#   "yybb"            yybb.codes Claude proxy               (Anthropic format)
+#   "yybb-codex"      yybb.codes Codex/GPT endpoint         (Anthropic format)
+#   "codex-official"  chatgpt.com Codex (requires cc-switch)(Anthropic format)
+#   "cc-switch"       Local cc-switch proxy 127.0.0.1:15721 (zero-config!)
+#   "openai"          Standard OpenAI API                   (OpenAI format)
+#   "deepseek"        DeepSeek API                          (OpenAI format)
+#
+# Minimal Xiaomi example:
+#   preset = "xiaomi-tp"
+#   api_key = "tp-xxxx"        # or: export LARK_AGENT_BRIDGE_AI_API_KEY=tp-xxx
+#
+# Zero-config cc-switch example (uses whichever provider is active in cc-switch):
+#   preset = "cc-switch"       # no api_key needed
+#
+# Zero-config env-var-only (no config file changes needed):
+#   export LARK_AGENT_BRIDGE_AI_PRESET=yybb
+#   export LARK_AGENT_BRIDGE_AI_API_KEY=sk-xxx
+preset = ""
+
+# Wire protocol: "openai" (default) or "anthropic".
+# Auto-detected from preset or base_url if left empty.
+api_format = ""
+
+# Model identifier. Overrides preset default.
 primary_model = ""
 fallback_model = ""
-# Fast/cheap model for intent classification.
-fast_model = ""
-# API base URL (OpenAI-compatible endpoint). Required.
-# Examples:
-#   "https://api.openai.com/v1"                — OpenAI
-#   "https://api.anthropic.com/v1"             — Anthropic
-#   "https://api.deepseek.com/v1"              — DeepSeek
-#   "http://127.0.0.1:8000/v1"                 — local omlx/Ollama
-#   Codex web endpoint or any OpenAI-compatible proxy
+fast_model = ""      # used for intent classification (fast/cheap)
+
+# API base URL. Overrides preset default.
 base_url = ""
-# Prefer environment variables for secrets:
-#   export LARK_AGENT_BRIDGE_AI_API_KEY="sk-..."
-#   export LARK_AGENT_BRIDGE_AI_BASE_URL="https://..."
-#   export LARK_AGENT_BRIDGE_AI_PRIMARY_MODEL="gpt-4.1-mini"
+
+# API key. Env var LARK_AGENT_BRIDGE_AI_API_KEY takes precedence.
 api_key = ""
+
 # Fallback provider (used when primary API fails).
-#   export LARK_AGENT_BRIDGE_AI_FALLBACK_BASE_URL="https://..."
-#   export LARK_AGENT_BRIDGE_AI_FALLBACK_API_KEY="sk-..."
 fallback_base_url = ""
-fallback_api_key = ""
+fallback_api_key = ""   # env: LARK_AGENT_BRIDGE_AI_FALLBACK_API_KEY
+
 # Intent classification tuning
 intent_temperature = 0.0
 intent_max_tokens = 1024

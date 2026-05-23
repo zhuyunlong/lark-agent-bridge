@@ -7295,16 +7295,10 @@ class BugAnalysisRunner:
             "必须完整响应用户原始请求中的所有诉求，输出中文 Markdown，结论先行。"
             "所有分析数据已内嵌在用户消息中，直接基于这些数据分析即可。"
         )
-        timeout = int(ai_opts.summary_timeout_seconds or 120)
-        temperature = ai_opts.summary_temperature
         try:
-            response = client.chat(
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=temperature,
-                timeout=timeout,
+            response = client.generate_summary(
+                system_prompt=system_prompt,
+                user_prompt=prompt,
             )
         except LLMClientError as exc:
             logger.warning("Direct API bug summary failed: %s", exc)
@@ -7367,11 +7361,7 @@ class BugAnalysisRunner:
             "session_id": "",
             "resumed": False,
             "duration_seconds": duration,
-            "usage": {
-                "prompt_tokens": response.prompt_tokens,
-                "completion_tokens": response.completion_tokens,
-                "total_tokens": response.total_tokens,
-            },
+            "usage": response.usage,
             "usage_scope": "direct_api",
         }
 
