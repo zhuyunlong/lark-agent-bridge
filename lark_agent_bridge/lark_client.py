@@ -332,7 +332,8 @@ class LarkClient:
                 raise EventConsumerError(error)
 
             event_count = 0
-            assert run.process.stdout is not None
+            if run.process.stdout is None:
+                raise EventConsumerError("event consumer process stdout is None")
             try:
                 for line in run.process.stdout:
                     line = line.strip()
@@ -342,6 +343,7 @@ class LarkClient:
                     parsed = json.loads(line)
                     if isinstance(parsed, dict):
                         yield parsed
+                        self._persist_last_event_id(parsed)
             finally:
                 self._terminate_consumer(run.process)
 
@@ -472,6 +474,21 @@ class LarkClient:
                 ready=False,
             )
         return False
+
+    def _persist_last_event_id(self, payload: dict[str, object]) -> None:
+        """Persist the last processed event ID for crash recovery."""
+        event_id = str(payload.get("event_id") or payload.get("header", {}).get("event_id", "") if isinstance(payload.get("header"), dict) else "").strip()
+        if not event_id:
+            return
+        try:
+            offset_path = self.config.data_dir / "state" / "event_consumer_offset.json"
+            offset_path.parent.mkdir(parents=True, exist_ok=True)
+            offset_path.write_text(
+                json.dumps({"event_id": event_id, "timestamp": time.time()}),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
 
     def _can_restart(self, restart_count: int) -> bool:
         options = self.config.event_consumer

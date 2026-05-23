@@ -28,6 +28,7 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -107,6 +108,7 @@ class ProcessWatchdog:
     def __init__(self, *, max_idle_seconds: float = 3600.0) -> None:
         self.max_idle_seconds = max(60.0, float(max_idle_seconds))
         self._tracked: dict[int, TrackedProcess] = {}
+        self._lock = threading.Lock()
 
     def track(
         self,
@@ -118,32 +120,38 @@ class ProcessWatchdog:
     ) -> None:
         """Start tracking a subprocess."""
         now = time.time()
-        self._tracked[pid] = TrackedProcess(
-            pid=pid,
-            name=name,
-            started_at=now,
-            last_activity_at=now,
-            max_idle_seconds=max_idle_seconds if max_idle_seconds is not None else self.max_idle_seconds,
-            session_id=session_id.strip(),
-        )
+        with self._lock:
+            self._tracked[pid] = TrackedProcess(
+                pid=pid,
+                name=name,
+                started_at=now,
+                last_activity_at=now,
+                max_idle_seconds=max_idle_seconds if max_idle_seconds is not None else self.max_idle_seconds,
+                session_id=session_id.strip(),
+            )
 
     def record_activity(self, pid: int) -> None:
         """Record that the tracked process showed activity."""
-        proc = self._tracked.get(pid)
+        with self._lock:
+            proc = self._tracked.get(pid)
         if proc is not None:
             proc.last_activity_at = time.time()
 
     def untrack(self, pid: int) -> None:
         """Stop tracking a subprocess."""
-        self._tracked.pop(pid, None)
+        with self._lock:
+            self._tracked.pop(pid, None)
 
     def check_stuck(self) -> list[TrackedProcess]:
         """Return list of processes that appear stuck (idle too long)."""
         now = time.time()
+        with self._lock:
+            snapshot = list(self._tracked.values())
         stuck: list[TrackedProcess] = []
-        for proc in list(self._tracked.values()):
+        for proc in snapshot:
             if not _process_alive(proc.pid):
-                self._tracked.pop(proc.pid, None)
+                with self._lock:
+                    self._tracked.pop(proc.pid, None)
                 continue
             idle_seconds = now - proc.last_activity_at
             if idle_seconds > proc.max_idle_seconds:
@@ -162,7 +170,8 @@ class ProcessWatchdog:
                 "terminated": terminated,
             })
             if terminated:
-                self._tracked.pop(proc.pid, None)
+                with self._lock:
+                    self._tracked.pop(proc.pid, None)
         return results
 
     def terminate_session(self, session_id: str) -> list[dict[str, Any]]:
@@ -170,8 +179,10 @@ class ProcessWatchdog:
         normalized = session_id.strip()
         if not normalized:
             return []
+        with self._lock:
+            snapshot = list(self._tracked.values())
         results: list[dict[str, Any]] = []
-        for proc in list(self._tracked.values()):
+        for proc in snapshot:
             if proc.session_id != normalized:
                 continue
             alive = _process_alive(proc.pid)
@@ -188,16 +199,20 @@ class ProcessWatchdog:
                 }
             )
             if terminated or not alive:
-                self._tracked.pop(proc.pid, None)
+                with self._lock:
+                    self._tracked.pop(proc.pid, None)
         return results
 
     @property
     def tracked_count(self) -> int:
-        return len(self._tracked)
+        with self._lock:
+            return len(self._tracked)
 
     def list_tracked(self) -> list[dict[str, Any]]:
         """Return info about all tracked processes."""
         now = time.time()
+        with self._lock:
+            snapshot = list(self._tracked.values())
         return [
             {
                 "pid": proc.pid,
@@ -207,7 +222,7 @@ class ProcessWatchdog:
                 "idle_seconds": now - proc.last_activity_at,
                 "alive": _process_alive(proc.pid),
             }
-            for proc in self._tracked.values()
+            for proc in snapshot
         ]
 
 
