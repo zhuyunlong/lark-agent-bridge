@@ -5,14 +5,13 @@ __pycache__/
 
 .DS_Store
 
-config.toml
-config.cc-switch.toml
-config.claude.toml
-config.claude-key.toml
-config.claude-oauth.toml
-config.openai.toml
-config.openai-key.toml
-config.openai-oauth.toml
+/config.toml
+/config.*.toml
+!/config.example.toml
+!/config.*.example.toml
+/.env
+/.env.*
+!/.env.example
 data/
 
 .pytest_cache/

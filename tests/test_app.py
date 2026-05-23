@@ -321,6 +321,44 @@ class FakeBugRunner:
             },
         )
 
+    def decide_bug_followup(self, **kwargs):
+        followup_text = str(kwargs.get("followup_text") or "")
+        lowered = followup_text.casefold()
+        if any(term in lowered for term in ("重新分析", "重跑", "再来一次", "重试", "时间点修正", "修正问题时间", "修复问题时间")):
+            return BugFollowupSelection(
+                should_reanalyze=True,
+                force_rerun=True,
+                plans=[],
+                skill_name="",
+                skill_label="",
+                source="",
+                reason="fake runner reanalysis",
+                provider="",
+            )
+        if ("基于源码" in lowered or "根据源码" in lowered) and (
+            "信号定义" in lowered or "vcu_electricit_percent" in lowered or "signal_" in lowered
+        ):
+            return BugFollowupSelection(
+                should_reanalyze=True,
+                force_rerun=True,
+                plans=[],
+                skill_name="",
+                skill_label="",
+                source="",
+                reason="fake runner source-driven reanalysis",
+                provider="",
+            )
+        return BugFollowupSelection(
+            should_reanalyze=False,
+            force_rerun=False,
+            plans=[],
+            skill_name="",
+            skill_label="",
+            source="",
+            reason="fake runner agent followup",
+            provider="",
+        )
+
 
 class FakePerceptionRunner:
     def __init__(self, html_path: Path):
@@ -3701,6 +3739,63 @@ class AppTests(unittest.TestCase):
         self.assertEqual(fake_bug.requests[0].resources[0].kind, "folder")
         self.assertEqual(fake_bug.requests[0].resources[0].value, "fldcnlog123")
         self.assertEqual(fake_bug.requests[0].resources[0].source_message_id, "om_folder_msg")
+
+    def test_reply_to_file_generic_question_prefers_chat_not_direct_analysis(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = Path(tmp) / "analysis.md"
+            html = Path(tmp) / "analysis.html"
+            metadata.write_text("analysis", encoding="utf-8")
+            html.write_text("<html></html>", encoding="utf-8")
+            fake_lark = FakeLarkClient()
+            fake_bug = FakeBugRunner(metadata, html)
+            fake_chat = FakeOmlxChatClient()
+            fake_lark.fetched_messages["om_current"] = json.dumps(
+                {
+                    "ok": True,
+                    "data": {
+                        "messages": [
+                            {
+                                "message_id": "om_current",
+                                "content": "@bot 这个是什么？",
+                                "reply_to": "om_file_msg",
+                            }
+                        ]
+                    },
+                },
+                ensure_ascii=False,
+            )
+            fake_lark.fetched_messages["om_file_msg"] = json.dumps(
+                {
+                    "ok": True,
+                    "data": {
+                        "messages": [
+                            {
+                                "message_id": "om_file_msg",
+                                "content": '<file key="file_v3_0011s_6d5d723c-ec0b-44f3-9908-a02be496b54g" name="Log.zip"/>',
+                            }
+                        ]
+                    },
+                },
+                ensure_ascii=False,
+            )
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    allowed_chats=["oc_denied"],
+                ),
+                lark_client=fake_lark,
+                bug_runner=fake_bug,
+                chat_client=fake_chat,
+                intent_runner=FakeIntentRunner(enabled=False),
+            )
+
+            result = app.handle_event(event(message_id="om_current", content="@bot 这个是什么？"))
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.details["mode"], "omlx_chat")
+        self.assertEqual(len(fake_bug.requests), 0)
+        self.assertEqual(len(fake_chat.prompts), 1)
 
     def test_followup_reply_uses_saved_analysis_context(self):
         with tempfile.TemporaryDirectory() as tmp:

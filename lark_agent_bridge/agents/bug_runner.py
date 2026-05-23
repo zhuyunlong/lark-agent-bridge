@@ -37,7 +37,7 @@ from ..models import (
     TaskResult,
     create_job_context,
 )
-from ..parser import parse_signal_request
+from ..parser import parse_followup_action, parse_signal_request
 from ..reporting import (
     ReportComposition,
     ReportSection,
@@ -60,6 +60,7 @@ from .omlx_client import OmlxChatClient
 from .routing_terms import (
     CRASH_ROUTE_TERMS,
     PERCEPTION_ROUTE_TERMS,
+    SCENE_SIGNAL_ROUTE_TERMS,
     SIGNAL_ROUTE_TERMS,
     STARTUP_BLOCK_ROUTE_TERMS,
     STARTUP_ROUTE_TERMS,
@@ -481,15 +482,28 @@ class BugAnalysisRunner:
             "candidates": time_context.candidates,
         }
 
-    def _time_context_from_fault_time(self, fault_time: str, *, source: str, note: str = "") -> BugTimeContext:
-        normalized = self._normalize_fault_time_text(fault_time)
-        return BugTimeContext(
-            fault_time=normalized,
-            source=source,
-            note=note or ("已从上下文继承问题时间。" if normalized else "上下文中未找到完整问题时间。"),
-            has_full_datetime=self._parse_bug_datetime(normalized) is not None,
-            candidates=[],
-        )
+    def _event_reference_time_text(self, event: LarkEvent | None) -> str:
+        if event is None:
+            return datetime.now().astimezone().isoformat(timespec="seconds")
+        for raw in (event.create_time, event.timestamp):
+            text = str(raw or "").strip()
+            if not text:
+                continue
+            if text.isdigit():
+                try:
+                    return datetime.fromtimestamp(int(text) / 1000, tz=timezone.utc).astimezone().isoformat(
+                        timespec="seconds"
+                    )
+                except (OverflowError, OSError, ValueError):
+                    continue
+            try:
+                parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone().isoformat(timespec="seconds")
+        return datetime.now().astimezone().isoformat(timespec="seconds")
 
     def _skill_name_for_kind(self, kind: str) -> str:
         for skill_name, (mapped_kind, _label, _requires_logs) in self.skill_manager.primary_skill_map().items():
@@ -611,6 +625,12 @@ class BugAnalysisRunner:
             "current_analysis_kinds": details.get("analysis_kinds") or [],
             "primary_skills": primary_skills,
         }
+        deterministic = self._deterministic_bug_followup_selection(
+            followup_text=followup_text,
+            request_text=request_text,
+        )
+        if deterministic is not None:
+            return deterministic
         prompt = (
             "你是 Lark Agent Bridge 的 bug 续聊决策器。"
             "请先判断当前追问能否直接基于已有分析结果回答；如果不能，再决定是否需要重新分析，"
@@ -668,6 +688,141 @@ class BugAnalysisRunner:
             reason=selection.reason,
             provider=selection.provider,
         )
+
+    def _deterministic_bug_followup_selection(
+        self,
+        *,
+        followup_text: str,
+        request_text: str,
+    ) -> BugFollowupSelection | None:
+        lowered = followup_text.casefold()
+        followup_action = parse_followup_action(followup_text)
+        force_terms = tuple(term.casefold() for term in self.config.bug_analysis.force_reanalysis_terms)
+        selection = self._manual_followup_selection_if_explicit(
+            followup_text=followup_text,
+            request_text=request_text,
+        )
+        if any(term in lowered for term in force_terms):
+            return self._build_bug_followup_selection(
+                should_reanalyze=True,
+                force_rerun=True,
+                selection=selection,
+                reason=(
+                    "命中本地强制重分析词，并识别到新的分析方向。"
+                    if selection is not None
+                    else "命中本地强制重分析词，沿用上一轮分析类型重新执行。"
+                ),
+                source="deterministic_fallback",
+            )
+        if followup_action == "retry":
+            return self._build_bug_followup_selection(
+                should_reanalyze=True,
+                force_rerun=True,
+                selection=selection,
+                reason=(
+                    "命中统一续跑动作，并识别到新的分析方向。"
+                    if selection is not None
+                    else "命中统一续跑动作，沿用上一轮分析类型重新执行。"
+                ),
+                source="deterministic_fallback",
+            )
+        if parse_signal_request(
+            followup_text,
+            signal_aliases=self.config.signal_aliases,
+            command_prefixes=self.config.command_prefixes,
+            signal_resolver=self.signal_resolver,
+        ).signal:
+            return self._build_bug_followup_selection(
+                should_reanalyze=True,
+                force_rerun=True,
+                selection=selection,
+                reason="本地回退识别到明确信号请求，触发重分析。",
+                source="deterministic_fallback",
+            )
+        has_correction = any(term in lowered for term in ("修正", "修复问题时间", "更正", "修改", "改成"))
+        has_time = re.search(r"(?<!\d)\d{1,2}[:：]\d{2}(?:\s*分)?(?!\d)", followup_text) is not None
+        if has_correction and has_time:
+            return self._build_bug_followup_selection(
+                should_reanalyze=True,
+                force_rerun=True,
+                selection=selection,
+                reason=(
+                    "本地回退识别到时间修正和新的分析方向，触发重分析。"
+                    if selection is not None
+                    else "本地回退识别到时间修正，沿用上一轮分析类型重分析。"
+                ),
+                source="deterministic_fallback",
+            )
+        return None
+
+    def _manual_followup_selection_if_explicit(
+        self,
+        *,
+        followup_text: str,
+        request_text: str,
+    ) -> "BugAnalysisSelection | None":
+        if not self._followup_has_explicit_bug_route(followup_text):
+            return None
+        selection = self._manual_bug_selection(
+            prompt_text=followup_text,
+            title=request_text,
+            description="",
+        )
+        if selection.skill_name == "general" and all(plan.kind == "general" for plan in selection.plans):
+            return None
+        return selection
+
+    def _build_bug_followup_selection(
+        self,
+        *,
+        should_reanalyze: bool,
+        force_rerun: bool,
+        selection: "BugAnalysisSelection | None",
+        reason: str,
+        source: str,
+    ) -> BugFollowupSelection:
+        if selection is None:
+            return BugFollowupSelection(
+                should_reanalyze=should_reanalyze,
+                force_rerun=force_rerun,
+                plans=[],
+                skill_name="",
+                skill_label="",
+                source=source,
+                reason=reason,
+                provider="",
+            )
+        return BugFollowupSelection(
+            should_reanalyze=should_reanalyze,
+            force_rerun=force_rerun,
+            plans=selection.plans,
+            skill_name=selection.skill_name,
+            skill_label=selection.skill_label,
+            source=selection.source,
+            reason=reason,
+            provider=selection.provider,
+        )
+
+    def _followup_has_explicit_bug_route(self, text: str) -> bool:
+        lowered = (text or "").casefold()
+        if parse_signal_request(
+            text,
+            signal_aliases=self.config.signal_aliases,
+            command_prefixes=self.config.command_prefixes,
+            signal_resolver=self.signal_resolver,
+        ).signal:
+            return True
+        route_terms = (
+            STARTUP_ROUTE_TERMS
+            + STARTUP_BLOCK_ROUTE_TERMS
+            + STUCK_ROUTE_TERMS
+            + CRASH_ROUTE_TERMS
+            + SIGNAL_ROUTE_TERMS
+            + SCENE_SIGNAL_ROUTE_TERMS
+            + XTHEME_ROUTE_TERMS
+            + PERCEPTION_ROUTE_TERMS
+        )
+        return any(term.casefold() in lowered for term in route_terms)
 
     def _run_bug_decision_agent(self, prompt: str) -> tuple[dict[str, object] | None, str]:
         candidates = _provider_candidates(self.config.bug_analysis.provider, self.config.bug_analysis.command)
@@ -1443,26 +1598,21 @@ class BugAnalysisRunner:
                     prepared_log_input=str(local_prepared_input),
                 )
                 break
-        target_time = self._extract_followup_fault_time(
-            followup_text,
-            reference_text="\n".join(
-                [
-                    request_text,
-                    str(getattr(previous_context, "summary_text", "")),
-                    str(getattr(previous_context, "report_excerpt", "")),
-                ]
-            ),
+        reference_text = "\n".join(
+            [
+                request_text,
+                str(getattr(previous_context, "summary_text", "")),
+                str(getattr(previous_context, "report_excerpt", "")),
+                f"故障时间: {str(details.get('target_time') or details.get('fault_time') or '').strip()}",
+            ]
+        ).strip()
+        time_context = self._resolve_bug_time_context(
+            request_text=followup_text,
+            title="",
+            description=reference_text,
+            reference_time=str(details.get("target_time") or details.get("fault_time") or "").strip(),
         )
-        if not target_time:
-            target_time = str(details.get("target_time") or details.get("fault_time") or "").strip()
-        if not target_time:
-            inherited_time, _ = self._extract_fault_time("", request_text)
-            target_time = inherited_time
-        time_context = self._time_context_from_fault_time(
-            target_time,
-            source="followup_or_previous_context",
-            note="从追问或上一轮上下文确定问题时间。",
-        )
+        target_time = time_context.fault_time
         prepared_input = local_prepared_input or self._path_from_details(details, "prepared_log_input")
         selected_input = local_selected_input or self._path_from_details(details, "selected_log_input") or prepared_input
         plans = plans_override or self._plans_for_reanalysis(details, request_text=request_text, followup_text=followup_text)
@@ -2055,12 +2205,13 @@ class BugAnalysisRunner:
             request_text=request_text,
             resources=[item.value for item in request.resources],
         )
-        fault_time, _ = self._extract_fault_time("", request.prompt)
-        time_context = self._time_context_from_fault_time(
-            fault_time,
-            source="user",
-            note="从直传文件分析请求中提取问题时间。",
+        time_context = self._resolve_bug_time_context(
+            request_text=request_text,
+            title="",
+            description="",
+            reference_time=self._event_reference_time_text(event),
         )
+        fault_time = time_context.fault_time
         if not time_context.has_full_datetime:
             return self._bug_time_clarification_result(
                 context=context,
@@ -2312,35 +2463,46 @@ class BugAnalysisRunner:
             signal_resolver=self.signal_resolver,
         )
         lowered = combined.casefold()
-        if any(term in lowered for term in PERCEPTION_ROUTE_TERMS):
-            return [BugAnalysisPlan(kind="perception")]
-        if any(term in lowered for term in XTHEME_ROUTE_TERMS):
-            return [BugAnalysisPlan(kind="xtheme")]
         explicit_signal_enum = "signal_" in lowered
         explicit_signal_terms = any(term in lowered for term in SIGNAL_ROUTE_TERMS)
+        startup_requested = any(term in lowered for term in STARTUP_ROUTE_TERMS)
+        stuck_requested = any(term in lowered for term in STUCK_ROUTE_TERMS)
+        startup_blocked = any(term in lowered for term in STARTUP_BLOCK_ROUTE_TERMS)
+        candidates: list[tuple[int, str, str | None]] = []
+
+        def add_candidate(score: int, kind: str, signal_code: str | None = None) -> None:
+            candidates.append((score, kind, signal_code))
+
+        if any(term in lowered for term in PERCEPTION_ROUTE_TERMS):
+            add_candidate(120, "perception")
+        if any(term in lowered for term in XTHEME_ROUTE_TERMS):
+            add_candidate(115, "xtheme")
+        if (
+            (looks_like_scene_signal_request(combined) and not (signal_request.signal and (explicit_signal_enum or explicit_signal_terms)))
+            or (signal_request.signal and _is_core_scene_signal(signal_request.signal))
+            or _has_strong_scene_signal_intent(lowered)
+        ):
+            add_candidate(110, "scene_signal")
         if (
             signal_request.signal
             and (explicit_signal_enum or explicit_signal_terms)
             and not _is_core_scene_signal(signal_request.signal)
             and not _has_strong_scene_signal_intent(lowered)
         ):
-            return [BugAnalysisPlan(kind="signal", signal_code=signal_request.signal)]
-        if looks_like_scene_signal_request(combined):
-            return [BugAnalysisPlan(kind="scene_signal")]
-        if explicit_signal_enum or (explicit_signal_terms and signal_request.signal):
-            return [BugAnalysisPlan(kind="signal", signal_code=signal_request.signal)]
+            add_candidate(100, "signal", signal_request.signal)
         if any(term in lowered for term in CRASH_ROUTE_TERMS):
-            return [BugAnalysisPlan(kind="crash")]
+            add_candidate(95, "crash")
         plans: list[BugAnalysisPlan] = []
-        startup_requested = any(term in lowered for term in STARTUP_ROUTE_TERMS)
-        stuck_requested = any(term in lowered for term in STUCK_ROUTE_TERMS)
-        startup_blocked = any(term in lowered for term in STARTUP_BLOCK_ROUTE_TERMS)
         if startup_requested or (stuck_requested and startup_blocked):
             plans.append(BugAnalysisPlan(kind="startup"))
         if stuck_requested:
             plans.append(BugAnalysisPlan(kind="stuck"))
         if plans:
             return plans
+        if candidates:
+            candidates.sort(key=lambda item: item[0], reverse=True)
+            _score, kind, signal_code = candidates[0]
+            return [BugAnalysisPlan(kind=kind, signal_code=signal_code)]
         return [BugAnalysisPlan(kind="general")]
 
     def classify_request(self, *, prompt_text: str, title: str, description: str) -> "BugAnalysisPlan":
@@ -2520,38 +2682,6 @@ class BugAnalysisRunner:
         if any(plan.kind == "signal" for plan in plans) and any(term in lowered for term in signal_followup_terms):
             force.add("signal")
         return force
-
-    def _extract_followup_fault_time(self, followup_text: str, *, reference_text: str) -> str:
-        normalized = followup_text.replace("：", ":")
-        full_match = re.search(
-            r"(20\d{2})[-_/年](\d{1,2})[-_/月](\d{1,2})[日_\s-]*(\d{1,2}):(\d{2})(?::(\d{2}))?",
-            normalized,
-        )
-        if full_match:
-            base = (
-                f"{int(full_match.group(1)):04d}-{int(full_match.group(2)):02d}-{int(full_match.group(3)):02d} "
-                f"{int(full_match.group(4)):02d}:{int(full_match.group(5)):02d}"
-            )
-            if full_match.group(6) is not None:
-                return f"{base}:{int(full_match.group(6)):02d}"
-            return base
-        short_match = re.search(r"(?<!\d)(\d{1,2}):(\d{2})(?::(\d{2}))?(?:\s*分)?(?!\d)", normalized)
-        if not short_match:
-            return ""
-        reference_date = self._extract_reference_date(reference_text)
-        short_time = f"{int(short_match.group(1)):02d}:{int(short_match.group(2)):02d}"
-        if short_match.group(3) is not None:
-            short_time = f"{short_time}:{int(short_match.group(3)):02d}"
-        if reference_date:
-            return f"{reference_date} {short_time}"
-        return short_time
-
-    def _extract_reference_date(self, text: str) -> str:
-        normalized = text.replace("：", ":")
-        match = re.search(r"(20\d{2})[-_/年](\d{1,2})[-_/月](\d{1,2})", normalized)
-        if not match:
-            return ""
-        return f"{int(match.group(1)):04d}-{int(match.group(2)):02d}-{int(match.group(3)):02d}"
 
     def _report_name(self, kind: str, suffix: str) -> str:
         return {

@@ -955,7 +955,7 @@ class AgentTests(unittest.TestCase):
             ),
         ):
             selection = runner.decide_bug_followup(
-                followup_text="重新分析 xtheme 主题变化",
+                followup_text="xtheme 主题变化为什么没跟上",
                 previous_context=previous_context,
                 previous_session=previous_session,
             )
@@ -966,6 +966,76 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(selection.skill_name, "xtheme-analyzer")
         self.assertEqual(selection.plans[0].kind, "xtheme")
         self.assertEqual(selection.provider, "claude")
+
+    def test_bug_followup_retry_without_explicit_route_keeps_previous_kind(self):
+        runner = BugAnalysisRunner(BridgeConfig(dry_run=False))
+        previous_session = {
+            "details": {
+                "analysis_kinds": ["startup"],
+                "prepared_log_input": "",
+                "selected_log_input": "",
+                "user_request_text": "调查3D生命周期",
+            }
+        }
+        previous_context = type(
+            "Context",
+            (),
+            {
+                "request_text": "调查3D生命周期",
+                "summary_text": "上一轮分析结论",
+                "report_excerpt": "上一轮报告摘录",
+            },
+        )()
+
+        selection = runner.decide_bug_followup(
+            followup_text="重新分析一遍",
+            previous_context=previous_context,
+            previous_session=previous_session,
+        )
+
+        self.assertIsNotNone(selection)
+        assert selection is not None
+        self.assertTrue(selection.should_reanalyze)
+        self.assertTrue(selection.force_rerun)
+        self.assertEqual(selection.plans, [])
+        self.assertEqual(selection.skill_name, "")
+
+    def test_bug_followup_signal_request_uses_signal_plan_without_agent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "guideengine"
+            signal_proto = repo / "module_floorcenter/module_proto/src/main/proto/signal.proto"
+            signal_proto.parent.mkdir(parents=True, exist_ok=True)
+            signal_proto.write_text("SIGNAL_VCU_ELECTRICIT_PERCENT = 40019;\n", encoding="utf-8")
+            runner = BugAnalysisRunner(BridgeConfig(dry_run=False, guideengine_repo=repo))
+            previous_session = {
+                "details": {
+                    "analysis_kinds": ["general"],
+                    "prepared_log_input": "",
+                    "selected_log_input": "",
+                    "user_request_text": "调查车辆状态",
+                }
+            }
+            previous_context = type(
+                "Context",
+                (),
+                {
+                    "request_text": "调查车辆状态",
+                    "summary_text": "上一轮静态结论",
+                    "report_excerpt": "信号定义未展开",
+                },
+            )()
+
+            selection = runner.decide_bug_followup(
+                followup_text="基于源码重新看 VCU_ELECTRICIT_PERCENT 信号链路",
+                previous_context=previous_context,
+                previous_session=previous_session,
+            )
+
+        self.assertIsNotNone(selection)
+        assert selection is not None
+        self.assertTrue(selection.should_reanalyze)
+        self.assertEqual(selection.plans[0].kind, "signal")
+        self.assertEqual(selection.plans[0].signal_code, "SIGNAL_VCU_ELECTRICIT_PERCENT")
 
     def test_bug_analysis_general_request_with_logs_collects_source_evidence(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1954,6 +2024,30 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(plan.kind, "xtheme")
         self.assertIsNone(plan.signal_code)
 
+    def test_bug_analysis_prefers_xtheme_over_generic_signal_terms(self):
+        runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
+
+        plan = runner.classify_request(
+            prompt_text="分析 105004 主题切换信号为什么异常",
+            title="晨曦时光主题没有切换",
+            description="xtheme 相关主题变化异常",
+        )
+
+        self.assertEqual(plan.kind, "xtheme")
+        self.assertIsNone(plan.signal_code)
+
+    def test_bug_analysis_prefers_perception_over_generic_signal_terms(self):
+        runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
+
+        plan = runner.classify_request(
+            prompt_text="分析当前感知数据和信号链路",
+            title="SR无感知显示",
+            description="请看 VHALHelper / X3DCB / XDataNativeProxy",
+        )
+
+        self.assertEqual(plan.kind, "perception")
+        self.assertIsNone(plan.signal_code)
+
     def test_bug_analysis_does_not_pick_signal_from_report_css_for_source_unity_followup(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp) / "guideengine"
@@ -2003,16 +2097,6 @@ class AgentTests(unittest.TestCase):
         )
 
         self.assertEqual([plan.kind for plan in plans], ["startup", "stuck"])
-
-    def test_bug_reanalysis_time_correction_reuses_previous_date(self):
-        runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
-
-        target_time = runner._extract_followup_fault_time(
-            "修复问题时间 23:12分 重新分析下",
-            reference_text="故障时间: 2026-05-11 23:10",
-        )
-
-        self.assertEqual(target_time, "2026-05-11 23:12")
 
     def test_bug_analysis_extract_fault_time_normalizes_fullwidth_colon(self):
         runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
@@ -3836,6 +3920,70 @@ class AgentTests(unittest.TestCase):
         self.assertTrue(result.skipped)
         self.assertEqual(result.details["mode"], "bug_time_clarification")
         self.assertEqual(result.details["time_gate_status"], "missing_fault_time")
+
+    def test_direct_analysis_cn_month_day_time_uses_full_datetime_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=False, data_dir=Path(tmp), workspace_root=Path(tmp))
+            runner = BugAnalysisRunner(config)
+            log_root = Path(tmp) / "direct_logs"
+            self._write_matching_log(log_root, "2026-05-22 07:46:00")
+            resource = DownloadResource(kind="file", value="log.zip")
+
+            class FakeDownloader:
+                def download_all(self, resources, *, context, message_id):
+                    return [DownloadedResource(resource=resource, path=log_root)]
+
+            runner._direct_downloader = FakeDownloader()
+
+            def fake_run_analysis(
+                *,
+                plan,
+                input_path,
+                html_path,
+                json_path,
+                analysis_dir,
+                timeout,
+                target_time,
+                request_text=None,
+                bridge_session_id=None,
+            ):
+                html_path.write_text("<html>ok</html>", encoding="utf-8")
+                json_path.write_text(json.dumps({"target_time": target_time}), encoding="utf-8")
+                return subprocess.CompletedProcess(args=["python3"], returncode=0, stdout="", stderr="")
+
+            prompt = "基于SRViolationHandler.kt源码分析 时间点5月22日 7:46 分析超速状态"
+            event = LarkEvent(
+                event_id="evt_1",
+                message_id="om_1",
+                chat_id="oc_1",
+                chat_type="group",
+                sender_id="ou_1",
+                message_type="text",
+                content=prompt,
+                create_time="1779536637134",
+                timestamp="1779536637482",
+            )
+
+            with (
+                mock.patch.object(runner, "_prepare_log_input", return_value=log_root),
+                mock.patch.object(runner, "classify_requests", return_value=[BugAnalysisPlan(kind="perception")]),
+                mock.patch.object(runner, "_write_reanalysis_source_evidence", return_value=None),
+                mock.patch.object(runner, "_run_analysis", side_effect=fake_run_analysis),
+                mock.patch.object(runner, "_build_combined_report_artifacts", return_value=None),
+            ):
+                result = runner.run_direct_analysis(
+                    DirectAnalysisRequest(
+                        prompt=prompt,
+                        resources=[resource],
+                        raw_text=prompt,
+                        triggered=True,
+                    ),
+                    event=event,
+                )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.details["mode"], "direct_analysis")
+        self.assertEqual(result.details["fault_time"], "2026-05-22 07:46")
 
     def test_bug_reanalysis_uses_agent_summary_and_persisted_session(self):
         with tempfile.TemporaryDirectory() as tmp:

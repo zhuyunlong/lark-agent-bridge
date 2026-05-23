@@ -22,19 +22,11 @@ from .agents import (
     BugAnalysisRunner,
     BugFollowupSelection,
     ClaudeSkillRunner,
-    CRASH_ROUTE_TERMS,
     IntentAnalysisFailure,
     IntentAnalysisRunner,
     OmlxChatClient,
-    PERCEPTION_ROUTE_TERMS,
     PerceptionSummaryRunner,
     RomVersionLookupRunner,
-    SCENE_SIGNAL_ROUTE_TERMS,
-    SIGNAL_ROUTE_TERMS,
-    STARTUP_BLOCK_ROUTE_TERMS,
-    STARTUP_ROUTE_TERMS,
-    STUCK_ROUTE_TERMS,
-    XTHEME_ROUTE_TERMS,
     looks_like_scene_signal_request,
 )
 from .arbitration import arbitrate, extract_conclusion
@@ -76,6 +68,7 @@ from .parser import (
     build_basic_chat_reply,
     extract_first_keyword_payload,
     find_resources,
+    looks_like_direct_analysis_prompt,
     parse_followup_action,
     parse_claude_skill_request,
     parse_bug_request,
@@ -3081,8 +3074,6 @@ class BridgeApp:
                 explicit_followup_context=explicit_followup_context,
                 latest_chat_context=latest_chat_context,
             )
-        if route == "claude_skill":
-            return self._handle_skill_intent(event, route_content)
         if route == "bug":
             return self._handle_bug_intent(event, route_content)
         if route == "direct_analysis":
@@ -3603,7 +3594,7 @@ class BridgeApp:
         hinted_request = parse_direct_analysis_request(hinted)
         if not hinted_request.triggered:
             prompt = route_content.strip()
-            if not prompt:
+            if not prompt or not self._looks_like_direct_analysis_prompt(route_content):
                 return request
             return request.__class__(
                 prompt=prompt,
@@ -3763,8 +3754,7 @@ class BridgeApp:
         return False
 
     def _looks_like_direct_analysis_prompt(self, route_content: str) -> bool:
-        hinted = f"{route_content.strip()} file_probe"
-        return parse_direct_analysis_request(hinted).triggered
+        return looks_like_direct_analysis_prompt(route_content, resources_present=True)
 
     def _extract_resources_from_message_payload(self, payload_text: str, *, fallback_message_id: str = "") -> list[DownloadResource]:
         try:
@@ -4696,96 +4686,16 @@ class BridgeApp:
         if "bug" not in str(followup_context.mode).casefold():
             return _BugReanalysisDecision(False, False)
         previous_session = self.activity_store.get_session(followup_context.root_message_id) or {}
-        lowered = route_content.casefold()
-        followup_action = parse_followup_action(route_content)
-        force_terms = tuple(term.casefold() for term in self.config.bug_analysis.force_reanalysis_terms)
-        manual_selection = None
-
-        def resolve_manual_selection():
-            nonlocal manual_selection
-            if manual_selection is None and hasattr(self.bug_runner, "_manual_bug_selection"):
-                manual_selection = self.bug_runner._manual_bug_selection(
-                    prompt_text=route_content,
-                    title=str(getattr(followup_context, "request_text", "") or ""),
-                    description="",
-                )
-            return manual_selection
-
-        if any(term in lowered for term in force_terms):
-            selection = resolve_manual_selection() if self._followup_has_explicit_bug_route(route_content) else None
-            return _BugReanalysisDecision(
-                True,
-                True,
-                plans=getattr(selection, "plans", None),
-                skill_name=getattr(selection, "skill_name", ""),
-                skill_label=getattr(selection, "skill_label", ""),
-                source=getattr(selection, "source", ""),
-                reason=(
-                    "命中本地强制重分析词，并识别到新的分析方向。"
-                    if selection is not None
-                    else "命中本地强制重分析词，沿用上一轮分析类型重新执行。"
-                ),
-            )
-        if followup_action == "retry":
-            selection = resolve_manual_selection() if self._followup_has_explicit_bug_route(route_content) else None
-            return _BugReanalysisDecision(
-                True,
-                True,
-                plans=getattr(selection, "plans", None),
-                skill_name=getattr(selection, "skill_name", ""),
-                skill_label=getattr(selection, "skill_label", ""),
-                source=getattr(selection, "source", ""),
-                reason=(
-                    "命中统一续跑动作，并识别到新的分析方向。"
-                    if selection is not None
-                    else "命中统一续跑动作，沿用上一轮分析类型重新执行。"
-                ),
-            )
-        if parse_signal_request(
-            route_content,
-            signal_aliases=self.config.signal_aliases,
-            command_prefixes=self.config.command_prefixes,
-            signal_resolver=self.signal_resolver,
-        ).signal:
-            selection = resolve_manual_selection()
-            return _BugReanalysisDecision(
-                True,
-                True,
-                plans=getattr(selection, "plans", None),
-                skill_name=getattr(selection, "skill_name", ""),
-                skill_label=getattr(selection, "skill_label", ""),
-                source=getattr(selection, "source", ""),
-                reason="本地回退识别到明确信号请求，触发重分析。",
-            )
-        has_correction = any(term in lowered for term in ("修正", "修复问题时间", "更正", "修改", "改成"))
-        has_time = re.search(r"(?<!\d)\d{1,2}[:：]\d{2}(?:\s*分)?(?!\d)", route_content) is not None
-        if has_correction and has_time:
-            selection = resolve_manual_selection() if self._followup_has_explicit_bug_route(route_content) else None
-            return _BugReanalysisDecision(
-                True,
-                True,
-                plans=getattr(selection, "plans", None),
-                skill_name=getattr(selection, "skill_name", ""),
-                skill_label=getattr(selection, "skill_label", ""),
-                source=getattr(selection, "source", ""),
-                reason=(
-                    "本地回退识别到时间修正和新的分析方向，触发重分析。"
-                    if selection is not None
-                    else "本地回退识别到时间修正，沿用上一轮分析类型重分析。"
-                ),
-            )
-        agent_decision = None
-        if hasattr(self.bug_runner, "decide_bug_followup"):
-            agent_decision = self.bug_runner.decide_bug_followup(
-                followup_text=route_content,
-                previous_context=followup_context,
-                previous_session=previous_session,
-            )
+        agent_decision = self.bug_runner.decide_bug_followup(
+            followup_text=route_content,
+            previous_context=followup_context,
+            previous_session=previous_session,
+        )
         if agent_decision is not None:
             return _BugReanalysisDecision(
                 agent_decision.should_reanalyze,
                 agent_decision.force_rerun,
-                plans=agent_decision.plans,
+                plans=agent_decision.plans or None,
                 skill_name=agent_decision.skill_name,
                 skill_label=agent_decision.skill_label,
                 source=agent_decision.source,
@@ -4793,43 +4703,16 @@ class BridgeApp:
                 provider=agent_decision.provider,
             )
         if not self._existing_bug_context_can_answer(route_content, followup_context):
-            selection = resolve_manual_selection() if self._followup_has_explicit_bug_route(route_content) else None
             return _BugReanalysisDecision(
                 True,
                 True,
-                plans=getattr(selection, "plans", None),
-                skill_name=getattr(selection, "skill_name", ""),
-                skill_label=getattr(selection, "skill_label", ""),
-                source=getattr(selection, "source", ""),
-                reason=(
-                    "现有上下文不足以直接回答，按本次明确方向重分析。"
-                    if selection is not None
-                    else "现有上下文不足以直接回答，沿用上一轮分析类型重分析。"
-                ),
+                plans=None,
+                skill_name="",
+                skill_label="",
+                source="minimal_fallback",
+                reason="现有上下文不足以直接回答，沿用上一轮分析类型重分析。",
             )
         return _BugReanalysisDecision(False, False)
-
-    def _followup_has_explicit_bug_route(self, route_content: str) -> bool:
-        text = route_content or ""
-        lowered = text.casefold()
-        if parse_signal_request(
-            text,
-            signal_aliases=self.config.signal_aliases,
-            command_prefixes=self.config.command_prefixes,
-            signal_resolver=self.signal_resolver,
-        ).signal:
-            return True
-        route_terms = (
-            STARTUP_ROUTE_TERMS
-            + STARTUP_BLOCK_ROUTE_TERMS
-            + STUCK_ROUTE_TERMS
-            + CRASH_ROUTE_TERMS
-            + SIGNAL_ROUTE_TERMS
-            + SCENE_SIGNAL_ROUTE_TERMS
-            + XTHEME_ROUTE_TERMS
-            + PERCEPTION_ROUTE_TERMS
-        )
-        return any(term.casefold() in lowered for term in route_terms)
 
     def _existing_bug_context_can_answer(self, route_content: str, followup_context) -> bool:
         question = route_content.strip()

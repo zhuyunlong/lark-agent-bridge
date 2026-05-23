@@ -325,6 +325,18 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(request.resources[0].kind, "file")
         self.assertIn("11:30", request.prompt)
 
+    def test_parse_direct_analysis_request_does_not_steal_perception_summary(self):
+        request = parse_direct_analysis_request("@bot 总结当前感知数据 file_abc123")
+
+        self.assertFalse(request.triggered)
+        self.assertEqual(request.resources[0].kind, "file")
+
+    def test_parse_direct_analysis_request_requires_analysis_intent_for_inline_file(self):
+        request = parse_direct_analysis_request("@bot 这个是什么 file_abc123")
+
+        self.assertFalse(request.triggered)
+        self.assertEqual(request.resources[0].kind, "file")
+
     def test_omlx_chat_candidate_for_simple_question(self):
         self.assertTrue(should_use_omlx_chat("帮我解释一下什么是 token？"))
         self.assertFalse(should_use_omlx_chat("这条消息当前没有实现对应能力"))

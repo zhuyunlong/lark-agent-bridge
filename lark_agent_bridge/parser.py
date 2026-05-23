@@ -214,19 +214,42 @@ FOLLOWUP_CONTINUE_TERMS = (
     "接着查",
     "继续查",
 )
-DIRECT_ANALYSIS_TERMS = (
+DIRECT_ANALYSIS_ACTION_TERMS = (
     "分析",
     "排查",
     "调查",
-    "总结",
+    "定位",
+    "检查",
+    "看下",
+    "看一下",
+    "看看",
+    "查下",
+    "查一下",
+    "帮我看",
+    "帮我分析",
+)
+DIRECT_ANALYSIS_DOMAIN_TERMS = (
+    "日志",
+    "附件",
+    "文件",
+    "压缩包",
+    "目录",
     "启动",
     "卡顿",
     "黑屏",
     "闪退",
     "crash",
     "tombstone",
-    "信号",
-    "感知数据",
+    "堆栈",
+    "3d",
+    "unity",
+    "源码",
+    "超速",
+    "状态",
+)
+DIRECT_ANALYSIS_DEICTIC_RE = re.compile(
+    r"^(?:看下|看一下|看看|帮我看(?:下|一下)?|分析(?:下|一下)?|排查(?:下|一下)?|调查(?:下|一下)?|查(?:下|一下)?)"
+    r"(?:这个|这份|这个文件|这个日志|这份日志|这个附件|这份附件)?[？?]?$"
 )
 
 
@@ -443,10 +466,9 @@ def parse_direct_analysis_request(text: str) -> DirectAnalysisRequest:
     normalized_text = text or ""
     cleaned = _strip_leading_mentions(normalized_text).strip()
     resources = _find_resources(cleaned)
-    lowered = cleaned.casefold()
     if not resources:
         return DirectAnalysisRequest(prompt="", resources=[], raw_text=normalized_text, triggered=False)
-    if not _contains_any(cleaned, lowered, DIRECT_ANALYSIS_TERMS):
+    if not looks_like_direct_analysis_prompt(cleaned, resources_present=True):
         return DirectAnalysisRequest(prompt="", resources=resources, raw_text=normalized_text, triggered=False)
     return DirectAnalysisRequest(
         prompt=cleaned,
@@ -455,6 +477,23 @@ def parse_direct_analysis_request(text: str) -> DirectAnalysisRequest:
         triggered=True,
         error=None if cleaned else "missing_prompt",
     )
+
+
+def looks_like_direct_analysis_prompt(text: str, *, resources_present: bool = False) -> bool:
+    normalized_text = text or ""
+    cleaned = _strip_leading_mentions(normalized_text).strip()
+    lowered = cleaned.casefold()
+    if not cleaned:
+        return False
+    if build_basic_chat_reply(cleaned) is not None:
+        return False
+    if parse_bug_request(cleaned).triggered:
+        return False
+    has_action = _contains_any(cleaned, lowered, DIRECT_ANALYSIS_ACTION_TERMS)
+    has_domain = _contains_any(cleaned, lowered, DIRECT_ANALYSIS_DOMAIN_TERMS)
+    if resources_present:
+        return has_action or bool(DIRECT_ANALYSIS_DEICTIC_RE.fullmatch(cleaned))
+    return has_action and has_domain
 
 
 def parse_bug_request(text: str) -> BugRequest:
