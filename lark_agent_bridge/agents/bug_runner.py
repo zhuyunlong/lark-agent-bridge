@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import hashlib
@@ -1105,16 +1106,25 @@ class BugAnalysisRunner:
                 project_key=project_key,
                 work_item_id=work_item_id,
             )
-            fetched = self._run_json_command(
-                [str(self._bug_fetcher_script()), "fetch-data", project_key, work_item_id],
-                timeout=120,
-                **bridge_kwargs,
-            )
-            full_item = self._run_json_command(
-                ["meegle", "workitem", "get", "--project-key", project_key, "--work-item-id", work_item_id, "--format", "json"],
-                timeout=120,
-                **bridge_kwargs,
-            )
+            # Parallel fetch: bug data + full work item + signal catalog pre-warm
+            with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+                future_fetched = pool.submit(
+                    self._run_json_command,
+                    [str(self._bug_fetcher_script()), "fetch-data", project_key, work_item_id],
+                    timeout=120,
+                    **bridge_kwargs,
+                )
+                future_full_item = pool.submit(
+                    self._run_json_command,
+                    ["meegle", "workitem", "get", "--project-key", project_key,
+                     "--work-item-id", work_item_id, "--format", "json"],
+                    timeout=120,
+                    **bridge_kwargs,
+                )
+                # Pre-warm signal catalog in background (uses Phase 4 cache)
+                pool.submit(self.signal_resolver._load_catalog)
+                fetched = future_fetched.result()
+                full_item = future_full_item.result()
             option_map = self._load_option_map(project_key, **bridge_kwargs)
             title = str(fetched.get("title", ""))
             description = self._bug_description(fetched)
@@ -1244,18 +1254,36 @@ class BugAnalysisRunner:
                     progress_callback=progress_callback,
                     log_coverage=log_coverage,
                 )
-            source_evidence_path = self._write_reanalysis_source_evidence(
-                plans=plans,
-                request_text=request_text,
-                followup_text=prompt_text,
-                output_dir=context.output_dir,
-                enabled=self._should_collect_source_evidence(request_text, prompt_text)
+            source_evidence_enabled = (
+                self._should_collect_source_evidence(request_text, prompt_text)
                 or (
                     any(plan.kind in {"general", "custom_skill"} for plan in plans)
                     and self._has_explicit_general_scope(prompt_text)
-                ),
-                extra_texts=(title, description),
+                )
             )
+            # Start source evidence collection in background while analysis runs
+            source_evidence_future: concurrent.futures.Future[Path | None] | None = None
+            if source_evidence_enabled:
+                _source_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+                source_evidence_future = _source_pool.submit(
+                    self._write_reanalysis_source_evidence,
+                    plans=plans,
+                    request_text=request_text,
+                    followup_text=prompt_text,
+                    output_dir=context.output_dir,
+                    enabled=True,
+                    extra_texts=(title, description),
+                )
+                _source_pool.shutdown(wait=False)
+            else:
+                source_evidence_future = None
+            # Resolve source evidence future before analysis loop
+            source_evidence_path: Path | None = None
+            if source_evidence_future is not None:
+                try:
+                    source_evidence_path = source_evidence_future.result(timeout=60)
+                except Exception:
+                    source_evidence_path = None
             html_paths: list[Path] = []
             report_jsons: dict[str, Path | None] = {}
             for current_plan in plans:
