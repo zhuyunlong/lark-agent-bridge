@@ -27,6 +27,26 @@ python3.11 -m lark_agent_bridge --help
 
 The project intentionally uses Python standard library modules only and requires Python 3.11+.
 
+## Quick Start
+
+Start the bot with one of two preset configurations:
+
+```bash
+# Option 1: Use local cc-switch proxy (supports multiple providers via UI switching)
+# Requires: cc-switch running at 127.0.0.1:15721
+./run.sh cc-switch
+
+# Option 2: Use OpenAI API directly (no local proxy needed)
+# Requires: LARK_AGENT_BRIDGE_AI_API_KEY environment variable or config.openai.toml
+./run.sh openai
+```
+
+Or use the CLI directly with custom config:
+
+```bash
+python3 -m lark_agent_bridge listen --config config.custom.toml
+```
+
 ## Configure
 
 Copy the example before real use:
