@@ -1,0 +1,28 @@
+[Unit]
+Description=Lark Agent Bridge — Feishu Bot with AI Providers
+Documentation=file:///path/to/lark-agent-bridge/docs/launcher.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=your_user_name
+WorkingDirectory=/path/to/lark-agent-bridge
+Environment="PATH=/usr/local/bin:/usr/bin"
+EnvironmentFile=/path/to/lark-agent-bridge/.env
+
+# Choose ONE: cc-switch or openai
+ExecStart=/path/to/lark-agent-bridge/run.sh openai
+
+# Auto-restart on failure
+Restart=on-failure
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+
+# Resource limits
+MemoryLimit=2G
+CPUQuota=80%
+
+[Install]
+WantedBy=multi-user.target
