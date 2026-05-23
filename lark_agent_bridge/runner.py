@@ -4,19 +4,34 @@ from __future__ import annotations
 
 from pathlib import Path
 import subprocess
+import sys
 import time
 
 from .health import ProcessWatchdog, run_tracked_process
 from .models import BridgeConfig, TaskResult
 
-
-SCRIPT_PATH = ".github/skills/signal-chain-analyzer/scripts/analyze_signal_chain.py"
+_SCRIPT_CANDIDATES = (
+    ".ai/skills/signal-chain-analyzer/scripts/analyze_signal_chain.py",
+    ".github/skills/signal-chain-analyzer/scripts/analyze_signal_chain.py",
+)
 
 
 class SignalChainRunner:
     def __init__(self, config: BridgeConfig, process_watchdog: ProcessWatchdog | None = None) -> None:
         self.config = config
         self.process_watchdog = process_watchdog
+
+    def _script_path(self) -> str | None:
+        """Resolve the analyzer script from multiple candidate locations."""
+        roots = [self.config.workspace_root, self.config.guideengine_repo]
+        for root in roots:
+            if not root:
+                continue
+            for candidate in _SCRIPT_CANDIDATES:
+                path = Path(root) / candidate
+                if path.exists():
+                    return str(path)
+        return None
 
     def build_command(
         self,
@@ -27,9 +42,10 @@ class SignalChainRunner:
         json_output: str | Path,
         since: str | None = None,
     ) -> list[str]:
+        script = self._script_path() or _SCRIPT_CANDIDATES[-1]
         command = [
-            "python3",
-            SCRIPT_PATH,
+            sys.executable,
+            script,
             "--signal-code",
             str(signal),
             "--log-path",
