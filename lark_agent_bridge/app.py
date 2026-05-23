@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import html
 import json
 import os
 from pathlib import Path
@@ -461,6 +462,7 @@ class BridgeApp:
         # Phase 1: Group mention filtering
         route_content = event.content
         followup_context = None
+        latest_chat_context = None
         if event.chat_type == "group":
             addressed_content = self._strip_group_chat_mention(event.content)
             if addressed_content is None:
@@ -469,6 +471,12 @@ class BridgeApp:
                     addressed_content = self._strip_bot_mention_anywhere(event.content)
                     if addressed_content is None and self._allows_reply_chain_without_mention(followup_context):
                         addressed_content = event.content.strip()
+                elif self._is_followup_intent(event.content):
+                    latest_chat_context = self._latest_analysis_context(event.chat_id)
+                    if latest_chat_context is not None:
+                        addressed_content = self._normalize_mention_text(
+                            self._normalize_mention_source_text(event.content)
+                        )
             if addressed_content is None:
                 if not self.state_store.mark_seen(event):
                     return TaskResult(True, f"duplicate event skipped: {event.event_id}", skipped=True)
@@ -512,7 +520,7 @@ class BridgeApp:
             and decision.reason == "chat_not_allowed"
             and self._allow_log_analysis_in_external_group(
                 event,
-                followup_context=followup_context,
+                followup_context=followup_context or latest_chat_context,
                 signal_request=signal_request,
                 bug_request=bug_request,
                 direct_analysis_request=direct_analysis_request,
@@ -536,10 +544,11 @@ class BridgeApp:
         # Phase 3: Build route context and dispatch through ordered handlers
         if followup_context is None:
             followup_context = self._resolve_followup_context(event)
-        latest_chat_context = self._latest_analysis_context(
-            event.chat_id,
-            explicit_followup_context=followup_context,
-        )
+        if latest_chat_context is None:
+            latest_chat_context = self._latest_analysis_context(
+                event.chat_id,
+                explicit_followup_context=followup_context,
+            )
         ctx = _RouteContext(
             event=event,
             route_content=route_content,
@@ -824,7 +833,9 @@ class BridgeApp:
         if not ctx.referenced_resources:
             return False
         inline_request = parse_direct_analysis_request(ctx.route_content)
-        if inline_request.triggered or self._looks_like_direct_analysis_prompt(ctx.route_content):
+        if inline_request.triggered:
+            return False
+        if looks_like_direct_analysis_prompt(ctx.route_content, resources_present=False):
             return False
         return True
 
@@ -838,8 +849,9 @@ class BridgeApp:
     def _route_followup_intent(self, ctx: _RouteContext) -> TaskResult | None:
         if not self._is_followup_intent(ctx.route_content):
             return None
-        if ctx.followup_context is not None:
-            return self._handle_followup(ctx.event, ctx.route_content, ctx.followup_context)
+        target_context = ctx.followup_context or ctx.latest_chat_context
+        if target_context is not None:
+            return self._handle_followup(ctx.event, ctx.route_content, target_context)
         if not self.state_store.mark_seen(ctx.event):
             return TaskResult(True, f"duplicate event skipped: {ctx.event.event_id}", skipped=True)
         result = self._missing_followup_reply_result(chat_type=ctx.event.chat_type)
@@ -1298,8 +1310,14 @@ class BridgeApp:
         except (OverflowError, ValueError):
             return None
 
+    def _normalize_mention_source_text(self, text: str) -> str:
+        normalized = html.unescape(str(text or ""))
+        normalized = re.sub(r"(?i)<br\s*/?>", " ", normalized)
+        normalized = re.sub(r"(?i)</?(?:p|div|span)[^>]*>", " ", normalized)
+        return normalized.strip()
+
     def _strip_group_chat_mention(self, text: str) -> str | None:
-        content = text.strip()
+        content = self._normalize_mention_source_text(text)
         configured_bot = self.config.lark.bot_open_id.strip()
         if configured_bot:
             at_matches = re.findall(r'<at\s+[^>]*user_id="([^"]+)"[^>]*></at>', content)
@@ -1338,7 +1356,7 @@ class BridgeApp:
         return self._strip_bot_mention_anywhere(event.content)
 
     def _strip_bot_mention_anywhere(self, text: str) -> str | None:
-        content = text.strip()
+        content = self._normalize_mention_source_text(text)
         configured_bot = self.config.lark.bot_open_id.strip()
         at_matches = re.findall(r'<at\s+[^>]*user_id="([^"]+)"[^>]*></at>', content)
         if at_matches and (not configured_bot or configured_bot in at_matches):
@@ -3104,8 +3122,7 @@ class BridgeApp:
 
     def _choose_followup_context(self, decision: IntentDecision, *, explicit_followup_context, latest_chat_context):
         _ = decision
-        _ = latest_chat_context
-        return explicit_followup_context
+        return explicit_followup_context or latest_chat_context
 
     def _analysis_context_modes(self) -> set[str]:
         return {

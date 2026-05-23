@@ -4511,7 +4511,7 @@ class AppTests(unittest.TestCase):
         self.assertEqual(len(second_bug.agent_followup_calls), 1)
         self.assertEqual(followup.details["conversation_root_message_id"], "om_original_request")
 
-    def test_followup_reanalysis_without_reply_is_rejected(self):
+    def test_followup_reanalysis_without_reply_uses_latest_chat_context(self):
         with tempfile.TemporaryDirectory() as tmp:
             metadata = Path(tmp) / "bug_metadata.md"
             html = Path(tmp) / "bug_report.html"
@@ -4544,12 +4544,13 @@ class AppTests(unittest.TestCase):
             )
 
         self.assertTrue(first.success)
-        self.assertFalse(followup.success)
-        self.assertEqual(followup.error_code, "missing_followup_reply")
+        self.assertTrue(followup.success)
+        self.assertEqual(followup.details["mode"], "bug_reanalysis")
         self.assertEqual(len(fake_bug.requests), 1)
-        self.assertEqual(len(fake_bug.reanalysis_calls), 0)
+        self.assertEqual(len(fake_bug.reanalysis_calls), 1)
+        self.assertEqual(fake_bug.reanalysis_calls[0]["followup_text"], "修正问题时间为 23:12分 重新分析")
 
-    def test_p2p_followup_without_reply_is_rejected_without_at_hint(self):
+    def test_p2p_followup_without_reply_uses_latest_chat_context(self):
         with tempfile.TemporaryDirectory() as tmp:
             metadata = Path(tmp) / "bug_metadata.md"
             html = Path(tmp) / "bug_report.html"
@@ -4586,11 +4587,10 @@ class AppTests(unittest.TestCase):
             )
 
         self.assertTrue(first.success)
-        self.assertFalse(followup.success)
-        self.assertEqual(followup.error_code, "missing_followup_reply")
-        self.assertIn("直接回复对应那条分析消息", followup.message)
-        self.assertNotIn("@机器人", followup.message)
-        self.assertEqual(len(fake_bug.reanalysis_calls), 0)
+        self.assertTrue(followup.success)
+        self.assertEqual(followup.details["mode"], "bug_reanalysis")
+        self.assertEqual(len(fake_bug.reanalysis_calls), 1)
+        self.assertEqual(fake_bug.reanalysis_calls[0]["followup_text"], "修正问题时间为 23:12分 重新分析")
 
     def test_followup_reply_with_bug_link_stays_in_context(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -4851,7 +4851,7 @@ class AppTests(unittest.TestCase):
         self.assertEqual(fake_chat.context_calls, [])
         self.assertEqual(fake_intent.calls, [])
 
-    def test_bug_followup_without_reply_is_rejected(self):
+    def test_bug_followup_without_reply_uses_latest_chat_context(self):
         with tempfile.TemporaryDirectory() as tmp:
             metadata = Path(tmp) / "bug_metadata.md"
             html = Path(tmp) / "bug_report.html"
@@ -4886,9 +4886,14 @@ class AppTests(unittest.TestCase):
             )
 
         self.assertTrue(first.success)
-        self.assertFalse(followup.success)
-        self.assertEqual(followup.error_code, "missing_followup_reply")
-        self.assertEqual(len(fake_bug.agent_followup_calls), 0)
+        self.assertTrue(followup.success)
+        self.assertEqual(followup.details["mode"], "bug_agent_followup")
+        self.assertEqual(len(fake_bug.agent_followup_calls), 1)
+        self.assertEqual(len(fake_bug.reanalysis_calls), 0)
+        self.assertEqual(
+            fake_bug.agent_followup_calls[0]["followup_text"],
+            "用你之前下载下来日志搜索 关键字看 卡顿skill 将23:10到23:15之间的系统卡顿报告发出来",
+        )
         self.assertEqual(fake_chat.context_calls, [])
 
     def test_bug_followup_existing_answer_replies_with_choice_card(self):
@@ -5626,7 +5631,7 @@ class AppTests(unittest.TestCase):
         self.assertTrue(any("bug_followup_decision_started" in item["card_json"] for item in fake_lark.updated_cards))
         self.assertTrue(any("已完成" in item["card_json"] for item in fake_lark.updated_cards))
 
-    def test_agent_intent_followup_without_reply_is_rejected(self):
+    def test_agent_intent_followup_without_reply_uses_latest_chat_context(self):
         with tempfile.TemporaryDirectory() as tmp:
             metadata = Path(tmp) / "bug_metadata.md"
             html = Path(tmp) / "bug_report.html"
@@ -5682,11 +5687,54 @@ class AppTests(unittest.TestCase):
             )
 
         self.assertTrue(first.success)
-        self.assertFalse(followup.success)
-        self.assertEqual(followup.error_code, "missing_followup_reply")
-        self.assertEqual(len(fake_bug.reanalysis_calls), 0)
+        self.assertTrue(followup.success)
+        self.assertEqual(followup.details["mode"], "bug_reanalysis")
+        self.assertEqual(len(fake_bug.reanalysis_calls), 1)
+        self.assertEqual(fake_bug.reanalysis_calls[0]["followup_text"], followup_text)
         self.assertEqual(fake_bug.agent_followup_calls, [])
         self.assertEqual(fake_chat.context_calls, [])
+
+    def test_group_followup_intent_without_mention_uses_latest_chat_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = Path(tmp) / "bug_metadata.md"
+            html = Path(tmp) / "bug_report.html"
+            metadata.write_text("bug", encoding="utf-8")
+            html.write_text("<html><body>根因是首帧超时</body></html>", encoding="utf-8")
+            fake_lark = FakeLarkClient()
+            fake_bug = FakeBugRunner(metadata, html)
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    allowed_chats=["oc_denied"],
+                ),
+                lark_client=fake_lark,
+                bug_runner=fake_bug,
+                chat_client=FakeOmlxChatClient(),
+                intent_runner=FakeIntentRunner(enabled=False),
+            )
+            app.conversation_store.remember(
+                root_message_id="om_bug_root",
+                chat_id="oc_denied",
+                mode="bug_analysis",
+                request_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722 调查3D启动时序",
+                summary_text="bug 分析完成",
+                report_url="http://report",
+                report_excerpt="SceneType=Main",
+            )
+
+            followup = app.handle_event(
+                event(
+                    event_id="evt_group_latest_followup_no_mention",
+                    message_id="om_group_latest_followup_no_mention",
+                    content="重新分析一遍",
+                )
+            )
+
+        self.assertTrue(followup.success)
+        self.assertEqual(followup.details["mode"], "bug_reanalysis")
+        self.assertEqual(len(fake_bug.reanalysis_calls), 1)
+        self.assertEqual(fake_bug.reanalysis_calls[0]["followup_text"], "重新分析一遍")
 
     def test_group_message_without_bot_mention_is_silent(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -5986,6 +6034,38 @@ class AppTests(unittest.TestCase):
                 event(
                     event_id="evt_bot_name_at_end",
                     content="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6979499593 分析3D生命周期 @Test Bot",
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertFalse(result.skipped)
+        self.assertEqual(result.details["mode"], "bug_analysis")
+        self.assertEqual(len(fake_bug.requests), 1)
+        self.assertEqual(fake_bug.requests[0].prompt, "分析3D生命周期")
+
+    def test_group_bug_request_accepts_rich_text_wrapped_bot_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = Path(tmp) / "bug_metadata.md"
+            html = Path(tmp) / "bug_report.html"
+            metadata.write_text("metadata", encoding="utf-8")
+            html.write_text("<html></html>", encoding="utf-8")
+            fake_lark = FakeLarkClient()
+            fake_bug = FakeBugRunner(metadata, html)
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    allowed_chats=["oc_denied"],
+                    lark=LarkOptions(bot_name="朱云龙的飞书 CLI"),
+                ),
+                lark_client=fake_lark,
+                bug_runner=fake_bug,
+            )
+
+            result = app.handle_event(
+                event(
+                    event_id="evt_rich_text_bot_name",
+                    content="<p>@朱云龙的飞书 CLI https://project.feishu.cn/xpfailuremgmt/buglo/detail/6979499593 分析3D生命周期</p>",
                 )
             )
 
