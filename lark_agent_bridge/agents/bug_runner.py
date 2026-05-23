@@ -7816,8 +7816,8 @@ class BugAnalysisRunner:
         stdout_parts: list[str] = []
         stderr_parts: list[str] = []
         try:
-            assert process.stdout is not None
-            assert process.stderr is not None
+            if process.stdout is None or process.stderr is None:
+                raise RuntimeError("subprocess streams not available (stdout/stderr must be PIPE)")
             streams = [process.stdout, process.stderr]
             while True:
                 now = time.monotonic()
