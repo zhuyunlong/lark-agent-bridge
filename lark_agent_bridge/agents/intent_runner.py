@@ -1,10 +1,12 @@
 """Intent analysis runner.
 
-Supports two backends:
-1. **Direct API** (preferred) — when ``[ai_provider].enabled = true``,
-   calls the LLM directly via HTTP with JSON mode for structured output.
-   Typical latency: 3-10 seconds.
-2. **Subprocess CLI** (legacy fallback) — shells out to ``codex exec``
+Supports three backends (tried in order):
+1. **Pydantic AI Agent** (best) — when pydantic-ai is installed and
+   ``[ai_provider].enabled = true``, uses structured output validation
+   with automatic retry on schema failures. Typical latency: 3-10 seconds.
+2. **Direct API** (preferred fallback) — raw LLM HTTP call with manual
+   JSON parsing. Typical latency: 3-10 seconds.
+3. **Subprocess CLI** (legacy fallback) — shells out to ``codex exec``
    or ``claude --print``. Typical latency: 120-300 seconds.
 """
 
@@ -23,6 +25,7 @@ from ..log import get_logger
 from ..models import BridgeConfig, IntentDecision, LarkEvent
 from ._helpers import _provider_candidates
 from .llm_client import LLMClient, LLMClientError
+from .pydantic_agents import IntentAgent
 
 logger = get_logger("agents")
 
@@ -65,8 +68,17 @@ class IntentAnalysisRunner:
         self.config = config
         self.process_watchdog = process_watchdog
         self._llm_client: LLMClient | None = None
+        self._intent_agent: IntentAgent | None = None
         if config.ai_provider.enabled and config.ai_provider.base_url and config.ai_provider.primary_model:
             self._llm_client = LLMClient(config.ai_provider)
+            # Try to initialize pydantic-ai agent (graceful if not installed)
+            try:
+                agent = IntentAgent(config.ai_provider)
+                if agent.is_available():
+                    self._intent_agent = agent
+                    logger.info("Pydantic AI IntentAgent enabled (structured output validation)")
+            except Exception as exc:
+                logger.debug("Pydantic AI IntentAgent not available: %s", exc)
 
     def is_enabled(self) -> bool:
         if self._llm_client is not None and self._llm_client.is_available():
@@ -101,6 +113,13 @@ class IntentAnalysisRunner:
                 context_source="none",
             )
 
+        # --- Path 0: Pydantic AI Agent (best — structured output + auto-retry) ---
+        if self._intent_agent is not None and self._intent_agent.is_available():
+            try:
+                return self._classify_via_pydantic_agent(prompt)
+            except Exception as exc:
+                logger.warning("Pydantic AI intent classification failed, trying direct API: %s", exc)
+
         # --- Path 1: Direct API (fast, preferred) ---
         if self._llm_client is not None and self._llm_client.is_available():
             try:
@@ -111,6 +130,45 @@ class IntentAnalysisRunner:
 
         # --- Path 2: Subprocess CLI (legacy fallback) ---
         return self._classify_via_subprocess(prompt)
+
+    def _classify_via_pydantic_agent(self, prompt: str) -> IntentDecision:
+        """Classify intent via pydantic-ai Agent with structured output validation.
+
+        This path uses Agent(output_type=IntentOutput) which:
+        1. Instructs the LLM to return JSON matching IntentOutput schema
+        2. Auto-validates the response with Pydantic
+        3. Auto-retries with error feedback if validation fails
+
+        No manual JSON parsing needed — pydantic-ai handles it all.
+        """
+        assert self._intent_agent is not None
+        system_prompt = self.config.intent_analysis.system_prompt
+
+        result = self._intent_agent.classify(
+            system_prompt=system_prompt,
+            user_prompt=prompt,
+        )
+
+        # Convert IntentOutput (pydantic BaseModel) to IntentDecision (dataclass)
+        from .pydantic_models import IntentOutput
+
+        output: IntentOutput = result.output  # type: ignore[assignment]
+        decision = IntentDecision(
+            route=output.route,
+            confidence=output.confidence,
+            reason=output.reason,
+            followup_action=output.followup_action,
+            context_source=output.context_source,
+            raw_response=f"[pydantic-ai] model={result.model} duration={result.duration_seconds:.1f}s",
+        )
+        logger.info(
+            "Intent classified via pydantic-ai: route=%s confidence=%s duration=%.1fs model=%s",
+            decision.route,
+            decision.confidence,
+            result.duration_seconds,
+            result.model,
+        )
+        return decision
 
     def _classify_via_api(self, prompt: str) -> IntentDecision:
         """Classify intent via direct LLM API call (3-10 seconds)."""
