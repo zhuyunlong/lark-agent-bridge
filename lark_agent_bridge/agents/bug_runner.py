@@ -3415,6 +3415,9 @@ class BugAnalysisRunner:
             except OSError:
                 continue
 
+    # Package whose main_* log should be preferred when selecting startup input.
+    _STARTUP_TARGET_PACKAGE = "com.xiaopeng.montecarlo"
+
     def _select_startup_input(self, input_path: Path, fault_time: str) -> Path:
         if input_path.is_file():
             return input_path
@@ -3422,12 +3425,17 @@ class BugAnalysisRunner:
         if fault_dt is None:
             return input_path
         fault_epoch = time.mktime(fault_dt)
-        candidates = [
+        all_candidates = [
             path
             for path in input_path.rglob("main_*")
             if path.is_file()
             and path.suffix.lower() in {".alog", ".xlog", ".log", ".txt"}
         ]
+        # Prefer files inside the target app package directory; fall back to
+        # all candidates so the script can emit a meaningful warning itself.
+        target_pkg = self._STARTUP_TARGET_PACKAGE
+        montecarlo = [p for p in all_candidates if target_pkg in str(p)]
+        candidates = montecarlo if montecarlo else all_candidates
         ranked: list[tuple[float, int, Path]] = []
         for candidate in candidates:
             file_dt = self._parse_log_file_datetime(candidate.name)
