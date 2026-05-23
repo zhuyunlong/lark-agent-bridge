@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 import re
 import shutil
 import subprocess
+import time
+
+logger = logging.getLogger(__name__)
 
 
 SIGNAL_ENUM_DEFINITION_RE = re.compile(
@@ -26,9 +31,19 @@ class SignalResolution:
 class SignalResolver:
     """Fuzzy resolver backed by signal definitions in the configured repo."""
 
-    def __init__(self, repo: Path | str | None = None) -> None:
+    def __init__(
+        self,
+        repo: Path | str | None = None,
+        *,
+        cache_dir: Path | str | None = None,
+        cache_ttl_seconds: float = 3600.0,
+    ) -> None:
         self.repo = Path(repo).expanduser() if repo else None
         self._catalog: dict[str, str] | None = None
+        self._cache_path: Path | None = (
+            Path(cache_dir) / "signal_catalog.json" if cache_dir else None
+        )
+        self._cache_ttl = cache_ttl_seconds
 
     def resolve(self, value: str) -> SignalResolution | None:
         requested = (value or "").strip()
@@ -59,6 +74,13 @@ class SignalResolver:
         if repo is None or not repo.exists():
             self._catalog = catalog
             return catalog
+
+        repo_hash = _repo_head_hash(repo)
+        cached = self._read_cache(repo_hash)
+        if cached is not None:
+            self._catalog = cached
+            return cached
+
         for path in _candidate_signal_files(repo):
             try:
                 text = path.read_text(encoding="utf-8", errors="replace")
@@ -72,7 +94,43 @@ class SignalResolver:
                 if code:
                     catalog.setdefault(code, name)
         self._catalog = catalog
+        self._write_cache(catalog, repo_hash)
         return catalog
+
+    # -- persistent cache helpers ------------------------------------------
+
+    def _read_cache(self, repo_hash: str | None) -> dict[str, str] | None:
+        if self._cache_path is None or not self._cache_path.exists():
+            return None
+        try:
+            data = json.loads(self._cache_path.read_text(encoding="utf-8"))
+            if (
+                isinstance(data, dict)
+                and data.get("repo_hash") == repo_hash
+                and time.time() - data.get("mtime", 0) < self._cache_ttl
+            ):
+                logger.debug("signal catalog cache hit (hash=%s)", repo_hash)
+                return data.get("catalog", {})
+        except (OSError, json.JSONDecodeError, TypeError):
+            pass
+        return None
+
+    def _write_cache(self, catalog: dict[str, str], repo_hash: str | None) -> None:
+        if self._cache_path is None:
+            return
+        try:
+            self._cache_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "repo_hash": repo_hash,
+                "mtime": time.time(),
+                "catalog": catalog,
+            }
+            self._cache_path.write_text(
+                json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+            )
+            logger.debug("signal catalog cache written (%d entries)", len(catalog))
+        except OSError:
+            pass
 
 
 def _candidate_signal_files(repo: Path) -> list[Path]:
@@ -94,6 +152,24 @@ def _candidate_signal_files(repo: Path) -> list[Path]:
     for path in _source_files_with_signal_refs(repo):
         _append_path(files, path)
     return files
+
+
+def _repo_head_hash(repo: Path) -> str | None:
+    """Return the HEAD commit hash for cache invalidation."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            cwd=repo,
+            check=False,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return None
 
 
 def _source_files_with_signal_refs(repo: Path) -> list[Path]:

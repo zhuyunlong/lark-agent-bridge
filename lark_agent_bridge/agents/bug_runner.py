@@ -195,7 +195,10 @@ class BugAnalysisRunner:
     ) -> None:
         self.config = config
         self.process_watchdog = process_watchdog
-        self.signal_resolver = SignalResolver(config.guideengine_repo)
+        self.signal_resolver = SignalResolver(
+            config.guideengine_repo,
+            cache_dir=config.data_dir / "cache",
+        )
         self._lark_client = lark_client
         self.skill_manager = skill_manager or SkillManager(config)
 

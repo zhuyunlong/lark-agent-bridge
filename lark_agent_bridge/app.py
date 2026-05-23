@@ -301,7 +301,10 @@ class BridgeApp:
         self.approval_store = ApprovalStore(config.data_dir / "state" / "approvals.json")
         self.version_store = ReportVersionStore(config.data_dir / "state" / "report_versions.json")
         self.workflow_archiver = WorkflowArchiver(config, self.lark_client)
-        self.signal_resolver = SignalResolver(config.guideengine_repo)
+        self.signal_resolver = SignalResolver(
+            config.guideengine_repo,
+            cache_dir=config.data_dir / "cache",
+        )
         self.bug_url_re = build_bug_url_re(config.bug_url_domains) if config.bug_url_domains else None
         self.escalation_checker = EscalationChecker()
         self.notification_history = NotificationHistory(config.data_dir / "state" / "notification_history.json")
