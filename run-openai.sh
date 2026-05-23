@@ -4,7 +4,7 @@
 # 用法:
 #   ./run-openai.sh                    # 默认使用 config.openai.toml 中的 preset
 #   ./run-openai.sh --preset panda     # 覆盖 preset
-#   ./run-openai.sh --preset openai    # 直连 OpenAI 官方
+#   ./run-openai.sh --preset yybb-codex-openai    # 走 yybb.codes 的 OpenAI 兼容网关
 # ---------------------------------------------------------------
 set -euo pipefail
 

@@ -80,7 +80,7 @@ _PROVIDER_PRESETS: dict[str, dict[str, str]] = {
         "api_format": "anthropic",
     },
     # yybb endpoint — Codex/GPT models via OpenAI-compat gateway
-    # yybb.codes 同时支持 /v1/chat/completions，base_url 需带 /v1
+    # 实测需要走 /v1/chat/completions；根路径 /chat/completions 返回的是站点 HTML，不是 API。
     "yybb-codex-openai": {
         "base_url": "https://yybb.codes/v1",
         "primary_model": "gpt-5.4",

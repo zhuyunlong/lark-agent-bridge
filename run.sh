@@ -8,6 +8,7 @@
 #   ./run.sh openai-key     # OpenAI API Key 直连
 #   ./run.sh xiaomi-tp      # 小米 MiMo Token Plan（默认）
 #   ./run.sh                # 默认 config.toml
+#   ./run.sh config.cc-switch.toml  # 也支持直接传本地 config 文件
 
 set -e
 
@@ -51,16 +52,26 @@ case "$PROFILE" in
     echo "🔌 Starting with default config.toml..."
     ;;
   *)
-    echo "Usage: $0 {cc-switch|claude-oauth|claude-key|openai-oauth|openai-key|xiaomi-tp}" >&2
-    echo "" >&2
-    echo "Presets:" >&2
-    echo "  cc-switch     - cc-switch 代理，零配置" >&2
-    echo "  claude-oauth  - Claude 官方 OAuth（经 cc-switch）" >&2
-    echo "  claude-key    - Anthropic API Key 直连" >&2
-    echo "  openai-oauth  - OpenAI 官方 OAuth（经 cc-switch）" >&2
-    echo "  openai-key    - OpenAI API Key 直连" >&2
-    echo "  xiaomi-tp     - 小米 MiMo Token Plan（默认）" >&2
-    exit 1
+    # 支持直接传 config 文件名
+    if [[ "$PROFILE" == *.toml ]] && [ -f "$PROJECT_DIR/$PROFILE" ]; then
+      CONFIG="$PROJECT_DIR/$PROFILE"
+    elif [ -f "$PROJECT_DIR/$PROFILE" ]; then
+      CONFIG="$PROJECT_DIR/$PROFILE"
+    else
+      echo "Usage: $0 {cc-switch|claude-oauth|claude-key|openai-oauth|openai-key|xiaomi-tp|config.xxx.toml}" >&2
+      echo "" >&2
+      echo "Presets:" >&2
+      echo "  cc-switch     - cc-switch 代理，零配置" >&2
+      echo "  claude-oauth  - Claude 官方 OAuth（经 cc-switch）" >&2
+      echo "  claude-key    - Anthropic API Key 直连" >&2
+      echo "  openai-oauth  - OpenAI 官方 OAuth（经 cc-switch）" >&2
+      echo "  openai-key    - OpenAI API Key 直连" >&2
+      echo "  xiaomi-tp     - 小米 MiMo Token Plan（默认）" >&2
+      echo "" >&2
+      echo "Or pass a config file directly:" >&2
+      echo "  ./run.sh config.cc-switch.toml" >&2
+      exit 1
+    fi
     ;;
 esac
 
