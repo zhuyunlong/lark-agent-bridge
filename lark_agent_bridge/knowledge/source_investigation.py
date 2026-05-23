@@ -1,7 +1,16 @@
-"""Read-only Codex CLI source investigation for knowledge QA."""
+"""Read-only source investigation for knowledge QA.
+
+Supports two execution paths:
+1. **Direct API** — uses LLMClient to call the LLM directly (fast, ~3-8s).
+2. **CLI subprocess** — falls back to ``codex exec`` (slow, ~30-120s).
+
+The direct API path is preferred when the AI provider is configured and
+enabled. The CLI path is kept as a fallback.
+"""
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 import json
 from pathlib import Path
@@ -12,6 +21,8 @@ from typing import Any
 
 from .models import SearchHit
 from ..models import BridgeConfig
+
+logger = logging.getLogger(__name__)
 
 _LOW_VALUE_PATH_HINTS = (
     "src/test",
@@ -71,13 +82,86 @@ class SourceInvestigationRunner:
         options = self.config.source_investigation
         if not options.enabled:
             return SourceInvestigationResult(success=False, error="source investigation disabled")
-        if options.provider.strip().casefold() != "codex":
-            return SourceInvestigationResult(success=False, error=f"unsupported provider: {options.provider}")
         repo_roots = [path.expanduser() for path in (options.repo_roots or [self.config.guideengine_repo])]
         local_result = _try_local_signal_probe(question, hits or [], repo_roots)
         if local_result is not None:
             return local_result
-        primary_root = repo_roots[0] if repo_roots else self.config.guideengine_repo
+
+        # Try direct API first (fast path, ~3-8s)
+        api_result = self._run_via_api(question, hits=hits, repo_roots=repo_roots)
+        if api_result is not None:
+            return api_result
+
+        # Fall back to CLI subprocess (slow path, ~30-120s)
+        if options.provider.strip().casefold() != "codex":
+            return SourceInvestigationResult(success=False, error=f"unsupported provider: {options.provider}")
+        return self._run_via_cli(question, hits=hits, repo_roots=repo_roots)
+
+    def _run_via_api(
+        self,
+        question: str,
+        *,
+        hits: list[SearchHit] | None = None,
+        repo_roots: list[Path] | None = None,
+    ) -> SourceInvestigationResult | None:
+        """Direct API call to LLM — returns None if not available."""
+        try:
+            from ..agents.llm_client import LLMClient
+        except ImportError:
+            return None
+        ai_opts = self.config.ai_provider
+        client = LLMClient(ai_opts)
+        if not client.is_available():
+            return None
+        prompt = self._prompt(question, hits=hits or [])
+        system_prompt = (
+            "You are a read-only source code investigator. "
+            "Respond with a single JSON object (no markdown, no code block). "
+            "Fields: answer(string), canonical_key(string), confidence(number 0-1), "
+            "commands(array string), source_evidence(array object with file,line,text), "
+            "coverage_boundary(string), writeback_allowed(boolean)."
+        )
+        try:
+            started = time.monotonic()
+            response = client.chat(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.0,
+                max_tokens=self.config.source_investigation.max_evidence * 200 + 2048,
+                timeout_seconds=max(1.0, self.config.source_investigation.timeout_seconds),
+            )
+            duration = time.monotonic() - started
+            logger.info(
+                "source investigation via API completed in %.1fs (model=%s)",
+                duration, response.model,
+            )
+        except Exception as exc:
+            logger.warning("source investigation API call failed, falling back to CLI: %s", exc)
+            return None
+
+        parsed = _parse_json_object(response.content)
+        if parsed is None:
+            logger.warning("source investigation API returned non-JSON, falling back to CLI")
+            return None
+        schema_error = _schema_error(parsed)
+        if schema_error:
+            logger.warning("source investigation API returned invalid schema: %s", schema_error)
+            return None
+        return _result_from_payload(parsed, command=["llm_client.chat()"], stdout=response.content, stderr="")
+
+    def _run_via_cli(
+        self,
+        question: str,
+        *,
+        hits: list[SearchHit] | None = None,
+        repo_roots: list[Path] | None = None,
+    ) -> SourceInvestigationResult:
+        """Original CLI subprocess path (codex exec)."""
+        options = self.config.source_investigation
+        roots = repo_roots or [path.expanduser() for path in (options.repo_roots or [self.config.guideengine_repo])]
+        primary_root = roots[0] if roots else self.config.guideengine_repo
         output_path = self._output_path()
         command = self._build_command(
             question=question,
