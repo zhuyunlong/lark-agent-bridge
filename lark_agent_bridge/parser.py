@@ -344,7 +344,11 @@ def parse_addr2line_request(text: str, *, allow_missing_address: bool = False) -
 def parse_followup_action(text: str) -> str:
     cleaned = _strip_leading_mentions(text or "").strip()
     lowered = cleaned.casefold()
-    if _contains_any(cleaned, lowered, FOLLOWUP_RETRY_TERMS) or re.search(r"^(?:再|重新).{0,12}(?:一次|一遍)$", cleaned):
+    if (
+        _contains_any(cleaned, lowered, FOLLOWUP_RETRY_TERMS)
+        or re.search(r"^(?:再|重新).{0,12}(?:一次|一遍)$", cleaned)
+        or re.search(r"^重新分析(?:下)?$", cleaned)
+    ):
         return "retry"
     if _contains_any(cleaned, lowered, FOLLOWUP_CONTINUE_TERMS):
         return "continue"

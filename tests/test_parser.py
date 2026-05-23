@@ -156,7 +156,7 @@ class ParserTests(unittest.TestCase):
                 self.assertFalse(request.triggered)
 
     def test_parse_followup_action_recognizes_generic_retry_terms(self):
-        for text in ("重试一次", "再来一次", "重新跑", "再查一次"):
+        for text in ("重试一次", "再来一次", "重新跑", "再查一次", "重新分析", "重新分析下"):
             with self.subTest(text=text):
                 self.assertEqual(parse_followup_action(text), "retry")
 

@@ -58,6 +58,7 @@ from .models import (
     BridgeConfig,
     CardActionEvent,
     DownloadResource,
+    DirectAnalysisRequest,
     IntentDecision,
     LarkEvent,
     RomVersionLookupRequest,
@@ -462,7 +463,6 @@ class BridgeApp:
         # Phase 1: Group mention filtering
         route_content = event.content
         followup_context = None
-        latest_chat_context = None
         if event.chat_type == "group":
             addressed_content = self._strip_group_chat_mention(event.content)
             if addressed_content is None:
@@ -471,12 +471,6 @@ class BridgeApp:
                     addressed_content = self._strip_bot_mention_anywhere(event.content)
                     if addressed_content is None and self._allows_reply_chain_without_mention(followup_context):
                         addressed_content = event.content.strip()
-                elif self._is_followup_intent(event.content):
-                    latest_chat_context = self._latest_analysis_context(event.chat_id)
-                    if latest_chat_context is not None:
-                        addressed_content = self._normalize_mention_text(
-                            self._normalize_mention_source_text(event.content)
-                        )
             if addressed_content is None:
                 if not self.state_store.mark_seen(event):
                     return TaskResult(True, f"duplicate event skipped: {event.event_id}", skipped=True)
@@ -520,7 +514,7 @@ class BridgeApp:
             and decision.reason == "chat_not_allowed"
             and self._allow_log_analysis_in_external_group(
                 event,
-                followup_context=followup_context or latest_chat_context,
+                followup_context=followup_context,
                 signal_request=signal_request,
                 bug_request=bug_request,
                 direct_analysis_request=direct_analysis_request,
@@ -544,11 +538,10 @@ class BridgeApp:
         # Phase 3: Build route context and dispatch through ordered handlers
         if followup_context is None:
             followup_context = self._resolve_followup_context(event)
-        if latest_chat_context is None:
-            latest_chat_context = self._latest_analysis_context(
-                event.chat_id,
-                explicit_followup_context=followup_context,
-            )
+        latest_chat_context = self._latest_analysis_context(
+            event.chat_id,
+            explicit_followup_context=followup_context,
+        )
         ctx = _RouteContext(
             event=event,
             route_content=route_content,
@@ -849,9 +842,8 @@ class BridgeApp:
     def _route_followup_intent(self, ctx: _RouteContext) -> TaskResult | None:
         if not self._is_followup_intent(ctx.route_content):
             return None
-        target_context = ctx.followup_context or ctx.latest_chat_context
-        if target_context is not None:
-            return self._handle_followup(ctx.event, ctx.route_content, target_context)
+        if ctx.followup_context is not None:
+            return self._handle_followup(ctx.event, ctx.route_content, ctx.followup_context)
         if not self.state_store.mark_seen(ctx.event):
             return TaskResult(True, f"duplicate event skipped: {ctx.event.event_id}", skipped=True)
         result = self._missing_followup_reply_result(chat_type=ctx.event.chat_type)
@@ -3122,7 +3114,8 @@ class BridgeApp:
 
     def _choose_followup_context(self, decision: IntentDecision, *, explicit_followup_context, latest_chat_context):
         _ = decision
-        return explicit_followup_context or latest_chat_context
+        _ = latest_chat_context
+        return explicit_followup_context
 
     def _analysis_context_modes(self) -> set[str]:
         return {
@@ -3137,6 +3130,8 @@ class BridgeApp:
     def _threaded_reply_context_modes(self) -> set[str]:
         return {
             *self._analysis_context_modes(),
+            "bug_clarification",
+            "bug_time_clarification",
             "knowledge_qa",
             "knowledge_probe",
             "basic_chat",
@@ -4073,6 +4068,38 @@ class BridgeApp:
                     followup_text=route_content,
                 )
                 return self._run_bug_request(event, recovered_bug_request, recovered_bug_request.raw_text)
+            if not str(previous_session.get("job_id") or "").strip():
+                recovered_direct_request = self._recovered_direct_analysis_request_from_followup_context(
+                    event,
+                    followup_context,
+                    followup_text=route_content,
+                )
+                if recovered_direct_request is not None:
+                    pending = self._maybe_request_approval(
+                        event,
+                        operation_type="direct_analysis",
+                        description="直传文件分析",
+                        route_content=recovered_direct_request.raw_text,
+                        file_count=len(recovered_direct_request.resources),
+                        prompt=recovered_direct_request.prompt,
+                        estimated_duration_seconds=self.config.bug_analysis.timeout_seconds,
+                    )
+                    if pending is not None:
+                        return pending
+                    self._notify_progress(
+                        "bug_followup_recovered_as_direct_analysis",
+                        "从回复链恢复原文件和意图，按直传文件分析重新执行",
+                        event=event,
+                        session_id=followup_context.root_message_id,
+                        followup_text=route_content,
+                        recovered_prompt=recovered_direct_request.prompt,
+                        recovered_resources=[item.value for item in recovered_direct_request.resources],
+                    )
+                    return self._run_direct_analysis_request(
+                        event,
+                        recovered_direct_request,
+                        recovered_direct_request.raw_text,
+                    )
             pending = self._maybe_request_approval(
                 event,
                 operation_type="reanalyze",
@@ -4176,6 +4203,38 @@ class BridgeApp:
             details["user_request_text"] = request_text
         session["details"] = details
         return session
+
+    def _recovered_direct_analysis_request_from_followup_context(
+        self,
+        event: LarkEvent,
+        followup_context,
+        *,
+        followup_text: str,
+    ) -> DirectAnalysisRequest | None:
+        request_text = str(getattr(followup_context, "request_text", "") or "").strip()
+        if not request_text or self._bug_url_from_request_text(request_text):
+            return None
+        resources = self._reference_chain_log_resources(event)
+        if not resources:
+            return None
+        route_content = request_text
+        cleaned_followup = followup_text.strip()
+        followup_action = parse_followup_action(cleaned_followup)
+        if cleaned_followup and followup_action not in {"retry", "continue"}:
+            route_content = f"{request_text}\n\n追问/修正：{cleaned_followup}"
+        request = self._build_direct_analysis_request(route_content, resources, event=event)
+        if request.triggered:
+            return request
+        prompt = route_content.strip()
+        if not prompt:
+            return None
+        return DirectAnalysisRequest(
+            prompt=prompt,
+            resources=resources,
+            raw_text=route_content,
+            triggered=True,
+            error=None,
+        )
 
     def _send_followup_ack(self, event: LarkEvent, message: str, *, root_message_id: str | None = None) -> None:
         if self.config.dry_run or event.chat_type not in {"group", "p2p"}:

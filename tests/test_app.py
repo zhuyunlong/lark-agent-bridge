@@ -4511,7 +4511,7 @@ class AppTests(unittest.TestCase):
         self.assertEqual(len(second_bug.agent_followup_calls), 1)
         self.assertEqual(followup.details["conversation_root_message_id"], "om_original_request")
 
-    def test_followup_reanalysis_without_reply_uses_latest_chat_context(self):
+    def test_followup_reanalysis_without_reply_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             metadata = Path(tmp) / "bug_metadata.md"
             html = Path(tmp) / "bug_report.html"
@@ -4544,13 +4544,12 @@ class AppTests(unittest.TestCase):
             )
 
         self.assertTrue(first.success)
-        self.assertTrue(followup.success)
-        self.assertEqual(followup.details["mode"], "bug_reanalysis")
+        self.assertFalse(followup.success)
+        self.assertEqual(followup.error_code, "missing_followup_reply")
         self.assertEqual(len(fake_bug.requests), 1)
-        self.assertEqual(len(fake_bug.reanalysis_calls), 1)
-        self.assertEqual(fake_bug.reanalysis_calls[0]["followup_text"], "修正问题时间为 23:12分 重新分析")
+        self.assertEqual(len(fake_bug.reanalysis_calls), 0)
 
-    def test_p2p_followup_without_reply_uses_latest_chat_context(self):
+    def test_p2p_followup_without_reply_is_rejected_without_at_hint(self):
         with tempfile.TemporaryDirectory() as tmp:
             metadata = Path(tmp) / "bug_metadata.md"
             html = Path(tmp) / "bug_report.html"
@@ -4587,10 +4586,11 @@ class AppTests(unittest.TestCase):
             )
 
         self.assertTrue(first.success)
-        self.assertTrue(followup.success)
-        self.assertEqual(followup.details["mode"], "bug_reanalysis")
-        self.assertEqual(len(fake_bug.reanalysis_calls), 1)
-        self.assertEqual(fake_bug.reanalysis_calls[0]["followup_text"], "修正问题时间为 23:12分 重新分析")
+        self.assertFalse(followup.success)
+        self.assertEqual(followup.error_code, "missing_followup_reply")
+        self.assertIn("直接回复对应那条分析消息", followup.message)
+        self.assertNotIn("@机器人", followup.message)
+        self.assertEqual(len(fake_bug.reanalysis_calls), 0)
 
     def test_followup_reply_with_bug_link_stays_in_context(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -4851,7 +4851,7 @@ class AppTests(unittest.TestCase):
         self.assertEqual(fake_chat.context_calls, [])
         self.assertEqual(fake_intent.calls, [])
 
-    def test_bug_followup_without_reply_uses_latest_chat_context(self):
+    def test_bug_followup_without_reply_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             metadata = Path(tmp) / "bug_metadata.md"
             html = Path(tmp) / "bug_report.html"
@@ -4886,14 +4886,9 @@ class AppTests(unittest.TestCase):
             )
 
         self.assertTrue(first.success)
-        self.assertTrue(followup.success)
-        self.assertEqual(followup.details["mode"], "bug_agent_followup")
-        self.assertEqual(len(fake_bug.agent_followup_calls), 1)
-        self.assertEqual(len(fake_bug.reanalysis_calls), 0)
-        self.assertEqual(
-            fake_bug.agent_followup_calls[0]["followup_text"],
-            "用你之前下载下来日志搜索 关键字看 卡顿skill 将23:10到23:15之间的系统卡顿报告发出来",
-        )
+        self.assertFalse(followup.success)
+        self.assertEqual(followup.error_code, "missing_followup_reply")
+        self.assertEqual(len(fake_bug.agent_followup_calls), 0)
         self.assertEqual(fake_chat.context_calls, [])
 
     def test_bug_followup_existing_answer_replies_with_choice_card(self):
@@ -5631,7 +5626,7 @@ class AppTests(unittest.TestCase):
         self.assertTrue(any("bug_followup_decision_started" in item["card_json"] for item in fake_lark.updated_cards))
         self.assertTrue(any("已完成" in item["card_json"] for item in fake_lark.updated_cards))
 
-    def test_agent_intent_followup_without_reply_uses_latest_chat_context(self):
+    def test_agent_intent_followup_without_reply_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             metadata = Path(tmp) / "bug_metadata.md"
             html = Path(tmp) / "bug_report.html"
@@ -5687,14 +5682,13 @@ class AppTests(unittest.TestCase):
             )
 
         self.assertTrue(first.success)
-        self.assertTrue(followup.success)
-        self.assertEqual(followup.details["mode"], "bug_reanalysis")
-        self.assertEqual(len(fake_bug.reanalysis_calls), 1)
-        self.assertEqual(fake_bug.reanalysis_calls[0]["followup_text"], followup_text)
+        self.assertFalse(followup.success)
+        self.assertEqual(followup.error_code, "missing_followup_reply")
+        self.assertEqual(len(fake_bug.reanalysis_calls), 0)
         self.assertEqual(fake_bug.agent_followup_calls, [])
         self.assertEqual(fake_chat.context_calls, [])
 
-    def test_group_followup_intent_without_mention_uses_latest_chat_context(self):
+    def test_group_followup_intent_without_reply_chain_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             metadata = Path(tmp) / "bug_metadata.md"
             html = Path(tmp) / "bug_report.html"
@@ -5713,16 +5707,6 @@ class AppTests(unittest.TestCase):
                 chat_client=FakeOmlxChatClient(),
                 intent_runner=FakeIntentRunner(enabled=False),
             )
-            app.conversation_store.remember(
-                root_message_id="om_bug_root",
-                chat_id="oc_denied",
-                mode="bug_analysis",
-                request_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722 调查3D启动时序",
-                summary_text="bug 分析完成",
-                report_url="http://report",
-                report_excerpt="SceneType=Main",
-            )
-
             followup = app.handle_event(
                 event(
                     event_id="evt_group_latest_followup_no_mention",
@@ -5732,9 +5716,105 @@ class AppTests(unittest.TestCase):
             )
 
         self.assertTrue(followup.success)
-        self.assertEqual(followup.details["mode"], "bug_reanalysis")
-        self.assertEqual(len(fake_bug.reanalysis_calls), 1)
-        self.assertEqual(fake_bug.reanalysis_calls[0]["followup_text"], "重新分析一遍")
+        self.assertTrue(followup.skipped)
+        self.assertEqual(followup.details["mode"], "not_addressed")
+        self.assertEqual(len(fake_bug.reanalysis_calls), 0)
+
+    def test_followup_reanalysis_fetches_current_message_reply_chain_through_clarification_to_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = Path(tmp) / "bug_metadata.md"
+            html = Path(tmp) / "bug_report.html"
+            metadata.write_text("bug", encoding="utf-8")
+            html.write_text("<html></html>", encoding="utf-8")
+            fake_lark = FakeLarkClient()
+            fake_lark.fetched_messages["om_followup_retry"] = json.dumps(
+                {
+                    "ok": True,
+                    "data": {
+                        "messages": [
+                            {
+                                "message_id": "om_followup_retry",
+                                "reply_to": "om_clarification",
+                            }
+                        ]
+                    },
+                },
+                ensure_ascii=False,
+            )
+            fake_lark.fetched_messages["om_clarification"] = json.dumps(
+                {
+                    "ok": True,
+                    "data": {
+                        "messages": [
+                            {
+                                "message_id": "om_clarification",
+                                "reply_to": "om_file_msg",
+                                "content": "@bot 基于SRViolationHandler.kt源码分析 时间点5月22日 7:46 分析超速状态",
+                            }
+                        ]
+                    },
+                },
+                ensure_ascii=False,
+            )
+            fake_lark.fetched_messages["om_file_msg"] = json.dumps(
+                {
+                    "ok": True,
+                    "data": {
+                        "messages": [
+                            {
+                                "message_id": "om_file_msg",
+                                "msg_type": "file",
+                                "content": '<file key="file_v3_0011v_33d1772b-86ac-4789-b6e1-35c77ec29a5g" name="L1NSPGHB3SB010669log0.zip"/>',
+                            }
+                        ]
+                    },
+                },
+                ensure_ascii=False,
+            )
+            fake_bug = FakeBugRunner(metadata, html)
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    allowed_chats=["oc_denied"],
+                ),
+                lark_client=fake_lark,
+                bug_runner=fake_bug,
+                chat_client=FakeOmlxChatClient(),
+            )
+            clarification_event = event(
+                event_id="evt_clarification",
+                message_id="om_clarification",
+                content="@bot 基于SRViolationHandler.kt源码分析 时间点5月22日 7:46 分析超速状态",
+            )
+            app.activity_store.record_event(clarification_event)
+            app.activity_store.record_result(
+                clarification_event,
+                TaskResult(
+                    success=True,
+                    message="缺少明确问题时间",
+                    details={
+                        "mode": "bug_time_clarification",
+                        "user_request_text": "基于SRViolationHandler.kt源码分析 时间点5月22日 7:46 分析超速状态",
+                    },
+                ),
+            )
+
+            followup = app.handle_event(
+                event(
+                    event_id="evt_followup_retry",
+                    message_id="om_followup_retry",
+                    content="重新分析",
+                )
+            )
+
+        self.assertTrue(followup.success)
+        self.assertEqual(followup.details["mode"], "direct_analysis")
+        self.assertEqual(len(fake_bug.requests), 1)
+        self.assertEqual(fake_bug.requests[0].prompt, "基于SRViolationHandler.kt源码分析 时间点5月22日 7:46 分析超速状态")
+        self.assertEqual(len(fake_bug.requests[0].resources), 1)
+        self.assertEqual(fake_bug.requests[0].resources[0].kind, "file")
+        self.assertEqual(fake_bug.requests[0].resources[0].value, "file_v3_0011v_33d1772b-86ac-4789-b6e1-35c77ec29a5g")
 
     def test_group_message_without_bot_mention_is_silent(self):
         with tempfile.TemporaryDirectory() as tmp:
