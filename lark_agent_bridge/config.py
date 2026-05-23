@@ -46,94 +46,41 @@ DEFAULT_SIGNAL_ALIASES = {
 # and api_format.  You only need to supply ``api_key`` (or set the env var
 # LARK_AGENT_BRIDGE_AI_API_KEY).  Individual fields override the preset.
 #
-# Special case "cc-switch": the local cc-switch proxy at 127.0.0.1:15721 does
-# not need an api_key — it manages auth internally.
+# Built-in presets are loaded from presets.toml alongside this module.
+# User-defined [provider_presets.<name>] sections in config.toml are merged
+# on top, allowing updates without touching source code.
 # ---------------------------------------------------------------------------
-_PROVIDER_PRESETS: dict[str, dict[str, str]] = {
-    # Xiaomi MiMo — token-plan (subscription) account
-    "xiaomi-tp": {
-        "base_url": "https://token-plan-cn.xiaomimimo.com/anthropic",
-        "primary_model": "mimo-v2.5-pro",
-        "fast_model": "mimo-v2.5",
-        "api_format": "anthropic",
-    },
-    # Xiaomi MiMo — SK (pay-as-you-go) account
-    "xiaomi-sk": {
-        "base_url": "https://api.xiaomimimo.com/anthropic",
-        "primary_model": "mimo-v2.5-pro",
-        "fast_model": "mimo-v2.5",
-        "api_format": "anthropic",
-    },
-    # yybb.codes — Claude-compatible proxy (Claude models)
-    "yybb": {
-        "base_url": "https://yybb.codes",
-        "primary_model": "claude-sonnet-4-6",
-        "fast_model": "claude-haiku-4-5-20251001",
-        "fallback_model": "claude-opus-4-6",
-        "api_format": "anthropic",
-    },
-    # yybb endpoint — Codex/GPT models via Anthropic-compat gateway
-    "yybb-codex": {
-        "base_url": "https://yybb.codes",
-        "primary_model": "gpt-5.4",
-        "fast_model": "gpt-5.4-mini",
-        "api_format": "anthropic",
-    },
-    # yybb endpoint — Codex/GPT models via OpenAI-compat gateway
-    # 实测需要走 /v1/chat/completions；根路径 /chat/completions 返回的是站点 HTML，不是 API。
-    "yybb-codex-openai": {
-        "base_url": "https://yybb.codes/v1",
-        "primary_model": "gpt-5.4",
-        "fast_model": "gpt-5.4-mini",
-        "api_format": "openai",
-    },
-    # TokenPanda proxy — OpenAI-compat gateway (hub.tokenpanda.top)
-    # panda 的 base_url 自带 /v1
-    "panda": {
-        "base_url": "https://hub.tokenpanda.top/v1",
-        "primary_model": "gpt-5.4",
-        "fast_model": "gpt-4.1-mini",
-        "api_format": "openai",
-    },
-    # Official Codex endpoint (requires cc-switch to inject browser token)
-    "codex-official": {
-        "base_url": "https://chatgpt.com/backend-api/codex",
-        "primary_model": "gpt-5.4",
-        "fast_model": "gpt-5.4-mini",
-        "api_format": "anthropic",
-    },
-    # Local cc-switch proxy — zero-config, routes to whichever provider is
-    # currently active in cc-switch (no api_key needed).
-    "cc-switch": {
-        "base_url": "http://127.0.0.1:15721",
-        "primary_model": "mimo-v2.5-pro",
-        "fast_model": "mimo-v2.5",
-        "api_format": "anthropic",
-        "api_key": "PROXY_MANAGED",
-    },
-    # Standard OpenAI API
-    "openai": {
-        "base_url": "https://api.openai.com/v1",
-        "primary_model": "gpt-5.4",
-        "fast_model": "gpt-4.1-mini",
-        "api_format": "openai",
-    },
-    # DeepSeek — OpenAI-compatible
-    "deepseek": {
-        "base_url": "https://api.deepseek.com/v1",
-        "primary_model": "deepseek-chat",
-        "fast_model": "deepseek-chat",
-        "api_format": "openai",
-    },
-}
+
+_BUILTIN_PRESETS_PATH = Path(__file__).parent / "presets.toml"
 
 
-def _apply_ai_preset(opts: AIProviderOptions) -> AIProviderOptions:
+def _load_provider_presets(user_presets: dict[str, dict[str, str]] | None = None) -> dict[str, dict[str, str]]:
+    """Load built-in presets from presets.toml, then merge user overrides."""
+    presets: dict[str, dict[str, str]] = {}
+    if _BUILTIN_PRESETS_PATH.exists():
+        with _BUILTIN_PRESETS_PATH.open("rb") as fh:
+            for name, values in tomllib.load(fh).items():
+                if isinstance(values, dict):
+                    presets[name] = {k: str(v) for k, v in values.items()}
+    if user_presets:
+        for name, values in user_presets.items():
+            if isinstance(values, dict):
+                merged = dict(presets.get(name, {}))
+                merged.update({k: str(v) for k, v in values.items()})
+                presets[name] = merged
+    return presets
+
+
+def _apply_ai_preset(
+    opts: AIProviderOptions,
+    presets: dict[str, dict[str, str]] | None = None,
+) -> AIProviderOptions:
     """Fill missing fields from a named preset. User-set values take precedence."""
     preset_name = opts.preset.strip().lower()
     if not preset_name:
         return opts
-    preset = _PROVIDER_PRESETS.get(preset_name)
+    effective_presets = presets if presets is not None else _load_provider_presets()
+    preset = effective_presets.get(preset_name)
     if not preset:
         return opts
     overrides: dict[str, Any] = {}
@@ -187,6 +134,8 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
     dual_agent_data = data.get("dual_agent") or {}
     knowledge_data = data.get("knowledge") or {}
     ai_provider_data = data.get("ai_provider") or {}
+    user_presets_data = data.get("provider_presets") or {}
+    provider_presets = _load_provider_presets(user_presets_data if isinstance(user_presets_data, dict) else None)
     guideengine_repo = _resolve_path(
         os.environ.get("LARK_AGENT_BRIDGE_GUIDEENGINE_REPO")
         or data.get("guideengine_repo", default_guideengine_repo),
@@ -482,7 +431,7 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
             summary_temperature=float(ai_provider_data.get("summary_temperature", 0.3)),
             summary_max_tokens=int(ai_provider_data.get("summary_max_tokens", 4096)),
             summary_timeout_seconds=float(ai_provider_data.get("summary_timeout_seconds", 120)),
-        )),
+        ), presets=provider_presets),
         runner_timeout_seconds=int(runner_data.get("timeout_seconds", 900)),
     )
 
