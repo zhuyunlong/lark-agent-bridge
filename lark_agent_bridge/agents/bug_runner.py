@@ -52,6 +52,7 @@ from ..reporting import (
 from ..signal_resolver import SignalResolver
 from ..skill_registry import AUX_BUG_SKILLS, PRIMARY_BUG_SKILL_MAP, extract_skill_frontmatter
 from ..skill_manager import SkillManager
+from .. import prompt_snapshots
 from ._helpers import (
     _default_command_for_provider,
     _normalize_provider_name,
@@ -1932,6 +1933,14 @@ class BugAnalysisRunner:
             encoding="utf-8",
         )
         agent_summary_path = previous_summary_path or (output_dir / "bug_agent_summary.md")
+        snapshot_details = self._structured_bug_prompt_snapshot_details(
+            base_details=details,
+            request_text=request_text,
+            plans=plans,
+            target_time=target_time,
+            prepared_input=prepared_input,
+            selected_input=selected_input,
+        )
         agent_summary_result = self._run_bug_agent_summary(
             request_text=request_text,
             request_artifact=agent_request_path,
@@ -1948,6 +1957,8 @@ class BugAnalysisRunner:
             provider_session_id="",
             followup_text=followup_text,
             previous_summary_path=previous_summary_path,
+            snapshot_details=snapshot_details,
+            snapshot_plans=plans,
             prefer_lightweight=self._should_prefer_lightweight_bug_summary(
                 request_text=request_text,
                 followup_text=followup_text,
@@ -2094,8 +2105,6 @@ class BugAnalysisRunner:
             self._render_bug_agent_followup_request(
                 request_text=request_text,
                 followup_text=followup_text,
-                summary_text=str(getattr(previous_context, "summary_text", "") or ""),
-                report_excerpt=str(getattr(previous_context, "report_excerpt", "") or ""),
                 history=getattr(previous_context, "history", None),
             ),
             encoding="utf-8",
@@ -2118,6 +2127,14 @@ class BugAnalysisRunner:
             encoding="utf-8",
         )
         agent_summary_path = previous_summary_path or (output_dir / "bug_agent_summary.md")
+        snapshot_details = self._structured_bug_prompt_snapshot_details(
+            base_details=details,
+            request_text=request_text,
+            plans=plans,
+            target_time=str(details.get("target_time") or details.get("fault_time") or ""),
+            prepared_input=prepared_input,
+            selected_input=selected_input,
+        )
         agent_summary_result = self._run_bug_agent_summary(
             request_text=request_text,
             request_artifact=agent_request_path,
@@ -2131,6 +2148,8 @@ class BugAnalysisRunner:
             provider_session_id=provider_session_id,
             followup_text=followup_text,
             previous_summary_path=previous_summary_path,
+            snapshot_details=snapshot_details,
+            snapshot_plans=plans,
             prefer_lightweight=self._should_prefer_lightweight_bug_summary(
                 request_text=request_text,
                 followup_text=followup_text,
@@ -7002,6 +7021,8 @@ class BugAnalysisRunner:
         provider_override: str = "",
         command_override: str = "",
         bridge_session_id: str = "",
+        snapshot_details: dict[str, object] | None = None,
+        snapshot_plans: list["BugAnalysisPlan"] | None = None,
     ) -> dict[str, object]:
         explicit_provider = _normalize_provider_name(provider_override)
         if explicit_provider == "omlx":
@@ -7015,6 +7036,8 @@ class BugAnalysisRunner:
                 progress_callback=progress_callback,
                 reason="explicit_agent",
                 allow_file_context=True,
+                snapshot_details=snapshot_details,
+                snapshot_plans=snapshot_plans,
             )
         invocation = self._build_bug_agent_summary_command(
             request_text=request_text,
@@ -7026,6 +7049,8 @@ class BugAnalysisRunner:
             previous_summary_path=previous_summary_path,
             provider_override=explicit_provider,
             command_override=command_override,
+            snapshot_details=snapshot_details,
+            snapshot_plans=snapshot_plans,
         )
         if not invocation["command"]:
             return {
@@ -7048,6 +7073,8 @@ class BugAnalysisRunner:
                 previous_summary_path=previous_summary_path,
                 progress_callback=progress_callback,
                 reason="lightweight_first",
+                snapshot_details=snapshot_details,
+                snapshot_plans=snapshot_plans,
             )
             if omlx_result["message"]:
                 return omlx_result
@@ -7075,6 +7102,8 @@ class BugAnalysisRunner:
                 followup_text=followup_text,
                 previous_summary_path=previous_summary_path,
                 progress_callback=progress_callback,
+                snapshot_details=snapshot_details,
+                snapshot_plans=snapshot_plans,
             )
             if api_result["message"]:
                 return api_result
@@ -7112,6 +7141,8 @@ class BugAnalysisRunner:
                 provider_session_id="",
                 followup_text=followup_text,
                 previous_summary_path=previous_summary_path,
+                snapshot_details=snapshot_details,
+                snapshot_plans=snapshot_plans,
             )
             if fallback_invocation["command"]:
                 fallback_result = self._run_bug_agent_summary_once(
@@ -7133,6 +7164,8 @@ class BugAnalysisRunner:
                 previous_summary_path=previous_summary_path,
                 progress_callback=progress_callback,
                 reason="primary_timeout",
+                snapshot_details=snapshot_details,
+                snapshot_plans=snapshot_plans,
             )
             if omlx_result["message"]:
                 return omlx_result
@@ -7144,6 +7177,8 @@ class BugAnalysisRunner:
             output_path=output_path,
             followup_text=followup_text,
             previous_summary_path=previous_summary_path,
+            snapshot_details=snapshot_details,
+            snapshot_plans=snapshot_plans,
         )
         if not provider_fallback["command"]:
             return fallback_result
@@ -7206,6 +7241,8 @@ class BugAnalysisRunner:
         progress_callback: Callable[[dict[str, object]], None] | None,
         reason: str = "primary_timeout",
         allow_file_context: bool = False,
+        snapshot_details: dict[str, object] | None = None,
+        snapshot_plans: list["BugAnalysisPlan"] | None = None,
     ) -> dict[str, object]:
         options = self.config.omlx_chat
         provider = "omlx"
@@ -7239,6 +7276,8 @@ class BugAnalysisRunner:
             followup_text=followup_text,
             previous_summary_path=previous_summary_path,
             include_context_file_excerpts=allow_file_context,
+            snapshot_details=snapshot_details,
+            snapshot_plans=snapshot_plans,
         )
         if not prompt.strip():
             return {
@@ -7314,6 +7353,307 @@ class BugAnalysisRunner:
             "usage_scope": "",
         }
 
+    def _bug_prompt_snapshot_path(self, output_dir: Path) -> Path:
+        return output_dir / "conversation_facts.json"
+
+    def _read_bug_prompt_snapshot(self, path: Path) -> "prompt_snapshots.BugPromptSnapshot | None":
+        try:
+            return prompt_snapshots.read_prompt_snapshot(path)
+        except (OSError, ValueError):
+            return None
+
+    def _write_bug_prompt_snapshot(self, path: Path, snapshot: "prompt_snapshots.BugPromptSnapshot") -> None:
+        try:
+            prompt_snapshots.write_prompt_snapshot(path, snapshot)
+        except OSError:
+            return
+
+    def _snapshot_field_from_text(self, text: str, *labels: str) -> str:
+        for label in labels:
+            match = re.search(rf"(?m)^- {re.escape(label)}:\s*(.+?)\s*$", text)
+            if not match:
+                continue
+            value = match.group(1).strip().strip("`").strip()
+            if value:
+                return value
+        return ""
+
+    def _extract_bug_url_from_text(self, *texts: str) -> str:
+        for text in texts:
+            if not text:
+                continue
+            match = re.search(r"https?://project\.feishu\.cn/\S+/buglo/detail/\d+", text)
+            if match:
+                return match.group(0).rstrip("`，。；;、)")
+        return ""
+
+    def _bug_prompt_snapshot_details_from_metadata(
+        self,
+        *,
+        request_text: str,
+        metadata_path: Path,
+    ) -> dict[str, object]:
+        try:
+            metadata_text = metadata_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            metadata_text = ""
+        details: dict[str, object] = {}
+        bug_url = self._extract_bug_url_from_text(request_text, metadata_text)
+        if bug_url:
+            details["bug_url"] = bug_url
+        target_time = self._snapshot_field_from_text(
+            metadata_text,
+            "修正后的故障时间",
+            "故障时间",
+            "目标时间",
+        )
+        if target_time and target_time != "未识别":
+            details["target_time"] = target_time
+        analysis_value = self._snapshot_field_from_text(metadata_text, "分析类型")
+        if analysis_value and analysis_value != "无":
+            kinds = [
+                item.strip()
+                for item in re.split(r"[，,|/]", analysis_value)
+                if item.strip() and item.strip() != "无"
+            ]
+            if kinds:
+                details["analysis_kind"] = kinds[0]
+                details["analysis_kinds"] = kinds
+        if "analysis_kind" not in details:
+            skill_name = self._snapshot_field_from_text(metadata_text, "命中 Skill")
+            route = self.skill_manager.primary_skill_map().get(skill_name) if skill_name else None
+            if route is not None:
+                details["analysis_kind"] = route[0]
+                details["analysis_kinds"] = [route[0]]
+        if "analysis_kind" not in details:
+            inferred_kind = ""
+            for marker, kind in (
+                ("bug_3d_startup_report", "startup"),
+                ("bug_3d_stuck_report", "stuck"),
+                ("bug_crash_report", "crash"),
+                ("bug_scene_signal_report", "scene_signal"),
+                ("bug_signal_chain_report", "signal"),
+                ("bug_perception_data_summary", "perception"),
+                ("bug_xtheme_analysis_report", "xtheme"),
+                ("bug_general_analysis_report", "general"),
+                ("bug_custom_skill_report", "custom_skill"),
+            ):
+                if marker in metadata_text:
+                    inferred_kind = kind
+                    break
+            if inferred_kind:
+                details["analysis_kind"] = inferred_kind
+                details["analysis_kinds"] = [inferred_kind]
+        prepared_input = self._snapshot_field_from_text(
+            metadata_text,
+            "复用 prepared log 输入",
+            "prepared log 输入",
+            "prepared log input",
+        )
+        if prepared_input:
+            details["prepared_log_input"] = prepared_input
+        selected_input = self._snapshot_field_from_text(
+            metadata_text,
+            "上一轮选中的日志输入",
+            "selected log 输入",
+            "selected log input",
+        )
+        if selected_input:
+            details["selected_log_input"] = selected_input
+        report_version = self._snapshot_field_from_text(metadata_text, "report_version", "Report Version")
+        if report_version:
+            details["report_version"] = report_version
+        return details
+
+    def _bug_prompt_snapshot_analysis_kind(
+        self,
+        *,
+        details: dict[str, object],
+        plans_override: list["BugAnalysisPlan"] | None,
+    ) -> str:
+        if plans_override:
+            for plan in plans_override:
+                kind = str(getattr(plan, "kind", "") or "").strip()
+                if kind:
+                    return kind
+        raw_kinds = details.get("analysis_kinds")
+        if isinstance(raw_kinds, list):
+            for item in raw_kinds:
+                kind = str(item or "").strip()
+                if kind:
+                    return kind
+        kind = str(details.get("analysis_kind") or "").strip()
+        return kind or "general"
+
+    def _bug_prompt_snapshot_scope_key(
+        self,
+        *,
+        request_text: str,
+        details: dict[str, object],
+        output_dir: Path | None,
+        existing: "prompt_snapshots.BugPromptSnapshot | None",
+    ) -> str:
+        if existing is not None and existing.scope_key.strip():
+            return existing.scope_key
+        bug_url = str(details.get("bug_url") or "").strip() or self._extract_bug_url_from_text(request_text)
+        bug_id = self._bug_id(bug_url or request_text)
+        scope_suffix = output_dir.parent.name if output_dir is not None else "followup"
+        return f"bug:{bug_id}:{scope_suffix}"
+
+    def _structured_bug_prompt_snapshot_details(
+        self,
+        *,
+        base_details: dict[str, object] | None,
+        request_text: str,
+        plans: list["BugAnalysisPlan"] | None = None,
+        target_time: str = "",
+        prepared_input: Path | None = None,
+        selected_input: Path | None = None,
+    ) -> dict[str, object]:
+        details = dict(base_details) if isinstance(base_details, dict) else {}
+        bug_url = str(details.get("bug_url") or "").strip() or self._extract_bug_url_from_text(request_text)
+        if bug_url:
+            details["bug_url"] = bug_url
+        if target_time.strip():
+            details["target_time"] = target_time.strip()
+        if prepared_input is not None:
+            details["prepared_log_input"] = str(prepared_input)
+        if selected_input is not None:
+            details["selected_log_input"] = str(selected_input)
+        if plans:
+            details["analysis_kind"] = plans[0].kind
+            details["analysis_kinds"] = [plan.kind for plan in plans]
+            signal_codes = [plan.signal_code for plan in plans if plan.kind == "signal" and plan.signal_code]
+            if signal_codes:
+                details["signal_code"] = signal_codes[0]
+        return details
+
+    def _build_or_refresh_bug_prompt_snapshot(
+        self,
+        *,
+        details: dict[str, object],
+        followup_text: str,
+        request_text: str = "",
+        output_dir: Path | None = None,
+        metadata_path: Path | None = None,
+        plans_override: list["BugAnalysisPlan"] | None = None,
+    ) -> "prompt_snapshots.BugPromptSnapshot":
+        snapshot_path = self._bug_prompt_snapshot_path(output_dir) if output_dir is not None else None
+        existing = self._read_bug_prompt_snapshot(snapshot_path) if snapshot_path is not None and snapshot_path.exists() else None
+        current_kind = self._bug_prompt_snapshot_analysis_kind(details=details, plans_override=plans_override)
+        stable_fact_map: dict[str, str] = {}
+        if existing is not None and existing.analysis_kind == current_kind:
+            stable_fact_map = {item.label: item.value for item in existing.stable_facts if item.label and item.value}
+        bug_url = str(details.get("bug_url") or "").strip() or self._extract_bug_url_from_text(request_text)
+        target_time = str(details.get("target_time") or details.get("fault_time") or "").strip()
+        report_version = str(details.get("report_version") or "").strip()
+        prepared_input = str(details.get("prepared_log_input") or "").strip()
+        selected_input = str(details.get("selected_log_input") or "").strip()
+        signal_code = ""
+        if plans_override:
+            for plan in plans_override:
+                if str(getattr(plan, "kind", "") or "").strip() != "signal":
+                    continue
+                signal_code = str(getattr(plan, "signal_code", "") or "").strip()
+                if signal_code:
+                    break
+        if not signal_code and current_kind == "signal":
+            signal_code = self._extract_signal_code_for_reanalysis(followup_text)
+        for label, value in (
+            ("bug_url", bug_url),
+            ("analysis_kind", current_kind),
+            ("target_time", target_time),
+            ("report_version", report_version),
+            ("prepared_log_input", prepared_input),
+            ("selected_log_input", selected_input),
+            ("signal_code", signal_code),
+        ):
+            if value:
+                stable_fact_map[label] = value
+        stable_facts = [
+            prompt_snapshots.SnapshotFact(label=label, value=stable_fact_map[label])
+            for label in (
+                "bug_url",
+                "analysis_kind",
+                "target_time",
+                "report_version",
+                "prepared_log_input",
+                "selected_log_input",
+                "signal_code",
+            )
+            if stable_fact_map.get(label)
+        ]
+        evidence_refs: list[prompt_snapshots.SnapshotEvidence] = []
+        if metadata_path is not None:
+            evidence_refs.append(
+                prompt_snapshots.SnapshotEvidence(title="Bug Follow-up Metadata", path=str(metadata_path), locator="")
+            )
+            for item in self._bug_summary_referenced_context_files(metadata_path)[:4]:
+                title = str(item.get("title") or "").strip()
+                ref_path = str(item.get("path") or "").strip()
+                if title and ref_path:
+                    evidence_refs.append(prompt_snapshots.SnapshotEvidence(title=title, path=ref_path, locator=""))
+        elif existing is not None and existing.analysis_kind == current_kind:
+            evidence_refs = list(existing.evidence_refs)
+        open_questions = list(existing.open_questions) if existing is not None and existing.analysis_kind == current_kind else []
+        snapshot = prompt_snapshots.BugPromptSnapshot(
+            scope_key=self._bug_prompt_snapshot_scope_key(
+                request_text=request_text,
+                details=details,
+                output_dir=output_dir,
+                existing=existing,
+            ),
+            analysis_kind=current_kind,
+            stable_facts=stable_facts,
+            evidence_refs=evidence_refs,
+            open_questions=open_questions,
+        )
+        if snapshot_path is not None:
+            self._write_bug_prompt_snapshot(snapshot_path, snapshot)
+        return snapshot
+
+    def _build_bug_prompt_snapshot_prefix(
+        self,
+        *,
+        request_text: str,
+        metadata_path: Path,
+        followup_text: str,
+        snapshot_details: dict[str, object] | None = None,
+        plans_override: list["BugAnalysisPlan"] | None = None,
+    ) -> str:
+        if not followup_text.strip():
+            return ""
+        details = self._bug_prompt_snapshot_details_from_metadata(
+            request_text=request_text,
+            metadata_path=metadata_path,
+        )
+        if snapshot_details:
+            for key, value in snapshot_details.items():
+                if value is None:
+                    continue
+                if isinstance(value, str) and not value.strip():
+                    continue
+                if isinstance(value, list) and not value:
+                    continue
+                details[key] = value
+        snapshot = self._build_or_refresh_bug_prompt_snapshot(
+            details=details,
+            followup_text=followup_text,
+            request_text=request_text,
+            output_dir=metadata_path.parent,
+            metadata_path=metadata_path,
+            plans_override=plans_override,
+        )
+        return self._render_bug_prompt_snapshot_prefix(snapshot, followup_text=followup_text)
+
+    def _render_bug_prompt_snapshot_prefix(
+        self,
+        snapshot: "prompt_snapshots.BugPromptSnapshot",
+        *,
+        followup_text: str,
+    ) -> str:
+        return prompt_snapshots.render_bug_snapshot_prefix(snapshot, followup_text=followup_text).rstrip() + "\n\n"
+
     def _build_omlx_bug_summary_prompt(
         self,
         *,
@@ -7323,17 +7663,29 @@ class BugAnalysisRunner:
         followup_text: str = "",
         previous_summary_path: Path | None = None,
         include_context_file_excerpts: bool = False,
+        snapshot_details: dict[str, object] | None = None,
+        snapshot_plans: list["BugAnalysisPlan"] | None = None,
     ) -> str:
         budget = max(500, int(getattr(self.config.omlx_chat, "max_prompt_chars", 2000) or 2000))
+        snapshot_prefix = ""
+        if followup_text.strip():
+            snapshot_prefix = self._build_bug_prompt_snapshot_prefix(
+                request_text=request_text,
+                metadata_path=metadata_path,
+                followup_text=followup_text,
+                snapshot_details=snapshot_details,
+                plans_override=snapshot_plans,
+            ).rstrip()
         sections = [
             "请基于以下已生成材料给出轻量 bug 总结。不要编造未提供的日志/源码证据。",
             "输出结构：## 结论摘要、## 关键证据、## 最可能原因、## 待确认项、## 建议动作。",
+            snapshot_prefix,
             self._omlx_prompt_section("用户请求", request_text, 420),
             self._omlx_prompt_section("本次追问", followup_text, 240),
             self._omlx_prompt_section("请求文件摘录", self._read_text_excerpt(request_artifact, 500), 500),
             self._omlx_prompt_section("元数据摘录", self._read_text_excerpt(metadata_path, 900), 900),
         ]
-        if previous_summary_path is not None:
+        if previous_summary_path is not None and not followup_text.strip():
             sections.append(
                 self._omlx_prompt_section("上一轮摘要摘录", self._read_text_excerpt(previous_summary_path, 700), 700)
             )
@@ -7417,6 +7769,8 @@ class BugAnalysisRunner:
         followup_text: str = "",
         previous_summary_path: Path | None = None,
         progress_callback: Callable[[dict[str, object]], None] | None,
+        snapshot_details: dict[str, object] | None = None,
+        snapshot_plans: list["BugAnalysisPlan"] | None = None,
     ) -> dict[str, object]:
         """Run bug summary via direct LLM API (fast path, no subprocess)."""
         from .llm_client import LLMClient, LLMClientError
@@ -7443,6 +7797,8 @@ class BugAnalysisRunner:
             metadata_path=metadata_path,
             followup_text=followup_text,
             previous_summary_path=previous_summary_path,
+            snapshot_details=snapshot_details,
+            snapshot_plans=snapshot_plans,
         )
         if not prompt.strip():
             return {
@@ -7548,6 +7904,8 @@ class BugAnalysisRunner:
         metadata_path: Path,
         followup_text: str = "",
         previous_summary_path: Path | None = None,
+        snapshot_details: dict[str, object] | None = None,
+        snapshot_plans: list["BugAnalysisPlan"] | None = None,
     ) -> str:
         """Build summary prompt with inlined file contents for direct API calls.
 
@@ -7557,6 +7915,7 @@ class BugAnalysisRunner:
         max_file_chars = 12000
         prompt = "请基于以下已内嵌的分析材料完成同一个 bug 会话的最终回答。\n"
         prompt += "注意：所有相关文件内容已内嵌在本消息中，无需读取本地文件。\n\n要求：\n"
+        snapshot_prefix = ""
         if followup_text.strip():
             prompt += (
                 "1. 这是一条续聊/追问，必须直接回答这次新问题，并延续上一轮分析。\n"
@@ -7564,6 +7923,13 @@ class BugAnalysisRunner:
                 "3. 只读分析，不修改任何文件。\n"
                 "4. 输出中文 Markdown，结论先行，再给出证据。\n"
                 "5. 如果现有材料仍不足以覆盖某个诉求，要明确指出缺口，但先回答已经能确认的部分。\n\n"
+            )
+            snapshot_prefix = self._build_bug_prompt_snapshot_prefix(
+                request_text=request_text,
+                metadata_path=metadata_path,
+                followup_text=followup_text,
+                snapshot_details=snapshot_details,
+                plans_override=snapshot_plans,
             )
         else:
             prompt += (
@@ -7591,10 +7957,12 @@ class BugAnalysisRunner:
             "## 建议动作\n"
             "- 给出下一轮可执行动作，例如补日志、重跑某个 skill、沿某个源码或日志点继续查。\n\n"
         )
+        if snapshot_prefix:
+            prompt += snapshot_prefix
         prompt += f"### 用户原始请求\n{request_text}\n\n"
         if followup_text.strip():
             prompt += f"### 本次追问/修正\n{followup_text.strip()}\n\n"
-        if previous_summary_path is not None:
+        if previous_summary_path is not None and not followup_text.strip():
             prev_text = self._read_text_excerpt(previous_summary_path, max_file_chars)
             if prev_text:
                 prompt += f"### 上一轮 Agent 总结\n{prev_text}\n\n"
@@ -8832,15 +9200,7 @@ class BugAnalysisRunner:
             + (f" / 信号: `{plan.signal_code}`" if plan.kind == "signal" and plan.signal_code else "")
             for plan in plans
         )
-        history_lines: list[str] = []
-        for item in history or []:
-            if not isinstance(item, dict):
-                continue
-            role = str(item.get("role") or "").strip()
-            content = str(item.get("content") or "").strip()
-            if not role or not content:
-                continue
-            history_lines.append(f"- {role}: {content}")
+        history_lines = self._compact_bug_followup_history(history)
         history_block = "\n".join(history_lines) if history_lines else "- 无"
         return (
             "# Bug Reanalysis Request\n\n"
@@ -8855,32 +9215,46 @@ class BugAnalysisRunner:
             "```\n"
         )
 
+    def _compact_bug_followup_history(self, history: list[dict[str, str]] | None) -> list[str]:
+        lines: list[str] = []
+        assistant_compacted = False
+        for item in history or []:
+            if not isinstance(item, dict):
+                continue
+            role = str(item.get("role") or "").strip()
+            content = re.sub(r"\s+", " ", str(item.get("content") or "")).strip()
+            if not role or not content:
+                continue
+            if role == "assistant":
+                if assistant_compacted:
+                    continue
+                if len(content) > 400:
+                    lines.append("- assistant: [上一轮长回答已省略；稳定事实请看 metadata 与会话事实快照]")
+                    assistant_compacted = True
+                    continue
+                lines.append(f"- assistant: {content[:200].rstrip()}")
+                assistant_compacted = True
+                continue
+            if len(content) > 240:
+                content = content[:239].rstrip() + "…"
+            lines.append(f"- {role}: {content}")
+        return lines[:6]
+
     def _render_bug_agent_followup_request(
         self,
         *,
         request_text: str,
         followup_text: str,
-        summary_text: str,
-        report_excerpt: str,
         history: list[dict[str, str]] | None,
     ) -> str:
-        history_lines: list[str] = []
-        for item in history or []:
-            if not isinstance(item, dict):
-                continue
-            role = str(item.get("role") or "").strip()
-            content = str(item.get("content") or "").strip()
-            if not role or not content:
-                continue
-            history_lines.append(f"- {role}: {content}")
+        history_lines = self._compact_bug_followup_history(history)
         history_block = "\n".join(history_lines) if history_lines else "- 无"
         return (
             "# Bug Agent Follow-up Request\n\n"
             "这是同一个 Bug 会话里的继续追问，请延续原来的 Agent 会话，"
             "优先复用已经下载/解密/分析过的日志与报告，不要重新要求用户上传材料。\n\n"
             f"- 本次追问:\n\n```text\n{followup_text}\n```\n"
-            f"- 上一轮摘要:\n\n```text\n{summary_text or '无'}\n```\n"
-            "- 上一轮报告摘录: 不在请求文件中嵌入正文；请从 metadata 中列出的本地报告路径读取。\n"
+            "- 会话稳定事实与证据入口: 以 metadata 与会话事实快照为准；不要在 request 中回放上一轮长摘要。\n"
             "- 最近对话历史:\n"
             f"{history_block}\n"
             "- 用户原始请求:\n\n```text\n"
@@ -9028,6 +9402,8 @@ class BugAnalysisRunner:
         previous_summary_path: Path | None = None,
         provider_override: str = "",
         command_override: str = "",
+        snapshot_details: dict[str, object] | None = None,
+        snapshot_plans: list["BugAnalysisPlan"] | None = None,
     ) -> dict[str, object]:
         provider = _normalize_provider_name(provider_override or self.config.bug_analysis.provider)
         command_name = (command_override or self.config.bug_analysis.command).strip() or _default_command_for_provider(provider)
@@ -9039,6 +9415,8 @@ class BugAnalysisRunner:
             metadata_path=metadata_path,
             followup_text=followup_text,
             previous_summary_path=previous_summary_path,
+            snapshot_details=snapshot_details,
+            snapshot_plans=snapshot_plans,
         )
         embedded_files = self._bug_agent_summary_context_files(
             followup_text=followup_text,
@@ -9143,6 +9521,8 @@ class BugAnalysisRunner:
         output_path: Path,
         followup_text: str = "",
         previous_summary_path: Path | None = None,
+        snapshot_details: dict[str, object] | None = None,
+        snapshot_plans: list["BugAnalysisPlan"] | None = None,
     ) -> dict[str, object]:
         candidates = _provider_candidates(self.config.bug_analysis.provider, self.config.bug_analysis.command)
         if len(candidates) < 2:
@@ -9158,6 +9538,8 @@ class BugAnalysisRunner:
             previous_summary_path=previous_summary_path,
             provider_override=provider,
             command_override=command_name,
+            snapshot_details=snapshot_details,
+            snapshot_plans=snapshot_plans,
         )
 
     def _build_bug_agent_summary_prompt(
@@ -9168,8 +9550,11 @@ class BugAnalysisRunner:
         metadata_path: Path,
         followup_text: str = "",
         previous_summary_path: Path | None = None,
+        snapshot_details: dict[str, object] | None = None,
+        snapshot_plans: list["BugAnalysisPlan"] | None = None,
     ) -> str:
         prompt = "请基于以下本地文件完成同一个 bug 会话的最终回答。\n要求：\n"
+        snapshot_prefix = ""
         if followup_text.strip():
             prompt += (
                 "1. 这是一条续聊/追问，必须直接回答这次新问题，并延续上一轮 Agent 会话。\n"
@@ -9177,6 +9562,13 @@ class BugAnalysisRunner:
                 "3. 只读分析，不修改任何文件。\n"
                 "4. 输出中文 Markdown，结论先行，再给出证据。\n"
                 "5. 如果现有日志/报告仍不足以覆盖某个诉求，要明确指出缺口，但先回答已经能确认的部分。\n\n"
+            )
+            snapshot_prefix = self._build_bug_prompt_snapshot_prefix(
+                request_text=request_text,
+                metadata_path=metadata_path,
+                followup_text=followup_text,
+                snapshot_details=snapshot_details,
+                plans_override=snapshot_plans,
             )
         else:
             prompt += (
@@ -9201,6 +9593,8 @@ class BugAnalysisRunner:
             "## 建议动作\n"
             "- 给出下一轮可执行动作，例如补日志、重跑某个 skill、沿某个源码或日志点继续查。\n\n"
         )
+        if snapshot_prefix:
+            prompt += snapshot_prefix
         prompt += f"用户原始请求：\n{request_text}\n\n"
         if followup_text.strip():
             prompt += f"本次追问/修正：\n{followup_text.strip()}\n\n"
@@ -9245,8 +9639,6 @@ class BugAnalysisRunner:
     ) -> list[dict[str, object]]:
         files: list[dict[str, object]] = []
         if followup_text.strip():
-            if previous_summary_path is not None:
-                files.append({"title": "上一轮 Agent 总结", "path": str(previous_summary_path), "max_chars": 0})
             files.append({"title": "Bug Agent Follow-up Request", "path": str(request_artifact), "max_chars": 0})
             files.append({"title": "Bug Follow-up Metadata", "path": str(metadata_path), "max_chars": 0})
             files.extend(self._bug_summary_referenced_context_files(metadata_path))

@@ -7,6 +7,7 @@ import unittest
 import zipfile
 from unittest import mock
 
+import lark_agent_bridge.prompt_snapshots as prompt_snapshots_module
 from lark_agent_bridge.agents import (
     BugAnalysisPlan,
     BugAnalysisRunner,
@@ -24,6 +25,11 @@ from lark_agent_bridge.models import (
     LarkEvent,
     PerceptionSummaryRequest,
     TaskResult,
+)
+from lark_agent_bridge.prompt_snapshots import (
+    BugPromptSnapshot,
+    SnapshotEvidence,
+    SnapshotFact,
 )
 from lark_agent_bridge.reporting import ReportComposition
 
@@ -396,23 +402,74 @@ class AgentTests(unittest.TestCase):
             request_artifact = Path(tmp) / "bug_agent_followup_request.md"
             metadata_path = Path(tmp) / "bug_agent_followup_metadata.md"
             previous_summary = Path(tmp) / "bug_agent_summary.md"
-            request_artifact.write_text("request\n" + "R" * 10000, encoding="utf-8")
-            metadata_path.write_text("metadata\n" + "M" * 10000, encoding="utf-8")
+            snapshot_path = Path(tmp) / "conversation_facts.json"
+            long_assistant_history = "上一轮长结论" + "A" * 6000
+            request_artifact.write_text(
+                runner._render_bug_agent_followup_request(
+                    request_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722 分析主题",
+                    followup_text="问题时刻系统主题是什么",
+                    history=[
+                        {"role": "user", "content": "继续看主题变化"},
+                        {"role": "assistant", "content": long_assistant_history},
+                    ],
+                ),
+                encoding="utf-8",
+            )
+            metadata_path.write_text(
+                "- 用户原始请求: `https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722 分析主题`\n"
+                "- 分析类型: `startup`\n"
+                "- 复用 prepared log 输入: `/tmp/from-metadata.log`\n"
+                "- report_version: `3`\n",
+                encoding="utf-8",
+            )
             previous_summary.write_text("summary\n" + "S" * 10000, encoding="utf-8")
 
-            prompt = runner._build_bug_agent_summary_prompt(
-                request_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722 分析主题",
-                request_artifact=request_artifact,
-                metadata_path=metadata_path,
-                followup_text="问题时刻系统主题是什么",
-                previous_summary_path=previous_summary,
-            )
+            with (
+                mock.patch(
+                    "lark_agent_bridge.prompt_snapshots.write_prompt_snapshot",
+                    wraps=prompt_snapshots_module.write_prompt_snapshot,
+                ) as write_snapshot_mock,
+                mock.patch(
+                    "lark_agent_bridge.prompt_snapshots.render_bug_snapshot_prefix",
+                    return_value="### 会话事实快照\n- stable_fact: xtheme\n",
+                ) as render_snapshot_mock,
+            ):
+                prompt = runner._build_bug_agent_summary_prompt(
+                    request_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722 分析主题",
+                    request_artifact=request_artifact,
+                    metadata_path=metadata_path,
+                    followup_text="问题时刻系统主题是什么",
+                    previous_summary_path=previous_summary,
+                    snapshot_details={
+                        "analysis_kind": "xtheme",
+                        "analysis_kinds": ["xtheme"],
+                        "prepared_log_input": "/tmp/prepared.log",
+                        "report_version": 7,
+                        "bug_url": "https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722",
+                    },
+                    snapshot_plans=[BugAnalysisPlan(kind="xtheme")],
+                )
 
+            request_body = request_artifact.read_text(encoding="utf-8")
+            snapshot_text = snapshot_path.read_text(encoding="utf-8")
+
+        self.assertNotIn("上一轮摘要", request_body)
+        self.assertNotIn(long_assistant_history, request_body)
         self.assertIn("续聊性能约束", prompt)
+        self.assertIn("### 会话事实快照\n- stable_fact: xtheme", prompt)
         self.assertIn("Bug Agent Follow-up Request", prompt)
         self.assertIn("Bug Follow-up Metadata", prompt)
         self.assertLess(len(prompt), 18000)
-        self.assertNotIn("S" * 4000, prompt)
+        self.assertNotIn(long_assistant_history, prompt)
+        self.assertNotIn("上一轮 Agent 总结", prompt)
+        write_snapshot_mock.assert_called_once()
+        render_snapshot_mock.assert_called_once()
+        persisted_snapshot = write_snapshot_mock.call_args.args[1]
+        self.assertEqual(persisted_snapshot.analysis_kind, "xtheme")
+        self.assertNotIn(long_assistant_history, snapshot_text)
+        self.assertNotIn("summary_text", snapshot_text)
+        self.assertNotIn("report_excerpt", snapshot_text)
+        self.assertNotIn("history", snapshot_text)
 
     def test_bug_agent_summary_followup_prompt_embeds_referenced_report_context(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -485,6 +542,117 @@ class AgentTests(unittest.TestCase):
         self.assertIn("轻量模型不能读取本地文件", prompt)
         self.assertNotIn("UnitySceneRouter.kt", prompt)
         self.assertNotIn("主 PID 2466", prompt)
+
+    def test_bug_reanalysis_prompt_for_api_uses_snapshot_prefix_before_incremental_tail(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=True, data_dir=Path(tmp), workspace_root=Path(tmp))
+            runner = BugAnalysisRunner(config)
+            output_dir = Path(tmp) / "jobs" / "job_1" / "output"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            request_artifact = output_dir / "bug_agent_reanalysis_request.md"
+            metadata_path = output_dir / "bug_reanalysis_metadata.md"
+            previous_summary = output_dir / "bug_agent_summary.md"
+            snapshot_path = output_dir / "conversation_facts.json"
+            request_artifact.write_text("本次追问: 重新源码分析 重点看 displaychange", encoding="utf-8")
+            metadata_path.write_text(
+                "- 用户原始请求: `https://project.feishu.cn/xpfailuremgmt/buglo/detail/6995823164 调查3D启动生命周期`\n"
+                "- 修正后的故障时间: `2026-05-21 03:38:17`\n"
+                "- 分析类型: `startup`\n"
+                "- 复用 prepared log 输入: `/tmp/prepared.log`\n"
+                "- report_version: `7`\n",
+                encoding="utf-8",
+            )
+            previous_summary.write_text("summary\n" + "S" * 10000, encoding="utf-8")
+
+            with (
+                mock.patch(
+                    "lark_agent_bridge.prompt_snapshots.write_prompt_snapshot",
+                    wraps=prompt_snapshots_module.write_prompt_snapshot,
+                ) as write_snapshot_mock,
+                mock.patch(
+                    "lark_agent_bridge.prompt_snapshots.render_bug_snapshot_prefix",
+                    return_value="### 会话事实快照\n- stable_fact: startup\n",
+                ) as render_snapshot_mock,
+            ):
+                prompt = runner._build_bug_agent_summary_prompt_for_api(
+                    request_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6995823164 调查3D启动生命周期",
+                    request_artifact=request_artifact,
+                    metadata_path=metadata_path,
+                    followup_text="重新源码分析 重点看 displaychange",
+                    previous_summary_path=previous_summary,
+                    snapshot_details={
+                        "analysis_kind": "signal",
+                        "analysis_kinds": ["signal"],
+                        "report_version": 9,
+                        "prepared_log_input": "/tmp/structured.log",
+                        "bug_url": "https://project.feishu.cn/xpfailuremgmt/buglo/detail/6995823164",
+                    },
+                    snapshot_plans=[BugAnalysisPlan(kind="signal", signal_code="SIGNAL_VCU_ELECTRICIT_PERCENT")],
+                )
+
+            self.assertTrue(snapshot_path.exists())
+            self.assertIn("### 会话事实快照\n- stable_fact: startup", prompt)
+            self.assertIn("### 本次追问/修正\n重新源码分析 重点看 displaychange", prompt)
+            self.assertLess(prompt.index("### 会话事实快照"), prompt.index("### 本次追问/修正"))
+            self.assertNotIn("### 上一轮 Agent 总结", prompt)
+            write_snapshot_mock.assert_called_once()
+            render_snapshot_mock.assert_called_once()
+            persisted_snapshot = write_snapshot_mock.call_args.args[1]
+            self.assertEqual(persisted_snapshot.analysis_kind, "signal")
+            self.assertEqual(
+                [item.value for item in persisted_snapshot.stable_facts if item.label == "prepared_log_input"],
+                ["/tmp/structured.log"],
+            )
+
+    def test_bug_reanalysis_snapshot_rebuilds_when_analysis_kind_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=True, data_dir=Path(tmp), workspace_root=Path(tmp))
+            runner = BugAnalysisRunner(config)
+            output_dir = Path(tmp) / "jobs" / "job_1" / "output"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            snapshot_path = output_dir / "conversation_facts.json"
+            snapshot_path.write_text("{}", encoding="utf-8")
+            existing_snapshot = BugPromptSnapshot(
+                scope_key="bug:6995823164:job_1",
+                analysis_kind="startup",
+                stable_facts=[SnapshotFact(label="target_time", value="2026-05-21 03:38:17")],
+                evidence_refs=[
+                    SnapshotEvidence(
+                        title="startup",
+                        path="/tmp/bug_3d_startup_report.json",
+                        locator="",
+                    )
+                ],
+                open_questions=["startup 旧问题"],
+            )
+
+            with (
+                mock.patch(
+                    "lark_agent_bridge.prompt_snapshots.read_prompt_snapshot",
+                    return_value=existing_snapshot,
+                ) as read_snapshot_mock,
+                mock.patch(
+                    "lark_agent_bridge.prompt_snapshots.write_prompt_snapshot",
+                ) as write_snapshot_mock,
+            ):
+                snapshot = runner._build_or_refresh_bug_prompt_snapshot(
+                    details={
+                        "analysis_kind": "startup",
+                        "report_version": 7,
+                        "prepared_log_input": "/tmp/prepared.log",
+                        "target_time": "2026-05-21 03:38:17",
+                    },
+                    followup_text="改查信号链路 SIGNAL_VCU_ELECTRICIT_PERCENT",
+                    plans_override=[BugAnalysisPlan(kind="signal", signal_code="SIGNAL_VCU_ELECTRICIT_PERCENT")],
+                    request_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6995823164 调查3D启动生命周期",
+                    output_dir=output_dir,
+                )
+
+            self.assertEqual(snapshot.analysis_kind, "signal")
+            read_snapshot_mock.assert_called_once_with(snapshot_path)
+            write_snapshot_mock.assert_called_once()
+            persisted_snapshot = write_snapshot_mock.call_args.args[1]
+            self.assertEqual(persisted_snapshot.analysis_kind, "signal")
 
     def test_bug_agent_summary_prompt_biases_to_fault_time_focus_session(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -4013,6 +4181,7 @@ class AgentTests(unittest.TestCase):
             stuck_html.write_text("<html>stuck</html>", encoding="utf-8")
             stuck_json.write_text("{}", encoding="utf-8")
             analysis_inputs = []
+            long_assistant_history = "上一轮超长分析结论" + "A" * 6000
 
             def fake_run_analysis(*, plan, input_path, html_path, json_path, analysis_dir, timeout, target_time, request_text=None):
                 analysis_inputs.append((plan.kind, input_path, target_time))
@@ -4037,7 +4206,7 @@ class AgentTests(unittest.TestCase):
                 request_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722 问题时间 2026-05-11 23:10 分析启动和卡顿",
                 summary_text="上一轮摘要",
                 report_excerpt="上一轮摘录",
-                history=[{"role": "user", "content": "第一次分析"}, {"role": "assistant", "content": "第一次结论"}],
+                history=[{"role": "user", "content": "第一次分析"}, {"role": "assistant", "content": long_assistant_history}],
             )
 
             with (
@@ -4065,6 +4234,8 @@ class AgentTests(unittest.TestCase):
                     previous_context=previous_context,
                     previous_session=previous_session,
                 )
+                request_text = (output_dir / "bug_agent_reanalysis_request.md").read_text(encoding="utf-8")
+                prompt_text = summary_mock.call_args.kwargs["request_artifact"].read_text(encoding="utf-8")
 
         self.assertTrue(result.success)
         self.assertEqual(result.message, "agent continued")
@@ -4078,6 +4249,9 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(summary_mock.call_args.kwargs["provider_session_id"], "")
         self.assertEqual(summary_mock.call_args.kwargs["previous_summary_path"], previous_summary)
         self.assertEqual(summary_mock.call_args.kwargs["timeout"], 500)
+        self.assertNotIn(long_assistant_history, request_text)
+        self.assertIn("上一轮长回答已省略", request_text)
+        self.assertNotIn(long_assistant_history, prompt_text)
 
     def test_bug_reanalysis_recovers_original_request_time_and_cached_bug_logs(self):
         with tempfile.TemporaryDirectory() as tmp:
