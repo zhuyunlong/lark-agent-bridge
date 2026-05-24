@@ -57,6 +57,7 @@ NAPA_VERSION_RE = re.compile(
 TOMBSTONE_PC_RE = re.compile(r"#\d+\s+pc\s+[0-9a-fA-F]{8,16}\s+\S*lib[\w.-]+\.so\b", re.I)
 SO_ADDR_RE = re.compile(r"\blib[\w.-]+\.so\b|0x[0-9a-fA-F]{4,}|\bpc\s+[0-9a-fA-F]{8,16}\b", re.I)
 ADDR2LINE_ADDRESS_RE = re.compile(r"0x[0-9a-fA-F]{4,}|\bpc\s+[0-9a-fA-F]{8,16}\b", re.I)
+LOG_FOLDER_RE = re.compile(r"(?<![A-Za-z0-9_])(log\d+)(?![A-Za-z0-9_])", re.I)
 FILE_KEY_RE = re.compile(r"\bfile_[A-Za-z0-9_-]+\b")
 IMAGE_KEY_RE = re.compile(r"\bimg_[A-Za-z0-9_-]+\b")
 FOLDER_XML_RE = re.compile(r"<folder\b[^>]*\b(?:folder_token|token)=\"(?P<token>[A-Za-z0-9_-]+)\"", re.I)
@@ -346,11 +347,70 @@ def parse_addr2line_request(text: str, *, allow_missing_address: bool = False) -
         rom_version=rom_match.group(1) if rom_match else "",
         napa_version=napa_match.group(1) if napa_match else "",
         apk_version=apk_match.group(1) if apk_match else "",
+        log_folder=_extract_addr2line_log_folder(cleaned),
+        fault_time=_extract_addr2line_fault_time(cleaned),
         target=target,
         prompt=cleaned,
         triggered=True,
         error=error,
     )
+
+
+def _extract_addr2line_log_folder(text: str) -> str:
+    match = LOG_FOLDER_RE.search(text or "")
+    if not match:
+        return ""
+    return match.group(1).casefold()
+
+
+def _extract_addr2line_fault_time(text: str) -> str:
+    normalized = _normalize_fault_time_text(text or "")
+    full_match = re.search(
+        r"(20\d{2})-(\d{1,2})-(\d{1,2})\s*(\d{1,2}):(\d{2})(?::(\d{2}))?",
+        normalized,
+    )
+    if full_match:
+        seconds = full_match.group(6)
+        base = (
+            f"{int(full_match.group(1)):04d}-{int(full_match.group(2)):02d}-{int(full_match.group(3)):02d} "
+            f"{int(full_match.group(4)):02d}:{int(full_match.group(5)):02d}"
+        )
+        return f"{base}:{int(seconds):02d}" if seconds is not None else base
+    month_day_match = re.search(
+        r"(?<!\d)(\d{1,2})-(\d{1,2})\s*(\d{1,2}):(\d{2})(?::(\d{2}))?(?!\d)",
+        normalized,
+    )
+    if month_day_match:
+        seconds = month_day_match.group(5)
+        base = (
+            f"{int(month_day_match.group(1)):02d}-{int(month_day_match.group(2)):02d} "
+            f"{int(month_day_match.group(3)):02d}:{int(month_day_match.group(4)):02d}"
+        )
+        return f"{base}:{int(seconds):02d}" if seconds is not None else base
+    if not re.search(r"(?:时间点|时间|故障时间|问题时间|发生时间)", normalized):
+        return ""
+    short_match = re.search(r"(?<!\d)(\d{1,2}):(\d{2})(?::(\d{2}))?(?!\d)", normalized)
+    if not short_match:
+        return ""
+    seconds = short_match.group(3)
+    base = f"{int(short_match.group(1)):02d}:{int(short_match.group(2)):02d}"
+    return f"{base}:{int(seconds):02d}" if seconds is not None else base
+
+
+def _normalize_fault_time_text(value: str) -> str:
+    normalized = (
+        value.strip()
+        .replace("：", ":")
+        .replace("年", "-")
+        .replace("月", "-")
+        .replace("日", " ")
+        .replace("/", "-")
+        .replace("_", " ")
+        .replace("点", ":")
+        .replace("时", ":")
+        .replace("分", "")
+    )
+    return re.sub(r"\s+", " ", normalized)
 
 
 def parse_followup_action(text: str) -> str:

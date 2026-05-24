@@ -347,6 +347,7 @@ class BridgeApp:
         self.addr2line_runner = addr2line_runner or Addr2LineRunner(
             config,
             lark_client=self.lark_client,
+            rom_version_runner=self.rom_version_runner,
             process_watchdog=self.process_watchdog,
         )
         self.chat_client = chat_client or OmlxChatClient(config)
@@ -472,7 +473,7 @@ class BridgeApp:
         route_content = event.content
         followup_context = None
         if event.chat_type == "group":
-            addressed_content = self._strip_group_chat_mention(event.content)
+            addressed_content = self._strip_group_chat_mention(event.content, event=event)
             if addressed_content is None:
                 followup_context = self._resolve_followup_context(event)
                 if followup_context is not None:
@@ -1116,6 +1117,9 @@ class BridgeApp:
         provider = str(result.details.get("agent_summary_provider") or result.details.get("provider") or "").strip()
         if provider:
             metadata["Agent 类型"] = provider
+        model = str(result.details.get("agent_summary_model") or "").strip()
+        if model:
+            metadata["Agent 模型"] = model
         total_tokens = result.details.get("agent_summary_total_tokens")
         if isinstance(total_tokens, int):
             metadata["Agent Token"] = str(total_tokens)
@@ -1316,7 +1320,7 @@ class BridgeApp:
         normalized = re.sub(r"(?i)</?(?:p|div|span)[^>]*>", " ", normalized)
         return normalized.strip()
 
-    def _strip_group_chat_mention(self, text: str) -> str | None:
+    def _strip_group_chat_mention(self, text: str, *, event: LarkEvent | None = None) -> str | None:
         content = self._normalize_mention_source_text(text)
         configured_bot = self.config.lark.bot_open_id.strip()
         if configured_bot:
@@ -1340,6 +1344,10 @@ class BridgeApp:
             if configured_bot:
                 return None
             return None
+        if event is not None:
+            cleaned = self._strip_runtime_bot_mention(content, event)
+            if cleaned is not None:
+                return cleaned
         if configured_bot:
             return None
         spaced_name_at = re.match(r"^@.+\s+(/chat(?:\s+.*)?)$", content)
@@ -1391,6 +1399,80 @@ class BridgeApp:
         if not mention_pattern.search(content):
             return None
         return self._normalize_mention_text(mention_pattern.sub(" ", content))
+
+    def _strip_runtime_bot_mention(self, content: str, event: LarkEvent) -> str | None:
+        for name in self._runtime_bot_mention_names(event):
+            cleaned = self._strip_configured_bot_name_mention(content, name)
+            if cleaned is not None:
+                return cleaned
+        return None
+
+    def _runtime_bot_mention_names(self, event: LarkEvent) -> list[str]:
+        names = self._bot_mention_names_from_payload(event.raw)
+        if names or not event.message_id:
+            return names
+        fetched = self.lark_client.fetch_message(event.message_id)
+        if fetched.returncode != 0:
+            return []
+        return self._bot_mention_names_from_payload_text(fetched.stdout, message_id=event.message_id)
+
+    def _bot_mention_names_from_payload(self, payload: object) -> list[str]:
+        if not isinstance(payload, dict):
+            return []
+        messages: list[dict[str, object]] = []
+        direct_message = payload.get("message")
+        if isinstance(direct_message, dict):
+            messages.append(direct_message)
+        event_body = payload.get("event")
+        if isinstance(event_body, dict):
+            nested_message = event_body.get("message")
+            if isinstance(nested_message, dict):
+                messages.append(nested_message)
+        if not messages:
+            return []
+        return self._bot_mention_names_from_messages(messages)
+
+    def _bot_mention_names_from_payload_text(self, payload_text: str, *, message_id: str = "") -> list[str]:
+        messages = self._extract_message_records(payload_text)
+        if message_id:
+            filtered = []
+            for message in messages:
+                current_id = str(message.get("message_id") or "").strip()
+                if not current_id or current_id == message_id:
+                    filtered.append(message)
+            messages = filtered
+        return self._bot_mention_names_from_messages(messages)
+
+    def _bot_mention_names_from_messages(self, messages: list[dict[str, object]]) -> list[str]:
+        names: list[str] = []
+        for message in messages:
+            mentions = message.get("mentions")
+            if not isinstance(mentions, list):
+                continue
+            for mention in mentions:
+                if not isinstance(mention, dict) or not self._is_bot_mention_metadata(mention):
+                    continue
+                name = str(mention.get("name") or "").strip()
+                if name and name not in names:
+                    names.append(name)
+        return names
+
+    def _is_bot_mention_metadata(self, mention: dict[str, object]) -> bool:
+        mention_id = str(
+            mention.get("id")
+            or mention.get("open_id")
+            or mention.get("user_id")
+            or mention.get("union_id")
+            or ""
+        ).strip()
+        if mention_id:
+            configured_bot = self.config.lark.bot_open_id.strip()
+            if configured_bot and mention_id == configured_bot:
+                return True
+            if mention_id.startswith("cli_"):
+                return True
+        mention_type = str(mention.get("type") or mention.get("id_type") or "").strip().casefold()
+        return mention_type in {"bot", "app_id"}
 
     def _jobs_root(self) -> Path:
         return self.config.data_dir / "jobs"
@@ -1676,9 +1758,11 @@ class BridgeApp:
         card_state = self._progress_cards.get(key, {})
         details = dict(card_state.get("details") if isinstance(card_state.get("details"), dict) else {})
         if result is not None:
+            if status in {"completed", "failed"}:
+                details.pop("当前阶段", None)
             mode = str(result.details.get("mode") or "")
             if mode:
-                details.setdefault("分析类型", self._progress_mode_label(mode))
+                details["分析类型"] = self._progress_mode_label(mode)
             if result.job_id:
                 details.setdefault("任务ID", result.job_id[:20])
             skill_label = str(result.details.get("analysis_skill_label") or result.details.get("analysis_skill") or "").strip()
@@ -1687,6 +1771,9 @@ class BridgeApp:
             classification_source = str(result.details.get("classification_source") or "").strip()
             if classification_source:
                 details.setdefault("分类来源", classification_source)
+            agent_model = str(result.details.get("agent_summary_model") or "").strip()
+            if agent_model:
+                details.setdefault("Agent 模型", agent_model)
         report_url = ""
         if result is not None:
             report_url = str(result.details.get("published_report_url") or "").strip()
@@ -1970,11 +2057,14 @@ class BridgeApp:
             apk_version=request.apk_version,
             raw_text=request.raw_text,
         )
-        request = self._resolve_addr2line_navigation_version(event, request)
+        resolved_request = self._resolve_addr2line_navigation_version(event, request)
+        if isinstance(resolved_request, TaskResult):
+            return self._deliver_result(event, resolved_request, request_text=request.raw_text)
+        request = resolved_request
         result = self.addr2line_runner.run_resolve(request, event=event)
         return self._deliver_result(event, result, request_text=request.raw_text)
 
-    def _resolve_addr2line_navigation_version(self, event: LarkEvent, request: Addr2LineRequest) -> Addr2LineRequest:
+    def _resolve_addr2line_navigation_version(self, event: LarkEvent, request: Addr2LineRequest) -> Addr2LineRequest | TaskResult:
         if request.apk_version or request.napa_version or not request.rom_version:
             return request
         lookup_request = parse_rom_version_lookup_request(f"{request.rom_version} 查导航版本")
@@ -1987,9 +2077,40 @@ class BridgeApp:
             rom_version=request.rom_version,
         )
         lookup_result = self.rom_version_runner.run_lookup(lookup_request, event=event)
+        if not lookup_result.success:
+            return TaskResult(
+                success=False,
+                message=(
+                    "ROM 查询失败，无法确定导航符号表版本；"
+                    "当前不会再按日期近似猜测符号表，请先修复 ROM 查询或直接提供 APK 版本后重试。\n"
+                    f"{lookup_result.message}"
+                ),
+                error_code="addr2line_symbol_version_lookup_failed",
+                stdout=lookup_result.stdout,
+                stderr=lookup_result.stderr,
+                details={
+                    "mode": "addr2line_resolve",
+                    "rom_version": request.rom_version,
+                    "lookup_error_code": lookup_result.error_code,
+                },
+            )
         navigation_version = self._navigation_version_from_lookup_result(lookup_result)
         if not navigation_version:
-            return request
+            return TaskResult(
+                success=False,
+                message=(
+                    "ROM 查询没有返回导航版本，无法确定导航符号表版本；"
+                    "当前不会再按日期近似猜测符号表，请先修复 ROM 查询或直接提供 APK 版本后重试。"
+                ),
+                error_code="addr2line_symbol_version_lookup_failed",
+                stdout=lookup_result.stdout,
+                stderr=lookup_result.stderr,
+                details={
+                    "mode": "addr2line_resolve",
+                    "rom_version": request.rom_version,
+                    "lookup_error_code": lookup_result.error_code,
+                },
+            )
         self._notify_progress(
             "addr2line_symbol_version_resolved",
             "已匹配导航符号表版本",
@@ -2004,6 +2125,8 @@ class BridgeApp:
             rom_version=request.rom_version,
             napa_version=request.napa_version,
             apk_version=navigation_version,
+            log_folder=request.log_folder,
+            fault_time=request.fault_time,
             target=request.target,
             prompt=request.prompt,
             triggered=request.triggered,
@@ -3237,6 +3360,8 @@ class BridgeApp:
                 rom_version=request.rom_version,
                 napa_version=request.napa_version,
                 apk_version=request.apk_version,
+                log_folder=request.log_folder,
+                fault_time=request.fault_time,
                 target=request.target,
                 prompt=request.prompt,
                 triggered=request.triggered,
@@ -3254,6 +3379,8 @@ class BridgeApp:
                     rom_version=request.rom_version,
                     napa_version=request.napa_version,
                     apk_version=recent_apk,
+                    log_folder=request.log_folder,
+                    fault_time=request.fault_time,
                     target=request.target,
                     prompt=request.prompt,
                     triggered=request.triggered,
@@ -3272,6 +3399,8 @@ class BridgeApp:
             rom_version=inherited_rom,
             napa_version=request.napa_version,
             apk_version=inherited_apk or request.apk_version,
+            log_folder=request.log_folder,
+            fault_time=request.fault_time,
             target=request.target,
             prompt=request.prompt,
             triggered=True,
@@ -3313,6 +3442,8 @@ class BridgeApp:
             rom_version=rom_version,
             napa_version=napa_version,
             apk_version=apk_version,
+            log_folder=previous_request.log_folder,
+            fault_time=previous_request.fault_time,
             target=previous_request.target or "auto",
             prompt=ctx.route_content.strip(),
             triggered=True,
@@ -4076,7 +4207,8 @@ class BridgeApp:
                     followup_text=route_content,
                 )
                 return self._run_bug_request(event, recovered_bug_request, recovered_bug_request.raw_text)
-            if not str(previous_session.get("job_id") or "").strip():
+            previous_bug_url = self._bug_url_from_session(previous_session)
+            if not previous_bug_url:
                 recovered_direct_request = self._recovered_direct_analysis_request_from_followup_context(
                     event,
                     followup_context,

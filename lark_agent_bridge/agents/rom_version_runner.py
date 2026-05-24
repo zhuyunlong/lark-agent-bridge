@@ -11,6 +11,7 @@ from typing import Any
 
 from ..health import ProcessWatchdog, run_tracked_process
 from ..models import BridgeConfig, LarkEvent, RomVersionLookupRequest, TaskResult, create_job_context
+from ..network_env import build_internal_network_env
 
 
 class RomVersionLookupRunner:
@@ -54,6 +55,7 @@ class RomVersionLookupRunner:
                 watchdog=self.process_watchdog,
                 name="rom-version-lookup",
                 cwd=script.parent,
+                env=build_internal_network_env(self.config.internal_network_env),
                 capture_output=True,
                 text=True,
                 timeout=self._timeout_seconds(),

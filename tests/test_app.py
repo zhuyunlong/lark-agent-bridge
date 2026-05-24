@@ -393,6 +393,22 @@ class FakeRomVersionRunner:
         )
 
 
+class FailingRomVersionRunner:
+    def __init__(self, *, message="ROM 版本查询失败", error_code="rom_version_lookup_failed"):
+        self.requests = []
+        self.message = message
+        self.error_code = error_code
+
+    def run_lookup(self, request, *, event=None):
+        self.requests.append(request)
+        return __import__("lark_agent_bridge.models", fromlist=["TaskResult"]).TaskResult(
+            success=False,
+            message=self.message,
+            error_code=self.error_code,
+            details={"mode": "rom_version_lookup", "rom_version": request.rom_version},
+        )
+
+
 class FakeAddr2LineRunner:
     def __init__(self):
         self.requests = []
@@ -2874,6 +2890,31 @@ class AppTests(unittest.TestCase):
         )
         self.assertEqual(fake_addr2line.requests[0].apk_version, "V6.1.0_20260327175820_Release")
 
+    def test_rom_plus_symbol_table_phrase_without_stack_routes_to_rom_lookup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_lark = FakeLarkClient()
+            fake_rom = FakeRomVersionRunner()
+            fake_addr2line = FakeAddr2LineRunner()
+            rom = "XMARTQGZHE29E5_V6.1.0.8810_20260327200937.9_REV01_USER_Release"
+            app = BridgeApp(
+                BridgeConfig(dry_run=False, data_dir=Path(tmp), allowed_chats=["oc_denied"], lark=LarkOptions(bot_name="bot")),
+                lark_client=fake_lark,
+                rom_version_runner=fake_rom,
+                addr2line_runner=fake_addr2line,
+            )
+
+            result = app.handle_event(
+                event(
+                    content=f"@bot ROM版本号{rom} 反解导航符号表"
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.details["mode"], "rom_version_lookup")
+        self.assertEqual(len(fake_rom.requests), 1)
+        self.assertEqual(len(fake_addr2line.requests), 0)
+        self.assertIn("导航版本", fake_lark.replies[-1]["text"])
+
     def test_addr2line_request_resolves_navigation_version_before_runner(self):
         with tempfile.TemporaryDirectory() as tmp:
             fake_lark = FakeLarkClient()
@@ -2902,6 +2943,34 @@ class AppTests(unittest.TestCase):
         self.assertEqual(len(fake_addr2line.requests), 1)
         self.assertEqual(fake_addr2line.requests[0].rom_version, rom)
         self.assertEqual(fake_addr2line.requests[0].apk_version, "V6.1.0_20260327175820_Release")
+
+    def test_addr2line_request_fails_when_rom_lookup_cannot_resolve_navigation_version(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_lark = FakeLarkClient()
+            failing_rom = FailingRomVersionRunner(message="SCM 查询失败")
+            fake_addr2line = FakeAddr2LineRunner()
+            rom = "XMARTQGZHE29E5_V6.1.0.8810_20260327200937.9_REV01_USER_Release"
+            app = BridgeApp(
+                BridgeConfig(dry_run=False, data_dir=Path(tmp), allowed_chats=["oc_denied"], lark=LarkOptions(bot_name="bot")),
+                lark_client=fake_lark,
+                rom_version_runner=failing_rom,
+                addr2line_runner=fake_addr2line,
+            )
+
+            result = app.handle_event(
+                event(
+                    content=(
+                        f"@bot ROM版本号{rom} 反解导航符号表\n"
+                        "#05 pc 0000000000f385e4 /system/app/xp_envirodrive/lib/arm64/libunity.so"
+                    )
+                )
+            )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, "addr2line_symbol_version_lookup_failed")
+        self.assertEqual(len(failing_rom.requests), 1)
+        self.assertEqual(len(fake_addr2line.requests), 0)
+        self.assertIn("SCM 查询失败", result.message)
 
     def test_addr2line_request_prefers_recent_navigation_version_for_same_rom(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -3248,6 +3317,191 @@ class AppTests(unittest.TestCase):
         self.assertIn("00000000010f5948", " ".join(result.command or []))
         self.assertNotIn("0000000000f385e4", " ".join(result.command or []))
         self.assertEqual(result.details["addr_source"], str(crash_file))
+
+    def test_addr2line_runner_infers_rom_from_lowest_log_prop_when_request_has_no_symbol_version(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script = root / ".ai/skills/addr2line-resolve/scripts/addr2line_resolve.py"
+            script.parent.mkdir(parents=True)
+            script.write_text("# fake script\n", encoding="utf-8")
+            rom_log1 = "XMARTQGZHE29E5_V6.1.0.1111_20260327111111.1_REV01_USER_Release"
+            rom_log2 = "XMARTQGZHE29E5_V6.1.0.2222_20260327222222.1_REV01_USER_Release"
+            log1_crash = root / "zip_src/data/Log/log1/logd/crash.txt"
+            log2_crash = root / "zip_src/data/Log/log2/logd/crash.txt"
+            for path, text in (
+                (
+                    log1_crash,
+                    "\n".join(
+                        [
+                            "05-19 15:28:40.041  9497  9497 F DEBUG   : Cmdline: /system/app/xp_envirodrive-mainland/xp_envirodrive-mainland",
+                            "05-19 15:28:40.041  9497  9497 F DEBUG   : pid: 2531, tid: 9497, name: UnityMain  >>> com.xiaopeng.montecarlo <<<",
+                            "05-19 15:28:40.041  9497  9497 F DEBUG   :       #00 pc 0000000000f385e4  /system/app/xp_envirodrive-mainland/lib/arm64/libunity.so",
+                        ]
+                    ),
+                ),
+                (
+                    log2_crash,
+                    "\n".join(
+                        [
+                            "05-19 15:32:57.535 11311 11311 F DEBUG   : Cmdline: /system/app/xp_envirodrive-mainland/xp_envirodrive-mainland",
+                            "05-19 15:32:57.535 11311 11311 F DEBUG   : pid: 11311, tid: 11311, name: UnityMain  >>> com.xiaopeng.montecarlo <<<",
+                            "05-19 15:32:57.535 11311 11311 F DEBUG   :       #00 pc 00000000010f5948  /system/app/xp_envirodrive-mainland/lib/arm64/libunity.so",
+                        ]
+                    ),
+                ),
+            ):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text, encoding="utf-8")
+            (log1_crash.parent / "prop.txt").write_text(f"ro.build.version={rom_log1}\n", encoding="utf-8")
+            (log2_crash.parent / "prop.txt").write_text(f"ro.build.version={rom_log2}\n", encoding="utf-8")
+            archive = root / "crash_bundle.zip"
+            with zipfile.ZipFile(archive, "w") as zf:
+                zf.write(log1_crash, "data/Log/log1/logd/crash.txt")
+                zf.write(log2_crash, "data/Log/log2/logd/crash.txt")
+                zf.write(log1_crash.parent / "prop.txt", "data/Log/log1/logd/prop.txt")
+                zf.write(log2_crash.parent / "prop.txt", "data/Log/log2/logd/prop.txt")
+            fake_rom = FakeRomVersionRunner()
+            runner = Addr2LineRunner(
+                BridgeConfig(dry_run=True, data_dir=root / "data", workspace_root=root, guideengine_repo=root),
+                rom_version_runner=fake_rom,
+            )
+
+            result = runner.run_resolve(
+                Addr2LineRequest(
+                    addr_text="",
+                    resources=[DownloadResource(kind="local", value=str(archive))],
+                    triggered=True,
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(len(fake_rom.requests), 1)
+        self.assertEqual(fake_rom.requests[0].rom_version, rom_log1)
+        self.assertTrue(str(result.details["addr_source"]).endswith("data/Log/log1/logd/crash.txt"))
+
+    def test_addr2line_runner_prefers_requested_log_folder_for_prop_and_crash_selection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script = root / ".ai/skills/addr2line-resolve/scripts/addr2line_resolve.py"
+            script.parent.mkdir(parents=True)
+            script.write_text("# fake script\n", encoding="utf-8")
+            rom_log1 = "XMARTQGZHE29E5_V6.1.0.3333_20260327333333.1_REV01_USER_Release"
+            rom_log2 = "XMARTQGZHE29E5_V6.1.0.4444_20260327444444.1_REV01_USER_Release"
+            log1_crash = root / "zip_src/data/Log/log1/logd/crash.txt"
+            log2_crash = root / "zip_src/data/Log/log2/logd/crash.txt"
+            for path, text in (
+                (
+                    log1_crash,
+                    "\n".join(
+                        [
+                            "05-19 15:28:40.041  9497  9497 F DEBUG   : Cmdline: /system/app/xp_envirodrive-mainland/xp_envirodrive-mainland",
+                            "05-19 15:28:40.041  9497  9497 F DEBUG   : pid: 2531, tid: 9497, name: UnityMain  >>> com.xiaopeng.montecarlo <<<",
+                            "05-19 15:28:40.041  9497  9497 F DEBUG   :       #00 pc 0000000000f385e4  /system/app/xp_envirodrive-mainland/lib/arm64/libunity.so",
+                        ]
+                    ),
+                ),
+                (
+                    log2_crash,
+                    "\n".join(
+                        [
+                            "05-19 15:32:57.535 11311 11311 F DEBUG   : Cmdline: /system/app/xp_envirodrive-mainland/xp_envirodrive-mainland",
+                            "05-19 15:32:57.535 11311 11311 F DEBUG   : pid: 11311, tid: 11311, name: UnityMain  >>> com.xiaopeng.montecarlo <<<",
+                            "05-19 15:32:57.535 11311 11311 F DEBUG   :       #00 pc 00000000010f5948  /system/app/xp_envirodrive-mainland/lib/arm64/libunity.so",
+                        ]
+                    ),
+                ),
+            ):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text, encoding="utf-8")
+            (log1_crash.parent / "prop.txt").write_text(f"ro.build.version={rom_log1}\n", encoding="utf-8")
+            (log2_crash.parent / "prop.txt").write_text(f"ro.build.version={rom_log2}\n", encoding="utf-8")
+            archive = root / "crash_bundle.zip"
+            with zipfile.ZipFile(archive, "w") as zf:
+                zf.write(log1_crash, "data/Log/log1/logd/crash.txt")
+                zf.write(log2_crash, "data/Log/log2/logd/crash.txt")
+                zf.write(log1_crash.parent / "prop.txt", "data/Log/log1/logd/prop.txt")
+                zf.write(log2_crash.parent / "prop.txt", "data/Log/log2/logd/prop.txt")
+            fake_rom = FakeRomVersionRunner()
+            runner = Addr2LineRunner(
+                BridgeConfig(dry_run=True, data_dir=root / "data", workspace_root=root, guideengine_repo=root),
+                rom_version_runner=fake_rom,
+            )
+
+            result = runner.run_resolve(
+                Addr2LineRequest(
+                    addr_text="",
+                    resources=[DownloadResource(kind="local", value=str(archive))],
+                    log_folder="log1",
+                    triggered=True,
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(len(fake_rom.requests), 1)
+        self.assertEqual(fake_rom.requests[0].rom_version, rom_log1)
+        self.assertTrue(str(result.details["addr_source"]).endswith("data/Log/log1/logd/crash.txt"))
+
+    def test_addr2line_runner_uses_fault_time_to_pick_matching_log_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script = root / ".ai/skills/addr2line-resolve/scripts/addr2line_resolve.py"
+            script.parent.mkdir(parents=True)
+            script.write_text("# fake script\n", encoding="utf-8")
+            rom_log1 = "XMARTQGZHE29E5_V6.1.0.5555_20260327555555.1_REV01_USER_Release"
+            rom_log2 = "XMARTQGZHE29E5_V6.1.0.6666_20260327666666.1_REV01_USER_Release"
+            log1_crash = root / "zip_src/data/Log/log1/logd/crash.txt"
+            log2_crash = root / "zip_src/data/Log/log2/logd/crash.txt"
+            for path, text in (
+                (
+                    log1_crash,
+                    "\n".join(
+                        [
+                            "05-19 15:28:40.041  9497  9497 F DEBUG   : Cmdline: /system/app/xp_envirodrive-mainland/xp_envirodrive-mainland",
+                            "05-19 15:28:40.041  9497  9497 F DEBUG   : pid: 2531, tid: 9497, name: UnityMain  >>> com.xiaopeng.montecarlo <<<",
+                            "05-19 15:28:40.041  9497  9497 F DEBUG   :       #00 pc 0000000000f385e4  /system/app/xp_envirodrive-mainland/lib/arm64/libunity.so",
+                        ]
+                    ),
+                ),
+                (
+                    log2_crash,
+                    "\n".join(
+                        [
+                            "05-19 15:32:57.535 11311 11311 F DEBUG   : Cmdline: /system/app/xp_envirodrive-mainland/xp_envirodrive-mainland",
+                            "05-19 15:32:57.535 11311 11311 F DEBUG   : pid: 11311, tid: 11311, name: UnityMain  >>> com.xiaopeng.montecarlo <<<",
+                            "05-19 15:32:57.535 11311 11311 F DEBUG   :       #00 pc 00000000010f5948  /system/app/xp_envirodrive-mainland/lib/arm64/libunity.so",
+                        ]
+                    ),
+                ),
+            ):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text, encoding="utf-8")
+            (log1_crash.parent / "prop.txt").write_text(f"ro.build.version={rom_log1}\n", encoding="utf-8")
+            (log2_crash.parent / "prop.txt").write_text(f"ro.build.version={rom_log2}\n", encoding="utf-8")
+            archive = root / "crash_bundle.zip"
+            with zipfile.ZipFile(archive, "w") as zf:
+                zf.write(log1_crash, "data/Log/log1/logd/crash.txt")
+                zf.write(log2_crash, "data/Log/log2/logd/crash.txt")
+                zf.write(log1_crash.parent / "prop.txt", "data/Log/log1/logd/prop.txt")
+                zf.write(log2_crash.parent / "prop.txt", "data/Log/log2/logd/prop.txt")
+            fake_rom = FakeRomVersionRunner()
+            runner = Addr2LineRunner(
+                BridgeConfig(dry_run=True, data_dir=root / "data", workspace_root=root, guideengine_repo=root),
+                rom_version_runner=fake_rom,
+            )
+
+            result = runner.run_resolve(
+                Addr2LineRequest(
+                    addr_text="",
+                    resources=[DownloadResource(kind="local", value=str(archive))],
+                    fault_time="05-19 15:28",
+                    triggered=True,
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(len(fake_rom.requests), 1)
+        self.assertEqual(fake_rom.requests[0].rom_version, rom_log1)
+        self.assertTrue(str(result.details["addr_source"]).endswith("data/Log/log1/logd/crash.txt"))
 
     def test_scene_signal_prompt_preempts_generic_signal_route(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -4151,6 +4405,8 @@ class AppTests(unittest.TestCase):
                     details={
                         "mode": "addr2line_resolve",
                         "rom_version": "XMARTQGZHE29E5_V6.1.0.8810_20260327200937.9_REV01_USER_Release",
+                        "symbol_version": "V6.1.0_20260327175820_Release",
+                        "symbol_version_kind": "apk",
                         "resources": [
                             {"kind": "local", "value": str(Path(tmp) / "crash_bundle.zip")},
                         ],
@@ -4211,6 +4467,8 @@ class AppTests(unittest.TestCase):
                     details={
                         "mode": "addr2line_resolve",
                         "rom_version": "XMARTQGZHE29E5_V6.1.0.8810_20260327200937.9_REV01_USER_Release",
+                        "symbol_version": "V6.1.0_20260327175820_Release",
+                        "symbol_version_kind": "apk",
                         "resources": [
                             {"kind": "local", "value": str(Path(tmp) / "retry_bundle.zip")},
                         ],
@@ -5172,6 +5430,8 @@ class AppTests(unittest.TestCase):
                     "analysis_skill": "3d-stuck-investigate",
                     "analysis_skill_label": "3D启动时序分析",
                     "classification_source": "agent",
+                    "agent_summary_provider": "direct_api",
+                    "agent_summary_model": "mimo-v2.5-pro",
                 },
             )
 
@@ -5184,6 +5444,8 @@ class AppTests(unittest.TestCase):
 
         self.assertTrue(sent)
         rendered = fake_lark.card_replies[0]["card_json"]
+        self.assertIn("Agent 模型", rendered)
+        self.assertIn("mimo-v2.5-pro", rendered)
         self.assertIn("命中 Skill", rendered)
         self.assertNotIn("意图/Skill 校正", rendered)
         self.assertNotIn("select_bug_skill", rendered)
@@ -5222,6 +5484,8 @@ class AppTests(unittest.TestCase):
                     "analysis_skill": "perception-data-summary",
                     "analysis_skill_label": "当前感知数据总结",
                     "classification_source": "agent",
+                    "agent_summary_provider": "direct_api",
+                    "agent_summary_model": "mimo-v2.5-pro",
                     "conversation_root_message_id": "om_bug_result",
                 },
             )
@@ -5235,6 +5499,8 @@ class AppTests(unittest.TestCase):
             )
 
         rendered = str(card)
+        self.assertIn("Agent 模型", rendered)
+        self.assertIn("mimo-v2.5-pro", rendered)
         self.assertIn("意图/Skill 校正", rendered)
         self.assertIn("当前命中：当前感知数据总结", rendered)
         self.assertIn("select_bug_skill", rendered)
@@ -5625,6 +5891,10 @@ class AppTests(unittest.TestCase):
         self.assertIn("请求处理中", fake_lark.card_replies[0]["card_json"])
         self.assertTrue(any("bug_followup_decision_started" in item["card_json"] for item in fake_lark.updated_cards))
         self.assertTrue(any("已完成" in item["card_json"] for item in fake_lark.updated_cards))
+        final_card = fake_lark.updated_cards[-1]["card_json"]
+        self.assertIn("Bug 重新分析", final_card)
+        self.assertNotIn("Bug 追问", final_card)
+        self.assertNotIn("续聊判断", final_card)
 
     def test_agent_intent_followup_without_reply_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -5815,6 +6085,103 @@ class AppTests(unittest.TestCase):
         self.assertEqual(len(fake_bug.requests[0].resources), 1)
         self.assertEqual(fake_bug.requests[0].resources[0].kind, "file")
         self.assertEqual(fake_bug.requests[0].resources[0].value, "file_v3_0011v_33d1772b-86ac-4789-b6e1-35c77ec29a5g")
+
+    def test_followup_reanalysis_prefers_direct_analysis_recovery_when_clarification_has_job_but_no_bug_url(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = Path(tmp) / "bug_metadata.md"
+            html = Path(tmp) / "bug_report.html"
+            metadata.write_text("bug", encoding="utf-8")
+            html.write_text("<html></html>", encoding="utf-8")
+            fake_lark = FakeLarkClient()
+            fake_lark.fetched_messages["om_followup_retry"] = json.dumps(
+                {
+                    "ok": True,
+                    "data": {
+                        "messages": [
+                            {
+                                "message_id": "om_followup_retry",
+                                "reply_to": "om_clarification",
+                            }
+                        ]
+                    },
+                },
+                ensure_ascii=False,
+            )
+            fake_lark.fetched_messages["om_clarification"] = json.dumps(
+                {
+                    "ok": True,
+                    "data": {
+                        "messages": [
+                            {
+                                "message_id": "om_clarification",
+                                "reply_to": "om_file_msg",
+                                "content": "@bot 基于SRViolationHandler.kt源码分析 时间点5月22日 7:46 分析超速状态",
+                            }
+                        ]
+                    },
+                },
+                ensure_ascii=False,
+            )
+            fake_lark.fetched_messages["om_file_msg"] = json.dumps(
+                {
+                    "ok": True,
+                    "data": {
+                        "messages": [
+                            {
+                                "message_id": "om_file_msg",
+                                "msg_type": "file",
+                                "content": '<file key="file_v3_0011v_33d1772b-86ac-4789-b6e1-35c77ec29a5g" name="L1NSPGHB3SB010669log0.zip"/>',
+                            }
+                        ]
+                    },
+                },
+                ensure_ascii=False,
+            )
+            fake_bug = FakeBugRunner(metadata, html)
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    allowed_chats=["oc_denied"],
+                ),
+                lark_client=fake_lark,
+                bug_runner=fake_bug,
+                chat_client=FakeOmlxChatClient(),
+            )
+            clarification_event = event(
+                event_id="evt_clarification_with_job",
+                message_id="om_clarification",
+                content="@bot 基于SRViolationHandler.kt源码分析 时间点5月22日 7:46 分析超速状态",
+            )
+            app.activity_store.record_event(clarification_event)
+            app.activity_store.record_result(
+                clarification_event,
+                TaskResult(
+                    success=True,
+                    message="缺少明确问题时间",
+                    job_id="job_direct_pending",
+                    job_dir=Path(tmp) / "jobs" / "job_direct_pending",
+                    details={
+                        "mode": "bug_time_clarification",
+                        "user_request_text": "基于SRViolationHandler.kt源码分析 时间点5月22日 7:46 分析超速状态",
+                        "bug_url": "",
+                    },
+                ),
+            )
+
+            followup = app.handle_event(
+                event(
+                    event_id="evt_followup_retry_with_job",
+                    message_id="om_followup_retry",
+                    content="重新分析",
+                )
+            )
+
+        self.assertTrue(followup.success)
+        self.assertEqual(followup.details["mode"], "direct_analysis")
+        self.assertEqual(len(fake_bug.requests), 1)
+        self.assertEqual(len(fake_bug.reanalysis_calls), 0)
+        self.assertEqual(fake_bug.requests[0].prompt, "基于SRViolationHandler.kt源码分析 时间点5月22日 7:46 分析超速状态")
 
     def test_group_message_without_bot_mention_is_silent(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -6154,6 +6521,61 @@ class AppTests(unittest.TestCase):
         self.assertEqual(result.details["mode"], "bug_analysis")
         self.assertEqual(len(fake_bug.requests), 1)
         self.assertEqual(fake_bug.requests[0].prompt, "分析3D生命周期")
+
+    def test_group_bug_request_recovers_bot_mention_from_message_metadata_when_config_has_no_bot_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = Path(tmp) / "bug_metadata.md"
+            html = Path(tmp) / "bug_report.html"
+            metadata.write_text("metadata", encoding="utf-8")
+            html.write_text("<html></html>", encoding="utf-8")
+            fake_lark = FakeLarkClient()
+            fake_lark.fetched_messages["om_mid_text_bot_mention"] = json.dumps(
+                {
+                    "ok": True,
+                    "data": {
+                        "messages": [
+                            {
+                                "message_id": "om_mid_text_bot_mention",
+                                "chat_id": "oc_denied",
+                                "content": "https://project.feishu.cn/xpfailuremgmt/buglo/detail/6995823164 @朱云龙的飞书 CLI 调查3D启动生命周期",
+                                "mentions": [
+                                    {
+                                        "id": "cli_a976baa2cdfadcc7",
+                                        "key": "@_user_1",
+                                        "name": "朱云龙的飞书 CLI",
+                                    }
+                                ],
+                            }
+                        ]
+                    },
+                },
+                ensure_ascii=False,
+            )
+            fake_bug = FakeBugRunner(metadata, html)
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    allowed_chats=["oc_denied"],
+                    lark=LarkOptions(bot_open_id="", bot_name=""),
+                ),
+                lark_client=fake_lark,
+                bug_runner=fake_bug,
+            )
+
+            result = app.handle_event(
+                event(
+                    event_id="evt_mid_text_bot_mention",
+                    message_id="om_mid_text_bot_mention",
+                    content="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6995823164 @朱云龙的飞书 CLI 调查3D启动生命周期",
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertFalse(result.skipped)
+        self.assertEqual(result.details["mode"], "bug_analysis")
+        self.assertEqual(len(fake_bug.requests), 1)
+        self.assertEqual(fake_bug.requests[0].prompt, "调查3D启动生命周期")
 
     def test_group_chat_command_uses_configured_bot_mention_only(self):
         with tempfile.TemporaryDirectory() as tmp:

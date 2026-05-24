@@ -143,6 +143,18 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(request.addr_text, "")
         self.assertEqual(request.error, "missing_address")
 
+    def test_parse_addr2line_request_extracts_log_folder_hint(self):
+        request = parse_addr2line_request("请用 log2 里的日志反解符号表", allow_missing_address=True)
+
+        self.assertTrue(request.triggered)
+        self.assertEqual(request.log_folder, "log2")
+
+    def test_parse_addr2line_request_extracts_fault_time_hint(self):
+        request = parse_addr2line_request("5月22日 7:46 反解符号表", allow_missing_address=True)
+
+        self.assertTrue(request.triggered)
+        self.assertEqual(request.fault_time, "05-22 07:46")
+
     def test_parse_addr2line_request_does_not_confuse_non_stack_requests(self):
         for text in (
             "分析3D生命周期",

@@ -268,6 +268,34 @@ class UnityStartupSkillTests(unittest.TestCase):
         self.assertEqual(markers[0].pid, 7412)
         self.assertEqual(markers[0].timestamp.strftime("%Y-%m-%d %H:%M:%S"), "2026-05-11 23:11:29")
 
+    def test_scan_text_log_parses_line_without_sequence_number(self):
+        """LOG_LINE_RE must match standard logcat format (no sequence field)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            # logd/main.txt style: no sequence number field
+            log_path = Path(tmp) / "main.txt"
+            log_path.write_text(
+                "05-11 23:06:40.123  1462  1480 I SrSM_SrUnityPlayer: preloadNativeLibrary: start loading\n",
+                encoding="utf-8",
+            )
+            events = self.mod.scan_text_log(log_path)
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].node_id, "unity_preload_start")
+        self.assertEqual(events[0].pid, 1462)
+
+    def test_scan_text_log_parses_line_with_sequence_number(self):
+        """LOG_LINE_RE must also match decoded alog format (sequence number present)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "main_2026-05-11_23-00.alog.log"
+            log_path.write_text(
+                "05-11 23:06:40.123  1462  1480 42 I SrSM_SrUnityPlayer: preloadNativeLibrary: start loading\n",
+                encoding="utf-8",
+            )
+            events = self.mod.scan_text_log(log_path)
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].node_id, "unity_preload_start")
+
     @staticmethod
     def _fake_event(mod, timestamp_text: str, pid: int):
         timestamp = mod.dt.datetime.strptime(timestamp_text, "%Y-%m-%d %H:%M:%S.%f")

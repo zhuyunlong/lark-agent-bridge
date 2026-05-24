@@ -339,6 +339,7 @@ class AgentTests(unittest.TestCase):
         html = runner._build_agent_runtime_html(
             {
                 "provider": "codex",
+                "model": "gpt-5.4",
                 "usage": {"input_tokens": 1197553, "output_tokens": 13026, "total_tokens": 1210579},
                 "duration_seconds": 307.0,
                 "session_id": "sess-1",
@@ -347,6 +348,8 @@ class AgentTests(unittest.TestCase):
             total_duration_seconds=370.5,
         )
 
+        self.assertIn("Agent 模型", html)
+        self.assertIn("gpt-5.4", html)
         self.assertIn("累计 Agent Token", html)
         self.assertIn("1.20M / 13.03K / 1.21M", html)
 
@@ -845,6 +848,7 @@ class AgentTests(unittest.TestCase):
 
         self.assertTrue(result.success)
         self.assertIn("Agent 类型: `codex`", metadata_text)
+        self.assertIn("Agent 模型: `gpt-5.4`", metadata_text)
         self.assertIn("Agent Token: `321 / 54 / 375`", metadata_text)
         self.assertIn("Agent 耗时: `12.5 秒`", metadata_text)
         self.assertIn("总耗时:", metadata_text)
@@ -1735,6 +1739,7 @@ class AgentTests(unittest.TestCase):
                 [report_html],
                 agent_summary_result={
                     "provider": "codex",
+                    "model": "gpt-5.4",
                     "duration_seconds": 12.5,
                     "usage": {
                         "input_tokens": 321,
@@ -1749,6 +1754,8 @@ class AgentTests(unittest.TestCase):
 
         self.assertIn("Agent 运行信息", html)
         self.assertIn("Agent 类型", html)
+        self.assertIn("Agent 模型", html)
+        self.assertIn("gpt-5.4", html)
         self.assertIn("codex", html)
         self.assertIn("321 / 54 / 375", html)
         self.assertIn("45.6 秒", html)

@@ -61,6 +61,12 @@ class LarkOptions:
 
 
 @dataclass(slots=True)
+class InternalNetworkEnvOptions:
+    inherit_env: list[str] = field(default_factory=list)
+    unset_env: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class ClaudeAgentOptions:
     enabled: bool = True
     command: str = "claude"
@@ -320,6 +326,7 @@ class BridgeConfig:
     job_retention: JobRetentionOptions = field(default_factory=JobRetentionOptions)
     event_consumer: EventConsumerOptions = field(default_factory=EventConsumerOptions)
     lark: LarkOptions = field(default_factory=LarkOptions)
+    internal_network_env: InternalNetworkEnvOptions = field(default_factory=InternalNetworkEnvOptions)
     claude_agent: ClaudeAgentOptions = field(default_factory=ClaudeAgentOptions)
     bug_analysis: BugAnalysisOptions = field(default_factory=BugAnalysisOptions)
     source_investigation: SourceInvestigationOptions = field(default_factory=SourceInvestigationOptions)
@@ -630,6 +637,8 @@ class Addr2LineRequest:
     rom_version: str = ""
     napa_version: str = ""
     apk_version: str = ""
+    log_folder: str = ""
+    fault_time: str = ""
     target: str = "auto"
     prompt: str = ""
     triggered: bool = False

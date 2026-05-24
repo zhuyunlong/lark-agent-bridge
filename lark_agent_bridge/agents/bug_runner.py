@@ -7290,6 +7290,7 @@ class BugAnalysisRunner:
                 "command": command,
                 "error": "",
                 "provider": provider,
+                "model": options.model,
                 "session_id": "",
                 "resumed": False,
                 "duration_seconds": result.duration_seconds
@@ -7303,6 +7304,7 @@ class BugAnalysisRunner:
             "command": command,
             "error": result.error_code or result.message or "omlx_fallback_failed",
             "provider": provider,
+            "model": options.model,
             "session_id": "",
             "resumed": False,
             "duration_seconds": result.duration_seconds
@@ -7530,6 +7532,7 @@ class BugAnalysisRunner:
             "command": None,
             "error": "",
             "provider": provider_tag,
+            "model": response.model or ai_opts.primary_model,
             "session_id": "",
             "resumed": False,
             "duration_seconds": duration,
@@ -7620,6 +7623,7 @@ class BugAnalysisRunner:
     ) -> dict[str, object]:
         command = list(invocation["command"])
         provider = str(invocation["provider"] or "")
+        model = str(invocation.get("model") or "")
         session_id = str(invocation.get("session_id") or "")
         resumed = bool(invocation.get("resumed"))
         started = time.monotonic()
@@ -7686,6 +7690,7 @@ class BugAnalysisRunner:
                     "command": command,
                     "error": "",
                     "provider": provider,
+                    "model": model,
                     "session_id": session_id,
                     "resumed": resumed,
                     "duration_seconds": time.monotonic() - started,
@@ -7709,6 +7714,7 @@ class BugAnalysisRunner:
                 "command": command,
                 "error": "agent_summary_timeout",
                 "provider": provider,
+                "model": model,
                 "session_id": session_id,
                 "resumed": resumed,
                 "duration_seconds": time.monotonic() - started,
@@ -7734,6 +7740,7 @@ class BugAnalysisRunner:
                 "command": command,
                 "error": str(exc),
                 "provider": provider,
+                "model": model,
                 "session_id": session_id,
                 "resumed": resumed,
                 "duration_seconds": time.monotonic() - started,
@@ -7758,6 +7765,7 @@ class BugAnalysisRunner:
                 "command": command,
                 "error": error,
                 "provider": provider,
+                "model": model,
                 "session_id": session_id,
                 "resumed": resumed,
                 "duration_seconds": time.monotonic() - started,
@@ -7780,6 +7788,7 @@ class BugAnalysisRunner:
                         "command": command,
                         "error": "agent_summary_output_io_error",
                         "provider": provider,
+                        "model": model,
                         "session_id": session_id,
                         "resumed": resumed,
                         "duration_seconds": time.monotonic() - started,
@@ -7794,6 +7803,7 @@ class BugAnalysisRunner:
                 "command": command,
                 "error": "empty_agent_summary",
                 "provider": provider,
+                "model": model,
                 "session_id": session_id,
                 "resumed": resumed,
                 "duration_seconds": time.monotonic() - started,
@@ -7818,6 +7828,7 @@ class BugAnalysisRunner:
             "command": command,
             "error": "",
             "provider": provider,
+            "model": model,
             "session_id": resolved_session_id,
             "resumed": resumed,
             "duration_seconds": time.monotonic() - started,
@@ -8254,6 +8265,9 @@ class BugAnalysisRunner:
             provider = str(agent_summary_result["provider"])
             details["agent_summary_provider"] = provider
             details.setdefault("provider", provider)
+        model = self._agent_summary_model(agent_summary_result)
+        if model:
+            details["agent_summary_model"] = model
         if agent_summary_result["session_id"]:
             details["agent_summary_session_id"] = str(agent_summary_result["session_id"])
         if agent_summary_result["resumed"]:
@@ -8286,15 +8300,18 @@ class BugAnalysisRunner:
         total_duration_seconds: float,
     ) -> None:
         provider = str(agent_summary_result.get("provider") or "").strip()
+        model = self._agent_summary_model(agent_summary_result)
         usage = agent_summary_result.get("usage")
         duration = agent_summary_result.get("duration_seconds")
         session_id = str(agent_summary_result.get("session_id") or "").strip()
         resumed = bool(agent_summary_result.get("resumed"))
         usage_scope = str(agent_summary_result.get("usage_scope") or "").strip()
-        if not provider and not isinstance(usage, dict) and not isinstance(duration, (int, float)):
+        if not provider and not model and not isinstance(usage, dict) and not isinstance(duration, (int, float)):
             return
         lines = ["", "## Agent 执行信息", ""]
         lines.append(f"- Agent 类型: `{provider or '未知'}`")
+        if model:
+            lines.append(f"- Agent 模型: `{model}`")
         if session_id:
             lines.append(f"- Agent 会话ID: `{session_id}`")
         lines.append(f"- 续会话: `{'是' if resumed else '否'}`")
@@ -8418,17 +8435,20 @@ class BugAnalysisRunner:
 
     def _build_agent_runtime_html(self, agent_summary_result: dict[str, object], *, total_duration_seconds: float) -> str:
         provider = str(agent_summary_result.get("provider") or "").strip()
+        model = self._agent_summary_model(agent_summary_result)
         usage = agent_summary_result.get("usage")
         duration = agent_summary_result.get("duration_seconds")
         session_id = str(agent_summary_result.get("session_id") or "").strip()
         resumed = bool(agent_summary_result.get("resumed"))
         usage_scope = str(agent_summary_result.get("usage_scope") or "").strip()
-        if not provider and not isinstance(usage, dict) and not isinstance(duration, (int, float)):
+        if not provider and not model and not isinstance(usage, dict) and not isinstance(duration, (int, float)):
             return ""
         rows = [
             ("Agent 类型", provider or "未知"),
             ("续会话", "是" if resumed else "否"),
         ]
+        if model:
+            rows.append(("Agent 模型", model))
         if session_id:
             rows.append(("Agent 会话ID", session_id))
         if isinstance(usage, dict) and any(isinstance(usage.get(key), int) for key in ("input_tokens", "output_tokens", "total_tokens")):
@@ -8469,6 +8489,21 @@ class BugAnalysisRunner:
             "</section>"
             f"{_RUNTIME_HTML_MARKER_END}"
         )
+
+    def _agent_summary_model(self, agent_summary_result: dict[str, object]) -> str:
+        model = str(agent_summary_result.get("model") or "").strip()
+        if model:
+            return model
+        provider = str(agent_summary_result.get("provider") or "").strip().casefold()
+        if provider == "direct_api":
+            return str(self.config.ai_provider.primary_model or "").strip()
+        if provider == "omlx":
+            return str(self.config.omlx_chat.model or "").strip()
+        if provider == "codex":
+            return str(self.config.bug_analysis.model or "").strip()
+        if provider in {"claude", "claude-code", "claude_code"}:
+            return str(self.config.claude_agent.model or "").strip()
+        return ""
 
     def _format_token_millions(self, value: object) -> str:
         if not isinstance(value, int):
@@ -9055,12 +9090,14 @@ class BugAnalysisRunner:
             return {
                 "command": command,
                 "provider": provider,
+                "model": model,
                 "session_id": session_id,
                 "resumed": bool(session_id),
                 "prompt": prompt,
                 "embedded_files": embedded_files,
             }
         if provider in {"claude", "claude-code", "claude_code"}:
+            model = (self.config.claude_agent.model or "").strip()
             allowed_tools = self.config.claude_agent.allowed_tools or ["Read", "Grep", "Glob", "LS"]
             session_id = session_id or str(uuid.uuid4())
             command = [
@@ -9089,6 +9126,7 @@ class BugAnalysisRunner:
             return {
                 "command": command,
                 "provider": provider,
+                "model": model,
                 "session_id": session_id,
                 "resumed": bool(provider_session_id.strip()),
                 "prompt": prompt,

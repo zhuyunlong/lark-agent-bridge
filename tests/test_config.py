@@ -55,7 +55,7 @@ bot_name = "Test Bot"
         self.assertEqual(config.allowed_users, ["ou_1"])
         self.assertEqual(config.download.max_bytes, 12)
         self.assertEqual(config.download.timeout_seconds, 3)
-        self.assertEqual(config.data_dir, Path(tmp) / "bridge-data")
+        self.assertEqual(config.data_dir, (Path(tmp) / "bridge-data").resolve())
         self.assertEqual(config.lark.bot_open_id, "ou_bot")
         self.assertEqual(config.lark.bot_name, "Test Bot")
 
@@ -230,6 +230,27 @@ force_reanalysis_terms = ["重新分析", "源码"]
         self.assertTrue(config.bug_analysis.resume_followup_sessions)
         self.assertEqual(config.bug_analysis.force_reanalysis_terms, ["重新分析", "源码"])
 
+    def test_relative_paths_are_resolved_to_absolute_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_dir = Path(tmp) / "configs" / "bridge"
+            config_dir.mkdir(parents=True)
+            config_path = config_dir / "config.toml"
+            config_path.write_text(
+                """
+workspace_root = "../.."
+guideengine_repo = "../../guideengine"
+data_dir = "data"
+""",
+                encoding="utf-8",
+            )
+
+            config = load_config(config_path)
+
+        self.assertTrue(config.workspace_root.is_absolute())
+        self.assertTrue(config.guideengine_repo.is_absolute())
+        self.assertTrue(config.data_dir.is_absolute())
+        self.assertNotIn("..", str(config.workspace_root))
+
     def test_load_source_investigation_options(self):
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "config.toml"
@@ -260,8 +281,8 @@ add_dirs = ["Napa5"]
         self.assertEqual(config.source_investigation.fallback_model, "gpt-5.3-codex")
         self.assertEqual(config.source_investigation.timeout_seconds, 66)
         self.assertEqual(config.source_investigation.max_evidence, 7)
-        self.assertEqual(config.source_investigation.repo_roots, [Path(tmp) / "guideengine"])
-        self.assertEqual(config.source_investigation.add_dirs, [Path(tmp) / "Napa5"])
+        self.assertEqual(config.source_investigation.repo_roots, [(Path(tmp) / "guideengine").resolve()])
+        self.assertEqual(config.source_investigation.add_dirs, [(Path(tmp) / "Napa5").resolve()])
 
     def test_default_bug_analysis_prompt_is_empty(self):
         config = load_config()
@@ -320,11 +341,11 @@ url = "https://example.feishu.cn/wiki/doc"
             config = load_config(config_path)
 
         self.assertTrue(config.knowledge.enabled)
-        self.assertEqual(config.knowledge.storage, Path(tmp) / "kb/knowledge.sqlite")
+        self.assertEqual(config.knowledge.storage, (Path(tmp) / "kb/knowledge.sqlite").resolve())
         self.assertEqual(config.knowledge.max_hits, 7)
         self.assertEqual(config.knowledge.trigger_prefixes, ["/kb", "知识库"])
         self.assertEqual(config.knowledge.sources[0].id, "adb")
-        self.assertEqual(config.knowledge.sources[0].path, str(Path(tmp) / "adb_data.json"))
+        self.assertEqual(config.knowledge.sources[0].path, str((Path(tmp) / "adb_data.json").resolve()))
         self.assertEqual(config.knowledge.sources[1].url, "https://example.feishu.cn/wiki/doc")
 
     def test_environment_overrides_sensitive_fields(self):
@@ -384,7 +405,7 @@ allowed_dirs = ["{downloads}"]
 
         self.assertTrue(config.local_resources.enabled)
         self.assertTrue(config.local_resources.require_allowed_user)
-        self.assertEqual(config.local_resources.allowed_dirs, [downloads])
+        self.assertEqual(config.local_resources.allowed_dirs, [downloads.resolve()])
 
 
 if __name__ == "__main__":

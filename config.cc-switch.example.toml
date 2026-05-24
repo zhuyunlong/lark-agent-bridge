@@ -25,6 +25,35 @@ allowed_users = []
 bot_open_id = ""
 bot_name = ""
 
+[internal_network_env]
+inherit_env = [
+  "PATH",
+  "HOME",
+  "USER",
+  "LOGNAME",
+  "TMPDIR",
+  "TMP",
+  "TEMP",
+  "LANG",
+  "LC_ALL",
+  "LC_CTYPE",
+  "SHELL",
+  "TERM",
+  "ANDROID_SDK_ROOT",
+  "ANDROID_HOME",
+  "JAVA_HOME",
+]
+unset_env = [
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "ALL_PROXY",
+  "NO_PROXY",
+  "http_proxy",
+  "https_proxy",
+  "all_proxy",
+  "no_proxy",
+]
+
 # ------------------------------------------------------------------
 # AI Provider: cc-switch 本地代理
 # cc-switch 必须运行在 127.0.0.1:15721
@@ -96,4 +125,3 @@ max_age_hours = 6
 
 [notifications]
 enabled = false
-

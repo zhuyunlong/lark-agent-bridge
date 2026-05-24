@@ -17,6 +17,7 @@ from .models import (
     DownloadConfig,
     DualAgentOptions,
     EventConsumerOptions,
+    InternalNetworkEnvOptions,
     IntentAnalysisOptions,
     JobRetentionOptions,
     KnowledgeOptions,
@@ -122,6 +123,7 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
     retention_data = data.get("job_retention") or {}
     event_consumer_data = data.get("event_consumer") or {}
     lark_data = data.get("lark") or {}
+    internal_network_env_data = data.get("internal_network_env") or {}
     runner_data = data.get("runner") or {}
     claude_data = data.get("claude_agent") or {}
     bug_data = data.get("bug_analysis") or {}
@@ -223,6 +225,16 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
                 os.environ.get("LARK_AGENT_BRIDGE_BOT_OPEN_ID") or lark_data.get("bot_open_id", "")
             ),
             bot_name=str(os.environ.get("LARK_AGENT_BRIDGE_BOT_NAME") or lark_data.get("bot_name", "")),
+        ),
+        internal_network_env=InternalNetworkEnvOptions(
+            inherit_env=_string_list(
+                internal_network_env_data.get("inherit_env", []),
+                "internal_network_env.inherit_env",
+            ),
+            unset_env=_string_list(
+                internal_network_env_data.get("unset_env", []),
+                "internal_network_env.unset_env",
+            ),
         ),
         claude_agent=ClaudeAgentOptions(
             enabled=bool(claude_data.get("enabled", True)),
@@ -469,7 +481,7 @@ def _resolve_path(value: str | Path, base_dir: Path) -> Path:
     path = Path(value).expanduser()
     if not path.is_absolute():
         path = base_dir / path
-    return path
+    return path.resolve()
 
 
 def _default_workspace_root(base_dir: Path) -> Path:

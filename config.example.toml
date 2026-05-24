@@ -87,6 +87,38 @@ mention_sender_in_group = true
 bot_open_id = ""
 bot_name = ""
 
+[internal_network_env]
+# For intranet-only subprocesses such as ROM lookup and addr2line symbol
+# resolution, prefer an explicit env whitelist and strip proxy variables so
+# local terminal proxy settings are not inherited implicitly.
+inherit_env = [
+  "PATH",
+  "HOME",
+  "USER",
+  "LOGNAME",
+  "TMPDIR",
+  "TMP",
+  "TEMP",
+  "LANG",
+  "LC_ALL",
+  "LC_CTYPE",
+  "SHELL",
+  "TERM",
+  "ANDROID_SDK_ROOT",
+  "ANDROID_HOME",
+  "JAVA_HOME",
+]
+unset_env = [
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "ALL_PROXY",
+  "NO_PROXY",
+  "http_proxy",
+  "https_proxy",
+  "all_proxy",
+  "no_proxy",
+]
+
 [ai_provider]
 # Direct LLM API configuration — replaces subprocess CLI calls.
 # When enabled, the bridge calls LLM APIs directly via HTTP instead of
