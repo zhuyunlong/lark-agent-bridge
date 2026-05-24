@@ -7528,6 +7528,24 @@ class BugAnalysisRunner:
                 details["signal_code"] = signal_codes[0]
         return details
 
+    def _followup_needs_previous_summary_text(self, followup_text: str) -> bool:
+        lowered = followup_text.casefold()
+        compare_terms = (
+            "对比上一轮",
+            "对比上次",
+            "上一轮结论",
+            "上次结论",
+            "旧结论",
+            "老结论",
+            "新旧结论",
+        )
+        if any(term in lowered for term in compare_terms):
+            return True
+        return (
+            ("上次为什么" in lowered or "上一轮为什么" in lowered)
+            and ("判断" in lowered or "结论" in lowered)
+        )
+
     def _build_or_refresh_bug_prompt_snapshot(
         self,
         *,
@@ -7685,7 +7703,9 @@ class BugAnalysisRunner:
             self._omlx_prompt_section("请求文件摘录", self._read_text_excerpt(request_artifact, 500), 500),
             self._omlx_prompt_section("元数据摘录", self._read_text_excerpt(metadata_path, 900), 900),
         ]
-        if previous_summary_path is not None and not followup_text.strip():
+        if previous_summary_path is not None and (
+            not followup_text.strip() or self._followup_needs_previous_summary_text(followup_text)
+        ):
             sections.append(
                 self._omlx_prompt_section("上一轮摘要摘录", self._read_text_excerpt(previous_summary_path, 700), 700)
             )
@@ -7962,7 +7982,9 @@ class BugAnalysisRunner:
         prompt += f"### 用户原始请求\n{request_text}\n\n"
         if followup_text.strip():
             prompt += f"### 本次追问/修正\n{followup_text.strip()}\n\n"
-        if previous_summary_path is not None and not followup_text.strip():
+        if previous_summary_path is not None and (
+            not followup_text.strip() or self._followup_needs_previous_summary_text(followup_text)
+        ):
             prev_text = self._read_text_excerpt(previous_summary_path, max_file_chars)
             if prev_text:
                 prompt += f"### 上一轮 Agent 总结\n{prev_text}\n\n"
@@ -9303,7 +9325,7 @@ class BugAnalysisRunner:
             f"- 本次重新执行: `{', '.join(rerun_kinds) or '无'}`",
             f"- 本次直接复用: `{', '.join(reused_kinds) or '无'}`",
         ]
-        if previous_summary_path is not None:
+        if previous_summary_path is not None and self._followup_needs_previous_summary_text(followup_text):
             lines.append(f"- 上一轮 Agent 总结: `{previous_summary_path}`")
         if source_evidence_path is not None:
             lines.append(f"- 本轮源码证据: `{source_evidence_path}`")
@@ -9359,7 +9381,7 @@ class BugAnalysisRunner:
             lines.append(f"- 命中 Skill: `{analysis_skill.strip()}`")
             lines.append(f"- Skill 规范:")
             lines.append(self._render_skill_context_lines(analysis_skill).rstrip())
-        if previous_summary_path is not None:
+        if previous_summary_path is not None and self._followup_needs_previous_summary_text(followup_text):
             lines.append(f"- 上一轮 Agent 总结: `{previous_summary_path}`")
         if report_url.strip():
             lines.append(f"- 当前已发布报告链接: `{report_url.strip()}`")
@@ -9639,6 +9661,8 @@ class BugAnalysisRunner:
     ) -> list[dict[str, object]]:
         files: list[dict[str, object]] = []
         if followup_text.strip():
+            if previous_summary_path is not None and self._followup_needs_previous_summary_text(followup_text):
+                files.append({"title": "上一轮 Agent 总结", "path": str(previous_summary_path), "max_chars": 0})
             files.append({"title": "Bug Agent Follow-up Request", "path": str(request_artifact), "max_chars": 0})
             files.append({"title": "Bug Follow-up Metadata", "path": str(metadata_path), "max_chars": 0})
             files.extend(self._bug_summary_referenced_context_files(metadata_path))

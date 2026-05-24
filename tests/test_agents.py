@@ -654,6 +654,470 @@ class AgentTests(unittest.TestCase):
             persisted_snapshot = write_snapshot_mock.call_args.args[1]
             self.assertEqual(persisted_snapshot.analysis_kind, "signal")
 
+    def test_bug_snapshot_prefix_keeps_open_questions_but_not_prior_conclusion_paragraphs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=True, data_dir=Path(tmp), workspace_root=Path(tmp))
+            runner = BugAnalysisRunner(config)
+            request_artifact = Path(tmp) / "bug_agent_followup_request.md"
+            metadata_path = Path(tmp) / "bug_agent_followup_metadata.md"
+            previous_summary = Path(tmp) / "bug_agent_summary.md"
+            request_artifact.write_text("followup request", encoding="utf-8")
+            metadata_path.write_text(
+                "- 用户原始请求: `https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722 分析主题`\n"
+                "- 分析类型: `xtheme`\n",
+                encoding="utf-8",
+            )
+            previous_summary.write_text("旧结论第一段\n旧结论第二段\n", encoding="utf-8")
+
+            prompt = runner._build_bug_agent_summary_prompt(
+                request_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722 分析主题",
+                request_artifact=request_artifact,
+                metadata_path=metadata_path,
+                followup_text="重新源码分析 displaychange",
+                previous_summary_path=previous_summary,
+                snapshot_details={
+                    "analysis_kind": "xtheme",
+                    "analysis_kinds": ["xtheme"],
+                    "bug_url": "https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722",
+                },
+                snapshot_plans=[BugAnalysisPlan(kind="xtheme")],
+            )
+
+        self.assertNotIn("### 上一轮 Agent 总结", prompt)
+        self.assertNotIn("旧结论第一段", prompt)
+
+    def test_bug_file_capable_prompt_reads_previous_summary_only_for_explicit_compare_request(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=True, data_dir=Path(tmp), workspace_root=Path(tmp))
+            runner = BugAnalysisRunner(config)
+            request_artifact = Path(tmp) / "bug_agent_followup_request.md"
+            metadata_path = Path(tmp) / "bug_agent_followup_metadata.md"
+            previous_summary = Path(tmp) / "bug_agent_summary.md"
+            request_artifact.write_text("followup request", encoding="utf-8")
+            metadata_path.write_text(
+                "- 用户原始请求: `https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722 分析主题`\n"
+                "- 分析类型: `xtheme`\n",
+                encoding="utf-8",
+            )
+            previous_summary.write_text("旧结论：displayChanged 是关键线索\n", encoding="utf-8")
+
+            prompt = runner._build_bug_agent_summary_prompt(
+                request_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722 分析主题",
+                request_artifact=request_artifact,
+                metadata_path=metadata_path,
+                followup_text="对比上一轮结论，解释为什么你上次判断 displayChanged 是关键线索",
+                previous_summary_path=previous_summary,
+                snapshot_details={
+                    "analysis_kind": "xtheme",
+                    "analysis_kinds": ["xtheme"],
+                    "bug_url": "https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722",
+                },
+                snapshot_plans=[BugAnalysisPlan(kind="xtheme")],
+            )
+
+        self.assertIn("上一轮 Agent 总结", prompt)
+
+    def test_bug_file_capable_prompt_reads_previous_summary_for_explain_old_conclusion_request(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=True, data_dir=Path(tmp), workspace_root=Path(tmp))
+            runner = BugAnalysisRunner(config)
+            request_artifact = Path(tmp) / "bug_agent_followup_request.md"
+            metadata_path = Path(tmp) / "bug_agent_followup_metadata.md"
+            previous_summary = Path(tmp) / "bug_agent_summary.md"
+            request_artifact.write_text("followup request", encoding="utf-8")
+            metadata_path.write_text(
+                "- 用户原始请求: `https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722 分析主题`\n"
+                "- 分析类型: `xtheme`\n",
+                encoding="utf-8",
+            )
+            previous_summary.write_text("旧结论：displayChanged 是关键线索\n", encoding="utf-8")
+
+            prompt = runner._build_bug_agent_summary_prompt(
+                request_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722 分析主题",
+                request_artifact=request_artifact,
+                metadata_path=metadata_path,
+                followup_text="上次为什么判断 displayChanged 是关键线索",
+                previous_summary_path=previous_summary,
+                snapshot_details={
+                    "analysis_kind": "xtheme",
+                    "analysis_kinds": ["xtheme"],
+                    "bug_url": "https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722",
+                },
+                snapshot_plans=[BugAnalysisPlan(kind="xtheme")],
+            )
+
+        self.assertIn("上一轮 Agent 总结", prompt)
+        self.assertIn("displayChanged 是关键线索", prompt)
+
+    def test_bug_direct_api_prompt_reads_previous_summary_only_for_explicit_compare_request(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=True, data_dir=Path(tmp), workspace_root=Path(tmp))
+            runner = BugAnalysisRunner(config)
+            request_artifact = Path(tmp) / "bug_agent_followup_request.md"
+            metadata_path = Path(tmp) / "bug_agent_followup_metadata.md"
+            previous_summary = Path(tmp) / "bug_agent_summary.md"
+            request_artifact.write_text("followup request", encoding="utf-8")
+            metadata_path.write_text(
+                "- 用户原始请求: `https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722 分析主题`\n"
+                "- 分析类型: `xtheme`\n",
+                encoding="utf-8",
+            )
+            previous_summary.write_text("旧结论：displayChanged 是关键线索\n", encoding="utf-8")
+
+            prompt = runner._build_bug_agent_summary_prompt_for_api(
+                request_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722 分析主题",
+                request_artifact=request_artifact,
+                metadata_path=metadata_path,
+                followup_text="你上次为什么判断 displayChanged 是关键线索？请对比上一轮结论",
+                previous_summary_path=previous_summary,
+                snapshot_details={
+                    "analysis_kind": "xtheme",
+                    "analysis_kinds": ["xtheme"],
+                    "bug_url": "https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722",
+                },
+                snapshot_plans=[BugAnalysisPlan(kind="xtheme")],
+            )
+
+        self.assertIn("### 上一轮 Agent 总结", prompt)
+        self.assertIn("displayChanged 是关键线索", prompt)
+
+    def test_bug_direct_api_prompt_reads_previous_summary_for_explain_old_conclusion_request(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=True, data_dir=Path(tmp), workspace_root=Path(tmp))
+            runner = BugAnalysisRunner(config)
+            request_artifact = Path(tmp) / "bug_agent_followup_request.md"
+            metadata_path = Path(tmp) / "bug_agent_followup_metadata.md"
+            previous_summary = Path(tmp) / "bug_agent_summary.md"
+            request_artifact.write_text("followup request", encoding="utf-8")
+            metadata_path.write_text(
+                "- 用户原始请求: `https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722 分析主题`\n"
+                "- 分析类型: `xtheme`\n",
+                encoding="utf-8",
+            )
+            previous_summary.write_text("旧结论：displayChanged 是关键线索\n", encoding="utf-8")
+
+            prompt = runner._build_bug_agent_summary_prompt_for_api(
+                request_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722 分析主题",
+                request_artifact=request_artifact,
+                metadata_path=metadata_path,
+                followup_text="上一轮为什么得出这个结论",
+                previous_summary_path=previous_summary,
+                snapshot_details={
+                    "analysis_kind": "xtheme",
+                    "analysis_kinds": ["xtheme"],
+                    "bug_url": "https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722",
+                },
+                snapshot_plans=[BugAnalysisPlan(kind="xtheme")],
+            )
+
+        self.assertIn("### 上一轮 Agent 总结", prompt)
+        self.assertIn("displayChanged 是关键线索", prompt)
+
+    def test_bug_direct_api_prompt_explicit_compare_request_does_not_trigger_for_generic_previous_round_question(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=True, data_dir=Path(tmp), workspace_root=Path(tmp))
+            runner = BugAnalysisRunner(config)
+            request_artifact = Path(tmp) / "bug_agent_followup_request.md"
+            metadata_path = Path(tmp) / "bug_agent_followup_metadata.md"
+            previous_summary = Path(tmp) / "bug_agent_summary.md"
+            request_artifact.write_text("followup request", encoding="utf-8")
+            metadata_path.write_text(
+                "- 用户原始请求: `https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722 分析主题`\n"
+                "- 分析类型: `xtheme`\n",
+                encoding="utf-8",
+            )
+            previous_summary.write_text("旧结论：displayChanged 是关键线索\n", encoding="utf-8")
+
+            prompt = runner._build_bug_agent_summary_prompt_for_api(
+                request_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722 分析主题",
+                request_artifact=request_artifact,
+                metadata_path=metadata_path,
+                followup_text="上次为什么没生成报告",
+                previous_summary_path=previous_summary,
+                snapshot_details={
+                    "analysis_kind": "xtheme",
+                    "analysis_kinds": ["xtheme"],
+                    "bug_url": "https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722",
+                },
+                snapshot_plans=[BugAnalysisPlan(kind="xtheme")],
+            )
+
+        self.assertNotIn("### 上一轮 Agent 总结", prompt)
+        self.assertNotIn("displayChanged 是关键线索", prompt)
+
+    def test_bug_omlx_prompt_explicit_compare_request_does_not_trigger_for_generic_previous_round_question(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=True, data_dir=Path(tmp), workspace_root=Path(tmp))
+            config.omlx_chat.max_prompt_chars = 9000
+            runner = BugAnalysisRunner(config)
+            request_artifact = Path(tmp) / "bug_agent_followup_request.md"
+            metadata_path = Path(tmp) / "bug_agent_followup_metadata.md"
+            previous_summary = Path(tmp) / "bug_agent_summary.md"
+            request_artifact.write_text("followup request", encoding="utf-8")
+            metadata_path.write_text(
+                "- 用户原始请求: `https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722 分析主题`\n"
+                "- 分析类型: `xtheme`\n",
+                encoding="utf-8",
+            )
+            previous_summary.write_text("旧结论：displayChanged 是关键线索\n", encoding="utf-8")
+
+            prompt = runner._build_omlx_bug_summary_prompt(
+                request_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722 分析主题",
+                request_artifact=request_artifact,
+                metadata_path=metadata_path,
+                followup_text="上一轮为什么没上传文件",
+                previous_summary_path=previous_summary,
+                snapshot_details={
+                    "analysis_kind": "xtheme",
+                    "analysis_kinds": ["xtheme"],
+                    "bug_url": "https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722",
+                },
+                snapshot_plans=[BugAnalysisPlan(kind="xtheme")],
+            )
+
+        self.assertNotIn("上一轮摘要摘录", prompt)
+        self.assertNotIn("displayChanged 是关键线索", prompt)
+
+    def test_bug_omlx_prompt_reads_previous_summary_only_for_explicit_compare_request(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=True, data_dir=Path(tmp), workspace_root=Path(tmp))
+            config.omlx_chat.max_prompt_chars = 9000
+            runner = BugAnalysisRunner(config)
+            request_artifact = Path(tmp) / "bug_agent_followup_request.md"
+            metadata_path = Path(tmp) / "bug_agent_followup_metadata.md"
+            previous_summary = Path(tmp) / "bug_agent_summary.md"
+            request_artifact.write_text("followup request", encoding="utf-8")
+            metadata_path.write_text(
+                "- 用户原始请求: `https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722 分析主题`\n"
+                "- 分析类型: `xtheme`\n",
+                encoding="utf-8",
+            )
+            previous_summary.write_text("旧结论：displayChanged 是关键线索\n", encoding="utf-8")
+
+            prompt = runner._build_omlx_bug_summary_prompt(
+                request_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722 分析主题",
+                request_artifact=request_artifact,
+                metadata_path=metadata_path,
+                followup_text="对比上一轮结论，解释为什么你上次判断 displayChanged 是关键线索",
+                previous_summary_path=previous_summary,
+                snapshot_details={
+                    "analysis_kind": "xtheme",
+                    "analysis_kinds": ["xtheme"],
+                    "bug_url": "https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722",
+                },
+                snapshot_plans=[BugAnalysisPlan(kind="xtheme")],
+            )
+
+        self.assertIn("上一轮摘要摘录", prompt)
+        self.assertIn("displayChanged 是关键线索", prompt)
+
+    def test_bug_omlx_prompt_reads_previous_summary_for_explain_old_conclusion_request(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=True, data_dir=Path(tmp), workspace_root=Path(tmp))
+            config.omlx_chat.max_prompt_chars = 9000
+            runner = BugAnalysisRunner(config)
+            request_artifact = Path(tmp) / "bug_agent_followup_request.md"
+            metadata_path = Path(tmp) / "bug_agent_followup_metadata.md"
+            previous_summary = Path(tmp) / "bug_agent_summary.md"
+            request_artifact.write_text("followup request", encoding="utf-8")
+            metadata_path.write_text(
+                "- 用户原始请求: `https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722 分析主题`\n"
+                "- 分析类型: `xtheme`\n",
+                encoding="utf-8",
+            )
+            previous_summary.write_text("旧结论：displayChanged 是关键线索\n", encoding="utf-8")
+
+            prompt = runner._build_omlx_bug_summary_prompt(
+                request_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722 分析主题",
+                request_artifact=request_artifact,
+                metadata_path=metadata_path,
+                followup_text="上次为什么判断 displayChanged 是关键线索",
+                previous_summary_path=previous_summary,
+                snapshot_details={
+                    "analysis_kind": "xtheme",
+                    "analysis_kinds": ["xtheme"],
+                    "bug_url": "https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722",
+                },
+                snapshot_plans=[BugAnalysisPlan(kind="xtheme")],
+            )
+
+        self.assertIn("上一轮摘要摘录", prompt)
+        self.assertIn("displayChanged 是关键线索", prompt)
+
+    def test_bug_prompt_explicit_compare_request_does_not_trigger_for_generic_previous_round_question(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=True, data_dir=Path(tmp), workspace_root=Path(tmp))
+            runner = BugAnalysisRunner(config)
+            request_artifact = Path(tmp) / "bug_agent_followup_request.md"
+            metadata_path = Path(tmp) / "bug_agent_followup_metadata.md"
+            previous_summary = Path(tmp) / "bug_agent_summary.md"
+            request_artifact.write_text("followup request", encoding="utf-8")
+            metadata_path.write_text(
+                "- 用户原始请求: `https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722 分析主题`\n"
+                "- 分析类型: `xtheme`\n",
+                encoding="utf-8",
+            )
+            previous_summary.write_text("旧结论：displayChanged 是关键线索\n", encoding="utf-8")
+
+            prompt = runner._build_bug_agent_summary_prompt(
+                request_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722 分析主题",
+                request_artifact=request_artifact,
+                metadata_path=metadata_path,
+                followup_text="上次为什么没生成报告",
+                previous_summary_path=previous_summary,
+                snapshot_details={
+                    "analysis_kind": "xtheme",
+                    "analysis_kinds": ["xtheme"],
+                    "bug_url": "https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722",
+                },
+                snapshot_plans=[BugAnalysisPlan(kind="xtheme")],
+            )
+
+        self.assertNotIn("上一轮 Agent 总结", prompt)
+        self.assertNotIn("displayChanged 是关键线索", prompt)
+
+    def test_bug_followup_metadata_reads_previous_summary_only_for_explicit_compare_request(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = BugAnalysisRunner(BridgeConfig(dry_run=True, data_dir=Path(tmp), workspace_root=Path(tmp)))
+            previous_summary = Path(tmp) / "bug_agent_summary.md"
+            previous_summary.write_text("旧结论：displayChanged 是关键线索\n", encoding="utf-8")
+            generic_metadata = runner._render_bug_agent_followup_metadata(
+                request_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722 分析主题",
+                followup_text="问题时刻系统主题是什么",
+                job_id="job_1",
+                job_dir=Path(tmp) / "jobs" / "job_1",
+                output_dir=Path(tmp) / "jobs" / "job_1" / "output",
+                prepared_input=None,
+                selected_input=None,
+                previous_summary_path=previous_summary,
+                report_files=[],
+                report_url="",
+                analysis_skill="xtheme-analyzer",
+            )
+            compare_metadata = runner._render_bug_agent_followup_metadata(
+                request_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722 分析主题",
+                followup_text="对比上一轮结论，解释为什么你上次判断 displayChanged 是关键线索",
+                job_id="job_1",
+                job_dir=Path(tmp) / "jobs" / "job_1",
+                output_dir=Path(tmp) / "jobs" / "job_1" / "output",
+                prepared_input=None,
+                selected_input=None,
+                previous_summary_path=previous_summary,
+                report_files=[],
+                report_url="",
+                analysis_skill="xtheme-analyzer",
+            )
+
+        self.assertNotIn("上一轮 Agent 总结", generic_metadata)
+        self.assertIn("上一轮 Agent 总结", compare_metadata)
+
+    def test_bug_followup_metadata_reads_previous_summary_for_explain_old_conclusion_request(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = BugAnalysisRunner(BridgeConfig(dry_run=True, data_dir=Path(tmp), workspace_root=Path(tmp)))
+            previous_summary = Path(tmp) / "bug_agent_summary.md"
+            previous_summary.write_text("旧结论：displayChanged 是关键线索\n", encoding="utf-8")
+            metadata = runner._render_bug_agent_followup_metadata(
+                request_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722 分析主题",
+                followup_text="上次为什么判断 displayChanged 是关键线索",
+                job_id="job_1",
+                job_dir=Path(tmp) / "jobs" / "job_1",
+                output_dir=Path(tmp) / "jobs" / "job_1" / "output",
+                prepared_input=None,
+                selected_input=None,
+                previous_summary_path=previous_summary,
+                report_files=[],
+                report_url="",
+                analysis_skill="xtheme-analyzer",
+            )
+
+        self.assertIn("上一轮 Agent 总结", metadata)
+
+    def test_bug_followup_metadata_explicit_compare_request_does_not_trigger_for_generic_previous_round_question(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = BugAnalysisRunner(BridgeConfig(dry_run=True, data_dir=Path(tmp), workspace_root=Path(tmp)))
+            previous_summary = Path(tmp) / "bug_agent_summary.md"
+            previous_summary.write_text("旧结论：displayChanged 是关键线索\n", encoding="utf-8")
+            metadata = runner._render_bug_agent_followup_metadata(
+                request_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722 分析主题",
+                followup_text="上一轮为什么没上传文件",
+                job_id="job_1",
+                job_dir=Path(tmp) / "jobs" / "job_1",
+                output_dir=Path(tmp) / "jobs" / "job_1" / "output",
+                prepared_input=None,
+                selected_input=None,
+                previous_summary_path=previous_summary,
+                report_files=[],
+                report_url="",
+                analysis_skill="xtheme-analyzer",
+            )
+
+        self.assertNotIn("上一轮 Agent 总结", metadata)
+
+    def test_bug_reanalysis_metadata_reads_previous_summary_only_for_explicit_compare_request(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = BugAnalysisRunner(BridgeConfig(dry_run=True, data_dir=Path(tmp), workspace_root=Path(tmp)))
+            previous_summary = Path(tmp) / "bug_agent_summary.md"
+            previous_summary.write_text("旧结论：displayChanged 是关键线索\n", encoding="utf-8")
+            generic_metadata = runner._render_bug_reanalysis_metadata(
+                request_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722 分析主题",
+                followup_text="修正问题时间为23:12，重新分析",
+                job_id="job_1",
+                target_time="2026-05-11 23:12",
+                prepared_input=None,
+                selected_input=None,
+                plans=[BugAnalysisPlan(kind="startup")],
+                rerun_kinds=["startup"],
+                reused_kinds=[],
+                html_paths=[],
+                report_jsons={},
+                combined_artifacts=None,
+                previous_summary_path=previous_summary,
+                classification_skill="startup-analyzer",
+            )
+            compare_metadata = runner._render_bug_reanalysis_metadata(
+                request_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722 分析主题",
+                followup_text="对比上一轮结论，解释为什么你上次判断 displayChanged 是关键线索",
+                job_id="job_1",
+                target_time="2026-05-11 23:12",
+                prepared_input=None,
+                selected_input=None,
+                plans=[BugAnalysisPlan(kind="startup")],
+                rerun_kinds=["startup"],
+                reused_kinds=[],
+                html_paths=[],
+                report_jsons={},
+                combined_artifacts=None,
+                previous_summary_path=previous_summary,
+                classification_skill="startup-analyzer",
+            )
+
+        self.assertNotIn("上一轮 Agent 总结", generic_metadata)
+        self.assertIn("上一轮 Agent 总结", compare_metadata)
+
+    def test_bug_reanalysis_metadata_reads_previous_summary_for_explain_old_conclusion_request(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = BugAnalysisRunner(BridgeConfig(dry_run=True, data_dir=Path(tmp), workspace_root=Path(tmp)))
+            previous_summary = Path(tmp) / "bug_agent_summary.md"
+            previous_summary.write_text("旧结论：displayChanged 是关键线索\n", encoding="utf-8")
+            metadata = runner._render_bug_reanalysis_metadata(
+                request_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722 分析主题",
+                followup_text="上一轮为什么得出这个结论",
+                job_id="job_1",
+                target_time="2026-05-11 23:12",
+                prepared_input=None,
+                selected_input=None,
+                plans=[BugAnalysisPlan(kind="startup")],
+                rerun_kinds=["startup"],
+                reused_kinds=[],
+                html_paths=[],
+                report_jsons={},
+                combined_artifacts=None,
+                previous_summary_path=previous_summary,
+                classification_skill="startup-analyzer",
+            )
+
+        self.assertIn("上一轮 Agent 总结", metadata)
+
     def test_bug_agent_summary_prompt_biases_to_fault_time_focus_session(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = BridgeConfig(dry_run=True, data_dir=Path(tmp), workspace_root=Path(tmp))
