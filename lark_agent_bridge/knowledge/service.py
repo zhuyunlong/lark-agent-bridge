@@ -52,6 +52,7 @@ class KnowledgeService:
         self.store = KnowledgeStore(config.knowledge.storage)
         self._ready_lock = threading.RLock()
         self._configured_sources_checked = False
+        self._source_investigation_runner = source_investigation.SourceInvestigationRunner(config)
 
     def should_handle(self, text: str) -> bool:
         if not self.config.knowledge.enabled:
@@ -303,7 +304,7 @@ class KnowledgeService:
         )
 
     def _answer_from_source_investigation(self, question: str, *, hits: list[SearchHit] | None = None) -> TaskResult:
-        result = source_investigation.SourceInvestigationRunner(self.config).run(question, hits=hits or [])
+        result = self._source_investigation_runner.run(question, hits=hits or [])
         if not result.success:
             existing_hits = hits or []
             return TaskResult(

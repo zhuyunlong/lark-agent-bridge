@@ -99,6 +99,8 @@ Behavior:
 - follow-ups and reanalysis create a fresh Agent session by default, while reusing the previous bug link, downloaded logs, extracted logs, report metadata, skill decision, and source-repo paths
 - set `resume_followup_sessions = true` only if you explicitly want a follow-up to resume the old Agent session; reanalysis still uses a fresh Agent summary session so the new prompt and current skill/source evidence are not biased by stale private context
 - each bug job writes `bug_agent_summary_prompt.md` and `bug_agent_summary_context.json` in the output directory so the exact Agent prompt and embedded local context can be audited
+- multi-turn bug follow-ups now favor a stable `conversation_facts.json` snapshot over replaying the previous long-form summary; the snapshot stores stable facts, evidence entry points, and open questions, not the prior conclusion prose
+- previous summary text is only reintroduced for explicit “compare/explain the old conclusion” follow-ups (for example `对比上一轮结论` or `你上次为什么判断...`); ordinary operational follow-ups such as “上次为什么没生成报告” do not pull the old summary back into the prompt
 
 ### Intent routing default agent
 
@@ -207,6 +209,14 @@ add_dirs = ["/path/to/Napa5"]
 ```
 
 The runner invokes `codex exec --json --output-last-message -s read-only -m gpt-5.4`, sets `-C` to the primary repo root, and appends `--add-dir` for optional cross-repo lookups. The prompt tells Codex to use `rg` anchors first, read only key snippets, avoid whole-repo context dumps, and return a fixed JSON schema: `answer`, `canonical_key`, `confidence`, `commands`, `source_evidence`, `coverage_boundary`, `writeback_allowed`. Write-back is allowed only when confidence is high enough, a canonical key exists, and source evidence is present. This path is for short source investigations only; big logs, long reports, and bug-analysis summaries stay on the existing analysis runners.
+
+Repeat source investigations now use a two-stage cache-friendly flow:
+
+- the first non-local investigation of a question family does **not** write any reusable snapshot to disk
+- the second real request of the same family can reuse an in-memory fact snapshot through the long-lived `KnowledgeService` source-investigation runner
+- only after that repeated request succeeds does the bridge write a durable snapshot under `data/source_investigations/snapshots/`
+- family matching prefers stable semantic identifiers from retrieved hits (`canonical_key`, `signal`, `code`) and only falls back to normalized question text when no better identifier exists
+- local probe short-circuit answers do not participate in this snapshot flow because they never call the model/subprocess prompt path
 
 ## Event consumer health
 

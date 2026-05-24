@@ -1040,6 +1040,271 @@ class KnowledgeServiceTests(unittest.TestCase):
         self.assertEqual(result.canonical_key, "adb-sim:3d-scene")
         self.assertIn("mock datacenter", result.answer)
 
+    def test_source_investigation_repeat_question_uses_fact_snapshot_prefix(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = BridgeConfig(
+                data_dir=root,
+                guideengine_repo=root / "guideengine",
+                knowledge=KnowledgeOptions(enabled=True, storage=root / "knowledge.sqlite"),
+                source_investigation=SourceInvestigationOptions(repo_roots=[root / "guideengine"]),
+            )
+            service = KnowledgeService(config)
+            question = "源码调查 火箭雨提示信号如何模拟"
+            hits = [
+                SearchHit(
+                    chunk_id="guideengine-signals:1",
+                    source_id="guideengine-signals",
+                    title="SIGNAL_CUSTOM_ALPHA (15012)",
+                    content="signal: SIGNAL_CUSTOM_ALPHA\ncode: 15012\ncomment: 火箭雨提示主链路\n",
+                    source_ref=str(root / "missing" / "signal.proto"),
+                    kind="signal_proto_entry",
+                    score=7.0,
+                    metadata={"signal": "SIGNAL_CUSTOM_ALPHA", "code": "15012", "line": "187"},
+                )
+            ]
+            drifted_hits = [
+                SearchHit(
+                    chunk_id="guideengine-signals:2",
+                    source_id="guideengine-signals",
+                    title="SIGNAL_CUSTOM_BETA (150006)",
+                    content="signal: SIGNAL_CUSTOM_BETA\ncode: 150006\ncomment: 火箭雨提示备用链路\n",
+                    source_ref=str(root / "missing" / "signal.proto"),
+                    kind="signal_proto_entry",
+                    score=6.8,
+                    metadata={"signal": "SIGNAL_CUSTOM_BETA", "code": "150006", "line": "188"},
+                ),
+                hits[0],
+            ]
+            payload = {
+                "answer": "火箭雨提示信号可通过 mock datacenter 广播模拟。",
+                "canonical_key": "adb-sim:front-car-start",
+                "confidence": 0.84,
+                "commands": [
+                    "adb shell am broadcast -a com.xiaopeng.guide.action.mock.datacenter --ei code 15012 --ei format 3 --es value 1"
+                ],
+                "source_evidence": [
+                    {
+                        "file": "module_floorcenter/module_proto/src/main/proto/signal.proto",
+                        "line": 187,
+                        "text": "SIGNAL_CUSTOM_ALPHA = 15012",
+                    }
+                ],
+                "coverage_boundary": "scanned datacenter and proto definition path",
+                "writeback_allowed": False,
+            }
+            prompts: list[str] = []
+
+            def fake_run(command, cwd, capture_output, text, timeout, check):
+                prompts.append(command[-1])
+                output_path = Path(command[command.index("--output-last-message") + 1])
+                output_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with (
+                patch.object(service, "search", side_effect=[hits, drifted_hits]),
+                patch("lark_agent_bridge.knowledge.source_investigation.subprocess.run", side_effect=fake_run),
+            ):
+                first = service.answer(question)
+                self.assertFalse((root / "source_investigations" / "snapshots").exists())
+                self.assertFalse((root / "source_investigations" / "repeat_question_registry.json").exists())
+                self.assertNotIn("### 调查事实快照", prompts[0])
+                second = service.answer(question)
+
+            snapshot_dir = root / "source_investigations" / "snapshots"
+            self.assertTrue(first.success)
+            self.assertTrue(second.success)
+            self.assertIn("### 调查事实快照", prompts[1])
+            self.assertIn("### 当前问题增量", prompts[1])
+            self.assertIn("SIGNAL_CUSTOM_ALPHA", prompts[1])
+            self.assertTrue(snapshot_dir.exists())
+            self.assertTrue(any(snapshot_dir.glob("*.json")))
+
+    def test_source_investigation_single_question_does_not_write_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = BridgeConfig(
+                data_dir=root,
+                guideengine_repo=root / "guideengine",
+                knowledge=KnowledgeOptions(enabled=True, storage=root / "knowledge.sqlite"),
+                source_investigation=SourceInvestigationOptions(repo_roots=[root / "guideengine"]),
+            )
+            service = KnowledgeService(config)
+            question = "源码调查 一次性火箭雨提示信号如何模拟"
+            hits = [
+                SearchHit(
+                    chunk_id="guideengine-signals:1",
+                    source_id="guideengine-signals",
+                    title="SIGNAL_CUSTOM_ALPHA (15012)",
+                    content="signal: SIGNAL_CUSTOM_ALPHA\ncode: 15012\ncomment: 火箭雨提示主链路\n",
+                    source_ref=str(root / "missing" / "signal.proto"),
+                    kind="signal_proto_entry",
+                    score=7.0,
+                    metadata={"signal": "SIGNAL_CUSTOM_ALPHA", "code": "15012", "line": "187"},
+                )
+            ]
+            payload = {
+                "answer": "一次性源码调查结果。",
+                "canonical_key": "",
+                "confidence": 0.61,
+                "commands": [],
+                "source_evidence": [],
+                "coverage_boundary": "single independent question",
+                "writeback_allowed": False,
+            }
+
+            def fake_run(command, cwd, capture_output, text, timeout, check):
+                output_path = Path(command[command.index("--output-last-message") + 1])
+                output_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with (
+                patch.object(service, "search", return_value=hits),
+                patch("lark_agent_bridge.knowledge.source_investigation.subprocess.run", side_effect=fake_run),
+            ):
+                result = service.answer(question)
+                self.assertTrue(result.success)
+                self.assertFalse((root / "source_investigations" / "snapshots").exists())
+                self.assertFalse((root / "source_investigations" / "repeat_question_registry.json").exists())
+
+    def test_source_investigation_same_question_text_with_different_hits_does_not_reuse_snapshot_family(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = BridgeConfig(
+                data_dir=root,
+                guideengine_repo=root / "guideengine",
+                knowledge=KnowledgeOptions(enabled=True, storage=root / "knowledge.sqlite"),
+                source_investigation=SourceInvestigationOptions(repo_roots=[root / "guideengine"]),
+            )
+            service = KnowledgeService(config)
+            question = "源码调查 火箭雨提示信号如何模拟"
+            first_hits = [
+                SearchHit(
+                    chunk_id="guideengine-signals:1",
+                    source_id="guideengine-signals",
+                    title="SIGNAL_CUSTOM_ALPHA (15012)",
+                    content="signal: SIGNAL_CUSTOM_ALPHA\ncode: 15012\ncomment: 火箭雨提示主链路\n",
+                    source_ref=str(root / "missing" / "signal.proto"),
+                    kind="signal_proto_entry",
+                    score=7.0,
+                    metadata={"signal": "SIGNAL_CUSTOM_ALPHA", "code": "15012", "line": "187"},
+                )
+            ]
+            second_hits = [
+                SearchHit(
+                    chunk_id="guideengine-signals:9",
+                    source_id="guideengine-signals",
+                    title="SIGNAL_OTHER_FAMILY (25001)",
+                    content="signal: SIGNAL_OTHER_FAMILY\ncode: 25001\ncomment: 火箭雨提示下载提示链路\n",
+                    source_ref=str(root / "missing" / "signal.proto"),
+                    kind="signal_proto_entry",
+                    score=7.2,
+                    metadata={"signal": "SIGNAL_OTHER_FAMILY", "code": "25001", "line": "199"},
+                )
+            ]
+            payload = {
+                "answer": "源码调查结果。",
+                "canonical_key": "",
+                "confidence": 0.61,
+                "commands": [],
+                "source_evidence": [],
+                "coverage_boundary": "single independent question",
+                "writeback_allowed": False,
+            }
+            prompts: list[str] = []
+
+            def fake_run(command, cwd, capture_output, text, timeout, check):
+                prompts.append(command[-1])
+                output_path = Path(command[command.index("--output-last-message") + 1])
+                output_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            service._source_investigation_runner._pending_snapshot_max_entries = 8
+            with (
+                patch.object(service, "search", side_effect=[first_hits, second_hits]),
+                patch("lark_agent_bridge.knowledge.source_investigation.subprocess.run", side_effect=fake_run),
+            ):
+                first = service.answer(question)
+                second = service.answer(question)
+
+            self.assertTrue(first.success)
+            self.assertTrue(second.success)
+            self.assertNotIn("### 调查事实快照", prompts[1])
+            self.assertFalse((root / "source_investigations" / "snapshots").exists())
+
+    def test_source_investigation_pending_cleanup_evicts_old_family(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = BridgeConfig(
+                data_dir=root,
+                guideengine_repo=root / "guideengine",
+                knowledge=KnowledgeOptions(enabled=True, storage=root / "knowledge.sqlite"),
+                source_investigation=SourceInvestigationOptions(repo_roots=[root / "guideengine"]),
+            )
+            service = KnowledgeService(config)
+            runner = service._source_investigation_runner
+            runner._pending_snapshot_max_entries = 1
+            question_a = "源码调查 火箭雨提示信号如何模拟"
+            question_b = "源码调查 彗星雨提示信号如何模拟"
+            hits_a = [
+                SearchHit(
+                    chunk_id="a",
+                    source_id="guideengine-signals",
+                    title="SIGNAL_CUSTOM_ALPHA (15012)",
+                    content="signal: SIGNAL_CUSTOM_ALPHA\ncode: 15012\ncomment: 火箭雨提示主链路\n",
+                    source_ref=str(root / "missing" / "signal.proto"),
+                    kind="signal_proto_entry",
+                    score=7.0,
+                    metadata={"signal": "SIGNAL_CUSTOM_ALPHA", "code": "15012", "line": "187"},
+                )
+            ]
+            hits_b = [
+                SearchHit(
+                    chunk_id="b",
+                    source_id="guideengine-signals",
+                    title="SIGNAL_CUSTOM_GAMMA (18001)",
+                    content="signal: SIGNAL_CUSTOM_GAMMA\ncode: 18001\ncomment: 彗星雨提示主链路\n",
+                    source_ref=str(root / "missing" / "signal.proto"),
+                    kind="signal_proto_entry",
+                    score=7.0,
+                    metadata={"signal": "SIGNAL_CUSTOM_GAMMA", "code": "18001", "line": "287"},
+                )
+            ]
+            payload = {
+                "answer": "源码调查结果。",
+                "canonical_key": "",
+                "confidence": 0.61,
+                "commands": [],
+                "source_evidence": [],
+                "coverage_boundary": "single independent question",
+                "writeback_allowed": False,
+            }
+            prompts: list[str] = []
+
+            def fake_run(command, cwd, capture_output, text, timeout, check):
+                prompts.append(command[-1])
+                output_path = Path(command[command.index("--output-last-message") + 1])
+                output_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            with (
+                patch.object(service, "search", side_effect=[hits_a, hits_b, hits_a]),
+                patch("lark_agent_bridge.knowledge.source_investigation.subprocess.run", side_effect=fake_run),
+            ):
+                service.answer(question_a)
+                service.answer(question_b)
+                service.answer(question_a)
+
+            self.assertNotIn("### 调查事实快照", prompts[2])
+
+    def test_source_investigation_question_family_normalization_keeps_xiadian_and_xiazai_distinct(self):
+        runner = SourceInvestigationRunner(BridgeConfig())
+
+        power_off = runner._normalize_source_question_family("源码调查 下电信号如何模拟")
+        download = runner._normalize_source_question_family("源码调查 下载信号如何模拟")
+
+        self.assertNotEqual(power_off, download)
+
     def test_source_investigation_prompt_includes_prefetched_source_excerpts(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1248,6 +1513,8 @@ class KnowledgeServiceTests(unittest.TestCase):
 
             with patch("lark_agent_bridge.knowledge.source_investigation.subprocess.run") as mocked_run:
                 answer = service.answer("源码调查 前车起步信号如何模拟")
+                self.assertFalse((root / "source_investigations" / "snapshots").exists())
+                self.assertFalse((root / "source_investigations" / "repeat_question_registry.json").exists())
 
         mocked_run.assert_not_called()
         self.assertTrue(answer.success)

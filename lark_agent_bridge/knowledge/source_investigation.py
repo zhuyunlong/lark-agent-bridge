@@ -16,11 +16,13 @@ import json
 from pathlib import Path
 import re
 import subprocess
+import threading
 import time
 from typing import Any
 
 from .models import SearchHit
 from ..models import BridgeConfig
+from .. import prompt_snapshots
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +76,13 @@ class SourceInvestigationResult:
     stderr: str = ""
 
 
+@dataclass(slots=True)
+class PendingSourceSnapshot:
+    snapshot: prompt_snapshots.BugPromptSnapshot
+    first_seen_monotonic: float
+    last_seen_monotonic: float
+
+
 class SourceInvestigationRunner:
     def __init__(self, config: BridgeConfig) -> None:
         self.config = config
@@ -85,6 +94,10 @@ class SourceInvestigationRunner:
             else _SIGNAL_PRIORITY_MODULES
         )
         self._exclude_paths = tuple(opts.exclude_paths) if opts.exclude_paths else _LOW_VALUE_PATH_HINTS
+        self._pending_snapshot_lock = threading.RLock()
+        self._pending_source_snapshots: dict[str, PendingSourceSnapshot] = {}
+        self._pending_snapshot_ttl_seconds = 1800.0
+        self._pending_snapshot_max_entries = 64
 
     def run(self, question: str, *, hits: list[SearchHit] | None = None) -> SourceInvestigationResult:
         options = self.config.source_investigation
@@ -98,12 +111,15 @@ class SourceInvestigationRunner:
         # Try direct API first (fast path, ~3-8s)
         api_result = self._run_via_api(question, hits=hits, repo_roots=repo_roots)
         if api_result is not None:
+            self._record_successful_non_local_snapshot(question, hits or [], api_result)
             return api_result
 
         # Fall back to CLI subprocess (slow path, ~30-120s)
         if options.provider.strip().casefold() != "codex":
             return SourceInvestigationResult(success=False, error=f"unsupported provider: {options.provider}")
-        return self._run_via_cli(question, hits=hits, repo_roots=repo_roots)
+        cli_result = self._run_via_cli(question, hits=hits, repo_roots=repo_roots)
+        self._record_successful_non_local_snapshot(question, hits or [], cli_result)
+        return cli_result
 
     def _run_via_api(
         self,
@@ -262,6 +278,24 @@ class SourceInvestigationRunner:
         return command
 
     def _prompt(self, question: str, *, hits: list[SearchHit] | None = None) -> str:
+        loaded_snapshot = self._load_source_snapshot(question, hits or [])
+        if loaded_snapshot is None:
+            return self._prompt_without_snapshot(question, hits=hits or [], include_question_label=True)
+        return "\n\n".join(
+            [
+                self._render_source_snapshot_prefix(loaded_snapshot),
+                f"### 当前问题增量\n{question}",
+                self._prompt_without_snapshot(question, hits=hits or [], include_question_label=False),
+            ]
+        ).strip()
+
+    def _prompt_without_snapshot(
+        self,
+        question: str,
+        *,
+        hits: list[SearchHit] | None = None,
+        include_question_label: bool,
+    ) -> str:
         options = self.config.source_investigation
         repo_roots = options.repo_roots or [self.config.guideengine_repo]
         add_dirs = options.add_dirs
@@ -272,10 +306,11 @@ class SourceInvestigationRunner:
             "直接按本提示执行源码调查：rg 定位 -> 读关键片段 -> 输出 JSON。",
             "目标：回答用户的知识库/ADB/源码可验证问题，并判断是否可沉淀为知识库模板。",
             "限制：只读；优先使用 rg 搜索锚点；只读取关键片段；不要读取全仓大文件；不要修改文件。",
-            f"用户问题：{question}",
             "源码根：",
             *[f"- {path}" for path in repo_roots],
         ]
+        if include_question_label:
+            prompt_parts.insert(6, f"用户问题：{question}")
         if add_dirs:
             prompt_parts.extend(["附加只读目录：", *[f"- {path}" for path in add_dirs]])
         prompt_parts.extend(_source_filter_prompt_lines(question, exclude_paths=self._exclude_paths))
@@ -298,6 +333,193 @@ class SourceInvestigationRunner:
         prompt_parts.append(f"source_evidence 最多 {max(1, int(options.max_evidence))} 条。")
         prompt_parts.append("只有源码证据能支持结论时 writeback_allowed 才能为 true。")
         return "\n".join(part for part in prompt_parts if part)
+
+    def _source_snapshot_key(self, question: str, hits: list[SearchHit]) -> str:
+        semantic_identifier = self._best_source_family_identifier(hits)
+        if semantic_identifier:
+            return semantic_identifier[:120]
+        normalized_question = self._normalize_source_question_family(question)
+        return normalized_question[:120]
+
+    def _best_source_family_identifier(self, hits: list[SearchHit]) -> str:
+        candidates: list[tuple[float, int, str]] = []
+        for hit in hits[:5]:
+            metadata = hit.metadata or {}
+            if not isinstance(metadata, dict):
+                continue
+            for priority, field_name in enumerate(("canonical_key", "signal", "code"), start=1):
+                raw = str(metadata.get(field_name) or "").strip()
+                if not raw:
+                    continue
+                normalized = re.sub(r"[^a-z0-9\u4e00-\u9fff:_-]+", "-", raw.casefold()).strip("-")
+                if normalized:
+                    candidates.append((float(hit.score or 0.0), priority, normalized))
+                    break
+        if not candidates:
+            return ""
+        candidates.sort(key=lambda item: (-item[0], item[1], item[2]))
+        return candidates[0][2]
+
+    def _source_snapshot_path(self, key: str) -> Path:
+        return ((self.config.data_dir / "source_investigations" / "snapshots" / f"{key}.json").expanduser().resolve())
+
+    def _normalize_source_question_family(self, question: str) -> str:
+        lowered = question.casefold()
+        for token in (
+            "源码分析",
+            "源码调查",
+            "基于源码",
+            "重新源码",
+            "重新调查",
+            "源码",
+            "调查",
+            "分析",
+            "如何",
+            "怎么",
+            "帮我",
+            "一下",
+        ):
+            lowered = lowered.replace(token, " ")
+        lowered = re.sub(r"^\s*请", " ", lowered)
+        lowered = re.sub(r"[^\w\u4e00-\u9fff]+", " ", lowered)
+        lowered = re.sub(r"\s+", "-", lowered).strip("-")
+        return lowered
+
+    def _load_source_snapshot(
+        self,
+        question: str,
+        hits: list[SearchHit],
+    ) -> prompt_snapshots.BugPromptSnapshot | None:
+        key = self._source_snapshot_key(question, hits)
+        if not key:
+            return None
+        path = self._source_snapshot_path(key)
+        if path.exists():
+            try:
+                return prompt_snapshots.read_prompt_snapshot(path)
+            except (OSError, ValueError):
+                return None
+        now = time.monotonic()
+        with self._pending_snapshot_lock:
+            self._cleanup_pending_source_snapshots_locked(now)
+            pending = self._pending_source_snapshots.get(key)
+            if pending is None:
+                return None
+            pending.last_seen_monotonic = now
+            return pending.snapshot
+
+    def _render_source_snapshot_prefix(self, snapshot: prompt_snapshots.BugPromptSnapshot) -> str:
+        lines = ["### 调查事实快照"]
+        lines.extend(f"- {fact.label}: {fact.value}" for fact in snapshot.stable_facts)
+        if snapshot.evidence_refs:
+            lines.append("### 证据目录")
+            for item in snapshot.evidence_refs:
+                locator = f" {item.locator}" if item.locator else ""
+                lines.append(f"- {item.title}: {item.path}{locator}")
+        if snapshot.open_questions:
+            lines.append("### 未决问题")
+            lines.extend(f"- {question}" for question in snapshot.open_questions)
+        return "\n".join(lines)
+
+    def _record_successful_non_local_snapshot(
+        self,
+        question: str,
+        hits: list[SearchHit],
+        result: SourceInvestigationResult,
+    ) -> None:
+        if not result.success:
+            return
+        key = self._source_snapshot_key(question, hits)
+        if not key:
+            return
+        stable_facts: list[prompt_snapshots.SnapshotFact] = [
+            prompt_snapshots.SnapshotFact(label="question_family", value=key),
+        ]
+        if result.canonical_key.strip():
+            stable_facts.append(prompt_snapshots.SnapshotFact(label="canonical_key", value=result.canonical_key.strip()))
+        if result.coverage_boundary.strip():
+            stable_facts.append(
+                prompt_snapshots.SnapshotFact(label="coverage_boundary", value=result.coverage_boundary.strip())
+            )
+        seen_signals: set[str] = set()
+        for hit in hits[:5]:
+            signal = str(hit.metadata.get("signal") or "").strip()
+            if signal and signal not in seen_signals:
+                seen_signals.add(signal)
+                stable_facts.append(prompt_snapshots.SnapshotFact(label="signal", value=signal))
+        evidence_refs: list[prompt_snapshots.SnapshotEvidence] = []
+        for item in result.source_evidence[:5]:
+            if not isinstance(item, dict):
+                continue
+            file_path = str(item.get("file") or "").strip()
+            if not file_path:
+                continue
+            line = str(item.get("line") or "").strip()
+            locator = f"L{line}" if line else ""
+            text = str(item.get("text") or "").strip()
+            title = text[:80] if text else Path(file_path).name
+            evidence_refs.append(prompt_snapshots.SnapshotEvidence(title=title, path=file_path, locator=locator))
+        snapshot = prompt_snapshots.BugPromptSnapshot(
+            scope_key=key,
+            analysis_kind="source_investigation",
+            stable_facts=stable_facts,
+            evidence_refs=evidence_refs,
+            open_questions=[],
+        )
+        path = self._source_snapshot_path(key)
+        if path.exists():
+            prompt_snapshots.write_prompt_snapshot(path, snapshot)
+            with self._pending_snapshot_lock:
+                self._pending_source_snapshots.pop(key, None)
+            return
+        now = time.monotonic()
+        with self._pending_snapshot_lock:
+            self._cleanup_pending_source_snapshots_locked(now)
+            pending = self._pending_source_snapshots.get(key)
+            if pending is None:
+                self._remember_pending_source_snapshot_locked(key, snapshot, now)
+                return
+            self._promote_pending_source_snapshot_locked(key, snapshot, path)
+
+    def _remember_pending_source_snapshot_locked(
+        self,
+        key: str,
+        snapshot: prompt_snapshots.BugPromptSnapshot,
+        now: float,
+    ) -> None:
+        self._pending_source_snapshots[key] = PendingSourceSnapshot(
+            snapshot=snapshot,
+            first_seen_monotonic=now,
+            last_seen_monotonic=now,
+        )
+        self._cleanup_pending_source_snapshots_locked(now)
+
+    def _promote_pending_source_snapshot_locked(
+        self,
+        key: str,
+        snapshot: prompt_snapshots.BugPromptSnapshot,
+        path: Path,
+    ) -> None:
+        prompt_snapshots.write_prompt_snapshot(path, snapshot)
+        self._pending_source_snapshots.pop(key, None)
+
+    def _cleanup_pending_source_snapshots_locked(self, now: float) -> None:
+        stale_keys = [
+            key
+            for key, pending in self._pending_source_snapshots.items()
+            if now - pending.last_seen_monotonic > self._pending_snapshot_ttl_seconds
+        ]
+        for key in stale_keys:
+            self._pending_source_snapshots.pop(key, None)
+        overflow = len(self._pending_source_snapshots) - self._pending_snapshot_max_entries
+        if overflow <= 0:
+            return
+        oldest = sorted(
+            self._pending_source_snapshots.items(),
+            key=lambda item: (item[1].last_seen_monotonic, item[1].first_seen_monotonic, item[0]),
+        )
+        for key, _pending in oldest[:overflow]:
+            self._pending_source_snapshots.pop(key, None)
 
     def _output_path(self) -> Path:
         base = (self.config.data_dir / "source_investigations").expanduser()
