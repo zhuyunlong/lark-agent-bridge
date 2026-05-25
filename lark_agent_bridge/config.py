@@ -542,6 +542,24 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
                     SourceInvestigationOptions().code_index_min_confidence,
                 )
             ),
+            codegraph_enabled=bool(
+                source_investigation_data.get("codegraph_enabled", SourceInvestigationOptions().codegraph_enabled)
+            ),
+            codegraph_command=str(
+                source_investigation_data.get("codegraph_command", SourceInvestigationOptions().codegraph_command)
+            ),
+            codegraph_timeout_seconds=float(
+                source_investigation_data.get(
+                    "codegraph_timeout_seconds",
+                    SourceInvestigationOptions().codegraph_timeout_seconds,
+                )
+            ),
+            codegraph_min_confidence=float(
+                source_investigation_data.get(
+                    "codegraph_min_confidence",
+                    SourceInvestigationOptions().codegraph_min_confidence,
+                )
+            ),
         ),
         signal_resolver=SignalResolverOptions(
             preferred_paths=[

@@ -105,6 +105,10 @@ code_index_enabled = true
 ctags_command = "ctags"
 code_index_timeout_seconds = 10
 code_index_min_confidence = 0.6
+codegraph_enabled = true
+codegraph_command = "codegraph"
+codegraph_timeout_seconds = 10
+codegraph_min_confidence = 0.6
 
 [claude_agent]
 enabled = false

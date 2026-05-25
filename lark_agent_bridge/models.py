@@ -266,6 +266,10 @@ class SourceInvestigationOptions:
     ctags_command: str = "ctags"
     code_index_timeout_seconds: float = 10.0
     code_index_min_confidence: float = 0.6
+    codegraph_enabled: bool = True
+    codegraph_command: str = "codegraph"
+    codegraph_timeout_seconds: float = 10.0
+    codegraph_min_confidence: float = 0.6
 
 
 @dataclass(slots=True)

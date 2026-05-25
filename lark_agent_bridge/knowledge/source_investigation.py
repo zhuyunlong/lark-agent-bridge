@@ -104,6 +104,7 @@ class SourceInvestigationRunner:
         self._pending_snapshot_ttl_seconds = 1800.0
         self._pending_snapshot_max_entries = 64
         self._code_index: _CodeIndex | None = None
+        self._codegraph: Any | None = None
         self._last_code_index_context: list[tuple[Path, Any]] | None = None
 
     def run(self, question: str, *, hits: list[SearchHit] | None = None) -> SourceInvestigationResult:
@@ -115,8 +116,15 @@ class SourceInvestigationRunner:
         if local_result is not None:
             return local_result
 
-        # Code index fast path (ctags + rg, ~100-300ms)
+        # CodeGraph fast path (semantic index, ~100-500ms)
         self._last_code_index_context = None
+        if options.codegraph_enabled:
+            cg_result = self._try_codegraph(question, hits=hits or [], repo_roots=repo_roots)
+            if cg_result is not None:
+                self._record_successful_non_local_snapshot(question, hits or [], cg_result)
+                return cg_result
+
+        # Code index fallback (ctags + rg, ~100-300ms)
         if options.code_index_enabled:
             ci_result = self._try_code_index(question, hits=hits or [], repo_roots=repo_roots)
             if ci_result is not None:
@@ -135,6 +143,84 @@ class SourceInvestigationRunner:
         cli_result = self._run_via_cli(question, hits=hits, repo_roots=repo_roots)
         self._record_successful_non_local_snapshot(question, hits or [], cli_result)
         return cli_result
+
+    # ------------------------------------------------------------------
+    # CodeGraph fast path (semantic code intelligence)
+    # ------------------------------------------------------------------
+
+    def _get_codegraph(self) -> Any | None:
+        if self._codegraph is not None:
+            return self._codegraph
+        try:
+            from .codegraph_client import CodeGraphClient
+        except ImportError:
+            return None
+        opts = self.config.source_investigation
+        client = CodeGraphClient(
+            command=opts.codegraph_command,
+            timeout=opts.codegraph_timeout_seconds,
+        )
+        if not client.is_available():
+            return None
+        self._codegraph = client
+        return client
+
+    def _try_codegraph(
+        self,
+        question: str,
+        *,
+        hits: list[SearchHit],
+        repo_roots: list[Path],
+    ) -> SourceInvestigationResult | None:
+        """Try to answer from CodeGraph semantic index. Returns None on miss."""
+        cg = self._get_codegraph()
+        if cg is None:
+            return None
+
+        symbols = _extract_query_symbols(question, hits)
+        if not symbols:
+            return None
+
+        from .codegraph_client import CgContext
+        all_contexts: list[tuple[Path, CgContext]] = []
+        all_callers: list[tuple[Path, str, list[Any]]] = []
+
+        for repo in repo_roots:
+            if not cg.is_indexed(repo):
+                cg.ensure_index(repo)
+                if not cg.is_indexed(repo):
+                    continue
+
+            for symbol in symbols[:3]:
+                cg_hits = cg.search_symbol(symbol, repo, limit=5)
+                if cg_hits:
+                    callers = cg.get_callers(symbol, repo, limit=10)
+                    ctx = CgContext(
+                        summary=f"Found {len(cg_hits)} definitions for {symbol}",
+                        entry_points=[{
+                            "name": h.name, "kind": h.kind,
+                            "qualifiedName": h.qualified_name,
+                            "filePath": h.path, "startLine": h.line,
+                        } for h in cg_hits],
+                    )
+                    all_contexts.append((repo, ctx))
+                    if callers:
+                        all_callers.append((repo, symbol, callers))
+
+        if not all_contexts:
+            return None
+
+        confidence = _codegraph_confidence(all_contexts, all_callers, question, hits)
+        opts = self.config.source_investigation
+        if confidence < opts.codegraph_min_confidence:
+            # Cache for prompt enrichment
+            self._last_code_index_context = [
+                (repo, _codegraph_to_code_index_context(ctx, cg, repo))
+                for repo, ctx in all_contexts
+            ]
+            return None
+
+        return _result_from_codegraph(all_contexts, all_callers, question, hits, confidence=confidence)
 
     # ------------------------------------------------------------------
     # Code index fast path (ctags + rg)
@@ -1390,3 +1476,106 @@ def _code_index_prompt_lines(contexts: list[tuple[Path, Any]]) -> list[str]:
         for ref in ctx.references[:5]:
             lines.append(f"  引用: {ref.path}:{ref.line}: {ref.text}")
     return lines if len(lines) > 1 else []
+
+
+# ---------------------------------------------------------------------------
+# CodeGraph helpers
+# ---------------------------------------------------------------------------
+
+def _codegraph_confidence(
+    contexts: list[tuple[Path, Any]],
+    callers: list[tuple[Path, str, list[Any]]],
+    question: str,
+    hits: list[SearchHit],
+) -> float:
+    """Estimate confidence of codegraph results."""
+    if not contexts:
+        return 0.0
+
+    total_entries = sum(len(ctx.entry_points) for _, ctx in contexts)
+    total_callers = sum(len(c) for _, _, c in callers)
+
+    if total_entries == 0:
+        return 0.0
+
+    score = 0.35  # base score for having definitions
+    if total_entries >= 2:
+        score += 0.15
+    if total_callers >= 2:
+        score += 0.2
+    if total_callers >= 5:
+        score += 0.1
+
+    # Bonus for multiple kinds
+    all_kinds = set()
+    for _, ctx in contexts:
+        for ep in ctx.entry_points:
+            all_kinds.add(ep.get("kind", ""))
+    if len(all_kinds) >= 2:
+        score += 0.1
+
+    return min(score, 1.0)
+
+
+def _result_from_codegraph(
+    contexts: list[tuple[Path, Any]],
+    callers: list[tuple[Path, str, list[Any]]],
+    question: str,
+    hits: list[SearchHit],
+    *,
+    confidence: float = 0.7,
+) -> SourceInvestigationResult:
+    """Build a SourceInvestigationResult from codegraph contexts."""
+    evidence: list[dict[str, Any]] = []
+    answer_parts: list[str] = []
+    canonical_parts: list[str] = []
+
+    for repo, ctx in contexts:
+        for ep in ctx.entry_points[:5]:
+            name = ep.get("qualifiedName") or ep.get("name", "")
+            kind = ep.get("kind", "")
+            path = ep.get("filePath", "")
+            line = ep.get("startLine", 0)
+            answer_parts.append(f"{kind} {name} 定义在 {path}:{line}")
+            evidence.append({"file": path, "line": line, "text": f"[{kind}] {name}"})
+            if not canonical_parts:
+                canonical_parts.append(name)
+
+    for repo, symbol, caller_list in callers:
+        for c in caller_list[:5]:
+            evidence.append({
+                "file": c.path, "line": c.line,
+                "text": f"[caller] {c.name} → {symbol}",
+            })
+
+    answer = "CodeGraph 语义索引快速查找结果：\n" + "\n".join(answer_parts) if answer_parts else ""
+    return SourceInvestigationResult(
+        success=True,
+        answer=answer,
+        canonical_key=".".join(canonical_parts)[:120] if canonical_parts else "",
+        confidence=confidence,
+        commands=[],
+        source_evidence=evidence[:20],
+        coverage_boundary="codegraph: semantic definitions + call graph",
+        writeback_allowed=False,
+    )
+
+
+def _codegraph_to_code_index_context(ctx: Any, cg: Any, repo: Path) -> Any:
+    """Convert codegraph context to code_index CodeIndexContext for prompt enrichment."""
+    try:
+        from .code_index import CodeIndexContext, SymbolHit, ReferenceHit
+    except ImportError:
+        return ctx
+    defs = [
+        SymbolHit(
+            name=ep.get("name", ""),
+            kind=ep.get("kind", ""),
+            path=ep.get("filePath", ""),
+            line=int(ep.get("startLine", 0)),
+            language="",
+            scope=ep.get("qualifiedName", "").rsplit("::", 1)[0] if "::" in ep.get("qualifiedName", "") else "",
+        )
+        for ep in ctx.entry_points[:5]
+    ]
+    return CodeIndexContext(definitions=defs, references=[])
