@@ -524,6 +524,24 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
             exclude_paths=[
                 str(p) for p in source_investigation_data.get("exclude_paths", [])
             ],
+            code_index_enabled=bool(
+                source_investigation_data.get("code_index_enabled", SourceInvestigationOptions().code_index_enabled)
+            ),
+            ctags_command=str(
+                source_investigation_data.get("ctags_command", SourceInvestigationOptions().ctags_command)
+            ),
+            code_index_timeout_seconds=float(
+                source_investigation_data.get(
+                    "code_index_timeout_seconds",
+                    SourceInvestigationOptions().code_index_timeout_seconds,
+                )
+            ),
+            code_index_min_confidence=float(
+                source_investigation_data.get(
+                    "code_index_min_confidence",
+                    SourceInvestigationOptions().code_index_min_confidence,
+                )
+            ),
         ),
         signal_resolver=SignalResolverOptions(
             preferred_paths=[

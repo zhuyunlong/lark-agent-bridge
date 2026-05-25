@@ -1047,7 +1047,7 @@ class KnowledgeServiceTests(unittest.TestCase):
                 data_dir=root,
                 guideengine_repo=root / "guideengine",
                 knowledge=KnowledgeOptions(enabled=True, storage=root / "knowledge.sqlite"),
-                source_investigation=SourceInvestigationOptions(repo_roots=[root / "guideengine"]),
+                source_investigation=SourceInvestigationOptions(repo_roots=[root / "guideengine"], code_index_enabled=False),
             )
             service = KnowledgeService(config)
             question = "源码调查 火箭雨提示信号如何模拟"
@@ -1127,7 +1127,7 @@ class KnowledgeServiceTests(unittest.TestCase):
                 data_dir=root,
                 guideengine_repo=root / "guideengine",
                 knowledge=KnowledgeOptions(enabled=True, storage=root / "knowledge.sqlite"),
-                source_investigation=SourceInvestigationOptions(repo_roots=[root / "guideengine"]),
+                source_investigation=SourceInvestigationOptions(repo_roots=[root / "guideengine"], code_index_enabled=False),
             )
             service = KnowledgeService(config)
             question = "源码调查 一次性火箭雨提示信号如何模拟"
@@ -1174,7 +1174,7 @@ class KnowledgeServiceTests(unittest.TestCase):
                 data_dir=root,
                 guideengine_repo=root / "guideengine",
                 knowledge=KnowledgeOptions(enabled=True, storage=root / "knowledge.sqlite"),
-                source_investigation=SourceInvestigationOptions(repo_roots=[root / "guideengine"]),
+                source_investigation=SourceInvestigationOptions(repo_roots=[root / "guideengine"], code_index_enabled=False),
             )
             service = KnowledgeService(config)
             question = "源码调查 火箭雨提示信号如何模拟"
@@ -1239,7 +1239,7 @@ class KnowledgeServiceTests(unittest.TestCase):
                 data_dir=root,
                 guideengine_repo=root / "guideengine",
                 knowledge=KnowledgeOptions(enabled=True, storage=root / "knowledge.sqlite"),
-                source_investigation=SourceInvestigationOptions(repo_roots=[root / "guideengine"]),
+                source_investigation=SourceInvestigationOptions(repo_roots=[root / "guideengine"], code_index_enabled=False),
             )
             service = KnowledgeService(config)
             runner = service._source_investigation_runner
@@ -1544,6 +1544,7 @@ class KnowledgeServiceTests(unittest.TestCase):
                 data_dir=root,
                 guideengine_repo=root / "guideengine",
                 knowledge=KnowledgeOptions(enabled=True, storage=root / "knowledge.sqlite"),
+                source_investigation=SourceInvestigationOptions(code_index_enabled=False),
             )
             service = KnowledgeService(config)
             service.store.add_chunks(

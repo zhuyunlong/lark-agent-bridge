@@ -18,7 +18,12 @@ import re
 import subprocess
 import threading
 import time
-from typing import Any
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .code_index import CodeIndexClient as _CodeIndex
+else:
+    _CodeIndex = Any
 
 from .models import SearchHit
 from ..models import BridgeConfig
@@ -98,6 +103,8 @@ class SourceInvestigationRunner:
         self._pending_source_snapshots: dict[str, PendingSourceSnapshot] = {}
         self._pending_snapshot_ttl_seconds = 1800.0
         self._pending_snapshot_max_entries = 64
+        self._code_index: _CodeIndex | None = None
+        self._last_code_index_context: list[tuple[Path, Any]] | None = None
 
     def run(self, question: str, *, hits: list[SearchHit] | None = None) -> SourceInvestigationResult:
         options = self.config.source_investigation
@@ -107,6 +114,14 @@ class SourceInvestigationRunner:
         local_result = _try_local_signal_probe(question, hits or [], repo_roots)
         if local_result is not None:
             return local_result
+
+        # Code index fast path (ctags + rg, ~100-300ms)
+        self._last_code_index_context = None
+        if options.code_index_enabled:
+            ci_result = self._try_code_index(question, hits=hits or [], repo_roots=repo_roots)
+            if ci_result is not None:
+                self._record_successful_non_local_snapshot(question, hits or [], ci_result)
+                return ci_result
 
         # Try direct API first (fast path, ~3-8s)
         api_result = self._run_via_api(question, hits=hits, repo_roots=repo_roots)
@@ -120,6 +135,64 @@ class SourceInvestigationRunner:
         cli_result = self._run_via_cli(question, hits=hits, repo_roots=repo_roots)
         self._record_successful_non_local_snapshot(question, hits or [], cli_result)
         return cli_result
+
+    # ------------------------------------------------------------------
+    # Code index fast path (ctags + rg)
+    # ------------------------------------------------------------------
+
+    def _get_code_index(self) -> _CodeIndex | None:
+        if self._code_index is not None:
+            return self._code_index
+        try:
+            from .code_index import CodeIndexClient
+        except ImportError:
+            return None
+        opts = self.config.source_investigation
+        repo_roots = [p.expanduser() for p in (opts.repo_roots or [self.config.guideengine_repo])]
+        self._code_index = CodeIndexClient(
+            repo_roots,
+            ctags_command=opts.ctags_command,
+            timeout=opts.code_index_timeout_seconds,
+        )
+        return self._code_index
+
+    def _try_code_index(
+        self,
+        question: str,
+        *,
+        hits: list[SearchHit],
+        repo_roots: list[Path],
+    ) -> SourceInvestigationResult | None:
+        """Try to answer from local code index. Returns None on miss."""
+        idx = self._get_code_index()
+        if idx is None or not idx.is_available():
+            return None
+
+        symbols = _extract_query_symbols(question, hits)
+        if not symbols:
+            return None
+
+        from .code_index import CodeIndexContext
+        all_contexts: list[tuple[Path, CodeIndexContext]] = []
+        for repo in repo_roots:
+            if not idx.is_available(repo):
+                continue
+            idx.ensure_index(repo)
+            for symbol in symbols[:3]:
+                ctx = idx.get_context(symbol, repo)
+                if ctx and ctx.definitions:
+                    all_contexts.append((repo, ctx))
+
+        if not all_contexts:
+            return None
+
+        confidence = _code_index_confidence(all_contexts, question, hits)
+        opts = self.config.source_investigation
+        if confidence < opts.code_index_min_confidence:
+            self._last_code_index_context = all_contexts
+            return None
+
+        return _result_from_code_index(all_contexts, question, hits, confidence=confidence)
 
     def _run_via_api(
         self,
@@ -325,6 +398,11 @@ class SourceInvestigationRunner:
             default_modules=self._priority_modules,
             signal_modules=self._signal_priority_modules,
         ))
+        # Inject code index context from low-confidence miss
+        if self._last_code_index_context:
+            ci_lines = _code_index_prompt_lines(self._last_code_index_context)
+            if ci_lines:
+                prompt_parts.extend(ci_lines)
         prompt_parts.append(
             "输出必须是一个 JSON 对象，不要 Markdown，不要代码块。字段："
             "answer(string), canonical_key(string), confidence(number 0-1), commands(array string), "
@@ -1189,3 +1267,126 @@ def _float(value: Any) -> float:
         return float(value)
     except (TypeError, ValueError):
         return 0.0
+
+
+# ---------------------------------------------------------------------------
+# Code index helpers
+# ---------------------------------------------------------------------------
+
+def _extract_query_symbols(question: str, hits: list[SearchHit]) -> list[str]:
+    """Extract symbol names from question text and search hits."""
+    symbols: list[str] = []
+    seen: set[str] = set()
+
+    # From hits metadata
+    for hit in hits[:10]:
+        signal = str(hit.metadata.get("signal") or "").strip()
+        if signal and signal not in seen:
+            seen.add(signal)
+            symbols.append(signal)
+
+    # From question — look for CamelCase or UPPER_SNAKE identifiers
+    for match in re.finditer(r'\b([A-Z][a-zA-Z0-9]{2,}(?:[A-Z][a-z]+)*)\b', question):
+        name = match.group(1)
+        if name not in seen:
+            seen.add(name)
+            symbols.append(name)
+    for match in re.finditer(r'\b(SIGNAL_[A-Z0-9_]+)\b', question):
+        name = match.group(1)
+        if name not in seen:
+            seen.add(name)
+            symbols.append(name)
+
+    return symbols[:10]
+
+
+def _code_index_confidence(
+    contexts: list[tuple[Path, Any]],
+    question: str,
+    hits: list[SearchHit],
+) -> float:
+    """Estimate confidence of code index results."""
+    if not contexts:
+        return 0.0
+
+    total_defs = sum(len(ctx.definitions) for _, ctx in contexts)
+    total_refs = sum(len(ctx.references) for _, ctx in contexts)
+
+    if total_defs == 0:
+        return 0.0
+
+    score = 0.3  # base score for having any definitions
+    if total_defs >= 2:
+        score += 0.15
+    if total_refs >= 3:
+        score += 0.2
+    if total_refs >= 8:
+        score += 0.1
+
+    # Bonus if definitions span multiple kinds (e.g. class + method)
+    all_kinds = set()
+    for _, ctx in contexts:
+        for d in ctx.definitions:
+            all_kinds.add(d.kind)
+    if len(all_kinds) >= 2:
+        score += 0.1
+
+    return min(score, 1.0)
+
+
+def _result_from_code_index(
+    contexts: list[tuple[Path, Any]],
+    question: str,
+    hits: list[SearchHit],
+    *,
+    confidence: float = 0.7,
+) -> SourceInvestigationResult:
+    """Build a SourceInvestigationResult from code index contexts."""
+    evidence: list[dict[str, Any]] = []
+    answer_parts: list[str] = []
+    canonical_parts: list[str] = []
+
+    for repo, ctx in contexts:
+        for defn in ctx.definitions[:5]:
+            scope_prefix = f"{defn.scope}." if defn.scope else ""
+            answer_parts.append(
+                f"{defn.kind} {scope_prefix}{defn.name} 定义在 {defn.path}:{defn.line}"
+            )
+            evidence.append({
+                "file": defn.path,
+                "line": defn.line,
+                "text": f"[{defn.kind}] {scope_prefix}{defn.name}",
+            })
+            if not canonical_parts:
+                canonical_parts.append(defn.name)
+
+        for ref in ctx.references[:8]:
+            evidence.append({
+                "file": ref.path,
+                "line": ref.line,
+                "text": ref.text[:200],
+            })
+
+    answer = "代码索引快速查找结果：\n" + "\n".join(answer_parts) if answer_parts else ""
+    return SourceInvestigationResult(
+        success=True,
+        answer=answer,
+        canonical_key=".".join(canonical_parts)[:120] if canonical_parts else "",
+        confidence=confidence,
+        commands=[],
+        source_evidence=evidence[:20],
+        coverage_boundary="code_index: definitions + references only",
+        writeback_allowed=False,
+    )
+
+
+def _code_index_prompt_lines(contexts: list[tuple[Path, Any]]) -> list[str]:
+    """Format code index context as prompt enrichment lines."""
+    lines: list[str] = ["预索引符号信息（优先使用，减少搜索）："]
+    for _, ctx in contexts:
+        for defn in ctx.definitions[:5]:
+            scope_prefix = f"{defn.scope}." if defn.scope else ""
+            lines.append(f"- {defn.kind} {scope_prefix}{defn.name} @ {defn.path}:{defn.line}")
+        for ref in ctx.references[:5]:
+            lines.append(f"  引用: {ref.path}:{ref.line}: {ref.text}")
+    return lines if len(lines) > 1 else []

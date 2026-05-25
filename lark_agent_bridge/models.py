@@ -262,6 +262,10 @@ class SourceInvestigationOptions:
     priority_modules: list[str] = field(default_factory=list)
     signal_priority_modules: dict[str, list[str]] = field(default_factory=dict)
     exclude_paths: list[str] = field(default_factory=list)
+    code_index_enabled: bool = True
+    ctags_command: str = "ctags"
+    code_index_timeout_seconds: float = 10.0
+    code_index_min_confidence: float = 0.6
 
 
 @dataclass(slots=True)
