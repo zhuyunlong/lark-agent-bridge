@@ -1,0 +1,154 @@
+lark_agent_bridge/agents/bug_runner.py
+  4e5b809767ccfdbb 3924-3932,3943,4023-4098,4100,4107
+  a72801efe4356a38 7349,9322
+  959c68a36b85109c 3498-3500,3502,3505
+lark_agent_bridge/app.py
+  8d1ac874f505a8c7 5090
+  fc1c13076488e44e 497-502,505,507-511,513-522,5062-5089,5091-5094
+tests/test_agents.py
+  4e5b809767ccfdbb 3111-3242
+  a72801efe4356a38 15,149,159-160,162-174,1452,1465,1476-1478,3878
+tests/test_app.py
+  d204901b0d72312d 1953,2000,7099
+  8d1ac874f505a8c7 1943-1952,1954-1999,2001-2028
+  fc1c13076488e44e 4483,6475,6574
+docs/superpowers/plans/2026-05-24-codegraph-source-analysis.md
+  fc6982b2e7f24a67 1-234
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.20",
+  "base_commit_sha": "7cdcf1e391e9b18d645531a313740e80c720b476",
+  "prompts": {
+    "1ad754052bdc639f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e5116-ab22-7af0-ab60-6f765b946878",
+        "model": "gpt-5.4"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 0,
+      "overriden_lines": 0
+    },
+    "4e5b809767ccfdbb": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "25e98c60-cd5e-481e-ae81-1eca42fd83ce",
+        "model": "mimo-v2.5-pro"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 225,
+      "total_deletions": 7,
+      "accepted_lines": 221,
+      "overriden_lines": 0
+    },
+    "8d1ac874f505a8c7": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "36724fac-7a5f-42cc-a5d8-e94db24eb40a",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 109,
+      "total_deletions": 6,
+      "accepted_lines": 85,
+      "overriden_lines": 0
+    },
+    "959c68a36b85109c": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1d66dcd4-9662-498d-a732-4820495f0852",
+        "model": "claude-sonnet-4-6"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 5,
+      "total_deletions": 2,
+      "accepted_lines": 5,
+      "overriden_lines": 0
+    },
+    "a72801efe4356a38": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e5ef3-f568-7ae2-b1e7-07cbd83ae1f5",
+        "model": "gpt-5.5"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 98,
+      "total_deletions": 382,
+      "accepted_lines": 25,
+      "overriden_lines": 0
+    },
+    "d204901b0d72312d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "9e2c6671-8e82-4d6c-94a8-b96633d4ebac",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 17,
+      "total_deletions": 8,
+      "accepted_lines": 3,
+      "overriden_lines": 0
+    },
+    "d50269dbf8d0cf76": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3b79674c-626c-4505-8a9b-f42cc2803d7d",
+        "model": "mimo-v2.5-pro"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 0,
+      "overriden_lines": 0
+    },
+    "e8f34384a9063382": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e5ffe-321e-7b90-ab8c-e85d0879a027",
+        "model": "gpt-5.5"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 87,
+      "accepted_lines": 0,
+      "overriden_lines": 0
+    },
+    "fc1c13076488e44e": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "981917b2-225b-47dc-8cf1-0c51a84c4ed2",
+        "model": "claude-opus-4-7"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 59,
+      "total_deletions": 32,
+      "accepted_lines": 57,
+      "overriden_lines": 0
+    },
+    "fc6982b2e7f24a67": {
+      "agent_id": {
+        "tool": "qoder",
+        "id": "1cccca19-fa5f-4624-adba-a3ec950e46c7",
+        "model": "qoder-model"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 234,
+      "total_deletions": 0,
+      "accepted_lines": 234,
+      "overriden_lines": 0
+    }
+  }
+}
