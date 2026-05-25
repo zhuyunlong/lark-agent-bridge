@@ -137,6 +137,7 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
     base_dir = path.parent if path else Path.cwd()
     default_workspace_root = _default_workspace_root(base_dir)
     default_guideengine_repo = default_workspace_root / "xp/guideengine/.worktrees/os6_xpdev"
+    default_napa5_repo = default_workspace_root / "xp/Napa5/.worktrees/os6_robotaxi"
     data: dict[str, Any] = {}
     if path:
         if not path.exists():
@@ -504,7 +505,7 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
             ),
             max_evidence=int(source_investigation_data.get("max_evidence", SourceInvestigationOptions().max_evidence)),
             repo_roots=_path_list(
-                source_investigation_data.get("repo_roots", [str(guideengine_repo)]),
+                source_investigation_data.get("repo_roots", _default_repo_roots(default_guideengine_repo, default_napa5_repo)),
                 base_dir,
                 "source_investigation.repo_roots",
             ),
@@ -594,6 +595,14 @@ def _default_workspace_root(base_dir: Path) -> Path:
     if base_dir.name == "lark-agent-bridge" and base_dir.parent.name == "tools":
         return base_dir.parent.parent
     return base_dir
+
+
+def _default_repo_roots(guideengine: Path, napa5: Path) -> list[str]:
+    """Build default repo_roots list, including only paths that exist."""
+    roots = [str(guideengine)]
+    if napa5.exists():
+        roots.append(str(napa5))
+    return roots
 
 
 def _bool_value(value: str | None, default: bool) -> bool:

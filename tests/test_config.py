@@ -27,7 +27,9 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.source_investigation.model, "gpt-5.4")
         self.assertEqual(config.source_investigation.timeout_seconds, 120)
         self.assertEqual(config.source_investigation.max_evidence, 20)
-        self.assertEqual(config.source_investigation.repo_roots, [config.guideengine_repo])
+        # Default repo_roots includes guideengine; also Napa5 if it exists on this machine
+        self.assertIn(config.guideengine_repo, config.source_investigation.repo_roots)
+        self.assertGreaterEqual(len(config.source_investigation.repo_roots), 1)
 
     def test_toml_overrides_are_resolved_relative_to_config(self):
         with tempfile.TemporaryDirectory() as tmp:

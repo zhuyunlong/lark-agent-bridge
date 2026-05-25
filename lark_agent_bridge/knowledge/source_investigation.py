@@ -107,6 +107,46 @@ class SourceInvestigationRunner:
         self._codegraph: Any | None = None
         self._last_code_index_context: list[tuple[Path, Any]] | None = None
 
+    def warmup_codegraph(self) -> None:
+        """Pre-index all repo_roots in background daemon threads (non-blocking).
+
+        Called at startup so that the first Q&A doesn't pay the init cost.
+        Each repo gets its own thread; threads are daemons so they don't prevent
+        process exit.
+        """
+        opts = self.config.source_investigation
+        if not opts.codegraph_enabled:
+            return
+        cg = self._get_codegraph()
+        if cg is None:
+            return
+        repo_roots = [p.expanduser() for p in (opts.repo_roots or [self.config.guideengine_repo])]
+        for repo in repo_roots:
+            if not repo.exists():
+                continue
+            if cg.is_indexed(repo):
+                logger.debug("codegraph: %s already indexed, skipping warmup", repo)
+                continue
+            t = threading.Thread(
+                target=self._warmup_one_repo,
+                args=(cg, repo),
+                name=f"codegraph-init-{repo.name}",
+                daemon=True,
+            )
+            t.start()
+            logger.info("codegraph: warmup started for %s (background)", repo)
+
+    def _warmup_one_repo(self, cg: Any, repo: Path) -> None:
+        try:
+            logger.info("codegraph: indexing %s …", repo)
+            ok = cg.ensure_index(repo)
+            if ok:
+                logger.info("codegraph: index ready for %s", repo)
+            else:
+                logger.warning("codegraph: indexing failed for %s", repo)
+        except Exception as exc:  # pragma: no cover
+            logger.warning("codegraph: warmup error for %s: %s", repo, exc)
+
     def run(self, question: str, *, hits: list[SearchHit] | None = None) -> SourceInvestigationResult:
         options = self.config.source_investigation
         if not options.enabled:

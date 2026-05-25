@@ -53,6 +53,7 @@ class KnowledgeService:
         self._ready_lock = threading.RLock()
         self._configured_sources_checked = False
         self._source_investigation_runner = source_investigation.SourceInvestigationRunner(config)
+        self._source_investigation_runner.warmup_codegraph()
 
     def should_handle(self, text: str) -> bool:
         if not self.config.knowledge.enabled:
