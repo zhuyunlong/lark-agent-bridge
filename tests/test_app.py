@@ -268,13 +268,52 @@ class FakeBugRunner:
             },
         ]
 
-    def run_direct_analysis(self, request, *, event=None, progress_callback=None):
+    def classify_requests(self, *, prompt_text: str, title: str, description: str):
+        if "感知数据" in prompt_text:
+            return [BugAnalysisPlan(kind="perception")]
+        if "信号链" in prompt_text or "VCU_ELECTRICIT_PERCENT" in prompt_text:
+            return [BugAnalysisPlan(kind="signal")]
+        if "启动和卡顿" in prompt_text or ("启动" in prompt_text and "卡顿" in prompt_text):
+            return [BugAnalysisPlan(kind="startup")]
+        if "场景信号" in prompt_text:
+            return [BugAnalysisPlan(kind="scene_signal")]
+        return [BugAnalysisPlan(kind="general")]
+
+    def _skill_name_for_kind(self, kind: str) -> str:
+        mapping = {
+            "startup": "3d-stuck-investigate",
+            "stuck": "3d-stuck-investigate",
+            "perception": "perception-data-summary",
+            "signal": "signal-chain-analyzer",
+            "xtheme": "xtheme-analyzer",
+            "general": "general",
+        }
+        return mapping.get(kind, kind or "general")
+
+    def run_direct_analysis(
+        self,
+        request,
+        *,
+        event=None,
+        progress_callback=None,
+        plans_override=None,
+        classification_skill="",
+        classification_source="",
+        classification_reason="",
+    ):
         self.requests.append(request)
         self.progress_callbacks.append(progress_callback)
         return __import__("lark_agent_bridge.models", fromlist=["TaskResult"]).TaskResult(
             success=True,
             message="直传文件分析完成",
-            details={"mode": "direct_analysis", "files_to_send": [self.metadata_path, self.html_path]},
+            details={
+                "mode": "direct_analysis",
+                "files_to_send": [self.metadata_path, self.html_path],
+                "analysis_skill": classification_skill,
+                "classification_source": classification_source,
+                "classification_reason": classification_reason,
+                "plans_override": [plan.kind for plan in plans_override or []],
+            },
         )
 
     def run_bug_reanalysis(self, **kwargs):
@@ -560,6 +599,9 @@ class AppTests(unittest.TestCase):
         self.assertEqual(first.details["report_group_key"], f"bug:{bug_url}")
         self.assertEqual(followup.details["report_group_key"], f"bug:{bug_url}")
         self.assertEqual(followup.details["report_version"], 2)
+        self.assertNotEqual(first.details["published_report_url"], followup.details["published_report_url"])
+        self.assertTrue(first.details["published_report_url"].endswith("/v1/"))
+        self.assertTrue(followup.details["published_report_url"].endswith("/v2/"))
 
     def test_report_ready_notification_pushes_when_enabled(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1898,6 +1940,92 @@ class AppTests(unittest.TestCase):
         self.assertEqual(len(fake_bug.agent_followup_calls), 1)
         self.assertEqual(fake_bug.agent_followup_calls[0]["followup_text"], "问题时间是2026-05-11 23:12分左右")
 
+    def test_group_reply_in_thread_without_replying_to_bot_is_ignored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_lark = FakeLarkClient()
+            fake_bug = FakeBugRunner(Path(tmp) / "m.md", Path(tmp) / "r.html")
+            (Path(tmp) / "m.md").write_text("bug", encoding="utf-8")
+            (Path(tmp) / "r.html").write_text("<html></html>", encoding="utf-8")
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    lark=LarkOptions(bot_open_id="ou_bot", bot_name="bot"),
+                ),
+                lark_client=fake_lark,
+                bug_runner=fake_bug,
+                chat_client=FakeOmlxChatClient(),
+            )
+            app.conversation_store.remember(
+                root_message_id="om_thread_root",
+                chat_id="oc_open",
+                mode="bug_analysis",
+                request_text="@bot https://project.feishu.cn/xpfailuremgmt/buglo/detail/1 调查",
+                summary_text="bug 分析完成",
+                report_url="http://r",
+                report_excerpt="",
+            )
+            app.conversation_store.remember_alias(
+                alias_message_id="om_bot_reply",
+                root_message_id="om_thread_root",
+            )
+
+            result = app.handle_event(
+                event(
+                    event_id="evt_reply_to_peer_in_thread",
+                    message_id="om_reply_to_peer",
+                    chat_id="oc_open",
+                    reply_to="om_peer_msg",
+                    root_id="om_thread_root",
+                    parent_id="om_peer_msg",
+                    content="@王忠华 M5MAX",
+                )
+            )
+
+        self.assertTrue(result.skipped)
+        self.assertEqual(result.details.get("mode"), "not_addressed")
+        self.assertEqual(fake_bug.agent_followup_calls, [])
+        self.assertEqual(fake_bug.requests, [])
+
+    def test_group_reply_to_bot_root_without_mention_is_ignored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_lark = FakeLarkClient()
+            fake_bug = FakeBugRunner(Path(tmp) / "m.md", Path(tmp) / "r.html")
+            (Path(tmp) / "m.md").write_text("bug", encoding="utf-8")
+            (Path(tmp) / "r.html").write_text("<html></html>", encoding="utf-8")
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    lark=LarkOptions(bot_open_id="ou_bot", bot_name="bot"),
+                ),
+                lark_client=fake_lark,
+                bug_runner=fake_bug,
+                chat_client=FakeOmlxChatClient(),
+            )
+            app.conversation_store.remember(
+                root_message_id="om_user_triggering",
+                chat_id="oc_open",
+                mode="bug_analysis",
+                request_text="@bot https://project.feishu.cn/xpfailuremgmt/buglo/detail/1 调查",
+                summary_text="bug 分析完成",
+                report_url="http://r",
+                report_excerpt="",
+            )
+
+            result = app.handle_event(
+                event(
+                    event_id="evt_reply_to_user_triggering_msg",
+                    message_id="om_reply_to_root",
+                    chat_id="oc_open",
+                    reply_to="om_user_triggering",
+                    content="继续追问",
+                )
+            )
+
+        self.assertTrue(result.skipped)
+        self.assertEqual(result.details.get("mode"), "not_addressed")
+
     def test_group_bug_followup_retry_once_routes_to_bug_reanalysis(self):
         with tempfile.TemporaryDirectory() as tmp:
             metadata = Path(tmp) / "bug_metadata.md"
@@ -2611,6 +2739,73 @@ class AppTests(unittest.TestCase):
         self.assertEqual(len(fake_lark.files), 1)
         self.assertEqual(Path(fake_lark.files[0]["path"]).resolve(), html.resolve())
 
+    def test_direct_analysis_with_explicit_source_clue_sends_preflight_card_then_runs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = Path(tmp) / "analysis.md"
+            html = Path(tmp) / "analysis.html"
+            metadata.write_text("analysis", encoding="utf-8")
+            html.write_text("<html></html>", encoding="utf-8")
+            fake_lark = FakeLarkClient()
+            fake_bug = FakeBugRunner(metadata, html)
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    allowed_chats=["oc_denied"],
+                ),
+                lark_client=fake_lark,
+                bug_runner=fake_bug,
+            )
+
+            result = app.handle_event(
+                event(
+                    event_id="evt_direct_source_preflight",
+                    message_id="om_direct_source_preflight",
+                    content="@bot 基于SRViolationHandler.kt源码分析 时间点2026-05-22 07:46 分析超速状态 file_abc123",
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.details["mode"], "direct_analysis")
+        self.assertEqual(len(fake_bug.requests), 1)
+        self.assertGreaterEqual(len(fake_lark.card_replies), 1)
+        initial_card = fake_lark.card_replies[0]["card_json"]
+        self.assertIn("意图分析", initial_card)
+        self.assertIn("高置信度", initial_card)
+        self.assertIn("源码导向文件分析", initial_card)
+
+    def test_generic_file_request_returns_clarification_before_execution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_lark = FakeLarkClient()
+            fake_bug = FakeBugRunner(Path(tmp) / "analysis.md", Path(tmp) / "analysis.html")
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    allowed_chats=["oc_denied"],
+                ),
+                lark_client=fake_lark,
+                bug_runner=fake_bug,
+            )
+
+            result = app.handle_event(
+                event(
+                    event_id="evt_direct_need_direction",
+                    message_id="om_direct_need_direction",
+                    content="@bot 时间点2026-05-22 07:46 调查3D生命周期 file_abc123",
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertTrue(result.skipped)
+        self.assertEqual(result.details["mode"], "bug_clarification")
+        self.assertTrue(result.details["needs_user_direction"])
+        self.assertEqual(fake_bug.requests, [])
+        self.assertIn("直接源码分析", result.message)
+        self.assertIn("1.", result.message)
+        self.assertGreaterEqual(len(fake_lark.card_replies), 1)
+        self.assertIn("意图分析", fake_lark.card_replies[0]["card_json"])
+
     def test_direct_analysis_followup_recovers_original_file_from_reply_chain(self):
         with tempfile.TemporaryDirectory() as tmp:
             metadata = Path(tmp) / "analysis.md"
@@ -2650,7 +2845,10 @@ class AppTests(unittest.TestCase):
                         "messages": [
                             {
                                 "message_id": "om_file_msg",
-                                "content": {"file_key": "file_direct_zip"},
+                                "content": {
+                                    "file_key": "file_direct_zip",
+                                    "file_name": "L1NSPGHB3SB010669log0.zip",
+                                },
                             }
                         ]
                     }
@@ -2681,6 +2879,206 @@ class AppTests(unittest.TestCase):
         self.assertEqual(resources[0].kind, "file")
         self.assertEqual(resources[0].value, "file_direct_zip")
         self.assertEqual(resources[0].source_message_id, "om_file_msg")
+        self.assertEqual(resources[0].display_name, "L1NSPGHB3SB010669log0.zip")
+
+    def test_bug_clarification_reply_direct_source_analysis_recovers_direct_analysis(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = Path(tmp) / "analysis.md"
+            html = Path(tmp) / "analysis.html"
+            metadata.write_text("analysis", encoding="utf-8")
+            html.write_text("<html></html>", encoding="utf-8")
+            fake_lark = FakeLarkClient()
+            fake_bug = FakeBugRunner(metadata, html)
+            fake_chat = FakeOmlxChatClient()
+            fake_lark.fetched_messages["om_followup_choice"] = json.dumps(
+                {
+                    "ok": True,
+                    "data": {
+                        "messages": [
+                            {
+                                "message_id": "om_followup_choice",
+                                "reply_to": "om_clarification_root",
+                            }
+                        ]
+                    },
+                },
+                ensure_ascii=False,
+            )
+            fake_lark.fetched_messages["om_clarification_root"] = json.dumps(
+                {
+                    "ok": True,
+                    "data": {
+                        "messages": [
+                            {
+                                "message_id": "om_clarification_root",
+                                "reply_to": "om_file_msg",
+                                "content": "@bot 时间点2026-05-22 07:46 调查3D生命周期",
+                            }
+                        ]
+                    },
+                },
+                ensure_ascii=False,
+            )
+            fake_lark.fetched_messages["om_file_msg"] = json.dumps(
+                {
+                    "ok": True,
+                    "data": {
+                        "messages": [
+                            {
+                                "message_id": "om_file_msg",
+                                "msg_type": "file",
+                                "content": '<file key="file_v3_0011v_33d1772b-86ac-4789-b6e1-35c77ec29a5g" name="L1NSPGHB3SB010669log0.zip"/>',
+                            }
+                        ]
+                    },
+                },
+                ensure_ascii=False,
+            )
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    allowed_chats=["oc_denied"],
+                ),
+                lark_client=fake_lark,
+                bug_runner=fake_bug,
+                chat_client=fake_chat,
+            )
+            clarification_event = event(
+                event_id="evt_clarification_root",
+                message_id="om_clarification_root",
+                content="@bot 时间点2026-05-22 07:46 调查3D生命周期",
+            )
+            app.activity_store.record_event(clarification_event)
+            app.activity_store.record_result(
+                clarification_event,
+                TaskResult(
+                    success=True,
+                    message="当前未自动命中专用 Skill。\n1. 3D启动时序分析\n2. 当前感知数据总结\n3. 直接源码分析",
+                    details={
+                        "mode": "bug_clarification",
+                        "conversation_root_message_id": "om_clarification_root",
+                        "user_request_text": "时间点2026-05-22 07:46 调查3D生命周期",
+                        "needs_user_direction": True,
+                        "intent_options": [
+                            {"index": 1, "type": "skill", "skill_name": "3d-stuck-investigate", "label": "3D启动时序分析"},
+                            {"index": 2, "type": "skill", "skill_name": "perception-data-summary", "label": "当前感知数据总结"},
+                            {"index": 3, "type": "source_analysis", "label": "直接源码分析"},
+                        ],
+                    },
+                ),
+            )
+
+            result = app.handle_event(
+                event(
+                    event_id="evt_followup_choice",
+                    message_id="om_followup_choice",
+                    content="@bot 直接源码分析",
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.details["mode"], "direct_analysis")
+        self.assertEqual(len(fake_bug.requests), 1)
+        self.assertEqual(fake_chat.context_calls, [])
+
+    def test_bug_clarification_reply_numeric_choice_recovers_direct_analysis(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = Path(tmp) / "analysis.md"
+            html = Path(tmp) / "analysis.html"
+            metadata.write_text("analysis", encoding="utf-8")
+            html.write_text("<html></html>", encoding="utf-8")
+            fake_lark = FakeLarkClient()
+            fake_bug = FakeBugRunner(metadata, html)
+            fake_lark.fetched_messages["om_followup_choice"] = json.dumps(
+                {
+                    "ok": True,
+                    "data": {
+                        "messages": [
+                            {
+                                "message_id": "om_followup_choice",
+                                "reply_to": "om_clarification_root",
+                            }
+                        ]
+                    },
+                },
+                ensure_ascii=False,
+            )
+            fake_lark.fetched_messages["om_clarification_root"] = json.dumps(
+                {
+                    "ok": True,
+                    "data": {
+                        "messages": [
+                            {
+                                "message_id": "om_clarification_root",
+                                "reply_to": "om_file_msg",
+                                "content": "@bot 时间点2026-05-22 07:46 调查3D生命周期",
+                            }
+                        ]
+                    },
+                },
+                ensure_ascii=False,
+            )
+            fake_lark.fetched_messages["om_file_msg"] = json.dumps(
+                {
+                    "ok": True,
+                    "data": {
+                        "messages": [
+                            {
+                                "message_id": "om_file_msg",
+                                "msg_type": "file",
+                                "content": '<file key="file_v3_0011v_33d1772b-86ac-4789-b6e1-35c77ec29a5g" name="L1NSPGHB3SB010669log0.zip"/>',
+                            }
+                        ]
+                    },
+                },
+                ensure_ascii=False,
+            )
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    allowed_chats=["oc_denied"],
+                ),
+                lark_client=fake_lark,
+                bug_runner=fake_bug,
+            )
+            clarification_event = event(
+                event_id="evt_clarification_root",
+                message_id="om_clarification_root",
+                content="@bot 时间点2026-05-22 07:46 调查3D生命周期",
+            )
+            app.activity_store.record_event(clarification_event)
+            app.activity_store.record_result(
+                clarification_event,
+                TaskResult(
+                    success=True,
+                    message="当前未自动命中专用 Skill。\n1. 3D启动时序分析\n2. 当前感知数据总结\n3. 直接源码分析",
+                    details={
+                        "mode": "bug_clarification",
+                        "conversation_root_message_id": "om_clarification_root",
+                        "user_request_text": "时间点2026-05-22 07:46 调查3D生命周期",
+                        "needs_user_direction": True,
+                        "intent_options": [
+                            {"index": 1, "type": "skill", "skill_name": "3d-stuck-investigate", "label": "3D启动时序分析"},
+                            {"index": 2, "type": "skill", "skill_name": "perception-data-summary", "label": "当前感知数据总结"},
+                            {"index": 3, "type": "source_analysis", "label": "直接源码分析"},
+                        ],
+                    },
+                ),
+            )
+
+            result = app.handle_event(
+                event(
+                    event_id="evt_followup_choice",
+                    message_id="om_followup_choice",
+                    content="@bot 1",
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.details["mode"], "direct_analysis")
+        self.assertEqual(len(fake_bug.requests), 1)
 
     def test_direct_analysis_can_use_authorized_download_dir_file(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -4082,7 +4480,7 @@ class AppTests(unittest.TestCase):
                     message_id="om_followup",
                     root_id="om_1",
                     parent_id="om_bot_reply",
-                    content="这个结论的根因是什么 @bot",
+                    content="@bot 这个结论的根因是什么",
                 )
             )
 
@@ -6074,7 +6472,7 @@ class AppTests(unittest.TestCase):
                 event(
                     event_id="evt_followup_retry",
                     message_id="om_followup_retry",
-                    content="重新分析",
+                    content="@bot 重新分析",
                 )
             )
 
@@ -6173,7 +6571,7 @@ class AppTests(unittest.TestCase):
                 event(
                     event_id="evt_followup_retry_with_job",
                     message_id="om_followup_retry",
-                    content="重新分析",
+                    content="@bot 重新分析",
                 )
             )
 
@@ -6182,6 +6580,118 @@ class AppTests(unittest.TestCase):
         self.assertEqual(len(fake_bug.requests), 1)
         self.assertEqual(len(fake_bug.reanalysis_calls), 0)
         self.assertEqual(fake_bug.requests[0].prompt, "基于SRViolationHandler.kt源码分析 时间点5月22日 7:46 分析超速状态")
+
+    def test_direct_analysis_failure_card_retry_reruns_direct_analysis_instead_of_omlx_followup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = Path(tmp) / "analysis.md"
+            html = Path(tmp) / "analysis.html"
+            metadata.write_text("analysis", encoding="utf-8")
+            html.write_text("<html></html>", encoding="utf-8")
+            fake_lark = FakeLarkClient()
+            fake_bug = FakeBugRunner(metadata, html)
+            fake_chat = FakeOmlxChatClient()
+            fake_lark.fetched_messages["om_retry_msg"] = json.dumps(
+                {
+                    "ok": True,
+                    "data": {
+                        "messages": [
+                            {
+                                "message_id": "om_retry_msg",
+                                "reply_to": "om_failure_card",
+                            }
+                        ]
+                    },
+                },
+                ensure_ascii=False,
+            )
+            fake_lark.fetched_messages["om_failure_card"] = json.dumps(
+                {
+                    "ok": True,
+                    "data": {
+                        "messages": [
+                            {
+                                "message_id": "om_failure_card",
+                                "reply_to": "om_direct_root",
+                                "content": "<card title=\"📋 文件分析\">下载失败</card>",
+                            }
+                        ]
+                    },
+                },
+                ensure_ascii=False,
+            )
+            fake_lark.fetched_messages["om_direct_root"] = json.dumps(
+                {
+                    "ok": True,
+                    "data": {
+                        "messages": [
+                            {
+                                "message_id": "om_direct_root",
+                                "reply_to": "om_file_msg",
+                                "content": "@bot 基于SRViolationHandler.kt源码分析 时间点5月22日 7:46 分析超速状态",
+                            }
+                        ]
+                    },
+                },
+                ensure_ascii=False,
+            )
+            fake_lark.fetched_messages["om_file_msg"] = json.dumps(
+                {
+                    "ok": True,
+                    "data": {
+                        "messages": [
+                            {
+                                "message_id": "om_file_msg",
+                                "msg_type": "file",
+                                "content": '<file key="file_v3_00120_d905735f-5edc-4122-91ef-ad8d306f401g" name="L1NSPGHB3SB010669log0.zip"/>',
+                            }
+                        ]
+                    },
+                },
+                ensure_ascii=False,
+            )
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    allowed_chats=["oc_denied"],
+                ),
+                lark_client=fake_lark,
+                bug_runner=fake_bug,
+                chat_client=fake_chat,
+            )
+            root_event = event(
+                event_id="evt_direct_root",
+                message_id="om_direct_root",
+                content="@bot 基于SRViolationHandler.kt源码分析 时间点5月22日 7:46 分析超速状态",
+            )
+            app.activity_store.record_event(root_event)
+            app.activity_store.record_result(
+                root_event,
+                TaskResult(
+                    success=False,
+                    message="下载失败",
+                    job_id="job_direct_failed",
+                    job_dir=Path(tmp) / "jobs" / "job_direct_failed",
+                    details={
+                        "mode": "direct_analysis",
+                        "conversation_root_message_id": "om_direct_root",
+                        "user_request_text": "基于SRViolationHandler.kt源码分析 时间点5月22日 7:46 分析超速状态",
+                    },
+                ),
+            )
+
+            result = app.handle_event(
+                event(
+                    event_id="evt_retry_msg",
+                    message_id="om_retry_msg",
+                    content="@bot 重新分析",
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.details["mode"], "direct_analysis")
+        self.assertEqual(len(fake_bug.requests), 1)
+        self.assertEqual(fake_chat.context_calls, [])
 
     def test_group_message_without_bot_mention_is_silent(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -6586,7 +7096,7 @@ class AppTests(unittest.TestCase):
                     dry_run=False,
                     data_dir=Path(tmp),
                     allowed_chats=["oc_denied"],
-                    lark=LarkOptions(bot_open_id="ou_bot"),
+                    lark=LarkOptions(bot_open_id="ou_bot", bot_name="bot"),
                 ),
                 lark_client=fake_lark,
                 chat_client=fake_chat,

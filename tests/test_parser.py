@@ -322,6 +322,7 @@ class ParserTests(unittest.TestCase):
             request.resources[0].value,
             "file_v3_0011s_6d5d723c-ec0b-44f3-9908-a02be496b54g",
         )
+        self.assertEqual(request.resources[0].display_name, "Log.zip")
 
     def test_find_resources_extracts_drive_folder_url_as_folder_resource(self):
         resources = find_resources("日志目录 https://example.feishu.cn/drive/folder/fldcnlog123")

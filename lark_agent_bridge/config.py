@@ -31,6 +31,7 @@ from .models import (
     SourceInvestigationOptions,
     WorkflowArchiveOptions,
 )
+from .profile_registry import PROFILE_REGISTRY_PATH, load_profile_specs
 
 
 DEFAULT_SIGNAL_ALIASES = {
@@ -48,34 +49,32 @@ DEFAULT_SIGNAL_ALIASES = {
 # and api_format.  You only need to supply ``api_key`` (or set the env var
 # LARK_AGENT_BRIDGE_AI_API_KEY).  Individual fields override the preset.
 #
-# Built-in presets are loaded from presets.toml alongside this module.
+# Built-in presets are loaded from config/presets.toml.
 # User-defined [provider_presets.<name>] sections in config.toml are merged
 # on top, allowing updates without touching source code.
 # ---------------------------------------------------------------------------
 
-_BUILTIN_PRESETS_PATH = Path(__file__).parent / "presets.toml"
+_BUILTIN_PRESETS_PATH = PROFILE_REGISTRY_PATH
 
 
-def _load_provider_presets(user_presets: dict[str, dict[str, str]] | None = None) -> dict[str, dict[str, str]]:
+def _load_provider_presets(user_presets: dict[str, dict[str, Any]] | None = None) -> dict[str, dict[str, Any]]:
     """Load built-in presets from presets.toml, then merge user overrides."""
-    presets: dict[str, dict[str, str]] = {}
+    presets: dict[str, dict[str, Any]] = {}
     if _BUILTIN_PRESETS_PATH.exists():
-        with _BUILTIN_PRESETS_PATH.open("rb") as fh:
-            for name, values in tomllib.load(fh).items():
-                if isinstance(values, dict):
-                    presets[name] = {k: str(v) for k, v in values.items()}
+        presets.update(load_profile_specs(_BUILTIN_PRESETS_PATH))
     if user_presets:
         for name, values in user_presets.items():
             if isinstance(values, dict):
                 merged = dict(presets.get(name, {}))
-                merged.update({k: str(v) for k, v in values.items()})
+                merged.update(dict(values))
                 presets[name] = merged
     return presets
 
 
 def _apply_ai_preset(
     opts: AIProviderOptions,
-    presets: dict[str, dict[str, str]] | None = None,
+    presets: dict[str, dict[str, Any]] | None = None,
+    apply_enabled: bool = True,
 ) -> AIProviderOptions:
     """Fill missing fields from a named preset. User-set values take precedence."""
     preset_name = opts.preset.strip().lower()
@@ -98,9 +97,39 @@ def _apply_ai_preset(
         overrides["api_format"] = preset["api_format"]
     if not opts.api_key and preset.get("api_key"):
         overrides["api_key"] = preset["api_key"]
+    if apply_enabled and "ai_enabled" in preset:
+        overrides["enabled"] = _bool_like(preset.get("ai_enabled"), opts.enabled)
+    if not opts.profile_type and preset.get("type"):
+        overrides["profile_type"] = str(preset.get("type", ""))
+    if not opts.agent_provider and preset.get("agent_provider"):
+        overrides["agent_provider"] = str(preset.get("agent_provider", ""))
+    if not opts.agent_command and preset.get("agent_command"):
+        overrides["agent_command"] = str(preset.get("agent_command", ""))
+    if preset.get("requires_api_key") is not None:
+        overrides["requires_api_key"] = _bool_like(preset.get("requires_api_key"), opts.requires_api_key)
+    if not opts.precondition and preset.get("precondition"):
+        overrides["precondition"] = str(preset.get("precondition", ""))
     if not overrides:
         return opts
     return replace(opts, **overrides)
+
+
+def _default_agent_provider_for_api_format(api_format: str) -> str:
+    normalized = api_format.strip().casefold()
+    if normalized == "openai":
+        return "codex"
+    if normalized == "anthropic":
+        return "claude"
+    return ""
+
+
+def _default_agent_command_for_provider(provider: str) -> str:
+    normalized = provider.strip().casefold()
+    if normalized == "codex":
+        return "codex"
+    if normalized in {"claude", "claude-code", "claude_code"}:
+        return "claude"
+    return ""
 
 
 def load_config(config_path: str | Path | None = None) -> BridgeConfig:
@@ -139,6 +168,83 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
     ai_provider_data = data.get("ai_provider") or {}
     user_presets_data = data.get("provider_presets") or {}
     provider_presets = _load_provider_presets(user_presets_data if isinstance(user_presets_data, dict) else None)
+    agent_provider_override = str(os.environ.get("LARK_AGENT_BRIDGE_AGENT_PROVIDER") or "").strip()
+    agent_command_override = str(os.environ.get("LARK_AGENT_BRIDGE_AGENT_COMMAND") or "").strip()
+    ai_enabled_env = os.environ.get("LARK_AGENT_BRIDGE_AI_ENABLED")
+    ai_provider = _apply_ai_preset(
+        AIProviderOptions(
+            enabled=_bool_value(
+                ai_enabled_env,
+                bool(ai_provider_data.get("enabled", False)),
+            ),
+            preset=str(
+                os.environ.get("LARK_AGENT_BRIDGE_AI_PRESET")
+                or ai_provider_data.get("preset", "")
+            ),
+            api_format=str(ai_provider_data.get("api_format", "")),
+            primary_model=str(
+                os.environ.get("LARK_AGENT_BRIDGE_AI_PRIMARY_MODEL")
+                or ai_provider_data.get("primary_model", "")
+            ),
+            fallback_model=str(ai_provider_data.get("fallback_model", "")),
+            fast_model=str(ai_provider_data.get("fast_model", "")),
+            base_url=str(
+                os.environ.get("LARK_AGENT_BRIDGE_AI_BASE_URL")
+                or ai_provider_data.get("base_url", "")
+            ),
+            api_key=str(
+                os.environ.get("LARK_AGENT_BRIDGE_AI_API_KEY")
+                or ai_provider_data.get("api_key", "")
+            ),
+            fallback_base_url=str(
+                os.environ.get("LARK_AGENT_BRIDGE_AI_FALLBACK_BASE_URL")
+                or ai_provider_data.get("fallback_base_url", "")
+            ),
+            fallback_api_key=str(
+                os.environ.get("LARK_AGENT_BRIDGE_AI_FALLBACK_API_KEY")
+                or ai_provider_data.get("fallback_api_key", "")
+            ),
+            intent_temperature=float(ai_provider_data.get("intent_temperature", 0.0)),
+            intent_max_tokens=int(ai_provider_data.get("intent_max_tokens", 1024)),
+            intent_timeout_seconds=float(ai_provider_data.get("intent_timeout_seconds", 30)),
+            intent_max_retries=int(ai_provider_data.get("intent_max_retries", 2)),
+            summary_temperature=float(ai_provider_data.get("summary_temperature", 0.3)),
+            summary_max_tokens=int(ai_provider_data.get("summary_max_tokens", 4096)),
+            summary_timeout_seconds=float(ai_provider_data.get("summary_timeout_seconds", 120)),
+        ),
+        presets=provider_presets,
+        apply_enabled=ai_enabled_env is None,
+    )
+    bug_provider = (agent_provider_override or str(bug_data.get("provider", ""))).strip()
+    if not bug_provider:
+        bug_provider = (
+            ai_provider.agent_provider
+            or _default_agent_provider_for_api_format(ai_provider.api_format)
+            or BugAnalysisOptions().provider
+        )
+    bug_command = (agent_command_override or str(bug_data.get("command", ""))).strip()
+    if not bug_command:
+        bug_command = ai_provider.agent_command or _default_agent_command_for_provider(bug_provider) or BugAnalysisOptions().command
+    intent_provider = (agent_provider_override or str(intent_data.get("provider", ""))).strip()
+    if not intent_provider:
+        intent_provider = bug_provider
+    intent_command = (agent_command_override or str(intent_data.get("command", ""))).strip()
+    if not intent_command:
+        intent_command = _default_agent_command_for_provider(intent_provider) or bug_command
+    source_provider = (agent_provider_override or str(source_investigation_data.get("provider", ""))).strip()
+    if not source_provider:
+        source_provider = (
+            ai_provider.agent_provider
+            or _default_agent_provider_for_api_format(ai_provider.api_format)
+            or SourceInvestigationOptions().provider
+        )
+    source_command = (agent_command_override or str(source_investigation_data.get("command", ""))).strip()
+    if not source_command:
+        source_command = (
+            ai_provider.agent_command
+            or _default_agent_command_for_provider(source_provider)
+            or SourceInvestigationOptions().command
+        )
     guideengine_repo = _resolve_path(
         os.environ.get("LARK_AGENT_BRIDGE_GUIDEENGINE_REPO")
         or data.get("guideengine_repo", default_guideengine_repo),
@@ -259,8 +365,8 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
         ),
         bug_analysis=BugAnalysisOptions(
             enabled=bool(bug_data.get("enabled", True)),
-            provider=str(bug_data.get("provider", "claude")),
-            command=str(bug_data.get("command", "claude")),
+            provider=bug_provider,
+            command=bug_command,
             model=str(bug_data.get("model", BugAnalysisOptions().model)),
             working_dir=_optional_path(bug_data.get("working_dir"), base_dir, "bug_analysis.working_dir"),
             timeout_seconds=int(bug_data.get("timeout_seconds", 5400)),
@@ -283,8 +389,8 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
         ),
         intent_analysis=IntentAnalysisOptions(
             enabled=bool(intent_data.get("enabled", False)),
-            provider=str(intent_data.get("provider", "")),
-            command=str(intent_data.get("command", "")),
+            provider=intent_provider,
+            command=intent_command,
             model=str(intent_data.get("model", IntentAnalysisOptions().model)),
             working_dir=_optional_path(intent_data.get("working_dir"), base_dir, "intent_analysis.working_dir"),
             timeout_seconds=int(intent_data.get("timeout_seconds", 180)),
@@ -381,8 +487,8 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
         ),
         source_investigation=SourceInvestigationOptions(
             enabled=bool(source_investigation_data.get("enabled", SourceInvestigationOptions().enabled)),
-            provider=str(source_investigation_data.get("provider", SourceInvestigationOptions().provider)),
-            command=str(source_investigation_data.get("command", SourceInvestigationOptions().command)),
+            provider=source_provider,
+            command=source_command,
             model=str(source_investigation_data.get("model", SourceInvestigationOptions().model)),
             fallback_model=str(
                 source_investigation_data.get(
@@ -430,43 +536,7 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
                 data.get("signal_resolver", {}).get("cache_ttl_seconds", 3600.0)
             ),
         ),
-        ai_provider=_apply_ai_preset(AIProviderOptions(
-            enabled=bool(ai_provider_data.get("enabled", False)),
-            preset=str(
-                os.environ.get("LARK_AGENT_BRIDGE_AI_PRESET")
-                or ai_provider_data.get("preset", "")
-            ),
-            api_format=str(ai_provider_data.get("api_format", "")),
-            primary_model=str(
-                os.environ.get("LARK_AGENT_BRIDGE_AI_PRIMARY_MODEL")
-                or ai_provider_data.get("primary_model", "")
-            ),
-            fallback_model=str(ai_provider_data.get("fallback_model", "")),
-            fast_model=str(ai_provider_data.get("fast_model", "")),
-            base_url=str(
-                os.environ.get("LARK_AGENT_BRIDGE_AI_BASE_URL")
-                or ai_provider_data.get("base_url", "")
-            ),
-            api_key=str(
-                os.environ.get("LARK_AGENT_BRIDGE_AI_API_KEY")
-                or ai_provider_data.get("api_key", "")
-            ),
-            fallback_base_url=str(
-                os.environ.get("LARK_AGENT_BRIDGE_AI_FALLBACK_BASE_URL")
-                or ai_provider_data.get("fallback_base_url", "")
-            ),
-            fallback_api_key=str(
-                os.environ.get("LARK_AGENT_BRIDGE_AI_FALLBACK_API_KEY")
-                or ai_provider_data.get("fallback_api_key", "")
-            ),
-            intent_temperature=float(ai_provider_data.get("intent_temperature", 0.0)),
-            intent_max_tokens=int(ai_provider_data.get("intent_max_tokens", 1024)),
-            intent_timeout_seconds=float(ai_provider_data.get("intent_timeout_seconds", 30)),
-            intent_max_retries=int(ai_provider_data.get("intent_max_retries", 2)),
-            summary_temperature=float(ai_provider_data.get("summary_temperature", 0.3)),
-            summary_max_tokens=int(ai_provider_data.get("summary_max_tokens", 4096)),
-            summary_timeout_seconds=float(ai_provider_data.get("summary_timeout_seconds", 120)),
-        ), presets=provider_presets),
+        ai_provider=ai_provider,
         runner_timeout_seconds=int(runner_data.get("timeout_seconds", 900)),
     )
 
@@ -499,6 +569,16 @@ def _bool_value(value: str | None, default: bool) -> bool:
     if normalized in {"0", "false", "no", "off"}:
         return False
     raise ValueError(f"Invalid boolean environment value: {value}")
+
+
+def _bool_like(value: Any, default: bool) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return _bool_value(value, default)
+    return bool(value)
 
 
 def _string_list(value: Any, field_name: str) -> list[str]:

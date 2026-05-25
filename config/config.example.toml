@@ -1,0 +1,153 @@
+# Committed desensitized template. Copy to ../config.toml for local runtime use.
+dry_run = true
+workspace_root = "../.."
+guideengine_repo = "../../xp/guideengine/.worktrees/os6_xpdev"
+data_dir = "data"
+
+allowed_chats = []
+allowed_users = []
+command_prefixes = ["/signal"]
+
+[signal_aliases]
+"LD normal" = "SIGNAL_X3D_LD_NORMAL_OVER_ALL_DATA"
+"normal over all" = "SIGNAL_X3D_LD_NORMAL_OVER_ALL_DATA"
+"LD tile" = "SIGNAL_X3D_LD_TILE_OVER_ALL_DATA"
+"tile over all" = "SIGNAL_X3D_LD_TILE_OVER_ALL_DATA"
+"SD over all" = "SIGNAL_X3D_SD_OVER_ALL_DATA"
+
+[download]
+max_bytes = 5368709120
+timeout_seconds = 1800
+
+[local_resources]
+enabled = true
+require_allowed_user = true
+allowed_dirs = ["~/Downloads"]
+
+[job_retention]
+enabled = true
+max_age_hours = 6
+bug_cache_max_age_hours = 24
+purge_all_on_listen_start = false
+cleanup_interval_seconds = 60
+
+[lark]
+reply_in_thread = false
+mention_sender_in_group = true
+bot_open_id = ""
+bot_name = ""
+
+[internal_network_env]
+inherit_env = [
+  "PATH",
+  "HOME",
+  "USER",
+  "LOGNAME",
+  "TMPDIR",
+  "TMP",
+  "TEMP",
+  "LANG",
+  "LC_ALL",
+  "LC_CTYPE",
+  "SHELL",
+  "TERM",
+  "ANDROID_SDK_ROOT",
+  "ANDROID_HOME",
+  "JAVA_HOME",
+]
+unset_env = [
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "ALL_PROXY",
+  "NO_PROXY",
+  "http_proxy",
+  "https_proxy",
+  "all_proxy",
+  "no_proxy",
+]
+
+[ai_provider]
+enabled = true
+preset = "cc-switch-deepseek-claude"
+api_key = ""
+intent_timeout_seconds = 30
+summary_timeout_seconds = 120
+summary_max_tokens = 4096
+
+[bug_analysis]
+enabled = true
+provider = ""
+command = ""
+model = "gpt-5.4"
+working_dir = "../.."
+timeout_seconds = 5400
+max_prompt_chars = 16000
+upload_result_files = true
+default_prompt = ""
+resume_followup_sessions = false
+
+[intent_analysis]
+enabled = true
+provider = ""
+command = ""
+model = "gpt-5.4"
+working_dir = "../.."
+timeout_seconds = 180
+max_prompt_chars = 12000
+
+[source_investigation]
+enabled = true
+provider = ""
+command = ""
+timeout_seconds = 300
+repo_roots = ["../../xp/guideengine/.worktrees/os6_xpdev"]
+
+[claude_agent]
+enabled = false
+command = "claude"
+trigger_prefixes = []
+working_dir = "../.."
+add_dirs = ["../.."]
+allowed_tools = ["Read", "Grep", "Glob", "LS"]
+permission_mode = "dontAsk"
+timeout_seconds = 1800
+max_prompt_chars = 12000
+upload_result_file = true
+
+[omlx_chat]
+enabled = true
+base_url = "http://127.0.0.1:8000/v1"
+model = "gemma-4-26b-a4b-it-4bit"
+api_key = ""
+timeout_seconds = 120
+max_prompt_chars = 2000
+max_tokens = 1024
+temperature = 0.3
+
+[runner]
+timeout_seconds = 900
+
+[knowledge]
+enabled = true
+storage = "data/knowledge/knowledge.sqlite"
+max_hits = 5
+trigger_prefixes = ["知识库", "查知识", "/kb", "/qa"]
+answer_provider = "omlx"
+
+[[knowledge.sources]]
+id = "guideengine-signals"
+type = "guideengine_signal"
+title = "guideengine signal source snippets"
+
+[report_server]
+enabled = true
+bind_host = "0.0.0.0"
+port = 8765
+public_base_url = ""
+admin_token = ""
+
+[approval]
+enabled = false
+
+[notifications]
+enabled = false

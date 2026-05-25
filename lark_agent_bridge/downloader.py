@@ -138,7 +138,8 @@ class LogDownloader:
         effective_message_id = resource.source_message_id.strip() or message_id
         if not effective_message_id:
             raise DownloadError("message_id is required for Feishu resource downloads")
-        target = context.input_dir / safe_filename(resource.value)
+        target_name = resource.display_name.strip() or resource.value
+        target = context.input_dir / safe_filename(target_name)
         staging_target = self._staging_path(target)
         self._remove_path(staging_target)
         result = self.lark_client.download_resource(
@@ -148,7 +149,19 @@ class LogDownloader:
             output=staging_target,
         )
         if result.returncode != 0:
-            raise DownloadError(result.stderr or "lark-cli resource download failed")
+            if self._recover_failed_download_output(
+                result=result,
+                staging_target=staging_target,
+                target=target,
+                validate_zip=target.suffix.casefold() == ".zip",
+            ):
+                return DownloadedResource(
+                    resource=resource,
+                    path=target,
+                    dry_run=result.dry_run,
+                    command=result.command,
+                )
+            raise DownloadError(self._format_failed_download_error(result, "resource download"))
         try:
             self._wait_for_download_output(staging_target, validate_zip=target.suffix.casefold() == ".zip")
             self._publish_download_output(staging_target, target)
@@ -167,7 +180,19 @@ class LogDownloader:
         self._remove_path(staging_target)
         result = self.lark_client.download_drive_folder(folder_token=folder_token, output_dir=staging_target)
         if result.returncode != 0:
-            raise DownloadError(result.stderr or "lark-cli Drive folder pull failed")
+            if self._recover_failed_download_output(
+                result=result,
+                staging_target=staging_target,
+                target=target,
+                expect_dir=True,
+            ):
+                return DownloadedResource(
+                    resource=resource,
+                    path=target,
+                    dry_run=result.dry_run,
+                    command=result.command,
+                )
+            raise DownloadError(self._format_failed_download_error(result, "Drive folder pull"))
         try:
             self._wait_for_download_output(staging_target, expect_dir=True)
             self._publish_download_output(staging_target, target)
@@ -217,6 +242,46 @@ class LogDownloader:
             return
         if path.exists() or path.is_symlink():
             path.unlink(missing_ok=True)
+
+    def _recover_failed_download_output(
+        self,
+        *,
+        result,
+        staging_target: Path,
+        target: Path,
+        expect_dir: bool = False,
+        validate_zip: bool = False,
+    ) -> bool:
+        if result.returncode != 124:
+            return False
+        if expect_dir:
+            if not staging_target.exists():
+                return False
+        elif not staging_target.is_file():
+            return False
+        try:
+            self._wait_for_download_output(
+                staging_target,
+                expect_dir=expect_dir,
+                validate_zip=validate_zip,
+            )
+        except DownloadError:
+            return False
+        logger.warning(
+            "download command timed out but recovered completed output from %s",
+            staging_target,
+        )
+        self._publish_download_output(staging_target, target)
+        return True
+
+    def _format_failed_download_error(self, result, operation: str) -> str:
+        stderr = (result.stderr or "").strip()
+        if result.returncode == 124:
+            message = f"lark-cli {operation} timed out after {self.config.download.timeout_seconds}s"
+            if stderr:
+                return f"{message}: {stderr}"
+            return message
+        return stderr or f"lark-cli {operation} failed"
 
 
 def safe_filename_from_url(url: str) -> str:

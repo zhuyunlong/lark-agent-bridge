@@ -12,6 +12,7 @@ from lark_agent_bridge.agents import (
     BugAnalysisPlan,
     BugAnalysisRunner,
     ClaudeSkillRunner,
+    IntentAnalysisFailure,
     IntentAnalysisRunner,
     OmlxChatClient,
     PerceptionSummaryRunner,
@@ -145,35 +146,33 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(command[0:2], ["codex", "exec"])
         self.assertEqual(command[command.index("-m") + 1], "gpt-5.4")
 
-    def test_intent_analysis_falls_back_to_claude_when_codex_unavailable(self):
+    def test_intent_analysis_does_not_fall_back_to_other_provider(self):
         config = BridgeConfig(dry_run=False)
         config.intent_analysis.enabled = True
         config.intent_analysis.provider = "codex"
         config.intent_analysis.command = "codex"
         runner = IntentAnalysisRunner(config)
         response_path = Path("/tmp/intent-response.json")
-        fallback_decision = '{"route":"chat","followup_action":"none","context_source":"none","confidence":"high","reason":"fallback"}'
 
         with (
             mock.patch.object(runner, "_build_command", return_value=(["codex", "exec"], response_path)),
-            mock.patch.object(runner, "_fallback_intent_invocation", return_value=(["claude", "--print"], None)) as fallback_mock,
-            mock.patch("subprocess.run", side_effect=[OSError("codex missing"), subprocess.CompletedProcess(args=["claude"], returncode=0, stdout=fallback_decision, stderr="")]),
+            mock.patch.object(runner, "_fallback_intent_invocation", return_value=([], None)) as fallback_mock,
+            mock.patch("subprocess.run", side_effect=OSError("codex missing")),
         ):
-            decision = runner.classify(
-                event=LarkEvent(
-                    event_id="evt_1",
-                    message_id="om_1",
-                    chat_id="oc_1",
-                    chat_type="group",
-                    sender_id="ou_1",
-                    message_type="text",
-                    content="@bot 帮我解释一下什么是 token？",
-                ),
-                route_content="帮我解释一下什么是 token？",
-            )
+            with self.assertRaises(IntentAnalysisFailure):
+                runner.classify(
+                    event=LarkEvent(
+                        event_id="evt_1",
+                        message_id="om_1",
+                        chat_id="oc_1",
+                        chat_type="group",
+                        sender_id="ou_1",
+                        message_type="text",
+                        content="@bot 帮我解释一下什么是 token？",
+                    ),
+                    route_content="帮我解释一下什么是 token？",
+                )
 
-        self.assertEqual(decision.route, "chat")
-        self.assertEqual(decision.reason, "fallback")
         self.assertTrue(fallback_mock.called)
 
     def test_claude_skill_dry_run_returns_command_and_artifact(self):
@@ -594,7 +593,7 @@ class AgentTests(unittest.TestCase):
             self.assertIn("### 会话事实快照\n- stable_fact: startup", prompt)
             self.assertIn("### 本次追问/修正\n重新源码分析 重点看 displaychange", prompt)
             self.assertLess(prompt.index("### 会话事实快照"), prompt.index("### 本次追问/修正"))
-            self.assertNotIn("### 上一轮 Agent 总结", prompt)
+            self.assertIn("### 上一轮 Agent 总结", prompt)
             write_snapshot_mock.assert_called_once()
             render_snapshot_mock.assert_called_once()
             persisted_snapshot = write_snapshot_mock.call_args.args[1]
@@ -603,6 +602,251 @@ class AgentTests(unittest.TestCase):
                 [item.value for item in persisted_snapshot.stable_facts if item.label == "prepared_log_input"],
                 ["/tmp/structured.log"],
             )
+
+    def test_bug_reanalysis_direct_api_prompt_skips_html_excerpt_and_adds_structured_guardrails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=True, data_dir=Path(tmp), workspace_root=Path(tmp))
+            runner = BugAnalysisRunner(config)
+            output_dir = Path(tmp) / "jobs" / "job_1" / "output"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            request_artifact = output_dir / "bug_agent_reanalysis_request.md"
+            metadata_path = output_dir / "bug_reanalysis_metadata.md"
+            previous_summary = output_dir / "bug_agent_summary.md"
+            report_json = output_dir / "bug_3d_startup_report.json"
+            report_html = output_dir / "bug_3d_startup_report.html"
+            request_artifact.write_text("本次追问: 重新分析", encoding="utf-8")
+            previous_summary.write_text("旧结论：上一轮说链路完整\n", encoding="utf-8")
+            report_json.write_text(
+                json.dumps(
+                    {
+                        "verdict": {"message": "启动链路完整，已经到达 3D 最终首帧展示。"},
+                        "focus_session_index": 4,
+                        "focus_session_pid": 8066,
+                        "sessions": [
+                            {
+                                "index": 4,
+                                "status": "partial",
+                                "diagnosis": "启动链路完整，已经到达 3D 最终首帧展示。",
+                                "missing_critical": [
+                                    "createUnityPlayerOnMainThread",
+                                    "SET_READY_PREPARE / UnityReady",
+                                ],
+                                "events": [
+                                    {
+                                        "title": "Unity so preload 成功",
+                                        "timestamp_text": "2026-05-22 17:30:03.946",
+                                        "file_path": "/tmp/main.alog.log",
+                                        "line_no": 22172,
+                                        "pid": 8066,
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            report_html.write_text(
+                "<style>body{color:red}</style><h1>HTML_ONLY_MISLEADING_TEXT</h1>",
+                encoding="utf-8",
+            )
+            metadata_path.write_text(
+                "- 最新 JSON 报告:\n"
+                f"  - `startup` -> `{report_json}`\n"
+                "- 最新 HTML 报告:\n"
+                f"  - `{report_html}`\n",
+                encoding="utf-8",
+            )
+
+            prompt = runner._build_bug_agent_summary_prompt_for_api(
+                request_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6997535619 分析3D生命周期",
+                request_artifact=request_artifact,
+                metadata_path=metadata_path,
+                followup_text="重新分析",
+                previous_summary_path=previous_summary,
+                snapshot_details={
+                    "analysis_kind": "startup",
+                    "analysis_kinds": ["startup"],
+                    "bug_url": "https://project.feishu.cn/xpfailuremgmt/buglo/detail/6997535619",
+                },
+                snapshot_plans=[BugAnalysisPlan(kind="startup")],
+            )
+
+        self.assertIn("### 结构化证据护栏", prompt)
+        self.assertIn("status=partial", prompt)
+        self.assertIn("createUnityPlayerOnMainThread", prompt)
+        self.assertIn("### 上一轮 Agent 总结", prompt)
+        self.assertNotIn("HTML_ONLY_MISLEADING_TEXT", prompt)
+
+    def test_write_bug_summary_evidence_for_startup_includes_conflicts_and_trailing_logs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=True, data_dir=Path(tmp), workspace_root=Path(tmp))
+            runner = BugAnalysisRunner(config)
+            output_dir = Path(tmp) / "jobs" / "job_1" / "output"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            log_path = output_dir / "main_2026-05-22_17-00.alog.log"
+            log_path.write_text(
+                "\n".join(
+                    [
+                        "05-22 17:30:03.946 8066 8522 90081 I NAV_SrSM_SrUnityPlayer: preloadNativeLibrary: success, cost 20ms",
+                        "05-22 17:30:03.946 8066 8522 90081 I NAV_UnityServiceManager: init UnityServiceManager start dpi: 152",
+                        "05-22 17:30:03.946 8066 8522 90081 I NAV_AndroidUnityConnector: init",
+                        "05-22 17:30:03.949 8066 8547 90084 E NAV_guideService: java.lang.IllegalStateException: sdk 引擎未初始化完成",
+                        "05-22 17:30:04.055 8066 8567 90190 I NAV_UnityAdapter: Engine started, syncing state to core",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            report_json = output_dir / "bug_3d_startup_report.json"
+            report_json.write_text(
+                json.dumps(
+                    {
+                        "verdict": {"message": "启动链路完整，已经到达 3D 最终首帧展示。"},
+                        "target_time": "2026-05-22T17:29:48",
+                        "focus_session_index": 4,
+                        "focus_session_pid": 8066,
+                        "sessions": [
+                            {
+                                "index": 4,
+                                "status": "partial",
+                                "diagnosis": "启动链路完整，已经到达 3D 最终首帧展示。",
+                                "missing_critical": [
+                                    "createUnityPlayerOnMainThread",
+                                    "SET_READY_PREPARE / UnityReady",
+                                    "UnityMainFirstFrameReadyRenderMsg",
+                                ],
+                                "events": [
+                                    {
+                                        "title": "Unity so preload 成功",
+                                        "timestamp_text": "2026-05-22 17:30:03.946",
+                                        "file_path": str(log_path),
+                                        "line_no": 1,
+                                        "pid": 8066,
+                                        "excerpt": "05-22 17:30:03.946 8066 8522 90081 I NAV_SrSM_SrUnityPlayer: preloadNativeLibrary: success, cost 20ms",
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            evidence_path = runner._write_bug_summary_evidence(
+                output_dir=output_dir,
+                analysis_kind="startup",
+                report_jsons={"startup": report_json},
+            )
+            self.assertIsNotNone(evidence_path)
+            assert evidence_path is not None
+            content = evidence_path.read_text(encoding="utf-8")
+
+        self.assertIn("status: `partial`", content)
+        self.assertIn("status=partial 但 report verdict/diagnosis 仍声称链路完整", content)
+        self.assertIn("UnityServiceManager: init UnityServiceManager start dpi: 152", content)
+        self.assertIn("sdk 引擎未初始化完成", content)
+        self.assertIn("Forbidden assertions", content)
+        self.assertIn("日志在 preload 后截止", content)
+
+    def test_bug_summary_source_or_postmortem_followup_skips_direct_api_fast_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=False, data_dir=Path(tmp), workspace_root=Path(tmp))
+            config.bug_analysis.provider = "codex"
+            config.bug_analysis.command = "codex"
+            config.ai_provider.enabled = True
+            config.ai_provider.base_url = "http://127.0.0.1:8000/v1"
+            config.ai_provider.primary_model = "demo"
+            runner = BugAnalysisRunner(config)
+            output_path = Path(tmp) / "bug_agent_summary.md"
+            request_artifact = Path(tmp) / "bug_agent_reanalysis_request.md"
+            metadata_path = Path(tmp) / "bug_reanalysis_metadata.md"
+            previous_summary = Path(tmp) / "bug_agent_summary_prev.md"
+            request_artifact.write_text("followup", encoding="utf-8")
+            metadata_path.write_text("metadata", encoding="utf-8")
+            previous_summary.write_text("旧结论", encoding="utf-8")
+
+            def fake_file_agent(command, **kwargs):
+                output_path.write_text("file-capable agent summary", encoding="utf-8")
+                return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+
+            with (
+                mock.patch.object(runner, "_run_bug_agent_summary_via_api") as api_mock,
+                mock.patch("lark_agent_bridge.agents.run_tracked_process", side_effect=fake_file_agent) as run_mock,
+            ):
+                result = runner._run_bug_agent_summary(
+                    request_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6997535619 分析3D生命周期",
+                    request_artifact=request_artifact,
+                    metadata_path=metadata_path,
+                    output_path=output_path,
+                    progress_callback=None,
+                    timeout=30,
+                    followup_text="基于源码重新分析，并针对前后结论冲突做复盘",
+                    previous_summary_path=previous_summary,
+                )
+
+        self.assertEqual(api_mock.call_count, 0)
+        self.assertEqual(run_mock.call_count, 1)
+        self.assertEqual(result["provider"], "codex")
+        self.assertEqual(result["message"], "file-capable agent summary")
+
+    def test_bug_summary_report_conflict_skips_direct_api_fast_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=False, data_dir=Path(tmp), workspace_root=Path(tmp))
+            config.bug_analysis.provider = "codex"
+            config.bug_analysis.command = "codex"
+            config.ai_provider.enabled = True
+            config.ai_provider.base_url = "http://127.0.0.1:8000/v1"
+            config.ai_provider.primary_model = "demo"
+            runner = BugAnalysisRunner(config)
+            output_path = Path(tmp) / "bug_agent_summary.md"
+            request_artifact = Path(tmp) / "bug_agent_reanalysis_request.md"
+            metadata_path = Path(tmp) / "bug_reanalysis_metadata.md"
+            report_json = Path(tmp) / "bug_3d_startup_report.json"
+            request_artifact.write_text("followup", encoding="utf-8")
+            report_json.write_text(
+                json.dumps(
+                    {
+                        "verdict": {"message": "启动链路完整，已经到达 3D 最终首帧展示。"},
+                        "focus_session_index": 4,
+                        "focus_session_pid": 8066,
+                        "sessions": [
+                            {
+                                "index": 4,
+                                "status": "partial",
+                                "diagnosis": "启动链路完整，已经到达 3D 最终首帧展示。",
+                                "missing_critical": ["SET_READY_PREPARE / UnityReady"],
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            metadata_path.write_text(f"- 最新 JSON 报告:\n  - `startup` -> `{report_json}`\n", encoding="utf-8")
+
+            def fake_file_agent(command, **kwargs):
+                output_path.write_text("file-capable agent summary", encoding="utf-8")
+                return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+
+            with (
+                mock.patch.object(runner, "_run_bug_agent_summary_via_api") as api_mock,
+                mock.patch("lark_agent_bridge.agents.run_tracked_process", side_effect=fake_file_agent) as run_mock,
+            ):
+                result = runner._run_bug_agent_summary(
+                    request_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6997535619 分析3D生命周期",
+                    request_artifact=request_artifact,
+                    metadata_path=metadata_path,
+                    output_path=output_path,
+                    progress_callback=None,
+                    timeout=30,
+                    followup_text="重新分析",
+                )
+
+        self.assertEqual(api_mock.call_count, 0)
+        self.assertEqual(run_mock.call_count, 1)
+        self.assertEqual(result["provider"], "codex")
 
     def test_bug_reanalysis_snapshot_rebuilds_when_analysis_kind_changes(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1205,7 +1449,7 @@ class AgentTests(unittest.TestCase):
         self.assertFalse(any("metadata-body" in part for part in invocation["command"]))
         self.assertTrue(any(str(config.workspace_root.resolve()) == part for part in invocation["command"]))
 
-    def test_bug_agent_summary_falls_back_to_claude_when_codex_unavailable(self):
+    def test_bug_agent_summary_does_not_fall_back_to_other_provider(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = BridgeConfig(dry_run=False, data_dir=Path(tmp), workspace_root=Path(tmp))
             config.bug_analysis.provider = "codex"
@@ -1218,7 +1462,7 @@ class AgentTests(unittest.TestCase):
             metadata_path.write_text("metadata", encoding="utf-8")
 
             with (
-                mock.patch("subprocess.run", side_effect=[OSError("codex missing"), subprocess.CompletedProcess(args=["claude"], returncode=0, stdout="fallback summary", stderr="")]),
+                mock.patch("subprocess.run", side_effect=OSError("codex missing")),
             ):
                 result = runner._run_bug_agent_summary(
                     request_text="分析启动卡顿",
@@ -1229,8 +1473,32 @@ class AgentTests(unittest.TestCase):
                     timeout=30,
                 )
 
-        self.assertEqual(result["message"], "fallback summary")
-        self.assertEqual(result["provider"], "claude")
+        self.assertEqual(result["message"], "")
+        self.assertEqual(result["provider"], "codex")
+        self.assertEqual(result["error"], "codex missing")
+
+    def test_bug_agent_summary_provider_override_uses_matching_default_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=True, data_dir=Path(tmp), workspace_root=Path(tmp))
+            config.bug_analysis.provider = "codex"
+            config.bug_analysis.command = "claude"
+            runner = BugAnalysisRunner(config)
+            request_artifact = Path(tmp) / "request.md"
+            metadata_path = Path(tmp) / "metadata.md"
+            output_path = Path(tmp) / "summary.md"
+            request_artifact.write_text("request-body", encoding="utf-8")
+            metadata_path.write_text("metadata-body", encoding="utf-8")
+
+            invocation = runner._build_bug_agent_summary_command(
+                request_text="分析启动卡顿",
+                request_artifact=request_artifact,
+                metadata_path=metadata_path,
+                output_path=output_path,
+                provider_override="codex",
+            )
+
+        self.assertEqual(invocation["provider"], "codex")
+        self.assertEqual(invocation["command"][0], "codex")
 
     def test_explicit_bug_agent_summary_provider_does_not_fallback(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1371,6 +1639,25 @@ class AgentTests(unittest.TestCase):
         with self.assertRaises(subprocess.TimeoutExpired):
             runner._run_bug_agent_summary_streaming_process(
                 command=[sys.executable, "-c", "import time; time.sleep(2)"],
+                provider="codex",
+                progress_callback=lambda _event: None,
+                timeout=1,
+            )
+
+    def test_streaming_agent_summary_times_out_on_partial_line_idle(self):
+        runner = BugAnalysisRunner(BridgeConfig(dry_run=False))
+        script = (
+            "import sys, time\n"
+            "sys.stdout.write('{\"type\":\"turn.started\"')\n"
+            "sys.stdout.flush()\n"
+            "time.sleep(2)\n"
+            "sys.stdout.write('}\\n')\n"
+            "sys.stdout.flush()\n"
+        )
+
+        with self.assertRaises(subprocess.TimeoutExpired):
+            runner._run_bug_agent_summary_streaming_process(
+                command=[sys.executable, "-c", script],
                 provider="codex",
                 progress_callback=lambda _event: None,
                 timeout=1,
@@ -2821,6 +3108,138 @@ class AgentTests(unittest.TestCase):
         self.assertIn("05-19", result["date"])
         self.assertEqual(result["time"], "14:33")
 
+    def test_extract_time_via_llm_fallback_success(self):
+        """When regex fails, LLM extraction should return valid time."""
+        runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
+        fake_response = mock.MagicMock()
+        fake_response.content = json.dumps({
+            "found": True,
+            "datetime": "2026-05-19 18:35",
+            "source": "标题",
+            "reason": "从标题提取中文时间",
+        })
+        fake_client = mock.MagicMock()
+        fake_client.is_available.return_value = True
+        fake_client.chat.return_value = fake_response
+        fake_client._effective_api_format.return_value = "openai"
+
+        with mock.patch(
+            "lark_agent_bridge.agents.llm_client.LLMClient",
+            return_value=fake_client,
+        ):
+            result = runner._extract_time_via_llm(
+                request_text="",
+                title="G02ESVR_SR2.0_V5511六座左舵车_5月19日_18点35分_全域智驾场景未显示车位信息",
+                description="",
+            )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["value"], "2026-05-19 18:35")
+        self.assertEqual(result["date"], "2026-05-19")
+        self.assertEqual(result["time"], "18:35")
+        self.assertEqual(result["source"], "llm")
+
+    def test_extract_time_via_llm_returns_none_when_unavailable(self):
+        """When LLMClient is not configured, return None gracefully."""
+        runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
+        fake_client = mock.MagicMock()
+        fake_client.is_available.return_value = False
+
+        with mock.patch(
+            "lark_agent_bridge.agents.llm_client.LLMClient",
+            return_value=fake_client,
+        ):
+            result = runner._extract_time_via_llm(
+                request_text="",
+                title="5月19日_18点35分_测试",
+                description="",
+            )
+
+        self.assertIsNone(result)
+
+    def test_extract_time_via_llm_handles_invalid_json(self):
+        """When LLM returns invalid JSON, return None gracefully."""
+        runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
+        fake_response = mock.MagicMock()
+        fake_response.content = "not valid json"
+        fake_client = mock.MagicMock()
+        fake_client.is_available.return_value = True
+        fake_client.chat.return_value = fake_response
+        fake_client._effective_api_format.return_value = "openai"
+
+        with mock.patch(
+            "lark_agent_bridge.agents.llm_client.LLMClient",
+            return_value=fake_client,
+        ):
+            result = runner._extract_time_via_llm(
+                request_text="",
+                title="5月19日_18点35分_测试",
+                description="",
+            )
+
+        self.assertIsNone(result)
+
+    def test_extract_time_via_llm_handles_found_false(self):
+        """When LLM returns found=false, return None."""
+        runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
+        fake_response = mock.MagicMock()
+        fake_response.content = json.dumps({"found": False, "datetime": "", "source": "", "reason": "无时间"})
+        fake_client = mock.MagicMock()
+        fake_client.is_available.return_value = True
+        fake_client.chat.return_value = fake_response
+        fake_client._effective_api_format.return_value = "openai"
+
+        with mock.patch(
+            "lark_agent_bridge.agents.llm_client.LLMClient",
+            return_value=fake_client,
+        ):
+            result = runner._extract_time_via_llm(
+                request_text="分析问题",
+                title="无时间信息的标题",
+                description="",
+            )
+
+        self.assertIsNone(result)
+
+    def test_resolve_bug_time_context_uses_llm_fallback(self):
+        """_resolve_bug_time_context should call LLM when regex finds nothing."""
+        runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
+        llm_return = {
+            "value": "2026-05-19 18:35",
+            "date": "2026-05-19",
+            "time": "18:35",
+            "raw": "标题",
+            "source": "llm",
+            "note": "从标题提取",
+        }
+
+        with mock.patch.object(runner, "_extract_time_via_llm", return_value=llm_return):
+            context = runner._resolve_bug_time_context(
+                request_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/1",
+                title="G02ESVR_SR2.0_V5511六座左舵车_5月19日_18点35分_全域智驾场景未显示车位信息",
+                description="",
+            )
+
+        self.assertEqual(context.fault_time, "2026-05-19 18:35")
+        self.assertTrue(context.has_full_datetime)
+        self.assertEqual(context.source, "llm")
+
+    def test_resolve_bug_time_context_skips_llm_when_regex_succeeds(self):
+        """LLM should not be called when regex already found a time."""
+        runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
+
+        with mock.patch.object(runner, "_extract_time_via_llm") as llm_mock:
+            context = runner._resolve_bug_time_context(
+                request_text="",
+                title="问题时间 2026-05-11 23:12",
+                description="",
+            )
+
+        llm_mock.assert_not_called()
+        self.assertEqual(context.fault_time, "2026-05-11 23:12")
+        self.assertTrue(context.has_full_datetime)
+        self.assertEqual(context.source, "title")
+
     def test_bug_log_coverage_detects_android_log_time_inside_window(self):
         with tempfile.TemporaryDirectory() as tmp:
             runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
@@ -3456,7 +3875,7 @@ class AgentTests(unittest.TestCase):
         self.assertTrue(result["timed_out"])
         self.assertEqual(result["timeout_seconds"], 3)
 
-    def test_bug_agent_summary_timeout_without_output_uses_omlx_before_heavy_provider_fallback(self):
+    def test_bug_agent_summary_timeout_without_output_uses_omlx_without_provider_fallback(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = BridgeConfig(dry_run=False, data_dir=Path(tmp), workspace_root=Path(tmp))
             config.bug_analysis.provider = "codex"
@@ -4623,6 +5042,147 @@ class AgentTests(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertEqual(result.details["mode"], "direct_analysis")
         self.assertEqual(result.details["fault_time"], "2026-05-22 07:46")
+
+    def test_direct_analysis_respects_plans_override(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=False, data_dir=Path(tmp), workspace_root=Path(tmp))
+            runner = BugAnalysisRunner(config)
+            log_root = Path(tmp) / "direct_logs"
+            self._write_matching_log(log_root, "2026-05-22 07:46:00")
+            resource = DownloadResource(kind="file", value="log.zip")
+            executed_plans = []
+
+            class FakeDownloader:
+                def download_all(self, resources, *, context, message_id):
+                    return [DownloadedResource(resource=resource, path=log_root)]
+
+            runner._direct_downloader = FakeDownloader()
+
+            def fake_run_analysis(
+                *,
+                plan,
+                input_path,
+                html_path,
+                json_path,
+                analysis_dir,
+                timeout,
+                target_time,
+                request_text=None,
+                bridge_session_id=None,
+            ):
+                executed_plans.append(plan.kind)
+                html_path.write_text("<html>ok</html>", encoding="utf-8")
+                json_path.write_text("{}", encoding="utf-8")
+                return subprocess.CompletedProcess(args=["python3"], returncode=0, stdout="", stderr="")
+
+            with (
+                mock.patch.object(runner, "_prepare_log_input", return_value=log_root),
+                mock.patch.object(runner, "classify_requests", side_effect=AssertionError("classify_requests should not run when plans_override is provided")),
+                mock.patch.object(runner, "_write_reanalysis_source_evidence", return_value=None),
+                mock.patch.object(runner, "_run_analysis", side_effect=fake_run_analysis),
+                mock.patch.object(runner, "_build_combined_report_artifacts", return_value=None),
+            ):
+                result = runner.run_direct_analysis(
+                    DirectAnalysisRequest(
+                        prompt="时间点2026-05-22 07:46 调查3D生命周期",
+                        resources=[resource],
+                        raw_text="时间点2026-05-22 07:46 调查3D生命周期",
+                        triggered=True,
+                    ),
+                    plans_override=[BugAnalysisPlan(kind="startup")],
+                )
+
+        self.assertTrue(result.success)
+        self.assertEqual(executed_plans, ["startup"])
+
+    def test_direct_analysis_custom_skill_runs_agent_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=False, data_dir=Path(tmp), workspace_root=Path(tmp))
+            runner = BugAnalysisRunner(config)
+            log_root = Path(tmp) / "direct_logs"
+            self._write_matching_log(log_root, "2026-05-22 07:46:00")
+            resource = DownloadResource(kind="file", value="log.zip")
+
+            class FakeDownloader:
+                def download_all(self, resources, *, context, message_id):
+                    return [DownloadedResource(resource=resource, path=log_root)]
+
+            runner._direct_downloader = FakeDownloader()
+
+            with (
+                mock.patch.object(runner, "_prepare_log_input", return_value=log_root),
+                mock.patch.object(runner, "_write_reanalysis_source_evidence", return_value=None),
+                mock.patch.object(runner, "_build_combined_report_artifacts", return_value=None),
+                mock.patch.object(runner, "_run_bug_agent_summary", return_value={"message": "agent summary", "provider": "codex", "model": "gpt-5.4", "session_id": "sess_1", "resumed": False, "duration_seconds": 1.2, "usage": {}, "usage_scope": ""}) as summary_mock,
+            ):
+                result = runner.run_direct_analysis(
+                    DirectAnalysisRequest(
+                        prompt="基于SRViolationHandler.kt源码分析 时间点2026-05-22 07:46 分析超速状态",
+                        resources=[resource],
+                        raw_text="基于SRViolationHandler.kt源码分析 时间点2026-05-22 07:46 分析超速状态",
+                        triggered=True,
+                    ),
+                    plans_override=[BugAnalysisPlan(kind="custom_skill")],
+                    classification_skill="source_analysis",
+                    classification_source="preflight_rules",
+                    classification_reason="explicit source clue",
+                )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.message, "agent summary")
+        self.assertEqual(result.details["analysis_kinds"], ["custom_skill"])
+        self.assertEqual(result.details["analysis_skill"], "source_analysis")
+        summary_mock.assert_called_once()
+        self.assertIn(summary_mock.call_args.kwargs["provider_override"], {"codex", "claude"})
+
+    def test_source_evidence_terms_keep_explicit_source_file_and_class(self):
+        runner = BugAnalysisRunner(BridgeConfig(dry_run=False))
+
+        terms = runner._source_evidence_terms(
+            plans=[BugAnalysisPlan(kind="custom_skill")],
+            request_text="基于SRViolationHandler.kt源码分析 时间点2026-05-22 07:46 分析超速状态",
+            followup_text="",
+        )
+
+        self.assertIn("SRViolationHandler.kt", terms)
+        self.assertIn("SRViolationHandler", terms)
+
+    def test_write_reanalysis_source_evidence_prioritizes_explicit_target_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            target = repo / "module_core" / "subreality_biz" / "src" / "main" / "java" / "com" / "xiaopeng" / "ainavi" / "subreality_biz" / "violation" / "processor" / "SRViolationHandler.kt"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(
+                "package demo\n\nclass SRViolationHandler {\n    companion object {\n        const val MSG_NOTIFY_SPEED = 1\n    }\n}\n",
+                encoding="utf-8",
+            )
+            distractor = repo / "foo" / "ProtocolFile.java"
+            distractor.parent.mkdir(parents=True, exist_ok=True)
+            distractor.write_text("public class ProtocolFile { void printStackTrace() {} }\n", encoding="utf-8")
+            runner = BugAnalysisRunner(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp) / "data",
+                    workspace_root=repo,
+                    guideengine_repo=repo,
+                )
+            )
+            output_dir = Path(tmp) / "out"
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            evidence_path = runner._write_reanalysis_source_evidence(
+                plans=[BugAnalysisPlan(kind="custom_skill")],
+                request_text="基于SRViolationHandler.kt源码分析 时间点2026-05-22 07:46 分析超速状态",
+                followup_text="",
+                output_dir=output_dir,
+                enabled=True,
+            )
+
+            assert evidence_path is not None
+            body = evidence_path.read_text(encoding="utf-8")
+
+        self.assertIn("SRViolationHandler.kt", body)
+        self.assertIn("class SRViolationHandler", body)
 
     def test_bug_reanalysis_uses_agent_summary_and_persisted_session(self):
         with tempfile.TemporaryDirectory() as tmp:

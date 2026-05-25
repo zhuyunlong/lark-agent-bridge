@@ -1,13 +1,21 @@
 from pathlib import Path
 import io
 import json
+import os
 import subprocess
 import tempfile
 import unittest
 from unittest import mock
 
 from lark_agent_bridge.lark_client import CommandResult, EventConsumerError, LarkClient
-from lark_agent_bridge.models import BridgeConfig, EventConsumerOptions, LarkEvent, LarkOptions
+from lark_agent_bridge.models import (
+    BridgeConfig,
+    DownloadConfig,
+    EventConsumerOptions,
+    InternalNetworkEnvOptions,
+    LarkEvent,
+    LarkOptions,
+)
 
 
 def event(**overrides):
@@ -353,7 +361,13 @@ class LarkClientTests(unittest.TestCase):
 
     def test_download_resource_uses_relative_output_from_parent_directory(self):
         with tempfile.TemporaryDirectory() as tmp:
-            client = LarkClient(BridgeConfig(dry_run=False, data_dir=Path(tmp)))
+            client = LarkClient(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    download=DownloadConfig(timeout_seconds=300),
+                )
+            )
             target = Path(tmp) / "jobs" / "job1" / "input" / "file_v3_0011s_abc.zip"
             target.parent.mkdir(parents=True)
 
@@ -391,10 +405,64 @@ class LarkClientTests(unittest.TestCase):
             ],
         )
         self.assertEqual(Path(cwd).resolve(), target.parent.resolve())
+        self.assertEqual(mocked_run.call_args.kwargs["timeout"], 300)
+
+    def test_download_resource_uses_configured_internal_network_env(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client = LarkClient(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    internal_network_env=InternalNetworkEnvOptions(
+                        inherit_env=["PATH", "HOME"],
+                        unset_env=["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY"],
+                    ),
+                )
+            )
+            target = Path(tmp) / "jobs" / "job1" / "input" / "file_v3_0011s_abc.zip"
+            target.parent.mkdir(parents=True)
+
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {
+                        "PATH": "/usr/bin:/bin",
+                        "HOME": "/Users/tester",
+                        "HTTP_PROXY": "http://127.0.0.1:7897",
+                        "HTTPS_PROXY": "http://127.0.0.1:7897",
+                        "NO_PROXY": "localhost",
+                    },
+                    clear=True,
+                ),
+                mock.patch.object(
+                    client,
+                    "_run",
+                    return_value=CommandResult(command=[], returncode=0),
+                ) as mocked_run,
+            ):
+                client.download_resource(
+                    message_id="om_file_msg",
+                    file_key="file_v3_0011s_abc",
+                    resource_type="file",
+                    output=target,
+                )
+
+        env = mocked_run.call_args.kwargs["env"]
+        self.assertEqual(env.get("PATH"), "/usr/bin:/bin")
+        self.assertEqual(env.get("HOME"), "/Users/tester")
+        self.assertNotIn("HTTP_PROXY", env)
+        self.assertNotIn("HTTPS_PROXY", env)
+        self.assertNotIn("NO_PROXY", env)
 
     def test_download_drive_folder_uses_relative_local_dir_from_parent_directory(self):
         with tempfile.TemporaryDirectory() as tmp:
-            client = LarkClient(BridgeConfig(dry_run=False, data_dir=Path(tmp)))
+            client = LarkClient(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    download=DownloadConfig(timeout_seconds=300),
+                )
+            )
             target_dir = Path(tmp) / "jobs" / "job1" / "input" / "fldcnlog123"
             target_dir.parent.mkdir(parents=True)
 
@@ -427,6 +495,26 @@ class LarkClientTests(unittest.TestCase):
             ],
         )
         self.assertEqual(Path(cwd).resolve(), target_dir.parent.resolve())
+        self.assertEqual(mocked_run.call_args.kwargs["timeout"], 300)
+
+    def test_run_timeout_decodes_bytes_output_and_stderr(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            client = LarkClient(BridgeConfig(dry_run=False, data_dir=Path(tmp)))
+
+            with mock.patch(
+                "lark_agent_bridge.lark_client.subprocess.run",
+                side_effect=subprocess.TimeoutExpired(
+                    ["lark-cli", "im", "+messages-resources-download"],
+                    60,
+                    output=b"partial stdout",
+                    stderr=b"[lark-cli] [WARN] proxy detected",
+                ),
+            ):
+                result = client._run(["lark-cli", "im", "+messages-resources-download"], timeout=60)
+
+        self.assertEqual(result.returncode, 124)
+        self.assertEqual(result.stdout, "partial stdout")
+        self.assertEqual(result.stderr, "[lark-cli] [WARN] proxy detected")
 
 
 class FakeProcess:

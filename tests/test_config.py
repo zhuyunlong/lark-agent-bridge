@@ -230,6 +230,212 @@ force_reanalysis_terms = ["重新分析", "源码"]
         self.assertTrue(config.bug_analysis.resume_followup_sessions)
         self.assertEqual(config.bug_analysis.force_reanalysis_terms, ["重新分析", "源码"])
 
+    def test_bug_analysis_command_defaults_to_codex_for_openai_api_format(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text(
+                """
+[ai_provider]
+enabled = true
+preset = "yybb-codex"
+
+[bug_analysis]
+enabled = true
+""",
+                encoding="utf-8",
+            )
+
+            config = load_config(config_path)
+
+        self.assertEqual(config.ai_provider.api_format, "openai")
+        self.assertEqual(config.bug_analysis.provider, "codex")
+        self.assertEqual(config.bug_analysis.command, "codex")
+
+    def test_bug_analysis_command_defaults_to_claude_for_anthropic_api_format(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text(
+                """
+[ai_provider]
+enabled = true
+preset = "mimo-claude"
+
+[bug_analysis]
+enabled = true
+""",
+                encoding="utf-8",
+            )
+
+            config = load_config(config_path)
+
+        self.assertEqual(config.ai_provider.api_format, "anthropic")
+        self.assertEqual(config.bug_analysis.provider, "claude")
+        self.assertEqual(config.bug_analysis.command, "claude")
+
+    def test_intent_analysis_command_defaults_to_matching_provider_when_omitted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text(
+                """
+[ai_provider]
+enabled = true
+preset = "yybb-codex"
+
+[intent_analysis]
+enabled = true
+provider = "codex"
+""",
+                encoding="utf-8",
+            )
+
+            config = load_config(config_path)
+
+        self.assertEqual(config.intent_analysis.provider, "codex")
+        self.assertEqual(config.intent_analysis.command, "codex")
+
+    def test_explicit_bug_analysis_command_is_not_overridden_by_api_format(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text(
+                """
+[ai_provider]
+enabled = true
+preset = "yybb-codex"
+
+[bug_analysis]
+enabled = true
+provider = "codex"
+command = "custom-codex"
+""",
+                encoding="utf-8",
+            )
+
+            config = load_config(config_path)
+
+        self.assertEqual(config.ai_provider.api_format, "openai")
+        self.assertEqual(config.bug_analysis.command, "custom-codex")
+
+    def test_repository_config_defaults_to_cc_switch_deepseek_claude_when_present(self):
+        root_config = Path(__file__).resolve().parents[1] / "config.toml"
+        if not root_config.exists():
+            self.skipTest("local config.toml is ignored and may be absent in clean checkouts")
+
+        config = load_config(root_config)
+
+        self.assertEqual(config.ai_provider.preset, "cc-switch-deepseek-claude")
+        self.assertEqual(config.ai_provider.api_format, "anthropic")
+        self.assertEqual(config.ai_provider.base_url, "http://127.0.0.1:15721")
+        self.assertEqual(config.ai_provider.api_key, "PROXY_MANAGED")
+        self.assertEqual(config.bug_analysis.provider, "claude")
+        self.assertEqual(config.bug_analysis.command, "claude")
+        self.assertEqual(config.intent_analysis.provider, "claude")
+        self.assertEqual(config.intent_analysis.command, "claude")
+        self.assertEqual(config.source_investigation.provider, "claude")
+        self.assertEqual(config.source_investigation.command, "claude")
+
+    def test_preset_override_drives_agent_defaults_from_protocol(self):
+        cases = [
+            ("cc-switch-deepseek-claude", "anthropic", "claude"),
+            ("cc-switch-mimo-claude", "anthropic", "claude"),
+            ("cc-switch-yybb-claude", "anthropic", "claude"),
+            ("cc-switch-scihub-claude", "anthropic", "claude"),
+            ("cc-switch-yybb-codex", "openai", "codex"),
+            ("deepseek-claude", "anthropic", "claude"),
+            ("mimo-claude", "anthropic", "claude"),
+            ("yybb-claude", "anthropic", "claude"),
+            ("yybb-codex", "openai", "codex"),
+            ("panda-codex", "openai", "codex"),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text(
+                """
+[ai_provider]
+enabled = true
+preset = "cc-switch-deepseek-claude"
+
+[bug_analysis]
+enabled = true
+provider = ""
+command = ""
+
+[intent_analysis]
+enabled = true
+provider = ""
+command = ""
+
+[source_investigation]
+enabled = true
+provider = ""
+command = ""
+""",
+                encoding="utf-8",
+            )
+
+            for preset, api_format, agent in cases:
+                with self.subTest(preset=preset):
+                    with mock.patch.dict(
+                        "os.environ",
+                        {"LARK_AGENT_BRIDGE_AI_PRESET": preset},
+                        clear=False,
+                    ):
+                        config = load_config(config_path)
+
+                    self.assertEqual(config.ai_provider.preset, preset)
+                    self.assertEqual(config.ai_provider.api_format, api_format)
+                    self.assertEqual(config.bug_analysis.provider, agent)
+                    self.assertEqual(config.bug_analysis.command, agent)
+                    self.assertEqual(config.intent_analysis.provider, agent)
+                    self.assertEqual(config.intent_analysis.command, agent)
+                    self.assertEqual(config.source_investigation.provider, agent)
+                    self.assertEqual(config.source_investigation.command, agent)
+
+    def test_agent_provider_env_override_supports_official_cli_login_profiles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text(
+                """
+[ai_provider]
+enabled = true
+preset = "cc-switch-deepseek-claude"
+
+[bug_analysis]
+enabled = true
+provider = ""
+command = ""
+
+[intent_analysis]
+enabled = true
+provider = ""
+command = ""
+
+[source_investigation]
+enabled = true
+provider = ""
+command = ""
+""",
+                encoding="utf-8",
+            )
+
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "LARK_AGENT_BRIDGE_AI_ENABLED": "false",
+                    "LARK_AGENT_BRIDGE_AGENT_PROVIDER": "codex",
+                    "LARK_AGENT_BRIDGE_AGENT_COMMAND": "codex",
+                },
+                clear=False,
+            ):
+                config = load_config(config_path)
+
+        self.assertFalse(config.ai_provider.enabled)
+        self.assertEqual(config.bug_analysis.provider, "codex")
+        self.assertEqual(config.bug_analysis.command, "codex")
+        self.assertEqual(config.intent_analysis.provider, "codex")
+        self.assertEqual(config.intent_analysis.command, "codex")
+        self.assertEqual(config.source_investigation.provider, "codex")
+        self.assertEqual(config.source_investigation.command, "codex")
+
     def test_relative_paths_are_resolved_to_absolute_paths(self):
         with tempfile.TemporaryDirectory() as tmp:
             config_dir = Path(tmp) / "configs" / "bridge"

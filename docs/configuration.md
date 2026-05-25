@@ -5,18 +5,17 @@
 1. `config.toml`: local machine defaults
 2. environment variables: sensitive or machine-specific overrides
 
-The repository keeps only `config.example.toml`. Real `config.toml` is ignored by Git.
+The repository keeps `config.toml` as the only runtime TOML, and Git ignores it. `config/config.example.toml` is the committed desensitized template. Keep local credentials, user IDs, Bot IDs, internal URLs, and API keys out of committed files.
 
 ## Recommended setup
 
 ```bash
-cp config.example.toml config.toml
+cp config/config.example.toml config.toml
+./run.sh
+./run.sh cc-switch-mimo-claude
 ```
 
-Then choose one of these patterns:
-
-- keep all values in `config.toml`
-- keep non-sensitive defaults in `config.toml`, and inject sensitive values from environment variables
+Provider URL/model/protocol/agent/key-policy values live in `config/presets.toml`. Routing keyword tables live in `config/routing_terms.toml`. `run.sh <profile>` sets environment overrides for the current process while still loading `config.toml`.
 
 ## Environment variables
 
@@ -34,6 +33,14 @@ LARK_AGENT_BRIDGE_OMLX_BASE_URL
 LARK_AGENT_BRIDGE_OMLX_MODEL
 LARK_AGENT_BRIDGE_OMLX_API_KEY
 LARK_AGENT_BRIDGE_REPORT_PUBLIC_BASE_URL
+LARK_AGENT_BRIDGE_AI_ENABLED
+LARK_AGENT_BRIDGE_AI_PRESET
+LARK_AGENT_BRIDGE_AI_BASE_URL
+LARK_AGENT_BRIDGE_AI_API_KEY
+LARK_AGENT_BRIDGE_AI_FALLBACK_BASE_URL
+LARK_AGENT_BRIDGE_AI_FALLBACK_API_KEY
+LARK_AGENT_BRIDGE_AGENT_PROVIDER
+LARK_AGENT_BRIDGE_AGENT_COMMAND
 ```
 
 Notes:
@@ -42,6 +49,7 @@ Notes:
 - `LARK_AGENT_BRIDGE_DRY_RUN` accepts `true/false`, `1/0`, `yes/no`, `on/off`
 - environment variables win over `config.toml`
 - `LARK_AGENT_BRIDGE_REPORT_PUBLIC_BASE_URL` should point to the externally reachable report prefix, for example `https://bridge.example.com/reports`
+- direct API profiles require `LARK_AGENT_BRIDGE_AI_API_KEY` or local `[ai_provider].api_key`; `run.sh` warns when both are empty
 
 ## Example shell setup
 
@@ -52,13 +60,24 @@ export LARK_AGENT_BRIDGE_OMLX_API_KEY="your-local-api-key"
 export LARK_AGENT_BRIDGE_REPORT_PUBLIC_BASE_URL="https://bridge.example.com/reports"
 ```
 
+Clear inherited API variables before switching back to cc-switch or official CLI login:
+
+```bash
+unset LARK_AGENT_BRIDGE_AI_API_KEY LARK_AGENT_BRIDGE_AI_FALLBACK_API_KEY LARK_AGENT_BRIDGE_AI_BASE_URL LARK_AGENT_BRIDGE_AI_FALLBACK_BASE_URL LARK_AGENT_BRIDGE_OMLX_API_KEY
+launchctl unsetenv LARK_AGENT_BRIDGE_AI_API_KEY
+launchctl unsetenv LARK_AGENT_BRIDGE_AI_FALLBACK_API_KEY
+launchctl unsetenv LARK_AGENT_BRIDGE_AI_BASE_URL
+launchctl unsetenv LARK_AGENT_BRIDGE_AI_FALLBACK_BASE_URL
+launchctl unsetenv LARK_AGENT_BRIDGE_OMLX_API_KEY
+```
+
 ## Default agent selection
 
-The bridge currently chooses the default local Agent at startup from `config.toml`.
+The bridge chooses the local Agent from the selected profile. `*-claude` maps to `claude`; `*-codex` maps to `codex`. For `codex-offi` and `claude-offi`, `run.sh` disables direct API and selects the matching CLI agent.
 
 ### Bug analysis default agent
 
-Use `[bug_analysis]` to define the preferred Agent for:
+Use `[bug_analysis]` only for execution settings. Leave `provider` and `command` empty unless you are intentionally overriding `run.sh`:
 
 - bug final summary
 - bug follow-up continuation
@@ -78,22 +97,13 @@ agent_summary_timeout_seconds = 300
 resume_followup_sessions = false
 ```
 
-or:
-
-```toml
-[bug_analysis]
-enabled = true
-provider = "claude"
-command = "claude"
-working_dir = "../.."
-```
-
 Behavior:
 
-- `provider = "codex"` means prefer Codex first
-- `provider = "claude"` means prefer Claude Code first
+- `provider = "codex"` means use Codex
+- `provider = "claude"` means use Claude Code
+- empty `provider` / `command` means derive from the selected preset protocol
 - when `provider = "codex"`, the bridge passes `-m` using `model`; the default is `gpt-5.4`
-- if the preferred provider cannot start or returns non-zero, the bridge automatically tries the other provider
+- the bridge does not cross-fallback between Codex and Claude; keep `provider`, `command`, and the selected protocol route consistent
 - `agent_summary_timeout_seconds` only limits the final Agent-written conclusion; if the Agent is silent longer than this window, the bridge falls back to the script summary and still returns the generated report
 - leave `default_prompt` empty unless you intentionally want a configured fallback; generic bug links should ask for a concrete analysis direction instead of silently defaulting to startup
 - follow-ups and reanalysis create a fresh Agent session by default, while reusing the previous bug link, downloaded logs, extracted logs, report metadata, skill decision, and source-repo paths
@@ -119,7 +129,7 @@ max_prompt_chars = 12000
 Behavior:
 
 - if `provider` / `command` are empty here, intent routing reuses `[bug_analysis]`
-- if the preferred intent-routing provider is unavailable, the bridge automatically tries the other provider
+- the bridge does not cross-fallback to the other intent-routing provider
 - this Agent only decides the route; heavy bug/log analysis still runs in local scripts
 
 ## Example launchd injection
@@ -151,6 +161,7 @@ Keep these local:
 Do not commit:
 
 - `config.toml`
+- local root copies of `config.*.toml`; committed config metadata/templates live under `config/`
 - `data/`
 - generated reports, downloaded logs, or runtime state
 

@@ -296,6 +296,50 @@ class UnityStartupSkillTests(unittest.TestCase):
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0].node_id, "unity_preload_start")
 
+    def test_diagnose_text_does_not_report_complete_when_preload_done_but_player_missing(self):
+        def fake(node_id: str):
+            event = self._fake_event(self.mod, "2026-05-22 17:29:48.419", 8066)
+            event.node_id = node_id
+            return event
+
+        diagnosis = self.mod.diagnose_text(
+            {
+                "app_attach_base_context": fake("app_attach_base_context"),
+                "activity_on_create": fake("activity_on_create"),
+                "activity_on_resume": fake("activity_on_resume"),
+                "xpe_surface_created": fake("xpe_surface_created"),
+                "unity_preload_start": fake("unity_preload_start"),
+                "unity_preload_success": fake("unity_preload_success"),
+            }
+        )
+
+        self.assertNotIn("启动链路完整", diagnosis)
+        self.assertIn("Unity preload", diagnosis)
+
+    def test_build_overall_verdict_does_not_repeat_complete_for_partial_session(self):
+        session = self.mod.Session(
+            index=4,
+            events=[self._fake_event(self.mod, "2026-05-22 17:29:48.419", 8066)],
+            first_by_node={},
+            all_by_node={},
+            status="partial",
+            diagnosis="启动链路完整，已经到达 3D 最终首帧展示。",
+            missing_critical=["createUnityPlayerOnMainThread", "SET_READY_PREPARE / UnityReady"],
+            primary_pid=8066,
+        )
+
+        severity, message = self.mod.build_overall_verdict(
+            [session],
+            [],
+            focus_session=session,
+            target_time=self.mod.parse_target_time("2026-05-22 17:29"),
+            boot_relation=None,
+        )
+
+        self.assertEqual(severity, "red")
+        self.assertNotIn("启动链路完整", message)
+        self.assertIn("未闭环", message)
+
     @staticmethod
     def _fake_event(mod, timestamp_text: str, pid: int):
         timestamp = mod.dt.datetime.strptime(timestamp_text, "%Y-%m-%d %H:%M:%S.%f")

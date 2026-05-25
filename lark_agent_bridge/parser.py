@@ -60,6 +60,7 @@ ADDR2LINE_ADDRESS_RE = re.compile(r"0x[0-9a-fA-F]{4,}|\bpc\s+[0-9a-fA-F]{8,16}\b
 LOG_FOLDER_RE = re.compile(r"(?<![A-Za-z0-9_])(log\d+)(?![A-Za-z0-9_])", re.I)
 FILE_KEY_RE = re.compile(r"\bfile_[A-Za-z0-9_-]+\b")
 IMAGE_KEY_RE = re.compile(r"\bimg_[A-Za-z0-9_-]+\b")
+FILE_XML_RE = re.compile(r"<file\b[^>]*>", re.I)
 FOLDER_XML_RE = re.compile(r"<folder\b[^>]*\b(?:folder_token|token)=\"(?P<token>[A-Za-z0-9_-]+)\"", re.I)
 DATE_RANGE_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}\s+\d{1,2}\s*-\s*\d{1,2}\b")
 HOUR_RANGE_RE = re.compile(r"(?<!\d)(\d{1,2})\s*-\s*(\d{1,2})\s*点")
@@ -718,7 +719,24 @@ def find_resources(text: str, *, source_message_id: str = "") -> list[DownloadRe
             resources.append(DownloadResource(kind="folder", value=folder_match.group("token"), source_message_id=source_message_id))
             continue
         resources.append(DownloadResource(kind="url", value=value, source_message_id=source_message_id))
+    file_keys_from_tags: set[str] = set()
+    for match in FILE_XML_RE.finditer(text):
+        tag = match.group(0)
+        key = _extract_xml_attr(tag, "key")
+        if not key or not FILE_KEY_RE.fullmatch(key):
+            continue
+        file_keys_from_tags.add(key)
+        resources.append(
+            DownloadResource(
+                kind="file",
+                value=key,
+                source_message_id=source_message_id,
+                display_name=_extract_xml_attr(tag, "name"),
+            )
+        )
     for match in FILE_KEY_RE.findall(text):
+        if match in file_keys_from_tags:
+            continue
         resources.append(DownloadResource(kind="file", value=match, source_message_id=source_message_id))
     for match in IMAGE_KEY_RE.findall(text):
         resources.append(DownloadResource(kind="image", value=match, source_message_id=source_message_id))
@@ -729,6 +747,11 @@ def find_resources(text: str, *, source_message_id: str = "") -> list[DownloadRe
 
 def _find_resources(text: str) -> list[DownloadResource]:
     return find_resources(text)
+
+
+def _extract_xml_attr(tag: str, attr: str) -> str:
+    match = re.search(rf"\b{re.escape(attr)}=\"([^\"]+)\"", tag, re.I)
+    return match.group(1).strip() if match else ""
 
 
 def _find_since(text: str) -> str | None:

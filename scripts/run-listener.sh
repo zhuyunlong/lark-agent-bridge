@@ -4,8 +4,8 @@ set -euo pipefail
 # Manual runner only. This script does not install launchd jobs or enable
 # login/startup auto-run.
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd -P)"
 cd "${REPO_ROOT}"
 
 USER_HOME="${HOME:-/Users/$(id -un)}"
@@ -65,7 +65,7 @@ PYTHON_BIN="$(find_python)"
 
 if [[ ! -f "${CONFIG_PATH}" ]]; then
   echo "Config not found: ${CONFIG_PATH}" >&2
-  echo "Create it first: cp config.example.toml config.toml" >&2
+  echo "Create local config.toml from config/config.example.toml before starting the listener." >&2
   exit 2
 fi
 

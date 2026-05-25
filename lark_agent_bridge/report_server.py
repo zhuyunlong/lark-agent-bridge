@@ -43,6 +43,7 @@ class PublishedReport:
     report_paths: list[Path]
     source_report_paths: list[Path]
     context_excerpt: str
+    version: int = 0
 
 
 class HtmlReportPublisher:
@@ -61,14 +62,19 @@ class HtmlReportPublisher:
             bind_host=self.config.report_server.bind_host,
         )
 
-    def publish_result(self, result: TaskResult) -> PublishedReport | None:
+    def publish_result(self, result: TaskResult, *, version: int | None = None) -> PublishedReport | None:
         if not self.config.report_server.enabled:
             return None
         html_paths = self._collect_html_paths(result)
         if not html_paths:
             return None
         slug = _safe_slug(result.job_id or "manual-report")
-        target_dir = self.root_dir / slug
+        slug_parts = [slug]
+        normalized_version = int(version or 0)
+        if normalized_version > 0:
+            slug_parts.append(f"v{normalized_version}")
+        published_slug = "/".join(slug_parts)
+        target_dir = self.root_dir.joinpath(*slug_parts)
         if target_dir.exists():
             shutil.rmtree(target_dir)
         target_dir.mkdir(parents=True, exist_ok=True)
@@ -106,6 +112,7 @@ class HtmlReportPublisher:
                     "classification_source": result.details.get("classification_source", ""),
                     "classification_provider": result.details.get("classification_provider", ""),
                     "agent_summary_provider": result.details.get("agent_summary_provider", ""),
+                    "report_version": normalized_version or result.details.get("report_version") or "",
                     "agent_summary_duration_seconds": result.details.get("agent_summary_duration_seconds"),
                     "agent_summary_input_tokens": result.details.get("agent_summary_input_tokens"),
                     "agent_summary_output_tokens": result.details.get("agent_summary_output_tokens"),
@@ -118,13 +125,14 @@ class HtmlReportPublisher:
             encoding="utf-8",
         )
         return PublishedReport(
-            slug=slug,
-            url=self._url_for_slug(slug),
+            slug=published_slug,
+            url=self._url_for_slug(published_slug),
             directory=target_dir,
             index_path=index_path,
             report_paths=copied_paths,
             source_report_paths=html_paths,
             context_excerpt=context_excerpt,
+            version=normalized_version,
         )
 
     def purge_all_reports(self) -> int:
@@ -266,7 +274,7 @@ class HtmlReportPublisher:
 
     def _url_for_slug(self, slug: str) -> str:
         base = self.public_base_url.rstrip("/")
-        return f"{base}/{quote(slug)}/"
+        return f"{base}/{'/'.join(quote(part) for part in slug.split('/'))}/"
 
 
 class ReportHttpServer:

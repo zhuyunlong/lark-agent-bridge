@@ -89,7 +89,7 @@ if __name__ == "__main__":
 
 ```text
 README.md
-config.example.toml
+config.toml
 lark_agent_bridge/cli.py
 lark_agent_bridge/models.py
 lark_agent_bridge/config.py
@@ -215,7 +215,7 @@ cd /path/to/workspace/tools/lark-agent-bridge
 
 ```text
 README.md
-config.example.toml
+config.toml
 lark_agent_bridge/cli.py
 ```
 
@@ -233,15 +233,15 @@ python3 -m lark_agent_bridge --help
 
 ```bash
 python3 -m unittest discover -s tests -v
-python3 -m lark_agent_bridge check --config config.example.toml
-python3 -m lark_agent_bridge handle-event --config config.example.toml --event samples/signal_event_with_url.json --dry-run
-python3 -m lark_agent_bridge handle-event --config config.example.toml --event samples/signal_event_with_file.json --dry-run
-python3 -m lark_agent_bridge handle-event --config config.example.toml --event samples/signal_event_no_signal.json --dry-run
-python3 -m lark_agent_bridge handle-event --config config.example.toml --event samples/signal_event_no_log.json --dry-run
-python3 -m lark_agent_bridge run-signal --config config.example.toml --signal 132002 --log-path /tmp/logs --dry-run
+python3 -m lark_agent_bridge check --config config.toml
+python3 -m lark_agent_bridge handle-event --config config.toml --event samples/signal_event_with_url.json --dry-run
+python3 -m lark_agent_bridge handle-event --config config.toml --event samples/signal_event_with_file.json --dry-run
+python3 -m lark_agent_bridge handle-event --config config.toml --event samples/signal_event_no_signal.json --dry-run
+python3 -m lark_agent_bridge handle-event --config config.toml --event samples/signal_event_no_log.json --dry-run
+python3 -m lark_agent_bridge run-signal --config config.toml --signal 132002 --log-path /tmp/logs --dry-run
 ```
 
-真实飞书监听尚未执行；上线前应使用 `config.toml` 配置白名单并确认 Bot 权限。
+当前运行策略：`run.sh` 固定加载本地 ignored `config.toml`，默认 profile 来自 `config/presets.toml`，其他 provider 通过 `run.sh <profile>` 覆盖。仓库只提交 `config/` 下的脱敏配置模板和配置元数据；provider/model/protocol/agent/key-policy 集中在 `config/presets.toml`；路由关键词集中在 `config/routing_terms.toml`；direct API profile 缺少 `LARK_AGENT_BRIDGE_AI_API_KEY` 且本地 `[ai_provider].api_key` 为空时会启动前提示。
 
 ## 风险和注意事项
 

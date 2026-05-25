@@ -1,8 +1,8 @@
-# Lark Agent Bridge 初版实现计划
+# Lark Agent Bridge 实现计划
 
-> 目标：实现一个本地飞书 Bot Bridge。客户在飞书群或私聊中 @ Bot，并给出信号 code / 信号枚举名 / 自然语言描述，以及日志下载链接或飞书附件后，本地 Bridge 下载日志、调用 guideengine `signal-chain-analyzer` skill 分析信号生命周期，并把报告结果回发飞书；同时提供安全范围内的基础聊天回复能力。
+> 最终状态：仓库使用单入口 `run.sh` 和单运行配置 `config.toml`；`config/config.example.toml` 是唯一提交到 Git 的脱敏模板；provider/model/protocol/agent/key-policy 统一集中在 `config/presets.toml`；路由关键词集中在 `config/routing_terms.toml`；`run.sh <profile>` 只覆盖当前进程的 profile/agent，不再维护多份运行态 `config.*.toml`。
 
-当前计划的主业务仍是 **信号生命周期调查**，同时补充基础聊天回复；架构按可扩展方式拆分，后续可以继续增加 `/review`、`/startup`、`/log`、`/report` 等 handler。
+当前业务包括信号生命周期、Bug 分析、直传日志分析、感知总结、知识问答和普通聊天；配置策略以“单 config + 集中 preset”为准。
 
 ## 一、当前已完成状态
 
@@ -18,7 +18,8 @@
 本轮补齐：
 
 - [x] `README.md`
-- [x] `config.example.toml`
+- [x] `config.toml`
+- [x] `config/config.example.toml`
 - [x] `lark_agent_bridge/cli.py`
 - [x] 配置加载、模型、解析、策略、状态去重
 - [x] 飞书事件消费、消息详情读取、附件下载、消息回复封装
@@ -100,7 +101,7 @@ Feishu Bot Message
 创建：
 
 - `README.md`
-- `config.example.toml`
+- `config.toml`
 - `lark_agent_bridge/cli.py`
 
 验收：
@@ -110,7 +111,7 @@ Feishu Bot Message
 
 具体步骤：
 
-1. 创建 `config.example.toml`，字段包括：
+1. 创建脱敏 `config.toml`，字段包括：
    - `dry_run`
    - `workspace_root`
    - `guideengine_repo`
@@ -154,7 +155,7 @@ Feishu Bot Message
 
 验收：
 
-- 能加载 `config.example.toml`。
+- 能加载脱敏 `config.toml`。
 - 缺省配置可在没有真实配置时进入 dry-run。
 - `tests/test_config.py` 覆盖默认值和 TOML 覆盖。
 
@@ -384,17 +385,17 @@ python3 .github/skills/signal-chain-analyzer/scripts/analyze_signal_chain.py \
 
 ```bash
 # 检查环境
-python3 -m lark_agent_bridge check --config config.example.toml
+python3 -m lark_agent_bridge check --config config.toml
 
 # 处理一个样例事件
 python3 -m lark_agent_bridge handle-event \
-  --config config.example.toml \
+  --config config.toml \
   --event samples/signal_event_with_url.json \
   --dry-run
 
 # 直接跑 signal handler，便于本地调试
 python3 -m lark_agent_bridge run-signal \
-  --config config.example.toml \
+  --config config.toml \
   --signal 132002 \
   --log-path /path/to/log \
   --dry-run
@@ -475,7 +476,7 @@ python3 -m unittest discover -s tests -v
 初版完成后必须满足：
 
 - [x] `python3 -m unittest discover -s tests -v` 通过。
-- [x] `python3 -m lark_agent_bridge check --config config.example.toml` 可运行。
+- [x] `python3 -m lark_agent_bridge check --config config.toml` 可运行。
 - [x] `handle-event --dry-run` 对 URL 样例输出可执行计划。
 - [x] `handle-event --dry-run` 对 file 样例输出飞书附件下载计划。
 - [x] 缺 signal / 缺日志输入时给出清晰错误。

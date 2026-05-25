@@ -118,6 +118,7 @@ class ReportVersionStore:
         self,
         group_key: str,
         *,
+        version: int | None = None,
         job_id: str = "",
         report_url: str = "",
         summary: str = "",
@@ -142,7 +143,7 @@ class ReportVersionStore:
             )
             self._groups[group_key] = group
 
-        next_version = group.latest_version + 1
+        next_version = int(version or 0) or (group.latest_version + 1)
         version = ReportVersion(
             version=next_version,
             job_id=job_id,
@@ -163,6 +164,12 @@ class ReportVersionStore:
 
     def get_group(self, group_key: str) -> VersionGroup | None:
         return self._groups.get(group_key)
+
+    def peek_next_version(self, group_key: str) -> int:
+        group = self._groups.get(group_key)
+        if group is None:
+            return 1
+        return group.latest_version + 1
 
     def get_version(self, group_key: str, version: int) -> ReportVersion | None:
         group = self._groups.get(group_key)

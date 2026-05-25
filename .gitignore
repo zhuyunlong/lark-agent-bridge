@@ -7,8 +7,6 @@ __pycache__/
 
 /config.toml
 /config.*.toml
-!/config.example.toml
-!/config.*.example.toml
 /.env
 /.env.*
 !/.env.example

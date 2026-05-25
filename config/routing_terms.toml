@@ -1,4 +1,4 @@
-# Routing terms configuration — loaded by routing_terms.py
+# Routing terms configuration.
 # Each section is a keyword tuple used for intent routing.
 # Add/remove/reorder entries without modifying source code.
 

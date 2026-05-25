@@ -35,31 +35,14 @@ def _normalize_provider_name(provider: str) -> str:
     return normalized
 
 
-def _alternate_provider(provider: str) -> str:
-    normalized = _normalize_provider_name(provider)
-    if normalized == "codex":
-        return "claude"
-    if normalized == "claude":
-        return "codex"
-    return ""
-
-
 def _provider_candidates(provider: str, command_name: str) -> list[tuple[str, str]]:
     primary_provider = _normalize_provider_name(provider)
     primary_command = command_name.strip() or _default_command_for_provider(primary_provider)
-    alternate_provider = _alternate_provider(primary_provider)
-    alternate_command = _default_command_for_provider(alternate_provider)
     candidates: list[tuple[str, str]] = []
     seen: set[tuple[str, str]] = set()
-    for current_provider, current_command in (
-        (primary_provider, primary_command),
-        (alternate_provider, alternate_command),
-    ):
-        if not current_provider or not current_command:
-            continue
-        key = (current_provider, current_command)
-        if key in seen:
-            continue
-        seen.add(key)
-        candidates.append(key)
+    if primary_provider and primary_command:
+        key = (primary_provider, primary_command)
+        if key not in seen:
+            seen.add(key)
+            candidates.append(key)
     return candidates

@@ -650,6 +650,7 @@ class AgentActivityStore:
 
     def record_daemon_status(self, payload: dict[str, object]) -> None:
         with self._lock:
+            self._reconcile_running_sessions_for_daemon_restart(payload)
             status = _jsonable_limited(payload)
             if not isinstance(status, dict):
                 return
@@ -745,6 +746,54 @@ class AgentActivityStore:
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
         payload = {"sessions": self._sessions, "daemon": self._daemon_status}
         _atomic_write_json(self.state_file, payload)
+
+    def _reconcile_running_sessions_for_daemon_restart(self, payload: dict[str, object]) -> None:
+        status = _jsonable_limited(payload)
+        if not isinstance(status, dict):
+            return
+        stage = str(status.get("stage") or "").strip()
+        ready = bool(status.get("ready")) or stage == "event_consumer_ready"
+        if not ready:
+            return
+        previous_pid = _coerce_int(self._daemon_status.get("process_id"))
+        current_pid = _coerce_int(status.get("process_id"))
+        if previous_pid is None or current_pid is None or previous_pid == current_pid:
+            return
+        now = _now_iso()
+        for session in self._sessions.values():
+            if str(session.get("status") or "") != "running":
+                continue
+            progress = session.setdefault("progress", [])
+            if not isinstance(progress, list):
+                progress = []
+                session["progress"] = progress
+            progress.append(
+                {
+                    "timestamp": now,
+                    "stage": "daemon_restart_orphan_cleanup",
+                    "message": "Listener 已重启，上一实例遗留的运行中任务标记为失败。",
+                    "details": {
+                        "previous_process_id": previous_pid,
+                        "current_process_id": current_pid,
+                        "executor": "AgentActivityStore",
+                    },
+                }
+            )
+            session["progress"] = progress[-self.max_progress_events :]
+            session["status"] = "failed"
+            session["success"] = False
+            session["skipped"] = False
+            session["error_code"] = "session_orphaned_after_restart"
+            session["message"] = "Listener 已重启，上一实例的运行中任务未完成。"
+            session["updated_at"] = now
+            session["finished_at"] = now
+
+
+def _coerce_int(value: object) -> int | None:
+    try:
+        return int(value) if value is not None and str(value).strip() else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _coerce_history(value: object) -> list[dict[str, str]]:

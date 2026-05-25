@@ -56,7 +56,7 @@
 
 **Files:**
 - Modify: `README.md`
-- Modify: `config.example.toml`
+- Modify: `config.toml`
 
 - [ ] Document trigger examples and the three provided knowledge sources.
 - [ ] Run targeted tests for knowledge/config/cards/app/CLI/report server.

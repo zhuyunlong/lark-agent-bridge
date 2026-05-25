@@ -120,6 +120,56 @@ class AgentActivityStoreTests(unittest.TestCase):
         self.assertEqual(status["event_key"], "im.message.receive_v1")
         self.assertTrue(status["ready"])
 
+    def test_daemon_restart_marks_stale_running_sessions_failed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "activity.json"
+            store = AgentActivityStore(path)
+            event = LarkEvent(
+                event_id="evt_1",
+                message_id="om_1",
+                chat_id="oc_1",
+                chat_type="group",
+                sender_id="ou_1",
+                message_type="text",
+                content="@bot 分析 bug",
+            )
+
+            store.record_event(event)
+            store.record_progress(
+                {
+                    "event_id": "evt_1",
+                    "message_id": "om_1",
+                    "chat_id": "oc_1",
+                    "chat_type": "group",
+                    "stage": "bug_agent_summary_stream",
+                    "message": "深度分析输出更新",
+                }
+            )
+            store.record_daemon_status(
+                {
+                    "stage": "event_consumer_ready",
+                    "event_key": "im.message.receive_v1",
+                    "ready": True,
+                    "process_id": 12345,
+                }
+            )
+
+            reloaded = AgentActivityStore(path)
+            reloaded.record_daemon_status(
+                {
+                    "stage": "event_consumer_ready",
+                    "event_key": "im.message.receive_v1",
+                    "ready": True,
+                    "process_id": 67890,
+                }
+            )
+            detail = reloaded.get_session("om_1")
+
+        assert detail is not None
+        self.assertEqual(detail["status"], "failed")
+        self.assertEqual(detail["error_code"], "session_orphaned_after_restart")
+        self.assertEqual(detail["progress"][-1]["stage"], "daemon_restart_orphan_cleanup")
+
     def test_list_sessions_hides_silent_skipped_sessions_by_default(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "activity.json"

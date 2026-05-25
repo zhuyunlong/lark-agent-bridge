@@ -1,88 +1,67 @@
 #!/bin/bash
-# lark-agent-bridge multi-config launcher
-# 用法:
-#   ./run.sh cc-switch      # cc-switch 代理（零配置）
-#   ./run.sh claude-oauth   # Claude 官方 OAuth（经 cc-switch）
-#   ./run.sh claude-key     # Anthropic API Key 直连
-#   ./run.sh openai-oauth   # OpenAI 官方 OAuth（经 cc-switch）
-#   ./run.sh openai-key     # OpenAI API Key 直连
-#   ./run.sh xiaomi-tp      # 小米 MiMo Token Plan（默认）
-#   ./run.sh                # 默认 config.toml
-#   ./run.sh config.cc-switch.toml  # 也支持直接传本地 config 文件
+# lark-agent-bridge single-config launcher
+#
+# Usage:
+#   ./run.sh              # default profile from config/presets.toml
+#   ./run.sh <profile>    # same config.toml, override profile
 
 set -e
 
-PROFILE="${1:-}"
-PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REQUESTED_PROFILE="${1:-default}"
+
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 cd "$PROJECT_DIR"
 
-case "$PROFILE" in
-  cc-switch)
-    CONFIG="$PROJECT_DIR/config.cc-switch.toml"
-    echo "🔌 Starting with cc-switch proxy..."
-    echo "   cc-switch must be running at 127.0.0.1:15721"
-    ;;
-  claude-oauth)
-    CONFIG="$PROJECT_DIR/config.claude-oauth.toml"
-    echo "🔑 Starting with Claude Official OAuth (via cc-switch)..."
-    echo "   cc-switch must be running with 'Claude Official' provider active"
-    ;;
-  claude-key)
-    CONFIG="$PROJECT_DIR/config.claude-key.toml"
-    echo "🔑 Starting with Anthropic API Key..."
-    echo "   Requires: LARK_AGENT_BRIDGE_AI_API_KEY or config.claude-key.toml api_key"
-    ;;
-  openai-oauth)
-    CONFIG="$PROJECT_DIR/config.openai-oauth.toml"
-    echo "🔑 Starting with OpenAI Official OAuth (via cc-switch)..."
-    echo "   cc-switch must be running with 'OpenAI Official' provider active"
-    ;;
-  openai-key)
-    CONFIG="$PROJECT_DIR/config.openai-key.toml"
-    echo "🔑 Starting with OpenAI API Key..."
-    echo "   Requires: LARK_AGENT_BRIDGE_AI_API_KEY or config.openai-key.toml api_key"
-    ;;
-  xiaomi-tp|default)
-    CONFIG="$PROJECT_DIR/config.toml"
-    echo "🔌 Starting with Xiaomi MiMo Token Plan (default config.toml)..."
-    echo "   Requires: LARK_AGENT_BRIDGE_AI_API_KEY or config.toml api_key"
-    ;;
-  "")
-    CONFIG="$PROJECT_DIR/config.toml"
-    echo "🔌 Starting with default config.toml..."
-    ;;
-  *)
-    # 支持直接传 config 文件名
-    if [[ "$PROFILE" == *.toml ]] && [ -f "$PROJECT_DIR/$PROFILE" ]; then
-      CONFIG="$PROJECT_DIR/$PROFILE"
-    elif [ -f "$PROJECT_DIR/$PROFILE" ]; then
-      CONFIG="$PROJECT_DIR/$PROFILE"
-    else
-      echo "Usage: $0 {cc-switch|claude-oauth|claude-key|openai-oauth|openai-key|xiaomi-tp|config.xxx.toml}" >&2
-      echo "" >&2
-      echo "Presets:" >&2
-      echo "  cc-switch     - cc-switch 代理，零配置" >&2
-      echo "  claude-oauth  - Claude 官方 OAuth（经 cc-switch）" >&2
-      echo "  claude-key    - Anthropic API Key 直连" >&2
-      echo "  openai-oauth  - OpenAI 官方 OAuth（经 cc-switch）" >&2
-      echo "  openai-key    - OpenAI API Key 直连" >&2
-      echo "  xiaomi-tp     - 小米 MiMo Token Plan（默认）" >&2
-      echo "" >&2
-      echo "Or pass a config file directly:" >&2
-      echo "  ./run.sh config.cc-switch.toml" >&2
-      exit 1
-    fi
-    ;;
-esac
+CONFIG="$PROJECT_DIR/config.toml"
+PRESETS="$PROJECT_DIR/config/presets.toml"
+
+VENV_PYTHON="$PROJECT_DIR/.venv/bin/python"
+if [ -n "${LARK_AGENT_BRIDGE_PYTHON:-}" ]; then
+  PYTHON_BIN="$LARK_AGENT_BRIDGE_PYTHON"
+elif [ -x "$VENV_PYTHON" ]; then
+  PYTHON_BIN="$VENV_PYTHON"
+else
+  PYTHON_BIN="python3"
+fi
 
 if [ ! -f "$CONFIG" ]; then
-  echo "❌ Config not found: $CONFIG" >&2
+  echo "Config not found: $CONFIG" >&2
   exit 1
 fi
 
-echo "📝 Config: $CONFIG"
+if [ ! -f "$PRESETS" ]; then
+  echo "Profile registry not found: $PRESETS" >&2
+  exit 1
+fi
+
+PROFILE_ENV="$("$PYTHON_BIN" -m lark_agent_bridge.profile_registry --path "$PRESETS" --shell "$REQUESTED_PROFILE")" || exit 1
+eval "$PROFILE_ENV"
+
+if [ "${PROFILE_REQUIRES_API_KEY:-false}" = "true" ] && [ -z "${LARK_AGENT_BRIDGE_AI_API_KEY:-}" ]; then
+  CONFIG_AI_API_KEY="$("$PYTHON_BIN" -c 'import sys, tomllib; data = tomllib.load(open(sys.argv[1], "rb")); print(str(data.get("ai_provider", {}).get("api_key", "")))' "$CONFIG" 2>/dev/null || true)"
+  if [ -z "$CONFIG_AI_API_KEY" ]; then
+    echo "Warning: profile '$PROFILE' requires a direct API key." >&2
+    echo "Set LARK_AGENT_BRIDGE_AI_API_KEY or local [ai_provider].api_key in config.toml." >&2
+    if [ -n "${PROFILE_PRECONDITION:-}" ]; then
+      echo "Profile precondition: $PROFILE_PRECONDITION" >&2
+    fi
+    echo "Clear shell API env vars: unset LARK_AGENT_BRIDGE_AI_API_KEY LARK_AGENT_BRIDGE_AI_FALLBACK_API_KEY LARK_AGENT_BRIDGE_AI_BASE_URL LARK_AGENT_BRIDGE_AI_FALLBACK_BASE_URL LARK_AGENT_BRIDGE_OMLX_API_KEY" >&2
+    echo "Clear launchd API env vars:" >&2
+    echo "  launchctl unsetenv LARK_AGENT_BRIDGE_AI_API_KEY" >&2
+    echo "  launchctl unsetenv LARK_AGENT_BRIDGE_AI_FALLBACK_API_KEY" >&2
+    echo "  launchctl unsetenv LARK_AGENT_BRIDGE_AI_BASE_URL" >&2
+    echo "  launchctl unsetenv LARK_AGENT_BRIDGE_AI_FALLBACK_BASE_URL" >&2
+    echo "  launchctl unsetenv LARK_AGENT_BRIDGE_OMLX_API_KEY" >&2
+  fi
+fi
+
+echo "Config: $CONFIG"
+echo "Profiles: $PRESETS"
+echo "Profile: $PROFILE"
+echo "Agent: ${LARK_AGENT_BRIDGE_AGENT_PROVIDER:-auto}"
+echo "Python: $PYTHON_BIN"
 echo ""
 echo "Press Ctrl+C to stop"
 echo "---"
 
-exec python3 -m lark_agent_bridge listen --config "$CONFIG"
+exec "$PYTHON_BIN" -m lark_agent_bridge listen --config "$CONFIG"

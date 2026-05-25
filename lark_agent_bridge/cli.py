@@ -70,6 +70,7 @@ def main(argv: list[str] | None = None) -> int:
     setup_logging()
     try:
         config = with_cli_overrides(load_config(args.config), dry_run=args.dry_run)
+        _warn_missing_direct_api_key(config)
         progress_callback = _print_progress if args.command == "listen" and not config.dry_run else None
         app = BridgeApp(config, progress_callback=progress_callback)
         if args.command == "check":
@@ -144,6 +145,26 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     parser.error(f"unknown command: {args.command}")
     return 2
+
+
+def _warn_missing_direct_api_key(config: object) -> None:
+    ai_provider = getattr(config, "ai_provider", None)
+    if ai_provider is None or not getattr(ai_provider, "enabled", False):
+        return
+    preset = str(getattr(ai_provider, "preset", "")).strip().lower()
+    if not getattr(ai_provider, "requires_api_key", False):
+        return
+    if str(getattr(ai_provider, "api_key", "")).strip():
+        return
+    logger.warning(
+        "profile '%s' requires a direct API key; set LARK_AGENT_BRIDGE_AI_API_KEY "
+        "or local [ai_provider].api_key in config.toml. Clear inherited API env vars with: "
+        "unset LARK_AGENT_BRIDGE_AI_API_KEY LARK_AGENT_BRIDGE_AI_FALLBACK_API_KEY "
+        "LARK_AGENT_BRIDGE_AI_BASE_URL LARK_AGENT_BRIDGE_AI_FALLBACK_BASE_URL "
+        "LARK_AGENT_BRIDGE_OMLX_API_KEY; clear launchd values with launchctl unsetenv "
+        "for the same variable names",
+        preset,
+    )
 
 
 def _add_common_options(parser: argparse.ArgumentParser) -> None:

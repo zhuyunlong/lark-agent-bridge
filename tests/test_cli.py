@@ -166,6 +166,29 @@ path = "{adb_json}"
         self.assertEqual(exit_code, 0)
         fake_app.purge_all_jobs.assert_not_called()
 
+    def test_cli_warns_when_direct_api_preset_has_no_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config.toml"
+            config.write_text(
+                f"""
+dry_run = true
+data_dir = "{tmp}/data"
+
+[ai_provider]
+enabled = true
+preset = "mimo-claude"
+""",
+                encoding="utf-8",
+            )
+
+            with self.assertLogs("bridge.cli", level="WARNING") as logs:
+                exit_code = main(["listen", "--config", str(config), "--dry-run"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("requires a direct API key", "\n".join(logs.output))
+        self.assertIn("LARK_AGENT_BRIDGE_AI_API_KEY", "\n".join(logs.output))
+        self.assertIn("[ai_provider].api_key", "\n".join(logs.output))
+
     def test_listen_purges_jobs_on_start_when_configured(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / "config.toml"

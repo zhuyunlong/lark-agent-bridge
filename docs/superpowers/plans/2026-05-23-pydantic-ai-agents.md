@@ -103,8 +103,8 @@ AnthropicProvider(base_url="...", api_key="...")
 ```
 
 Our presets map directly:
-- `openai`, `deepseek` → OpenAIProvider
-- `xiaomi-tp`, `yybb`, `cc-switch` → AnthropicProvider
+- `openai`, `yybb-codex`, `panda-codex`, `cc-switch-yybb-codex` → OpenAIProvider
+- `mimo-claude`, `deepseek-claude`, `yybb-claude`, `cc-switch-*-claude` → AnthropicProvider
 
 ## Installation
 

@@ -29,45 +29,59 @@ The project intentionally uses Python standard library modules only and requires
 
 ## Quick Start
 
-Start the bot with one of two preset configurations:
+Start the bot through the single launcher and single runtime config:
 
 ```bash
-# Option 1: Use local cc-switch proxy (supports multiple providers via UI switching)
-# Requires: cc-switch running at 127.0.0.1:15721
-./run.sh cc-switch
+# Clean checkout setup: create the ignored local runtime file from the committed template.
+cp config/config.example.toml config.toml
 
-# Option 2: Use OpenAI API directly (no local proxy needed)
-# Requires: LARK_AGENT_BRIDGE_AI_API_KEY environment variable or config.openai.toml
-./run.sh openai
+# Default: config.toml + cc-switch-deepseek-claude
+./run.sh
+
+# Override only the preset/profile. run.sh still loads config.toml.
+./run.sh cc-switch-deepseek-claude
+./run.sh cc-switch-mimo-claude
+./run.sh cc-switch-yybb-claude
+./run.sh cc-switch-yybb-codex
+./run.sh cc-switch-scihub-claude
+./run.sh deepseek-claude
+./run.sh mimo-claude
+./run.sh yybb-claude
+./run.sh yybb-codex
+./run.sh panda-codex
+./run.sh codex-offi
+./run.sh claude-offi
 ```
 
-Or use the CLI directly with custom config:
+Or use the CLI directly with the same config:
 
 ```bash
-python3 -m lark_agent_bridge listen --config config.custom.toml
+python3 -m lark_agent_bridge listen --config config.toml
 ```
 
 ## Configure
 
-Copy the example before real use:
+`config.toml` is the only runtime TOML. It is ignored by Git and must stay desensitized: keep tokens, Bot IDs, user IDs, internal URLs, and API keys out of committed files. `config/config.example.toml` is the committed desensitized template.
 
-```bash
-cp config.example.toml config.toml
-```
-
-`dry_run = true` is the safe default. By default `allowed_chats = []`, which means group access is not restricted: any group can `@` the bot for bug analysis, direct analysis, signal analysis, perception summary, follow-up, and ordinary chat. If you later need group access control, fill `allowed_chats`; users inside an allowed group are all supported. `p2p` private chats are also supported directly.
-
-Recommended local setup:
-
-```bash
-cp config.example.toml config.toml
-```
-
-Then keep sensitive values in either `config.toml` or environment variables:
+Provider/profile details are centralized in `config/presets.toml`. Routing terms live in `config/routing_terms.toml`. Keep secrets in environment variables:
 
 ```bash
 export LARK_AGENT_BRIDGE_BOT_NAME="My Feishu CLI Bot"
 export LARK_AGENT_BRIDGE_OMLX_API_KEY="your-local-api-key"
+export LARK_AGENT_BRIDGE_AI_API_KEY="your-provider-key"
+```
+
+Direct API profiles (`deepseek-claude`, `mimo-claude`, `yybb-claude`, `yybb-codex`, `panda-codex`) require `LARK_AGENT_BRIDGE_AI_API_KEY` or local `[ai_provider].api_key` in ignored `config.toml`. `run.sh` warns when neither is present.
+
+Clear inherited API variables when switching back to cc-switch or official CLI login:
+
+```bash
+unset LARK_AGENT_BRIDGE_AI_API_KEY LARK_AGENT_BRIDGE_AI_FALLBACK_API_KEY LARK_AGENT_BRIDGE_AI_BASE_URL LARK_AGENT_BRIDGE_AI_FALLBACK_BASE_URL LARK_AGENT_BRIDGE_OMLX_API_KEY
+launchctl unsetenv LARK_AGENT_BRIDGE_AI_API_KEY
+launchctl unsetenv LARK_AGENT_BRIDGE_AI_FALLBACK_API_KEY
+launchctl unsetenv LARK_AGENT_BRIDGE_AI_BASE_URL
+launchctl unsetenv LARK_AGENT_BRIDGE_AI_FALLBACK_BASE_URL
+launchctl unsetenv LARK_AGENT_BRIDGE_OMLX_API_KEY
 ```
 
 Detailed configuration guidance, environment variables, and `launchd` injection examples are in [docs/configuration.md](docs/configuration.md).
@@ -152,11 +166,8 @@ python3.11 -m lark_agent_bridge knowledge answer --config config.toml "主题信
 python3.11 -m lark_agent_bridge knowledge answer --config config.toml "PB对象怎么ADB模拟"
 ```
 
-The default example config wires these sources:
+The desensitized `config.toml` wires only the local guideengine signal-source snippets by default. Add private knowledge sources locally when needed; do not commit Feishu Wiki/Base URLs or local credential-bearing paths.
 
-- `/Users/zhuyl/Documents/workspace/xp/guideengine/.worktrees/os6_xpdev/config/adb/adb_data.json`
-- `https://xiaopeng.feishu.cn/wiki/Tog2wE6sxij4SjkNp6UcRK6Xn6l?table=tblHjB1Nm6m9EbkL&view=vewmlXCvgy`
-- `https://xiaopeng.feishu.cn/wiki/D6Vhw7iB3iTWnLkdBx3coVQQnuh`
 - guideengine signal-source snippets from `DataCenterBroadcastReceiver.java`、`SrOtaService.kt`、`signal.proto`
 
 For fuzzy ADB signal simulation questions such as `OTA信号如何模拟`、`主题信号如何模拟` or `上下电如何模拟`, the bridge uses verified/source-derived template data first, then template alias/candidate matching, and only runs read-only Codex CLI source investigation when the user explicitly asks for source investigation. If a fuzzy topic maps to multiple candidate signals, the answer lists each candidate with a short use-case description and a follow-up phrase such as `知识库 模拟 SIGNAL_SR_XTHEME` for selecting one. Signal simulation is classified by source capability: primitive values can use the generic broadcast, verified `mockDataFactory` builders can return concrete templates, while ByteArray/PB/ProtoObject signals without a builder are reported as requiring custom factory code or record replay rather than a fake generic ADB command. When a broad operation question has no high-confidence template but the core terms retrieve executable commands, the bridge returns those commands as low-confidence candidates with an explicit confirmation boundary instead of falling back to unrelated high-noise entries. High-confidence Codex CLI findings with a canonical key and source evidence are recorded into `derived-adb-simulations`; low-confidence, timed-out, or invalid-schema runs only return the investigation boundary and are not written back. The same backend exposes `/api/knowledge/sources`, `/api/knowledge/search`, `/api/knowledge/sync`, and `/api/knowledge/items` for listing, searching, resyncing, and adding manual knowledge.
@@ -171,7 +182,7 @@ To avoid cross-bot conflicts in busy groups, set `[lark].bot_name` or `[lark].bo
 
 Sensitive or machine-specific settings should stay out of Git:
 
-- `config.toml` is ignored by default
+- `config.toml` is ignored by default; committed config metadata/templates live under `config/`
 - `data/` runtime outputs are ignored by default
 - supported environment variables:
   - `LARK_AGENT_BRIDGE_WORKSPACE_ROOT`
@@ -183,6 +194,10 @@ Sensitive or machine-specific settings should stay out of Git:
   - `LARK_AGENT_BRIDGE_OMLX_BASE_URL`
   - `LARK_AGENT_BRIDGE_OMLX_MODEL`
   - `LARK_AGENT_BRIDGE_OMLX_API_KEY`
+  - `LARK_AGENT_BRIDGE_AI_API_KEY`
+  - `LARK_AGENT_BRIDGE_AI_FALLBACK_API_KEY`
+  - `LARK_AGENT_BRIDGE_AI_BASE_URL`
+  - `LARK_AGENT_BRIDGE_AI_FALLBACK_BASE_URL`
   - `LARK_AGENT_BRIDGE_REPORT_PUBLIC_BASE_URL`
 
 Job retention is controlled by `[job_retention]`. The default local policy is:
@@ -196,45 +211,45 @@ Job retention is controlled by `[job_retention]`. The default local policy is:
 ## Dry-run examples
 
 ```bash
-python3.11 -m lark_agent_bridge check --config config.example.toml
+python3.11 -m lark_agent_bridge check --config config.toml
 
 python3.11 -m lark_agent_bridge handle-event \
-  --config config.example.toml \
+  --config config.toml \
   --event samples/signal_event_with_url.json \
   --dry-run
 
 python3.11 -m lark_agent_bridge handle-event \
-  --config config.example.toml \
+  --config config.toml \
   --event samples/signal_event_with_file.json \
   --dry-run
 
 python3.11 -m lark_agent_bridge handle-event \
-  --config config.example.toml \
+  --config config.toml \
   --event samples/basic_chat_who_are_you.json \
   --dry-run
 
 python3.11 -m lark_agent_bridge handle-event \
-  --config config.example.toml \
+  --config config.toml \
   --event samples/omlx_chat_question.json \
   --dry-run
 
 python3.11 -m lark_agent_bridge handle-event \
-  --config config.example.toml \
+  --config config.toml \
   --event samples/group_chat_command.json \
   --dry-run
 
 python3.11 -m lark_agent_bridge handle-event \
-  --config config.example.toml \
+  --config config.toml \
   --event samples/group_unmentioned_url.json \
   --dry-run
 
 python3.11 -m lark_agent_bridge handle-event \
-  --config config.example.toml \
+  --config config.toml \
   --event samples/p2p_plain_chat.json \
   --dry-run
 
 python3.11 -m lark_agent_bridge run-signal \
-  --config config.example.toml \
+  --config config.toml \
   --signal 132002 \
   --log-path /path/to/log \
   --dry-run
@@ -245,13 +260,13 @@ python3.11 -m lark_agent_bridge run-signal \
 Real mode requires a working `lark-cli` bot login and Feishu app scopes for message events, message reads, attachment downloads, and replies. `python3.11 -m lark_agent_bridge check --config config.toml` will show the current `userOpenId` from `lark-cli auth status`.
 
 ```bash
-scripts/run-listener.sh
+./run.sh
 ```
 
 For diagnostics without starting the listener:
 
 ```bash
-scripts/run-listener.sh check
+python3.11 -m lark_agent_bridge check --config config.toml
 ```
 
 After `listen` starts, open `http://<bridge-lan-ip>:8765/admin` to view the local management console. It includes multi-session progress, historical cases with the latest report per Bug, listener health, and skill management for listing, creating, editing, deleting, and statically debugging local `.ai/skills` entries. `/sessions` still opens the same console for older bookmarks.

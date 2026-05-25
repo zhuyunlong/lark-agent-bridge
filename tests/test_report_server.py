@@ -46,6 +46,46 @@ class ReportServerTests(unittest.TestCase):
                 self.assertEqual(published.source_report_paths, [html_path.resolve()])
                 self.assertIn("首帧超时", published.context_excerpt)
 
+    def test_publish_result_with_version_uses_versioned_url_and_preserves_older_bundle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            html_path = Path(tmp) / "bug_report.html"
+            html_path.write_text("<html><body><h1>根因分析</h1><p>首帧超时</p></body></html>", encoding="utf-8")
+            config = BridgeConfig(
+                dry_run=False,
+                data_dir=Path(tmp),
+                report_server=ReportServerOptions(bind_host="0.0.0.0"),
+            )
+            publisher = HtmlReportPublisher(config)
+
+            with mock.patch("lark_agent_bridge.report_server._detect_lan_ip", return_value="10.2.3.4"):
+                first = publisher.publish_result(
+                    TaskResult(
+                        success=True,
+                        message="bug 分析完成",
+                        job_id="evt_bug_1",
+                        details={"mode": "bug_analysis", "files_to_send": [html_path]},
+                    ),
+                    version=1,
+                )
+                second = publisher.publish_result(
+                    TaskResult(
+                        success=True,
+                        message="bug 重新分析完成",
+                        job_id="evt_bug_1",
+                        details={"mode": "bug_reanalysis", "files_to_send": [html_path]},
+                    ),
+                    version=2,
+                )
+
+                self.assertIsNotNone(first)
+                self.assertIsNotNone(second)
+                assert first is not None and second is not None
+                self.assertEqual(first.url, "http://10.2.3.4:8765/reports/evt_bug_1/v1/")
+                self.assertEqual(second.url, "http://10.2.3.4:8765/reports/evt_bug_1/v2/")
+                self.assertTrue(first.index_path.exists())
+                self.assertTrue(second.index_path.exists())
+                self.assertNotEqual(first.index_path, second.index_path)
+
     def test_publish_result_index_includes_agent_runtime_fields(self):
         with tempfile.TemporaryDirectory() as tmp:
             html_path = Path(tmp) / "bug_report.html"

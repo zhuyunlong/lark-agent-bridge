@@ -20,6 +20,7 @@ logger = get_logger("app")
 
 from .agents import (
     Addr2LineRunner,
+    BugAnalysisPlan,
     BugAnalysisRunner,
     BugFollowupSelection,
     ClaudeSkillRunner,
@@ -183,6 +184,30 @@ _FOLLOWUP_STOP_TERMS = (
     "问题",
     "结论",
 )
+
+_SOURCE_ANALYSIS_TERMS = (
+    "源码分析",
+    "基于源码",
+    "根据源码",
+    "重新源码分析",
+    "重点看",
+    "关键字",
+)
+
+
+@dataclass
+class _IntentPreflightDecision:
+    title: str
+    intent_label: str
+    confidence_label: str
+    strategy_label: str
+    reason: str
+    execute: bool = True
+    clarification_result: TaskResult | None = None
+    plans_override: list[BugAnalysisPlan] | None = None
+    classification_skill: str = ""
+    classification_source: str = "preflight_rules"
+    classification_reason: str = ""
 
 _FAST_EXISTING_ANSWER_MIN_CONFIDENCE = 0.8
 _FAST_ANSWER_DOMAIN_STOP_TERMS = {
@@ -469,17 +494,32 @@ class BridgeApp:
     def _handle_event(self, event: LarkEvent) -> TaskResult:
         self.cleanup_expired_jobs()
 
-        # Phase 1: Group mention filtering
+        # Phase 1: Group mention filtering.
+        # Strict rule:
+        #   - New chain root: event.reply_to is empty AND the message @-mentions the bot.
+        #   - Continuation:  event.reply_to points at a known bot alias (an entry in
+        #                    conversation_store whose context_key != root_message_id).
+        #   - Anything else: ignored.
         route_content = event.content
         followup_context = None
+        phase1_new_chain = False
         if event.chat_type == "group":
-            addressed_content = self._strip_group_chat_mention(event.content, event=event)
-            if addressed_content is None:
-                followup_context = self._resolve_followup_context(event)
+            stripped_at_bot = self._strip_group_chat_mention(event.content, event=event)
+            direct_reply_to = self._direct_reply_to(event)
+            addressed_content: str | None = None
+            if direct_reply_to:
+                followup_context = self._lookup_bot_alias_context(direct_reply_to)
                 if followup_context is not None:
-                    addressed_content = self._strip_bot_mention_anywhere(event.content)
-                    if addressed_content is None and self._allows_reply_chain_without_mention(followup_context):
-                        addressed_content = event.content.strip()
+                    addressed_content = (
+                        stripped_at_bot if stripped_at_bot is not None else event.content.strip()
+                    )
+                elif stripped_at_bot is not None:
+                    addressed_content = stripped_at_bot
+                    phase1_new_chain = True
+            else:
+                if stripped_at_bot is not None:
+                    addressed_content = stripped_at_bot
+                    phase1_new_chain = True
             if addressed_content is None:
                 if not self.state_store.mark_seen(event):
                     return TaskResult(True, f"duplicate event skipped: {event.event_id}", skipped=True)
@@ -572,23 +612,24 @@ class BridgeApp:
         # Each returns TaskResult on match, or None to fall through.
         _ROUTE_HANDLERS = [
             self._route_bug_followup,       # 1. Bug followup conversation
-            self._route_bug_intent,         # 2. Explicit bug analysis request
-            self._route_addr2line_resolve,  # 3. Native stack address reverse lookup
-            self._route_rom_version_lookup, # 4. ROM version lookup
-            self._route_scene_signal,       # 5. Scene signal shortcut
-            self._route_knowledge_qa,       # 6. Personal knowledge QA / ADB templates
-            self._route_signal_request,     # 7. Signal lifecycle analysis
-            self._route_claude_skill,       # 8. Optional configured local skill route
-            self._route_bug_request,        # 9. Bug request (secondary match)
-            self._route_perception,         # 10. Perception summary
-            self._route_direct_analysis,    # 11. Direct file/log analysis
-            self._route_followup_intent,    # 12. Followup intent keywords
-            self._route_general_followup,   # 13. General followup conversation
-            self._route_knowledge_probe,    # 14. Internal operation QA from knowledge before chat
-            self._route_stale_light_interaction,  # 15. Replayed old lightweight messages
-            self._route_basic_chat,         # 16. Deterministic help/identity replies
-            self._route_omlx_chat,          # 17. OMLX chat conversation
-            self._route_intent_router,      # 18. Intent fallback for unresolved tasks
+            self._route_direct_analysis_followup,  # 2. File-analysis followup / retry
+            self._route_bug_intent,         # 3. Explicit bug analysis request
+            self._route_addr2line_resolve,  # 4. Native stack address reverse lookup
+            self._route_rom_version_lookup, # 5. ROM version lookup
+            self._route_scene_signal,       # 6. Scene signal shortcut
+            self._route_knowledge_qa,       # 7. Personal knowledge QA / ADB templates
+            self._route_signal_request,     # 8. Signal lifecycle analysis
+            self._route_claude_skill,       # 9. Optional configured local skill route
+            self._route_bug_request,        # 10. Bug request (secondary match)
+            self._route_perception,         # 11. Perception summary
+            self._route_direct_analysis,    # 12. Direct file/log analysis
+            self._route_followup_intent,    # 13. Followup intent keywords
+            self._route_general_followup,   # 14. General followup conversation
+            self._route_knowledge_probe,    # 15. Internal operation QA from knowledge before chat
+            self._route_stale_light_interaction,  # 16. Replayed old lightweight messages
+            self._route_basic_chat,         # 17. Deterministic help/identity replies
+            self._route_omlx_chat,          # 18. OMLX chat conversation
+            self._route_intent_router,      # 19. Intent fallback for unresolved tasks
         ]
         for handler in _ROUTE_HANDLERS:
             result = handler(ctx)
@@ -610,14 +651,21 @@ class BridgeApp:
     # --- Individual route handlers (ordered by priority) ---
 
     def _route_bug_followup(self, ctx: _RouteContext) -> TaskResult | None:
+        if ctx.followup_context is None or "bug" not in str(ctx.followup_context.mode).casefold():
+            return None
+        if ctx.signal_request is None or not ctx.signal_request.triggered:
+            return self._handle_followup(ctx.event, ctx.route_content, ctx.followup_context)
         if (
-            ctx.followup_context is not None
-            and "bug" in str(ctx.followup_context.mode).casefold()
-            and ctx.signal_request is not None
-            and not ctx.signal_request.triggered
+            self._bug_followup_requires_fresh_analysis(ctx.route_content)
+            and self._is_bug_reanalysis_followup(ctx.route_content, ctx.followup_context)
         ):
             return self._handle_followup(ctx.event, ctx.route_content, ctx.followup_context)
         return None
+
+    def _route_direct_analysis_followup(self, ctx: _RouteContext) -> TaskResult | None:
+        if ctx.followup_context is None:
+            return None
+        return self._maybe_handle_direct_analysis_followup(ctx.event, ctx.followup_context, ctx.route_content)
 
     def _route_bug_intent(self, ctx: _RouteContext) -> TaskResult | None:
         if ctx.bug_request is not None and getattr(ctx.bug_request, "triggered", False):
@@ -693,6 +741,13 @@ class BridgeApp:
     def _route_signal_request(self, ctx: _RouteContext) -> TaskResult | None:
         request = ctx.signal_request
         if request is None or not request.triggered:
+            return None
+        if (
+            not request.signal
+            and ctx.direct_analysis_request is not None
+            and bool(ctx.direct_analysis_request.resources)
+            and self._looks_like_direct_analysis_prompt(ctx.route_content)
+        ):
             return None
         if not request.resources:
             inherited_resources = self._contextual_signal_resources(
@@ -814,20 +869,11 @@ class BridgeApp:
             return None
         if self._should_defer_direct_analysis_to_intent(ctx):
             return None
-        if not self.state_store.mark_seen(ctx.event):
-            return TaskResult(True, f"duplicate event skipped: {ctx.event.event_id}", skipped=True)
-        pending = self._maybe_request_approval(
+        return self._handle_direct_analysis_intent(
             ctx.event,
-            operation_type="direct_analysis",
-            description="直传文件分析",
-            route_content=ctx.route_content,
-            file_count=len(ctx.direct_analysis_request.resources),
-            prompt=ctx.direct_analysis_request.prompt,
-            estimated_duration_seconds=self.config.bug_analysis.timeout_seconds,
+            ctx.route_content,
+            referenced_resources=ctx.referenced_resources,
         )
-        if pending is not None:
-            return pending
-        return self._run_direct_analysis_request(ctx.event, ctx.direct_analysis_request, ctx.route_content)
 
     def _should_defer_direct_analysis_to_intent(self, ctx: _RouteContext) -> bool:
         if not self.intent_runner.is_enabled():
@@ -1358,11 +1404,6 @@ class BridgeApp:
             return plain_at.group(1).strip()
         return None
 
-    def _strip_group_followup_mention(self, event: LarkEvent) -> str | None:
-        if not (event.reply_to or event.parent_id or event.root_id or event.thread_id):
-            return None
-        return self._strip_bot_mention_anywhere(event.content)
-
     def _strip_bot_mention_anywhere(self, text: str) -> str | None:
         content = self._normalize_mention_source_text(text)
         configured_bot = self.config.lark.bot_open_id.strip()
@@ -1516,7 +1557,10 @@ class BridgeApp:
         if existing and existing.get("message_id"):
             existing["title"] = title
             existing["status"] = status
-            existing["details"] = dict(details or {})
+            existing["details"] = {
+                **dict(existing.get("details") or {}),
+                **dict(details or {}),
+            }
             existing["last_active_at"] = datetime.now(timezone.utc)
             self._update_progress_card(event, status=status, note=note, session_id=session_id)
             return
@@ -1695,6 +1739,215 @@ class BridgeApp:
         if skill_label:
             return f"当前命中：{skill_label}。如果意图不正确，可以先补充要求，再从 Skill 按钮改选一个方向基于已有日志重新分析。"
         return "如果当前意图不正确，可以先补充要求，再从 Skill 按钮改选一个方向基于已有日志重新分析。"
+
+    def _analysis_label_for_plan_kind(self, kind: str) -> str:
+        labeler = getattr(self.bug_runner, "_analysis_label", None)
+        if callable(labeler):
+            try:
+                return str(labeler(kind))
+            except Exception:
+                pass
+        return kind or "通用问题分析"
+
+    def _has_explicit_source_clue(self, text: str) -> bool:
+        normalized = str(text or "")
+        if any(term in normalized for term in _SOURCE_ANALYSIS_TERMS):
+            return True
+        if re.search(r"\b[\w.-]+\.(?:kt|java|cpp|cc|c|h|hpp|py)\b", normalized, re.I):
+            return True
+        if re.search(r"\b[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)+\b", normalized):
+            return True
+        if re.search(r"\b(?=[A-Za-z0-9_]*[a-z])(?=[A-Za-z0-9_]*[A-Z])[A-Za-z_][A-Za-z0-9_]{5,}\b", normalized):
+            return True
+        return False
+
+    def _build_direct_analysis_clarification_options(self) -> list[dict[str, object]]:
+        options: list[dict[str, object]] = []
+        provider = getattr(self.bug_runner, "supported_primary_bug_skills", None)
+        raw_skills = provider() if callable(provider) else []
+        index = 1
+        for item in raw_skills:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            label = str(item.get("label") or name).strip()
+            if not name or not label or name == "general":
+                continue
+            options.append(
+                {
+                    "index": index,
+                    "type": "skill",
+                    "skill_name": name,
+                    "label": label,
+                }
+            )
+            index += 1
+        options.append(
+            {
+                "index": index,
+                "type": "source_analysis",
+                "label": "直接源码分析",
+            }
+        )
+        return options
+
+    def _direct_analysis_needs_user_direction(self, prompt: str) -> bool:
+        normalized = prompt.strip()
+        if not normalized:
+            return False
+        has_time = bool(
+            re.search(r"\b20\d{2}-\d{2}-\d{2}\b", normalized)
+            or re.search(r"\b\d{1,2}:\d{2}\b", normalized)
+            or "时间点" in normalized
+            or "问题时间" in normalized
+        )
+        if not has_time:
+            return False
+        broad_terms = ("生命周期", "3D", "场景", "启动", "卡顿", "黑屏", "闪退")
+        return any(term in normalized for term in broad_terms)
+
+    def _render_direct_analysis_clarification_message(self, *, prompt: str, options: list[dict[str, object]]) -> str:
+        lines = [
+            "意图分析结果：当前已识别为文件型分析请求，但自动路由置信度不足，暂不直接执行。",
+            "",
+            f"原始请求：{prompt.strip()}",
+            "",
+            "请直接回复下面任一选项的序号，或直接回复对应文本：",
+        ]
+        for option in options:
+            lines.append(f"{option['index']}. {option['label']}")
+        lines.extend(
+            [
+                "",
+                "也可以直接补充更明确的方向，例如：",
+                "- 根据源码分析 SR 生命周期",
+                "- 重点看 displayChanged",
+                "- 按当前感知数据总结",
+            ]
+        )
+        return "\n".join(lines)
+
+    def _match_direct_analysis_clarification_option(
+        self,
+        followup_text: str,
+        previous_session: dict[str, object],
+    ) -> dict[str, object] | None:
+        details = previous_session.get("details", {})
+        if not isinstance(details, dict):
+            return None
+        raw_options = details.get("intent_options")
+        if not isinstance(raw_options, list):
+            return None
+        normalized = followup_text.strip()
+        if not normalized:
+            return None
+        for option in raw_options:
+            if not isinstance(option, dict):
+                continue
+            index = str(option.get("index") or "").strip()
+            label = str(option.get("label") or "").strip()
+            skill_name = str(option.get("skill_name") or "").strip()
+            if normalized == index:
+                return option
+            if label and normalized.casefold() == label.casefold():
+                return option
+            if skill_name and normalized.casefold() == skill_name.casefold():
+                return option
+        if normalized in {"直接源码分析", "源码分析"}:
+            for option in raw_options:
+                if isinstance(option, dict) and str(option.get("type") or "") == "source_analysis":
+                    return option
+        return None
+
+    def _direct_analysis_preflight(self, request: DirectAnalysisRequest) -> _IntentPreflightDecision:
+        prompt = request.prompt.strip()
+        if not request.resources:
+            return _IntentPreflightDecision(
+                title="文件分析",
+                intent_label="文件分析",
+                confidence_label="高置信度",
+                strategy_label="自动执行",
+                reason="消息已包含可执行的文件分析资源。",
+            )
+        explicit_source = self._has_explicit_source_clue(prompt)
+        plans = self.bug_runner.classify_requests(prompt_text=prompt, title="", description="")
+        first_plan = plans[0] if plans else BugAnalysisPlan(kind="general")
+        if explicit_source:
+            return _IntentPreflightDecision(
+                title="文件分析",
+                intent_label="源码导向文件分析",
+                confidence_label="高置信度",
+                strategy_label="自动执行",
+                reason="已识别到明确源码线索，将基于日志和源码证据直接执行文件分析。",
+                plans_override=[BugAnalysisPlan(kind="custom_skill")],
+                classification_skill="source_analysis",
+                classification_reason="文件请求包含明确源码线索，优先按源码导向分析执行。",
+            )
+        if first_plan.kind != "general":
+            plan_label = self._analysis_label_for_plan_kind(first_plan.kind)
+            return _IntentPreflightDecision(
+                title="文件分析",
+                intent_label=f"文件型Bug分析（{plan_label}）",
+                confidence_label="高置信度",
+                strategy_label="自动执行",
+                reason=f"已命中专用分析方向：{plan_label}。",
+                plans_override=plans,
+                classification_skill=self.bug_runner._skill_name_for_kind(first_plan.kind),
+                classification_reason=f"文件请求已稳定命中专用分析方向：{plan_label}。",
+            )
+        if not self._direct_analysis_needs_user_direction(prompt):
+            return _IntentPreflightDecision(
+                title="文件分析",
+                intent_label="文件型分析",
+                confidence_label="高置信度",
+                strategy_label="自动执行",
+                reason="消息已给出附件资源和可执行请求，按文件分析直接执行。",
+                classification_skill="general",
+                classification_reason="文件请求未命中专用方向，但范围不足以要求额外分诊，直接执行通用文件分析。",
+            )
+        options = self._build_direct_analysis_clarification_options()
+        message = self._render_direct_analysis_clarification_message(prompt=prompt, options=options)
+        clarification = TaskResult(
+            success=True,
+            skipped=True,
+            message=message,
+            details={
+                "mode": "bug_clarification",
+                "analysis_kind": "general",
+                "analysis_kinds": ["general"],
+                "analysis_skill": "general",
+                "analysis_skill_label": "通用问题分诊",
+                "classification_source": "preflight_rules",
+                "classification_reason": "文件请求未命中稳定专用方向，需用户补充约束后继续。",
+                "needs_user_direction": True,
+                "supported_bug_skills": getattr(self.bug_runner, "supported_primary_bug_skills", lambda: [])(),
+                "intent_options": options,
+                "user_request_text": prompt,
+            },
+        )
+        return _IntentPreflightDecision(
+            title="文件分析分诊",
+            intent_label="文件型分析待补充方向",
+            confidence_label="低置信度",
+            strategy_label="等待用户补充",
+            reason="当前只有文件和泛化现象，未稳定命中专用分析方向。",
+            execute=False,
+            clarification_result=clarification,
+        )
+
+    def _send_intent_preflight_card(self, event: LarkEvent, decision: _IntentPreflightDecision) -> None:
+        self.send_status_card(
+            event,
+            title=decision.title,
+            status="queued",
+            details={
+                "意图分析": decision.intent_label,
+                "置信度": decision.confidence_label,
+                "执行策略": decision.strategy_label,
+                "分类来源": decision.classification_source or "preflight_rules",
+            },
+            note=f"意图分析：{decision.reason}",
+        )
 
     def _result_bug_agent_choices(self, result: TaskResult | None) -> list[dict[str, object]]:
         if result is None or not result.success or not self._result_is_bug_report_mode(result):
@@ -1950,6 +2203,16 @@ class BridgeApp:
         return decision.can_proceed
 
     def _run_signal_request(self, event: LarkEvent, request: SignalRequest, route_content: str) -> TaskResult:
+        self._send_intent_preflight_card(
+            event,
+            _IntentPreflightDecision(
+                title="信号生命周期",
+                intent_label="信号生命周期分析",
+                confidence_label="高置信度",
+                strategy_label="自动执行",
+                reason="消息已明确命中信号生命周期分析入口。",
+            ),
+        )
         self._notify_progress(
             "signal_request_received",
             "收到信号生命周期分析请求",
@@ -1970,6 +2233,16 @@ class BridgeApp:
         return self._deliver_result(event, result, request_text=request.raw_text or route_content)
 
     def _run_bug_request(self, event: LarkEvent, bug_request, route_content: str) -> TaskResult:
+        self._send_intent_preflight_card(
+            event,
+            _IntentPreflightDecision(
+                title="Bug 分析",
+                intent_label="Bug 分析",
+                confidence_label="高置信度",
+                strategy_label="自动执行",
+                reason="消息包含显式 Bug 链接，将按 Bug 分析路径执行。",
+            ),
+        )
         self._notify_progress(
             "bug_request_received",
             "收到 bug 分析请求",
@@ -1994,6 +2267,16 @@ class BridgeApp:
         return self._deliver_result(event, result, request_text=bug_request.raw_text or route_content)
 
     def _run_perception_request(self, event: LarkEvent, perception_request, route_content: str) -> TaskResult:
+        self._send_intent_preflight_card(
+            event,
+            _IntentPreflightDecision(
+                title="感知数据总结",
+                intent_label="感知数据总结",
+                confidence_label="高置信度",
+                strategy_label="自动执行",
+                reason="消息已明确命中感知数据总结入口。",
+            ),
+        )
         self._notify_progress(
             "perception_summary_request_received",
             "收到感知数据总结请求",
@@ -2011,7 +2294,17 @@ class BridgeApp:
         result = self.perception_runner.run_summary(perception_request, event=event)
         return self._deliver_result(event, result, request_text=perception_request.raw_text or route_content)
 
-    def _run_direct_analysis_request(self, event: LarkEvent, direct_analysis_request, route_content: str) -> TaskResult:
+    def _run_direct_analysis_request(
+        self,
+        event: LarkEvent,
+        direct_analysis_request,
+        route_content: str,
+        *,
+        plans_override: list[BugAnalysisPlan] | None = None,
+        classification_skill: str = "",
+        classification_source: str = "",
+        classification_reason: str = "",
+    ) -> TaskResult:
         self._notify_progress(
             "direct_analysis_request_received",
             "收到直传文件分析请求",
@@ -2031,6 +2324,10 @@ class BridgeApp:
             direct_analysis_request,
             event=event,
             progress_callback=self._event_progress_callback(event),
+            plans_override=plans_override,
+            classification_skill=classification_skill,
+            classification_source=classification_source,
+            classification_reason=classification_reason,
         )
         return self._deliver_result(event, result, request_text=direct_analysis_request.raw_text or route_content)
 
@@ -2944,17 +3241,23 @@ class BridgeApp:
         if not result.success:
             return result
         self._apply_dual_agent_arbitration(result)
-        published = self.report_publisher.publish_result(result)
+        bug_url = str(result.details.get("bug_url") or self._bug_url_from_request_text(request_text))
+        context_root_message_id = root_message_id or event.root_id or event.message_id
+        group_key = derive_group_key(
+            bug_url=bug_url,
+            case_id=result.job_id or "",
+            root_message_id=context_root_message_id,
+        )
+        next_report_version = self.version_store.peek_next_version(group_key)
+        published = self.report_publisher.publish_result(result, version=next_report_version)
         if published is None:
             mode = str(result.details.get("mode", "") or "").strip()
             if result.success and (
                 result.details.get("needs_user_direction") or mode in self._threaded_reply_context_modes()
             ):
                 details = dict(result.details)
-                context_root_message_id = root_message_id or event.root_id or event.message_id
                 details.setdefault("delivery", "reply")
                 details.setdefault("conversation_root_message_id", context_root_message_id)
-                bug_url = str(details.get("bug_url") or self._bug_url_from_request_text(request_text))
                 if bug_url:
                     details["bug_url"] = bug_url
                 result.details = details
@@ -2975,7 +3278,7 @@ class BridgeApp:
         details["delivery"] = "reply"
         details["published_report_url"] = published.url
         details["published_report_index"] = str(published.index_path)
-        context_root_message_id = root_message_id or event.root_id or event.message_id
+        details["published_report_dir"] = str(published.directory)
         details["conversation_root_message_id"] = context_root_message_id
         if event.chat_type == "group":
             details["files_to_send"] = [Path(path) for path in published.source_report_paths]
@@ -2992,7 +3295,6 @@ class BridgeApp:
             report_excerpt=published.context_excerpt,
         )
         self._remember_progress_card_aliases(event, context_root_message_id)
-        bug_url = str(details.get("bug_url") or self._bug_url_from_request_text(request_text))
         if bug_url and not details.get("bug_url"):
             details["bug_url"] = bug_url
             result.details = details
@@ -3004,13 +3306,9 @@ class BridgeApp:
             bug_url=bug_url,
         )
         # Track report version
-        group_key = derive_group_key(
-            bug_url=bug_url,
-            case_id=result.job_id or "",
-            root_message_id=context_root_message_id,
-        )
         version = self.version_store.add_version(
             group_key,
+            version=next_report_version,
             job_id=result.job_id or "",
             report_url=published.url,
             summary=summary_text,
@@ -3271,9 +3569,6 @@ class BridgeApp:
             "addr2line_resolve",
             "rom_version_lookup",
         }
-
-    def _allows_reply_chain_without_mention(self, followup_context) -> bool:
-        return str(getattr(followup_context, "mode", "") or "").strip() in self._threaded_reply_context_modes()
 
     def _latest_analysis_context(self, chat_id: str, *, explicit_followup_context=None):
         latest = self.conversation_store.latest_for_chat(chat_id, modes=self._analysis_context_modes())
@@ -3809,14 +4104,24 @@ class BridgeApp:
         extra: list[DownloadResource],
     ) -> list[DownloadResource]:
         merged: list[DownloadResource] = []
-        seen: set[tuple[str, str, str]] = set()
+        seen: dict[tuple[str, str, str], int] = {}
         for item in [*primary, *extra]:
             key = (item.kind, item.value, item.source_message_id.strip())
-            if key in seen:
+            existing_index = seen.get(key)
+            if existing_index is not None:
+                if not merged[existing_index].display_name and item.display_name:
+                    merged[existing_index] = item
                 continue
-            seen.add(key)
+            seen[key] = len(merged)
             merged.append(item)
         return merged
+
+    def _extract_resource_display_name(self, value: dict[str, object]) -> str:
+        for key in ("file_name", "fileName", "filename", "name"):
+            candidate = value.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+        return ""
 
     def _fetch_referenced_message_resources(
         self,
@@ -3946,11 +4251,19 @@ class BridgeApp:
                 if item.kind in {"file", "folder", "image"}
             ]
         if isinstance(value, dict):
+            file_display_name = self._extract_resource_display_name(value)
             for key, nested in value.items():
                 if key == "file_key" and isinstance(nested, str) and nested.strip():
                     resources = self._merge_resources(
                         resources,
-                        [DownloadResource(kind="file", value=nested.strip(), source_message_id=source_message_id)],
+                        [
+                            DownloadResource(
+                                kind="file",
+                                value=nested.strip(),
+                                source_message_id=source_message_id,
+                                display_name=file_display_name,
+                            )
+                        ],
                     )
                     continue
                 if key == "image_key" and isinstance(nested, str) and nested.strip():
@@ -4030,18 +4343,6 @@ class BridgeApp:
             return TaskResult(True, f"duplicate event skipped: {event.event_id}", skipped=True)
         return self._run_signal_request(event, request, route_content)
 
-    def _handle_skill_intent(self, event: LarkEvent, route_content: str) -> TaskResult:
-        skill_request = parse_claude_skill_request(
-            route_content,
-            trigger_prefixes=self.config.claude_agent.trigger_prefixes,
-        )
-        if not skill_request.triggered:
-            skill_request = skill_request.__class__(prompt=route_content.strip(), raw_text=route_content, triggered=True)
-        if not self.state_store.mark_seen(event):
-            return TaskResult(True, f"duplicate event skipped: {event.event_id}", skipped=True)
-        result = self.claude_runner.run_skill_analysis(skill_request, event=event)
-        return self._deliver_result(event, result, request_text=skill_request.raw_text or route_content)
-
     def _handle_bug_intent(self, event: LarkEvent, route_content: str) -> TaskResult:
         bug_request = parse_bug_request(route_content, bug_url_re=self.bug_url_re)
         if not bug_request.triggered:
@@ -4078,6 +4379,20 @@ class BridgeApp:
                 triggered=True,
                 error=None if referenced_resources else "missing_log",
             )
+        preflight = self._direct_analysis_preflight(direct_analysis_request)
+        if not preflight.execute:
+            if not self.state_store.mark_seen(event):
+                return TaskResult(True, f"duplicate event skipped: {event.event_id}", skipped=True)
+            result = preflight.clarification_result
+            if result is None:
+                return TaskResult(
+                    success=False,
+                    message="意图分析失败，无法确定后续执行路径。",
+                    error_code="intent_preflight_failed",
+                    details={"mode": "intent_preflight"},
+                )
+            return self._deliver_result(event, result, request_text=direct_analysis_request.raw_text or route_content)
+        self._send_intent_preflight_card(event, preflight)
         if not self.state_store.mark_seen(event):
             return TaskResult(True, f"duplicate event skipped: {event.event_id}", skipped=True)
         pending = self._maybe_request_approval(
@@ -4091,7 +4406,15 @@ class BridgeApp:
         )
         if pending is not None:
             return pending
-        return self._run_direct_analysis_request(event, direct_analysis_request, route_content)
+        return self._run_direct_analysis_request(
+            event,
+            direct_analysis_request,
+            route_content,
+            plans_override=preflight.plans_override,
+            classification_skill=preflight.classification_skill,
+            classification_source=preflight.classification_source,
+            classification_reason=preflight.classification_reason or preflight.reason,
+        )
 
     def _handle_perception_intent(
         self,
@@ -4144,6 +4467,9 @@ class BridgeApp:
         had_previous_session_before_followup = (
             self.activity_store.get_session(followup_context.root_message_id) is not None
         )
+        direct_followup_result = self._maybe_handle_direct_analysis_followup(event, followup_context, route_content)
+        if direct_followup_result is not None:
+            return direct_followup_result
         if "bug" in str(followup_context.mode).casefold():
             existing_answer = self._answer_bug_followup_from_existing(route_content, followup_context)
             if existing_answer is not None:
@@ -4375,6 +4701,104 @@ class BridgeApp:
             triggered=True,
             error=None,
         )
+
+    def _execute_recovered_direct_analysis(
+        self,
+        event: LarkEvent,
+        followup_context,
+        *,
+        followup_text: str,
+        plans_override: list[BugAnalysisPlan] | None = None,
+        classification_skill: str = "",
+        classification_source: str = "",
+        classification_reason: str = "",
+    ) -> TaskResult | None:
+        request = self._recovered_direct_analysis_request_from_followup_context(
+            event,
+            followup_context,
+            followup_text=followup_text,
+        )
+        if request is None:
+            return None
+        pending = self._maybe_request_approval(
+            event,
+            operation_type="direct_analysis",
+            description="直传文件分析",
+            route_content=request.raw_text,
+            file_count=len(request.resources),
+            prompt=request.prompt,
+            estimated_duration_seconds=self.config.bug_analysis.timeout_seconds,
+        )
+        if pending is not None:
+            return pending
+        return self._run_direct_analysis_request(
+            event,
+            request,
+            request.raw_text,
+            plans_override=plans_override,
+            classification_skill=classification_skill,
+            classification_source=classification_source,
+            classification_reason=classification_reason,
+        )
+
+    def _maybe_handle_direct_analysis_followup(self, event: LarkEvent, followup_context, route_content: str) -> TaskResult | None:
+        request_text = str(getattr(followup_context, "request_text", "") or "").strip()
+        if not request_text or self._bug_url_from_request_text(request_text):
+            return None
+        previous_session = self.activity_store.get_session(followup_context.root_message_id) or {}
+        selected_option = self._match_direct_analysis_clarification_option(route_content, previous_session)
+        if selected_option is not None:
+            option_type = str(selected_option.get("type") or "").strip()
+            if option_type == "skill":
+                decision = self.bug_runner.selection_for_skill_name(
+                    str(selected_option.get("skill_name") or "").strip(),
+                    source="user_selected_reply",
+                    reason="用户通过文本回复选择专用 skill。",
+                )
+                if decision is None:
+                    return TaskResult(
+                        success=False,
+                        message="回复中的 Skill 选项无效，请重新选择。",
+                        error_code="invalid_bug_skill_selection",
+                        details={"mode": "bug_clarification"},
+                    )
+                return self._execute_recovered_direct_analysis(
+                    event,
+                    followup_context,
+                    followup_text="",
+                    plans_override=decision.plans,
+                    classification_skill=decision.skill_name,
+                    classification_source=decision.source,
+                    classification_reason=decision.reason,
+                )
+            if option_type == "source_analysis":
+                return self._execute_recovered_direct_analysis(
+                    event,
+                    followup_context,
+                    followup_text="",
+                    plans_override=[BugAnalysisPlan(kind="general")],
+                    classification_skill="general",
+                    classification_source="user_selected_source_analysis",
+                    classification_reason="用户明确要求直接源码分析。",
+                )
+        followup_action = parse_followup_action(route_content)
+        if followup_action in {"retry", "continue"} and str(getattr(followup_context, "mode", "") or "") == "direct_analysis":
+            return self._execute_recovered_direct_analysis(
+                event,
+                followup_context,
+                followup_text="",
+                classification_source="reply_chain_retry",
+                classification_reason="用户在文件分析回复链中发起重跑。",
+            )
+        if str(getattr(followup_context, "mode", "") or "") in {"bug_clarification", "bug_time_clarification"}:
+            return self._execute_recovered_direct_analysis(
+                event,
+                followup_context,
+                followup_text=route_content,
+                classification_source="clarification_reply",
+                classification_reason="用户补充了文件分析方向，继续恢复原始文件请求执行。",
+            )
+        return None
 
     def _send_followup_ack(self, event: LarkEvent, message: str, *, root_message_id: str | None = None) -> None:
         if self.config.dry_run or event.chat_type not in {"group", "p2p"}:
@@ -4635,6 +5059,39 @@ class BridgeApp:
             return f'<at user_id="{event.sender_id}"></at> {text}'
         return text
 
+    def _direct_reply_to(self, event: LarkEvent) -> str:
+        explicit = (event.reply_to or "").strip()
+        if explicit:
+            return explicit
+        parent = (event.parent_id or "").strip()
+        if parent:
+            return parent
+        if not event.message_id:
+            return ""
+        fetched = self.lark_client.fetch_message(event.message_id)
+        if fetched.returncode != 0:
+            return ""
+        for message in self._extract_message_records(fetched.stdout):
+            if str(message.get("message_id") or "").strip() != event.message_id:
+                continue
+            for key in ("reply_to", "upper_message_id"):
+                value = message.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+            break
+        return ""
+
+    def _lookup_bot_alias_context(self, reply_to: str) -> ConversationContext | None:
+        key = (reply_to or "").strip()
+        if not key:
+            return None
+        context = self.conversation_store.lookup(key)
+        if context is None:
+            return None
+        if context.context_key == context.root_message_id:
+            return None
+        return context
+
     def _resolve_followup_context(self, event: LarkEvent):
         context = self.conversation_store.find(event)
         if context is not None:
@@ -4854,11 +5311,6 @@ class BridgeApp:
                 return str(value)
         return content
 
-    def _is_contextual_followup(self, event: LarkEvent, route_content: str) -> bool:
-        if not route_content.strip():
-            return False
-        return bool(event.reply_to or event.parent_id or event.root_id or event.thread_id)
-
     def _is_followup_intent(self, route_content: str) -> bool:
         action = parse_followup_action(route_content)
         if action in {"retry", "continue"}:
@@ -4980,27 +5432,6 @@ class BridgeApp:
         if normalized.casefold() in {item.casefold() for item in terms}:
             return
         terms.append(normalized)
-
-    def _latest_job_mtime(self, job_dir: Path) -> float:
-        latest = 0.0
-        try:
-            for child in job_dir.rglob("*"):
-                if not child.is_file():
-                    continue
-                try:
-                    child_mtime = child.stat().st_mtime
-                except OSError:
-                    continue
-                if child_mtime > latest:
-                    latest = child_mtime
-        except OSError:
-            latest = 0.0
-        if latest == 0.0:
-            try:
-                latest = job_dir.stat().st_mtime
-            except OSError:
-                latest = 0.0
-        return latest
 
     def _remove_job_dir(self, job_dir: Path) -> bool:
         try:

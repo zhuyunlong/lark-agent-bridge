@@ -6,11 +6,11 @@ with direct HTTP API calls. Supports two wire protocols:
 * **OpenAI format** (``api_format="openai"``) — ``/v1/chat/completions``
   via the ``openai`` Python SDK. Works with OpenAI, omlx, DeepSeek, etc.
 * **Anthropic format** (``api_format="anthropic"``) — ``/v1/messages``
-  via plain ``urllib.request`` (no extra SDK). Works with Xiaomi MiMo,
+  via plain ``urllib.request`` (no extra SDK). Works with MiMo, DeepSeek,
   yybb, cc-switch local proxy, and Anthropic-compatible gateways.
 
 Key design decisions:
-- Preset system lets users specify just ``preset = "xiaomi-tp"`` in config;
+- Preset system lets users specify just ``preset = "mimo-claude"`` in config;
   base_url/models/api_format are auto-filled from built-in preset defaults.
 - Supports custom ``base_url`` and ``api_key`` per provider so users can
   point at Codex web endpoints, Claude-compatible proxies, or local models.

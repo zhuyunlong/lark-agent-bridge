@@ -10,9 +10,10 @@ import shutil
 import subprocess
 import threading
 import time
-from typing import Callable, Iterator
+from typing import Callable, Iterator, Mapping
 
 from .models import BridgeConfig, LarkEvent
+from .network_env import build_internal_network_env
 
 
 class EventConsumerError(RuntimeError):
@@ -107,6 +108,8 @@ class LarkClient:
                 output_arg,
             ],
             cwd=output_cwd,
+            env=self._download_command_env(),
+            timeout=max(1, int(self.config.download.timeout_seconds)),
         )
 
     def download_drive_folder(self, *, folder_token: str, output_dir: str | Path) -> CommandResult:
@@ -133,6 +136,8 @@ class LarkClient:
                 "rename",
             ],
             cwd=output_cwd,
+            env=self._download_command_env(),
+            timeout=max(1, int(self.config.download.timeout_seconds)),
         )
 
     def reply(self, message_id: str, text: str, *, markdown: bool = False) -> CommandResult:
@@ -577,10 +582,17 @@ class LarkClient:
                 payload.setdefault("stderr_tail", list(run.stderr_tail))
         status_callback(payload)
 
-    def _run_or_plan(self, command: list[str], *, timeout: int = 60, cwd: Path | None = None) -> CommandResult:
+    def _run_or_plan(
+        self,
+        command: list[str],
+        *,
+        timeout: int = 60,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+    ) -> CommandResult:
         if self.config.dry_run:
             return CommandResult(command=command, returncode=0, dry_run=True, cwd=str(cwd or ""))
-        return self._run(command, timeout=timeout, cwd=cwd)
+        return self._run(command, timeout=timeout, cwd=cwd, env=env)
 
     def _send_message(
         self,
@@ -637,7 +649,14 @@ class LarkClient:
         command.extend(["--msg-type", "interactive", "--content", card_json])
         return self._run_or_plan(command)
 
-    def _run(self, command: list[str], *, timeout: int, cwd: Path | None = None) -> CommandResult:
+    def _run(
+        self,
+        command: list[str],
+        *,
+        timeout: int,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+    ) -> CommandResult:
         try:
             completed = subprocess.run(
                 command,
@@ -646,24 +665,34 @@ class LarkClient:
                 timeout=timeout,
                 check=False,
                 cwd=str(cwd) if cwd else None,
+                env=dict(env) if env is not None else None,
             )
         except FileNotFoundError as exc:
             return CommandResult(command=command, returncode=127, stderr=str(exc), cwd=str(cwd or ""))
         except subprocess.TimeoutExpired as exc:
+            stdout = getattr(exc, "stdout", None)
+            if stdout is None:
+                stdout = getattr(exc, "output", None)
             return CommandResult(
                 command=command,
                 returncode=124,
-                stdout=exc.stdout or "",
-                stderr=exc.stderr or "",
+                stdout=_coerce_text(stdout),
+                stderr=_coerce_text(exc.stderr),
                 cwd=str(cwd or ""),
             )
         return CommandResult(
             command=command,
             returncode=completed.returncode,
-            stdout=completed.stdout,
-            stderr=completed.stderr,
+            stdout=_coerce_text(completed.stdout),
+            stderr=_coerce_text(completed.stderr),
             cwd=str(cwd or ""),
         )
+
+    def _download_command_env(self) -> dict[str, str] | None:
+        options = self.config.internal_network_env
+        if not options.inherit_env and not options.unset_env:
+            return None
+        return build_internal_network_env(options)
 
 
 def _summarize_auth_status(result: CommandResult) -> dict[str, object]:
@@ -684,3 +713,11 @@ def _summarize_auth_status(result: CommandResult) -> dict[str, object]:
         if key in payload:
             summary[key] = payload[key]
     return summary
+
+
+def _coerce_text(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)

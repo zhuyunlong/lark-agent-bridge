@@ -1413,6 +1413,12 @@ class BugAnalysisRunner:
                 log_coverage=log_coverage,
             )
             metadata_path.write_text(metadata_text, encoding="utf-8")
+            bug_summary_evidence_path = self._write_bug_summary_evidence(
+                output_dir=context.output_dir,
+                analysis_kind=plans[0].kind if plans else "general",
+                report_jsons=report_jsons,
+            )
+            self._append_bug_summary_evidence_metadata(metadata_path, bug_summary_evidence_path)
             self._append_source_evidence_metadata(metadata_path, source_evidence_path)
             evidence_log_bundle = preserve_evidence_log_bundle(
                 output_dir=context.output_dir,
@@ -1909,6 +1915,11 @@ class BugAnalysisRunner:
         )
         agent_metadata_path = output_dir / "bug_reanalysis_metadata.md"
         previous_summary_path = self._path_from_details(details, "agent_summary_file")
+        bug_summary_evidence_path = self._write_bug_summary_evidence(
+            output_dir=output_dir,
+            analysis_kind=plans[0].kind if plans else "general",
+            report_jsons=report_jsons,
+        )
         agent_metadata_path.write_text(
             self._render_bug_reanalysis_metadata(
                 request_text=request_text,
@@ -1932,6 +1943,7 @@ class BugAnalysisRunner:
             ),
             encoding="utf-8",
         )
+        self._append_bug_summary_evidence_metadata(agent_metadata_path, bug_summary_evidence_path)
         agent_summary_path = previous_summary_path or (output_dir / "bug_agent_summary.md")
         snapshot_details = self._structured_bug_prompt_snapshot_details(
             base_details=details,
@@ -2229,6 +2241,10 @@ class BugAnalysisRunner:
         *,
         event: LarkEvent | None = None,
         progress_callback: Callable[[dict[str, object]], None] | None = None,
+        plans_override: list["BugAnalysisPlan"] | None = None,
+        classification_skill: str = "",
+        classification_source: str = "",
+        classification_reason: str = "",
     ) -> TaskResult:
         if request.error == "missing_prompt" or not request.prompt.strip():
             return TaskResult(
@@ -2248,8 +2264,19 @@ class BugAnalysisRunner:
         context = create_job_context(self.config.data_dir, event=event)
         bridge_session_id = self._bridge_session_id(event)
         metadata_path = context.output_dir / "direct_analysis_metadata.md"
+        request_artifact = context.output_dir / "bug_agent_request.md"
         started = time.monotonic()
         request_text = self._request_text(raw_text=request.raw_text, prompt_text=request.prompt, bug_url="")
+        plans = plans_override or self.classify_requests(prompt_text=request.prompt, title="", description="")
+        request_artifact.write_text(
+            self._render_bug_agent_request(
+                request_text=request_text,
+                prompt_text=request.prompt,
+                bug_url="",
+                plans=plans,
+            ),
+            encoding="utf-8",
+        )
         self._emit_progress(
             progress_callback,
             stage="direct_job_created",
@@ -2300,7 +2327,6 @@ class BugAnalysisRunner:
         selected_input = downloaded[0].path if len(downloaded) == 1 else context.input_dir
         self._emit_progress(progress_callback, stage="direct_prepare_logs", message="准备直传日志输入")
         prepared_input = self._prepare_log_input(selected_input) if selected_input.exists() else selected_input
-        plans = self.classify_requests(prompt_text=request.prompt, title="", description="")
         html_paths: list[Path] = []
         report_jsons: dict[str, Path | None] = {}
         command: list[str] | None = None
@@ -2378,7 +2404,7 @@ class BugAnalysisRunner:
                     )
                     completed = subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
                 elif current_plan.kind == "custom_skill":
-                    classification_skill = self._skill_name_for_kind(current_plan.kind)
+                    current_skill_name = classification_skill or self._skill_name_for_kind(current_plan.kind)
                     self._write_custom_skill_bug_report(
                         html_path=current_html,
                         json_path=current_json,
@@ -2389,9 +2415,9 @@ class BugAnalysisRunner:
                         fault_time=fault_time,
                         selected_input=selected_input,
                         source_evidence_path=source_evidence_path,
-                        classification_skill=classification_skill,
-                        classification_source="manual_fallback",
-                        classification_reason="直传文件分析命中自定义专用 skill，交由 Agent 按 Skill 规范分析。",
+                        classification_skill=current_skill_name,
+                        classification_source=classification_source or "manual_fallback",
+                        classification_reason=classification_reason or "直传文件分析命中自定义专用 skill，交由 Agent 按 Skill 规范分析。",
                     )
                     completed = subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
                 else:
@@ -2456,6 +2482,68 @@ class BugAnalysisRunner:
             selected_input=selected_input,
             source_evidence_path=None,
         )
+        agent_summary_result = {
+            "message": "",
+            "provider": "",
+            "model": "",
+            "session_id": "",
+            "resumed": False,
+            "duration_seconds": 0.0,
+            "usage": {},
+            "usage_scope": "",
+        }
+        if any(plan.kind in {"general", "custom_skill"} for plan in plans):
+            agent_summary_path = context.output_dir / "bug_agent_summary.md"
+            agent_provider_override = ""
+            if classification_skill == "source_analysis":
+                normalized_provider = _normalize_provider_name(self.config.bug_analysis.provider)
+                agent_provider_override = normalized_provider if normalized_provider in {"codex", "claude"} else "codex"
+            snapshot_details = self._structured_bug_prompt_snapshot_details(
+                base_details={
+                    "analysis_skill": classification_skill or self._skill_name_for_kind(plans[0].kind if plans else "general"),
+                    "classification_source": classification_source or "manual_fallback",
+                    "classification_reason": classification_reason or "",
+                },
+                request_text=request_text,
+                plans=plans,
+                target_time=fault_time,
+                prepared_input=prepared_input,
+                selected_input=selected_input,
+            )
+            agent_summary_result = self._run_bug_agent_summary(
+                request_text=request_text,
+                request_artifact=request_artifact,
+                metadata_path=metadata_path,
+                output_path=agent_summary_path,
+                progress_callback=progress_callback,
+                timeout=self._agent_summary_timeout(
+                    self.config.bug_analysis.timeout_seconds,
+                    reference_seconds=max(
+                        time.monotonic() - started,
+                        240.0 if any(item.kind == "custom_skill" for item in plans) else 0.0,
+                    ),
+                ),
+                bridge_session_id=bridge_session_id,
+                snapshot_details=snapshot_details,
+                snapshot_plans=plans,
+                provider_override=agent_provider_override,
+            )
+            self._append_agent_runtime_metadata(
+                metadata_path,
+                agent_summary_result=agent_summary_result,
+                total_duration_seconds=time.monotonic() - started,
+            )
+            annotated_html_paths = list(html_paths)
+            if combined_artifacts is not None:
+                annotated_html_paths.append(Path(combined_artifacts["html_path"]))
+            self._annotate_html_reports(
+                annotated_html_paths,
+                agent_summary_result=agent_summary_result,
+                total_duration_seconds=time.monotonic() - started,
+            )
+        final_message = str(combined_artifacts["summary"]) if combined_artifacts is not None else summary
+        if agent_summary_result.get("message"):
+            final_message = str(agent_summary_result["message"])
         self._emit_progress(
             progress_callback,
             stage="direct_completed",
@@ -2466,7 +2554,7 @@ class BugAnalysisRunner:
         )
         return TaskResult(
             success=True,
-            message=str(combined_artifacts["summary"]) if combined_artifacts is not None else summary,
+            message=final_message,
             job_id=context.job_id,
             job_dir=context.job_dir,
             command=command,
@@ -2481,6 +2569,16 @@ class BugAnalysisRunner:
                 "log_coverage_end": log_coverage.end_time,
                 "log_coverage_scanned_files": log_coverage.scanned_files,
                 "log_coverage_scanned_lines": log_coverage.scanned_lines,
+                "analysis_skill": classification_skill or self._skill_name_for_kind(plans[0].kind if plans else "general"),
+                "analysis_skill_label": (
+                    "源码导向文件分析"
+                    if classification_skill == "source_analysis"
+                    else self._analysis_label(plans[0].kind if plans else "general")
+                ),
+                "classification_source": classification_source or "manual_fallback",
+                "classification_reason": classification_reason or "",
+                "agent_request_file": str(request_artifact),
+                "agent_summary_file": str(context.output_dir / "bug_agent_summary.md"),
                 **(
                     {
                         "combined_report_html": str(combined_artifacts["html_path"]),
@@ -3397,11 +3495,14 @@ class BugAnalysisRunner:
 
     def _expand_xp_file(self, xp_path: Path) -> Path:
         jar_path = self.config.workspace_root / ".ai/skills/log-decoder/tools/decryptFile.jar"
+        # Pass only the filename and run from the xp file's directory so that
+        # DecryptFile.jar's String.replace("xp","zip") doesn't corrupt the
+        # directory components of the path (e.g. "xpfailuremgmt" → "zipfailuremgmt").
         completed = _run_tracked_process(
-            ["java", "-jar", str(jar_path), str(xp_path)],
+            ["java", "-jar", str(jar_path), xp_path.name],
             watchdog=self.process_watchdog,
             name="xp-log-decrypt",
-            cwd=self._working_dir(),
+            cwd=xp_path.parent,
             capture_output=True,
             text=True,
             timeout=600,
@@ -3820,6 +3921,16 @@ class BugAnalysisRunner:
                 candidates.append({"source": source, **candidate})
 
         if not candidates:
+            llm_candidate = self._extract_time_via_llm(
+                request_text=request_text,
+                title=title,
+                description=description,
+                reference_time=reference_time,
+            )
+            if llm_candidate:
+                candidates.append(llm_candidate)
+
+        if not candidates:
             return BugTimeContext(
                 fault_time="",
                 source="",
@@ -3829,7 +3940,7 @@ class BugAnalysisRunner:
             )
 
         reference_date = self._select_reference_date(candidates) or fallback_reference_date
-        for preferred_source in ("user", "title", "description"):
+        for preferred_source in ("user", "title", "description", "llm"):
             for candidate in candidates:
                 if candidate["source"] != preferred_source:
                     continue
@@ -3909,15 +4020,91 @@ class BugAnalysisRunner:
             return f"{base}:{int(second):02d}"
         return base
 
+    def _extract_time_via_llm(
+        self,
+        *,
+        request_text: str,
+        title: str,
+        description: str,
+        reference_time: str = "",
+    ) -> dict[str, str] | None:
+        """Use LLM (fast_model) to extract fault time when regex fails."""
+        from .llm_client import LLMClient, LLMClientError
+
+        client = LLMClient(self.config.ai_provider)
+        if not client.is_available():
+            return None
+
+        parts: list[str] = []
+        stripped = self._strip_urls_for_time_parse(request_text or "")
+        if stripped.strip():
+            parts.append(f"用户输入: {stripped.strip()}")
+        if title:
+            parts.append(f"标题: {title}")
+        if description:
+            parts.append(f"描述: {description}")
+        if reference_time:
+            parts.append(f"参考时间（创建时间）: {reference_time}")
+        if not parts:
+            return None
+
+        now = datetime.now()
+        system_prompt = (
+            "你是一个时间提取器。从用户提供的文本中提取问题发生的精确时间。\n"
+            f"当前时间: {now:%Y-%m-%d %H:%M}。\n"
+            "规则:\n"
+            "1. 优先取用户明确给出的时间，其次标题，最后描述。\n"
+            "2. '5月19日_18点35分' 应解析为 2026-05-19 18:35。\n"
+            "3. '昨天下午3点' 等相对时间，基于当前时间推算为绝对时间。\n"
+            "4. 如果只有日期没有具体时间，found 设为 false。\n"
+            "5. 年份缺失时用当前年份补全。\n"
+            '返回 JSON: {"found": true/false, "datetime": "YYYY-MM-DD HH:MM", "source": "从哪段文字提取的", "reason": "简短说明"}\n'
+            "只返回 JSON，不要其他文字。"
+        )
+
+        try:
+            response = client.chat(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": "\n".join(parts)},
+                ],
+                model="",
+                temperature=0.0,
+                max_tokens=256,
+                timeout_seconds=15,
+                response_format={"type": "json_object"} if client._effective_api_format() == "openai" else None,
+            )
+        except (LLMClientError, Exception):  # noqa: BLE001
+            logger.debug("LLM time extraction failed, falling back to regex-only")
+            return None
+
+        try:
+            data = json.loads(response.content)
+            if not data.get("found"):
+                return None
+            dt_str = str(data.get("datetime", ""))
+            datetime.strptime(dt_str, "%Y-%m-%d %H:%M")
+            return {
+                "value": dt_str,
+                "date": dt_str.split(" ")[0],
+                "time": dt_str.split(" ")[1],
+                "raw": str(data.get("source", "")),
+                "source": "llm",
+                "note": str(data.get("reason", "")),
+            }
+        except (json.JSONDecodeError, ValueError, KeyError):
+            logger.debug("LLM time extraction returned invalid JSON or format")
+            return None
+
     def _select_reference_date(self, candidates: list[dict[str, str]]) -> str:
-        for source in ("user", "title", "description"):
+        for source in ("user", "title", "description", "llm"):
             for candidate in candidates:
                 if candidate.get("source") == source and candidate.get("date"):
                     return str(candidate["date"])
         return ""
 
     def _bug_time_context_note(self, candidate: dict[str, str], *, reference_date: str, completed: bool) -> str:
-        labels = {"user": "用户输入", "title": "标题", "description": "缺陷描述"}
+        labels = {"user": "用户输入", "title": "标题", "description": "缺陷描述", "llm": "AI识别"}
         source = labels.get(candidate.get("source", ""), candidate.get("source", ""))
         if candidate.get("date"):
             return f"从{source}提取完整问题时间。"
@@ -4512,18 +4699,21 @@ class BugAnalysisRunner:
         source_entries = self._parse_source_evidence_entries(source_evidence_path)
         source_rows = [(entry["file"], f"L{entry['line']}", entry["text"]) for entry in source_entries[:8]]
         has_logs = selected_input is not None
-        verdict_sev = "green" if has_logs and skill_md is not None else "yellow"
+        is_source_analysis = classification_skill.strip() == "source_analysis"
+        verdict_sev = "green" if has_logs and (skill_md is not None or is_source_analysis) else "yellow"
         verdict_text = (
-            f"已命中专用 Skill `{classification_skill}`，本轮将由本地 Agent 按 Skill 规范读取日志/源码并产出最终结论。"
+            "已识别为源码导向文件分析，本轮将由本地 Agent 基于日志、源码证据和用户给出的源码线索整理最终结论。"
+            if is_source_analysis
+            else f"已命中专用 Skill `{classification_skill}`，本轮将由本地 Agent 按 Skill 规范读取日志/源码并产出最终结论。"
             if skill_md is not None
             else f"已命中专用 Skill `{classification_skill}`，但未找到 SKILL.md，当前只能保留材料索引并等待补齐 skill。"
         )
         cards = [
-            ("分析方式", "专用 Skill + Agent", verdict_sev, "没有回落为通用问题分析。"),
+            ("分析方式", "源码导向文件分析 + Agent" if is_source_analysis else "专用 Skill + Agent", verdict_sev, "没有回落为通用问题分析。"),
             ("命中 Skill", classification_skill or "未记录", "green" if classification_skill else "yellow", classification_source or "manual_fallback"),
             ("故障时间", fault_time or "未识别", "green" if fault_time else "yellow", ""),
             ("现场日志", selected_input.name if selected_input else "无", "green" if has_logs else "yellow", str(selected_input or "")),
-            ("Skill 规范", skill_md.name if skill_md else "缺失", "green" if skill_md else "yellow", str(skill_md or "")),
+            ("Skill 规范", skill_md.name if skill_md else "内部源码导向规则" if is_source_analysis else "缺失", "green" if (skill_md or is_source_analysis) else "yellow", str(skill_md or "")),
             ("源码证据", str(len(source_rows)), "green" if source_rows else "yellow", "按用户诉求预检索。"),
         ]
         summary_sections = build_structured_summary_sections(
@@ -4535,22 +4725,28 @@ class BugAnalysisRunner:
                     "detail": f"当前可复用日志输入：{selected_input}" if has_logs else "当前没有可复用日志，无法执行日志型专用 Skill。",
                 },
                 {
-                    "sev": "green" if skill_md else "yellow",
+                    "sev": "green" if (skill_md or is_source_analysis) else "yellow",
                     "title": "Skill 规范",
-                    "detail": f"Agent 需要先读取 `{skill_md}` 并按其 Required Workflow 执行。" if skill_md else "缺少 SKILL.md。",
+                    "detail": "当前使用内部源码导向分析路径，不要求匹配现有 SKILL.md。"
+                    if is_source_analysis
+                    else f"Agent 需要先读取 `{skill_md}` 并按其 Required Workflow 执行。"
+                    if skill_md
+                    else "缺少 SKILL.md。",
                 },
             ],
             evidence_rows=[
                 ("分类路由", classification_skill or "未记录", "bridge/agent", classification_source or "manual_fallback", classification_reason or "未记录"),
                 ("故障时间", fault_time or "未识别", "用户输入/标题/描述", "用于限定日志窗口", ""),
                 ("日志输入", str(selected_input or "无"), "附件/缓存", "专用 Skill 的主要运行材料", ""),
-                ("Skill 文件", str(skill_md or "未找到"), "workspace/.ai/skills", "Agent 分析规范入口", ""),
+                ("Skill 文件", str(skill_md or "内部源码导向规则"), "workspace/.ai/skills", "Agent 分析规范入口", ""),
             ],
             causes=[
                 {
                     "sev": "yellow",
                     "title": "脚本覆盖",
-                    "detail": "该 Skill 当前没有 Bridge 内置 Python 执行器，因此报告主体依赖本地 Agent 按 SKILL.md 做只读分析。",
+                    "detail": "当前路径没有 Bridge 内置业务脚本结论，最终质量依赖本地 Agent 对日志、源码证据和用户线索的综合整理。"
+                    if is_source_analysis
+                    else "该 Skill 当前没有 Bridge 内置 Python 执行器，因此报告主体依赖本地 Agent 按 SKILL.md 做只读分析。",
                 }
             ],
             confirmations=[
@@ -6713,15 +6909,6 @@ class BugAnalysisRunner:
             return "业务消费"
         return ""
 
-    def _signal_stage_hits(self, stages: object, stage_key: str) -> int:
-        if not isinstance(stages, dict):
-            return 0
-        stage = stages.get(stage_key)
-        if not isinstance(stage, dict):
-            return 0
-        hits = stage.get("hits")
-        return int(hits) if isinstance(hits, int) else 0
-
     def _signal_target_stage_hits(self, signal_payload: dict[str, object], stages: object, stage_key: str) -> int:
         if not isinstance(stages, dict):
             return 0
@@ -6887,24 +7074,6 @@ class BugAnalysisRunner:
                     "text": str(ref.get("text") or ""),
                 }
         return None
-
-    def _render_flow_line(self, nodes: list[dict[str, str]]) -> str:
-        if not nodes:
-            return '<p class="muted">未提取到可视化链路节点。</p>'
-        chunks: list[str] = ['<div class="flow-line">']
-        for index, node in enumerate(nodes):
-            if index:
-                chunks.append('<div class="flow-arrow-inline">→</div>')
-            chunks.append(
-                '<div class="flow-step">'
-                f'<div class="flow-tag">{combined_bug_html.H(node.get("tag", ""))}</div>'
-                f'<div class="flow-title">{combined_bug_html.H(node.get("title", ""))}</div>'
-                f'<div class="flow-meta">{combined_bug_html.H(node.get("meta", ""))}</div>'
-                f'<div class="flow-note">{combined_bug_html.H(node.get("note", ""))}</div>'
-                '</div>'
-            )
-        chunks.append("</div>")
-        return "".join(chunks)
 
     def _signal_package_from_path(self, path_text: str) -> str:
         match = re.search(r"/app/([^/]+)/", path_text)
@@ -7093,6 +7262,13 @@ class BugAnalysisRunner:
             and self.config.ai_provider.enabled
             and self.config.ai_provider.base_url
             and self.config.ai_provider.primary_model
+            and not self._should_skip_direct_api_bug_summary(
+                request_text=request_text,
+                followup_text=followup_text,
+                request_artifact=request_artifact,
+                metadata_path=metadata_path,
+                previous_summary_path=previous_summary_path,
+            )
         ):
             api_result = self._run_bug_agent_summary_via_api(
                 request_text=request_text,
@@ -7170,32 +7346,7 @@ class BugAnalysisRunner:
             if omlx_result["message"]:
                 return omlx_result
             return fallback_result
-        provider_fallback = self._build_bug_agent_summary_fallback_command(
-            request_text=request_text,
-            request_artifact=request_artifact,
-            metadata_path=metadata_path,
-            output_path=output_path,
-            followup_text=followup_text,
-            previous_summary_path=previous_summary_path,
-            snapshot_details=snapshot_details,
-            snapshot_plans=snapshot_plans,
-        )
-        if not provider_fallback["command"]:
-            return fallback_result
-        self._emit_progress(
-            progress_callback,
-            stage="bug_agent_summary_provider_fallback",
-            message="主 Agent 不可用，切换备用 Agent 继续整理结论",
-            primary_provider=str(invocation["provider"] or ""),
-            fallback_provider=str(provider_fallback["provider"] or ""),
-        )
-        return self._run_bug_agent_summary_once(
-            invocation=provider_fallback,
-            output_path=output_path,
-            progress_callback=progress_callback,
-            timeout=timeout,
-            bridge_session_id=bridge_session_id,
-        )
+        return fallback_result
 
     def _agent_summary_timeout(
         self,
@@ -7546,6 +7697,395 @@ class BugAnalysisRunner:
             and ("判断" in lowered or "结论" in lowered)
         )
 
+    def _should_include_previous_summary_for_followup(
+        self,
+        *,
+        followup_text: str,
+        request_artifact: Path,
+        metadata_path: Path,
+    ) -> bool:
+        if not followup_text.strip():
+            return False
+        names = {request_artifact.name.casefold(), metadata_path.name.casefold()}
+        if any("reanalysis" in name for name in names):
+            return True
+        return self._followup_needs_previous_summary_text(followup_text)
+
+    def _is_postmortem_or_conflict_followup(self, text: str) -> bool:
+        lowered = text.casefold()
+        terms = (
+            "复盘",
+            "前后结论",
+            "结论冲突",
+            "结论完全不一样",
+            "前后不一致",
+            "上次为什么",
+            "上一轮为什么",
+            "错判",
+            "重新审视",
+        )
+        return any(term.casefold() in lowered for term in terms)
+
+    def _metadata_has_structured_report_conflict(self, metadata_path: Path) -> bool:
+        for item in self._bug_summary_context_items(metadata_path):
+            path = Path(str(item.get("path") or ""))
+            if not self._is_report_json_path(path):
+                continue
+            payload = self._load_structured_report_payload(path)
+            if payload is None:
+                continue
+            focus_session = self._structured_report_focus_session(payload)
+            if not isinstance(focus_session, dict):
+                continue
+            if self._structured_report_conflicts(payload, focus_session):
+                return True
+        return False
+
+    def _should_skip_direct_api_bug_summary(
+        self,
+        *,
+        request_text: str,
+        followup_text: str,
+        request_artifact: Path,
+        metadata_path: Path,
+        previous_summary_path: Path | None,
+    ) -> bool:
+        if self._should_collect_source_evidence(request_text, followup_text):
+            return True
+        if self._is_postmortem_or_conflict_followup(request_text) or self._is_postmortem_or_conflict_followup(followup_text):
+            return True
+        if previous_summary_path is not None and self._should_include_previous_summary_for_followup(
+            followup_text=followup_text,
+            request_artifact=request_artifact,
+            metadata_path=metadata_path,
+        ) and self._is_postmortem_or_conflict_followup(followup_text):
+            return True
+        return self._metadata_has_structured_report_conflict(metadata_path)
+
+    def _is_report_json_path(self, path: Path) -> bool:
+        lowered = path.name.casefold()
+        return path.suffix.lower() == ".json" and "_report" in lowered
+
+    def _is_report_html_path(self, path: Path) -> bool:
+        lowered = path.name.casefold()
+        return path.suffix.lower() == ".html" and "_report" in lowered
+
+    def _bug_summary_context_items(
+        self,
+        metadata_path: Path,
+        *,
+        include_html_reports: bool = True,
+    ) -> list[dict[str, object]]:
+        items = self._bug_summary_referenced_context_files(metadata_path)[:5]
+        if include_html_reports:
+            return items
+        has_report_json = any(self._is_report_json_path(Path(str(item.get("path") or ""))) for item in items)
+        if not has_report_json:
+            return items
+        filtered: list[dict[str, object]] = []
+        for item in items:
+            path = Path(str(item.get("path") or ""))
+            if self._is_report_html_path(path):
+                continue
+            filtered.append(item)
+        return filtered
+
+    def _render_structured_report_guardrails(self, path: Path) -> str:
+        if not self._is_report_json_path(path):
+            return ""
+        payload = self._load_structured_report_payload(path)
+        if payload is None:
+            return ""
+        focus_session = self._structured_report_focus_session(payload)
+        if not isinstance(focus_session, dict):
+            return ""
+        status = str(focus_session.get("status") or "").strip()
+        diagnosis = str(focus_session.get("diagnosis") or "").strip()
+        missing_critical = [
+            str(item).strip()
+            for item in focus_session.get("missing_critical") or []
+            if str(item).strip()
+        ]
+        events = focus_session.get("events")
+        last_event = events[-1] if isinstance(events, list) and events and isinstance(events[-1], dict) else None
+        lines = [
+            "### 结构化证据护栏",
+            f"来源: {path}",
+        ]
+        verdict = payload.get("verdict")
+        if isinstance(verdict, dict):
+            verdict_message = str(verdict.get("message") or "").strip()
+            if verdict_message:
+                lines.append(f"- 报告顶层 verdict: {verdict_message[:220]}")
+        focus_pid = payload.get("focus_session_pid")
+        if focus_pid not in (None, ""):
+            lines.append(f"- focus session: Session {focus_session.get('index', '?')} / PID {focus_pid}")
+        if status:
+            lines.append(f"- status={status}")
+        if diagnosis:
+            lines.append(f"- structured diagnosis: {diagnosis[:220]}")
+        if missing_critical:
+            lines.append("- missing_critical: " + "、".join(missing_critical[:6]))
+        if isinstance(last_event, dict):
+            title = str(last_event.get("title") or "").strip()
+            timestamp = str(last_event.get("timestamp_text") or last_event.get("timestamp") or "").strip()
+            file_path = str(last_event.get("file_path") or "").strip()
+            line_no = str(last_event.get("line_no") or "").strip()
+            location = f"{file_path}:{line_no}".rstrip(":") if file_path else ""
+            detail = " ".join(part for part in [timestamp, title, location] if part).strip()
+            if detail:
+                lines.append(f"- 最后命中事件: {detail[:260]}")
+        for conflict in self._structured_report_conflicts(payload, focus_session):
+            lines.append(f"- 冲突: {conflict}")
+        if status and status != "complete":
+            lines.append(
+                "- 护栏: `status` 不是 `complete` 时，不要写“启动链路完整”或“已经到达最终首帧展示”；只能描述为“当前已命中到某节点，后续关键节点未命中，链路未闭环”。"
+            )
+        if missing_critical:
+            lines.append(
+                "- 护栏: “未命中关键节点”不等于“日志在这里截止”；除非材料明确显示文件结束或时间窗截断，否则不要把缺节点改写成日志截止。"
+            )
+        return "\n".join(lines)
+
+    def _load_structured_report_payload(self, path: Path) -> dict[str, object] | None:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def _structured_report_focus_session(self, payload: dict[str, object]) -> dict[str, object] | None:
+        sessions = payload.get("sessions")
+        if not isinstance(sessions, list) or not sessions:
+            return None
+        focus_index = payload.get("focus_session_index")
+        if isinstance(focus_index, int):
+            for item in sessions:
+                if isinstance(item, dict) and item.get("index") == focus_index:
+                    return item
+        first_session = sessions[0]
+        return first_session if isinstance(first_session, dict) else None
+
+    def _structured_report_conflicts(
+        self,
+        payload: dict[str, object],
+        focus_session: dict[str, object],
+    ) -> list[str]:
+        conflicts: list[str] = []
+        status = str(focus_session.get("status") or "").strip()
+        diagnosis = str(focus_session.get("diagnosis") or "").strip()
+        missing_critical = [
+            str(item).strip()
+            for item in focus_session.get("missing_critical") or []
+            if str(item).strip()
+        ]
+        verdict = payload.get("verdict")
+        verdict_message = ""
+        if isinstance(verdict, dict):
+            verdict_message = str(verdict.get("message") or "").strip()
+        complete_phrases = ("启动链路完整", "最终首帧展示", "已经到达 3D 最终首帧展示")
+        says_complete = any(phrase in diagnosis or phrase in verdict_message for phrase in complete_phrases)
+        if status and status != "complete" and says_complete:
+            conflicts.append(f"status={status} 但 report verdict/diagnosis 仍声称链路完整")
+        if missing_critical and says_complete:
+            conflicts.append("missing_critical 非空，但 report verdict/diagnosis 仍声称链路完整")
+        return conflicts
+
+    def _looks_like_startup_event(self, event: dict[str, object]) -> bool:
+        title = str(event.get("title") or "").strip()
+        return bool(title)
+
+    def _read_same_pid_log_excerpt(
+        self,
+        *,
+        file_path: str,
+        pid: int | None,
+        line_no: int,
+        max_lines: int = 24,
+        errors_only: bool = False,
+    ) -> list[str]:
+        if not file_path or pid is None or line_no <= 0:
+            return []
+        path = Path(file_path)
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            return []
+        start = max(0, line_no - 1)
+        excerpt: list[str] = []
+        pid_token = f" {pid} "
+        for raw in lines[start:]:
+            if pid_token not in raw:
+                continue
+            if errors_only and not re.search(r"\s[EW]\s", raw):
+                continue
+            excerpt.append(raw.strip())
+            if len(excerpt) >= max_lines:
+                break
+        return excerpt
+
+    def _render_bug_summary_evidence_markdown(self, evidence: dict[str, object]) -> str:
+        lines = [
+            "# Bug Summary Evidence",
+            "",
+            f"- analysis_kind: `{evidence.get('analysis_kind') or ''}`",
+            f"- target_time: `{evidence.get('target_time') or ''}`",
+            f"- focus session: `Session {evidence.get('focus_session_index') or '?'} / PID {evidence.get('focus_session_pid') or '?'}`",
+            f"- status: `{evidence.get('focus_status') or ''}`",
+        ]
+        conflicts = evidence.get("report_conflicts") or []
+        if conflicts:
+            lines.extend(["", "## Report conflicts", ""])
+            for item in conflicts:
+                lines.append(f"- {item}")
+        missing_critical = evidence.get("missing_critical") or []
+        if missing_critical:
+            lines.extend(["", "## Missing critical nodes", ""])
+            for item in missing_critical:
+                lines.append(f"- {item}")
+        last_event = evidence.get("last_matched_event") or {}
+        if isinstance(last_event, dict) and last_event:
+            lines.extend(["", "## Last matched lifecycle event", ""])
+            for item in (
+                last_event.get("timestamp_text"),
+                last_event.get("title"),
+                f"{last_event.get('file_path') or ''}:{last_event.get('line_no') or ''}".rstrip(":"),
+                f"PID {last_event.get('pid')}" if last_event.get("pid") not in (None, "") else "",
+                last_event.get("excerpt"),
+            ):
+                if item:
+                    lines.append(f"- {item}")
+        trailing = evidence.get("same_pid_trailing_log_excerpt") or []
+        if trailing:
+            lines.extend(["", "## Same PID trailing logs", ""])
+            for item in trailing:
+                lines.append(f"- {item}")
+        errors = evidence.get("same_pid_error_excerpt") or []
+        if errors:
+            lines.extend(["", "## Same PID errors", ""])
+            for item in errors:
+                lines.append(f"- {item}")
+        safe_assertions = evidence.get("safe_assertions") or []
+        if safe_assertions:
+            lines.extend(["", "## Safe assertions", ""])
+            for item in safe_assertions:
+                lines.append(f"- {item}")
+        forbidden_assertions = evidence.get("forbidden_assertions") or []
+        if forbidden_assertions:
+            lines.extend(["", "## Forbidden assertions", ""])
+            for item in forbidden_assertions:
+                lines.append(f"- {item}")
+        return "\n".join(lines).rstrip() + "\n"
+
+    def _write_bug_summary_evidence(
+        self,
+        *,
+        output_dir: Path,
+        analysis_kind: str,
+        report_jsons: dict[str, Path | None],
+    ) -> Path | None:
+        if analysis_kind != "startup":
+            return None
+        report_json = report_jsons.get("startup")
+        if report_json is None or not report_json.exists():
+            return None
+        payload = self._load_structured_report_payload(report_json)
+        if payload is None:
+            return None
+        focus_session = self._structured_report_focus_session(payload)
+        if not isinstance(focus_session, dict):
+            return None
+        focus_pid = payload.get("focus_session_pid")
+        try:
+            normalized_pid = int(focus_pid) if focus_pid not in (None, "") else None
+        except (TypeError, ValueError):
+            normalized_pid = None
+        missing_critical = [
+            str(item).strip()
+            for item in focus_session.get("missing_critical") or []
+            if str(item).strip()
+        ]
+        events = focus_session.get("events")
+        event_items = [item for item in events or [] if isinstance(item, dict) and self._looks_like_startup_event(item)]
+        last_event = event_items[-1] if event_items else {}
+        if normalized_pid is None and isinstance(last_event, dict):
+            try:
+                normalized_pid = int(last_event.get("pid")) if last_event.get("pid") not in (None, "") else None
+            except (TypeError, ValueError):
+                normalized_pid = None
+        file_path = str(last_event.get("file_path") or "").strip() if isinstance(last_event, dict) else ""
+        line_no_raw = last_event.get("line_no") if isinstance(last_event, dict) else 0
+        try:
+            line_no = int(line_no_raw or 0)
+        except (TypeError, ValueError):
+            line_no = 0
+        trailing_excerpt = self._read_same_pid_log_excerpt(
+            file_path=file_path,
+            pid=normalized_pid,
+            line_no=line_no,
+            max_lines=24,
+            errors_only=False,
+        )
+        error_excerpt = self._read_same_pid_log_excerpt(
+            file_path=file_path,
+            pid=normalized_pid,
+            line_no=line_no,
+            max_lines=12,
+            errors_only=True,
+        )
+        conflicts = self._structured_report_conflicts(payload, focus_session)
+        safe_assertions = [
+            "只引用结构化报告已命中的生命周期节点。",
+            "如果 `missing_critical` 非空，只能描述为“链路未闭环”。",
+        ]
+        if trailing_excerpt:
+            safe_assertions.append("同一 PID 在最后命中事件之后仍有原始日志继续输出。")
+        forbidden_assertions = [
+            "启动链路完整",
+            "已经到达最终首帧展示",
+        ]
+        if missing_critical:
+            forbidden_assertions.append("日志在 preload 后截止")
+        evidence = {
+            "analysis_kind": analysis_kind,
+            "bug_url": str(payload.get("bug_url") or ""),
+            "target_time": str(payload.get("target_time") or ""),
+            "focus_session_index": payload.get("focus_session_index") or focus_session.get("index"),
+            "focus_session_pid": normalized_pid,
+            "focus_status": str(focus_session.get("status") or ""),
+            "verdict_message": str((payload.get("verdict") or {}).get("message") if isinstance(payload.get("verdict"), dict) else ""),
+            "focus_diagnosis": str(focus_session.get("diagnosis") or ""),
+            "report_conflicts": conflicts,
+            "missing_critical": missing_critical,
+            "last_matched_event": last_event if isinstance(last_event, dict) else {},
+            "same_pid_trailing_log_excerpt": trailing_excerpt,
+            "same_pid_error_excerpt": error_excerpt,
+            "safe_assertions": safe_assertions,
+            "forbidden_assertions": forbidden_assertions,
+        }
+        evidence_json_path = output_dir / "bug_summary_evidence.json"
+        evidence_md_path = output_dir / "bug_summary_evidence.md"
+        evidence_json_path.write_text(json.dumps(evidence, ensure_ascii=False, indent=2), encoding="utf-8")
+        evidence_md_path.write_text(self._render_bug_summary_evidence_markdown(evidence), encoding="utf-8")
+        return evidence_md_path
+
+    def _append_bug_summary_evidence_metadata(self, metadata_path: Path, evidence_path: Path | None) -> None:
+        if evidence_path is None:
+            return
+        json_path = evidence_path.with_suffix(".json")
+        try:
+            original = metadata_path.read_text(encoding="utf-8")
+        except OSError:
+            return
+        lines = [
+            "",
+            "## 结构化证据包",
+            "",
+            f"- 结构化证据 Markdown: `{evidence_path}`",
+            f"- 结构化证据 JSON: `{json_path}`",
+        ]
+        metadata_path.write_text(original.rstrip() + "\n" + "\n".join(lines).rstrip() + "\n", encoding="utf-8")
+
     def _build_or_refresh_bug_prompt_snapshot(
         self,
         *,
@@ -7704,7 +8244,12 @@ class BugAnalysisRunner:
             self._omlx_prompt_section("元数据摘录", self._read_text_excerpt(metadata_path, 900), 900),
         ]
         if previous_summary_path is not None and (
-            not followup_text.strip() or self._followup_needs_previous_summary_text(followup_text)
+            not followup_text.strip()
+            or self._should_include_previous_summary_for_followup(
+                followup_text=followup_text,
+                request_artifact=request_artifact,
+                metadata_path=metadata_path,
+            )
         ):
             sections.append(
                 self._omlx_prompt_section("上一轮摘要摘录", self._read_text_excerpt(previous_summary_path, 700), 700)
@@ -7942,7 +8487,9 @@ class BugAnalysisRunner:
                 "2. 优先复用已内嵌的元数据和报告材料，不要要求用户重新上传日志。\n"
                 "3. 只读分析，不修改任何文件。\n"
                 "4. 输出中文 Markdown，结论先行，再给出证据。\n"
-                "5. 如果现有材料仍不足以覆盖某个诉求，要明确指出缺口，但先回答已经能确认的部分。\n\n"
+                "5. 如果现有材料仍不足以覆盖某个诉求，要明确指出缺口，但先回答已经能确认的部分。\n"
+                "6. 对启动/生命周期类报告，若结构化 JSON 显示 `status != complete` 或仍有 `missing_critical`，即使 HTML/verdict 文案更乐观，也按“链路未闭环”处理，并明确指出报告内部冲突。\n"
+                "7. “未命中关键节点”不等于“日志在这里截止”；除非材料明确显示文件结束或时间窗截断，否则不要把缺节点改写成日志截止。\n\n"
             )
             snapshot_prefix = self._build_bug_prompt_snapshot_prefix(
                 request_text=request_text,
@@ -7983,7 +8530,12 @@ class BugAnalysisRunner:
         if followup_text.strip():
             prompt += f"### 本次追问/修正\n{followup_text.strip()}\n\n"
         if previous_summary_path is not None and (
-            not followup_text.strip() or self._followup_needs_previous_summary_text(followup_text)
+            not followup_text.strip()
+            or self._should_include_previous_summary_for_followup(
+                followup_text=followup_text,
+                request_artifact=request_artifact,
+                metadata_path=metadata_path,
+            )
         ):
             prev_text = self._read_text_excerpt(previous_summary_path, max_file_chars)
             if prev_text:
@@ -7994,9 +8546,12 @@ class BugAnalysisRunner:
         metadata_text = self._read_text_excerpt(metadata_path, max_file_chars)
         if metadata_text:
             prompt += f"### Bug Metadata 文件内容\n{metadata_text}\n\n"
-        for item in self._bug_summary_referenced_context_files(metadata_path)[:5]:
+        for item in self._bug_summary_context_items(metadata_path, include_html_reports=False):
             path = Path(str(item["path"]))
             title = str(item["title"])
+            guardrails = self._render_structured_report_guardrails(path)
+            if guardrails:
+                prompt += f"{guardrails}\n\n"
             content = self._read_bug_summary_context_excerpt(path, max_file_chars)
             if content:
                 prompt += f"### {title}\n来源: {path}\n{content}\n\n"
@@ -8241,7 +8796,6 @@ class BugAnalysisRunner:
             "cwd": self._working_dir(),
             "stdout": subprocess.PIPE,
             "stderr": subprocess.PIPE,
-            "text": True,
         }
         if sys.platform != "win32":
             kwargs["start_new_session"] = True
@@ -8258,6 +8812,36 @@ class BugAnalysisRunner:
         last_heartbeat = started
         stdout_parts: list[str] = []
         stderr_parts: list[str] = []
+        stdout_partial = b""
+        stderr_partial = b""
+
+        def _coerce_chunk(chunk: bytes | str | None) -> bytes:
+            if chunk is None:
+                return b""
+            if isinstance(chunk, bytes):
+                return chunk
+            return chunk.encode("utf-8", errors="replace")
+
+        def _append_chunk(
+            chunk: bytes | str | None,
+            *,
+            partial: bytes,
+            sink: list[str],
+        ) -> bytes:
+            data = partial + _coerce_chunk(chunk)
+            while True:
+                newline = data.find(b"\n")
+                if newline < 0:
+                    break
+                sink.append(data[: newline + 1].decode("utf-8", errors="replace"))
+                data = data[newline + 1 :]
+            return data
+
+        def _flush_partial(partial: bytes, sink: list[str]) -> bytes:
+            if partial:
+                sink.append(partial.decode("utf-8", errors="replace"))
+            return b""
+
         try:
             if process.stdout is None or process.stderr is None:
                 raise RuntimeError("subprocess streams not available (stdout/stderr must be PIPE)")
@@ -8272,9 +8856,11 @@ class BugAnalysisRunner:
                         _safe_terminate(process.pid, sig=signal.SIGKILL)
                         stdout, stderr = process.communicate()
                     if stdout:
-                        stdout_parts.append(stdout)
+                        stdout_partial = _append_chunk(stdout, partial=stdout_partial, sink=stdout_parts)
                     if stderr:
-                        stderr_parts.append(stderr)
+                        stderr_partial = _append_chunk(stderr, partial=stderr_partial, sink=stderr_parts)
+                    stdout_partial = _flush_partial(stdout_partial, stdout_parts)
+                    stderr_partial = _flush_partial(stderr_partial, stderr_parts)
                     raise subprocess.TimeoutExpired(
                         command,
                         timeout,
@@ -8291,22 +8877,32 @@ class BugAnalysisRunner:
                     readable = []
                 if readable:
                     for stream in readable:
-                        line = stream.readline()
-                        if line:
+                        reader = getattr(stream, "read1", None)
+                        if callable(reader):
+                            chunk = reader(4096)
+                        else:
+                            chunk = stream.read(4096)
+                        if chunk:
                             if stream is process.stdout:
-                                stdout_parts.append(line)
-                                self._emit_agent_summary_stream_progress(
-                                    progress_callback,
-                                    provider=provider,
-                                    line=line,
-                                    elapsed_seconds=time.monotonic() - started,
-                                )
+                                before = len(stdout_parts)
+                                stdout_partial = _append_chunk(chunk, partial=stdout_partial, sink=stdout_parts)
+                                for line in stdout_parts[before:]:
+                                    self._emit_agent_summary_stream_progress(
+                                        progress_callback,
+                                        provider=provider,
+                                        line=line,
+                                        elapsed_seconds=time.monotonic() - started,
+                                    )
                             else:
-                                stderr_parts.append(line)
+                                stderr_partial = _append_chunk(chunk, partial=stderr_partial, sink=stderr_parts)
                             last_activity = time.monotonic()
                             if self.process_watchdog is not None:
                                 self.process_watchdog.record_activity(process.pid)
                         elif stream in streams:
+                            if stream is process.stdout:
+                                stdout_partial = _flush_partial(stdout_partial, stdout_parts)
+                            else:
+                                stderr_partial = _flush_partial(stderr_partial, stderr_parts)
                             streams.remove(stream)
                 elif process.poll() is not None:
                     break
@@ -8327,9 +8923,11 @@ class BugAnalysisRunner:
 
             remaining_stdout, stderr = process.communicate(timeout=2)
             if remaining_stdout:
-                stdout_parts.append(remaining_stdout)
+                stdout_partial = _append_chunk(remaining_stdout, partial=stdout_partial, sink=stdout_parts)
             if stderr:
-                stderr_parts.append(stderr)
+                stderr_partial = _append_chunk(stderr, partial=stderr_partial, sink=stderr_parts)
+            stdout_partial = _flush_partial(stdout_partial, stdout_parts)
+            stderr_partial = _flush_partial(stderr_partial, stderr_parts)
             return subprocess.CompletedProcess(command, process.returncode, "".join(stdout_parts), "".join(stderr_parts))
         finally:
             if self.process_watchdog is not None:
@@ -8721,7 +9319,7 @@ class BugAnalysisRunner:
         if agent_summary_result.get("timeout_seconds"):
             lines.append(f"- Agent 总结超时: `{agent_summary_result['timeout_seconds']} 秒`")
         if agent_summary_result.get("timed_out") and agent_summary_result.get("message"):
-            lines.append("- 超时处理: `已采用 Agent 写出的总结文件，未再切换重型备用 Agent`")
+            lines.append("- 超时处理: `已采用 Agent 写出的总结文件，未跨 provider fallback`")
         if agent_summary_result.get("prompt_file"):
             lines.append(f"- Agent Prompt: `{agent_summary_result['prompt_file']}`")
         if agent_summary_result.get("context_file"):
@@ -8986,6 +9584,9 @@ class BugAnalysisRunner:
         extra_texts: tuple[str, ...] = (),
     ) -> list[str]:
         terms: list[str] = []
+        for text in (request_text, followup_text, *extra_texts):
+            for term in self._explicit_source_terms_from_text(text):
+                self._append_unique(terms, term)
         for plan in plans:
             if plan.kind != "signal" or not plan.signal_code:
                 continue
@@ -9002,6 +9603,23 @@ class BugAnalysisRunner:
             for term in self._business_source_terms_from_text(text):
                 self._append_unique(terms, term)
         return terms[:8]
+
+    def _explicit_source_terms_from_text(self, text: str) -> list[str]:
+        search_text = re.sub(r"https?://\S+", " ", text or "")
+        terms: list[str] = []
+        for match in re.finditer(
+            r"(?<![A-Za-z0-9_])([A-Za-z_][A-Za-z0-9_.-]{1,120}\.(?:kt|java|cpp|cc|c|h|hpp|proto|xml))",
+            search_text,
+        ):
+            filename = match.group(1).strip()
+            self._append_unique(terms, filename)
+            stem = Path(filename).stem
+            if stem:
+                self._append_unique(terms, stem)
+        for match in re.finditer(r"\b([A-Z][A-Za-z0-9_]{4,})\b", search_text):
+            token = match.group(1).strip()
+            self._append_unique(terms, token)
+        return terms
 
     def _business_source_terms_from_text(self, text: str) -> list[str]:
         suffixes = (
@@ -9094,10 +9712,58 @@ class BugAnalysisRunner:
         return terms
 
     def _collect_source_evidence(self, *, repo: Path, terms: list[str]) -> list[tuple[str, int, str]]:
+        explicit_matches = self._collect_source_evidence_by_targets(repo=repo, terms=terms)
         rg_matches = self._collect_source_evidence_with_rg(repo=repo, terms=terms)
         if rg_matches is not None:
-            return rg_matches
-        return self._collect_source_evidence_by_scan(repo=repo, terms=terms)
+            return self._merge_source_evidence_matches(explicit_matches, rg_matches)
+        return self._merge_source_evidence_matches(
+            explicit_matches,
+            self._collect_source_evidence_by_scan(repo=repo, terms=terms),
+        )
+
+    def _collect_source_evidence_by_targets(self, *, repo: Path, terms: list[str]) -> list[tuple[str, int, str]]:
+        suffixes = {".kt", ".java", ".cpp", ".cc", ".c", ".h", ".hpp", ".proto", ".xml"}
+        ignored_dirs = {".git", ".gradle", ".idea", "build", "out", ".cxx", "node_modules"}
+        explicit_files = [term for term in terms if re.search(r"\.(?:kt|java|cpp|cc|c|h|hpp|proto|xml)$", term, re.I)]
+        if not explicit_files:
+            return []
+        explicit_stems = {Path(term).stem for term in explicit_files}
+        matches: list[tuple[str, int, str]] = []
+        for path in sorted(repo.rglob("*")):
+            if not path.is_file() or path.suffix not in suffixes:
+                continue
+            if any(part in ignored_dirs for part in path.relative_to(repo).parts):
+                continue
+            if path.name not in explicit_files and path.stem not in explicit_stems:
+                continue
+            try:
+                lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            except OSError:
+                continue
+            rel_path = str(path.relative_to(repo))
+            stem = path.stem
+            for index, line in enumerate(lines, start=1):
+                if stem in line or path.name in line:
+                    matches.append((rel_path, index, line.strip()[:300]))
+                    if len([item for item in matches if item[0] == rel_path]) >= 3:
+                        break
+        return matches
+
+    def _merge_source_evidence_matches(
+        self,
+        primary: list[tuple[str, int, str]],
+        extra: list[tuple[str, int, str]],
+    ) -> list[tuple[str, int, str]]:
+        merged: list[tuple[str, int, str]] = []
+        seen: set[tuple[str, int, str]] = set()
+        for item in [*primary, *extra]:
+            if item in seen:
+                continue
+            seen.add(item)
+            merged.append(item)
+            if len(merged) >= 80:
+                break
+        return merged
 
     def _collect_source_evidence_with_rg(self, *, repo: Path, terms: list[str]) -> list[tuple[str, int, str]] | None:
         if shutil.which("rg") is None:
@@ -9428,7 +10094,12 @@ class BugAnalysisRunner:
         snapshot_plans: list["BugAnalysisPlan"] | None = None,
     ) -> dict[str, object]:
         provider = _normalize_provider_name(provider_override or self.config.bug_analysis.provider)
-        command_name = (command_override or self.config.bug_analysis.command).strip() or _default_command_for_provider(provider)
+        if command_override.strip():
+            command_name = command_override.strip()
+        elif provider_override:
+            command_name = _default_command_for_provider(provider)
+        else:
+            command_name = (self.config.bug_analysis.command or "").strip() or _default_command_for_provider(provider)
         if not provider or not command_name:
             return {"command": [], "provider": provider, "session_id": provider_session_id, "resumed": False}
         prompt = self._build_bug_agent_summary_prompt(
@@ -9534,36 +10205,6 @@ class BugAnalysisRunner:
             }
         return {"command": [], "provider": provider, "session_id": session_id, "resumed": False, "prompt": prompt, "embedded_files": embedded_files}
 
-    def _build_bug_agent_summary_fallback_command(
-        self,
-        *,
-        request_text: str,
-        request_artifact: Path,
-        metadata_path: Path,
-        output_path: Path,
-        followup_text: str = "",
-        previous_summary_path: Path | None = None,
-        snapshot_details: dict[str, object] | None = None,
-        snapshot_plans: list["BugAnalysisPlan"] | None = None,
-    ) -> dict[str, object]:
-        candidates = _provider_candidates(self.config.bug_analysis.provider, self.config.bug_analysis.command)
-        if len(candidates) < 2:
-            return {"command": [], "provider": "", "session_id": "", "resumed": False}
-        provider, command_name = candidates[1]
-        return self._build_bug_agent_summary_command(
-            request_text=request_text,
-            request_artifact=request_artifact,
-            metadata_path=metadata_path,
-            output_path=output_path,
-            provider_session_id="",
-            followup_text=followup_text,
-            previous_summary_path=previous_summary_path,
-            provider_override=provider,
-            command_override=command_name,
-            snapshot_details=snapshot_details,
-            snapshot_plans=snapshot_plans,
-        )
-
     def _build_bug_agent_summary_prompt(
         self,
         *,
@@ -9583,7 +10224,9 @@ class BugAnalysisRunner:
                 "2. 优先复用 metadata 中已经给出的日志、报告、output 目录和历史总结，不要要求用户重新上传日志。\n"
                 "3. 只读分析，不修改任何文件。\n"
                 "4. 输出中文 Markdown，结论先行，再给出证据。\n"
-                "5. 如果现有日志/报告仍不足以覆盖某个诉求，要明确指出缺口，但先回答已经能确认的部分。\n\n"
+                "5. 如果现有日志/报告仍不足以覆盖某个诉求，要明确指出缺口，但先回答已经能确认的部分。\n"
+                "6. 对启动/生命周期类报告，若结构化 JSON 显示 `status != complete` 或仍有 `missing_critical`，即使 HTML/verdict 文案更乐观，也按“链路未闭环”处理，并明确指出报告内部冲突。\n"
+                "7. “未命中关键节点”不等于“日志在这里截止”；除非材料明确显示文件结束或时间窗截断，否则不要把缺节点改写成日志截止。\n\n"
             )
             snapshot_prefix = self._build_bug_prompt_snapshot_prefix(
                 request_text=request_text,
@@ -9620,6 +10263,12 @@ class BugAnalysisRunner:
         prompt += f"用户原始请求：\n{request_text}\n\n"
         if followup_text.strip():
             prompt += f"本次追问/修正：\n{followup_text.strip()}\n\n"
+        if previous_summary_path is not None and self._should_include_previous_summary_for_followup(
+            followup_text=followup_text,
+            request_artifact=request_artifact,
+            metadata_path=metadata_path,
+        ):
+            prompt += f"上一轮 Agent 总结（也要核对，不可直接当成事实）：\n{previous_summary_path}\n\n"
         prompt += (
             "可读取路径：\n"
             f"- 工作区根目录：{self._working_dir()}\n"
@@ -9661,7 +10310,11 @@ class BugAnalysisRunner:
     ) -> list[dict[str, object]]:
         files: list[dict[str, object]] = []
         if followup_text.strip():
-            if previous_summary_path is not None and self._followup_needs_previous_summary_text(followup_text):
+            if previous_summary_path is not None and self._should_include_previous_summary_for_followup(
+                followup_text=followup_text,
+                request_artifact=request_artifact,
+                metadata_path=metadata_path,
+            ):
                 files.append({"title": "上一轮 Agent 总结", "path": str(previous_summary_path), "max_chars": 0})
             files.append({"title": "Bug Agent Follow-up Request", "path": str(request_artifact), "max_chars": 0})
             files.append({"title": "Bug Follow-up Metadata", "path": str(metadata_path), "max_chars": 0})
@@ -9719,6 +10372,10 @@ class BugAnalysisRunner:
     def _bug_summary_context_file_profile(self, path: Path) -> tuple[str, int, int]:
         name = path.name
         lowered = name.casefold()
+        if lowered == "bug_summary_evidence.md":
+            return "Bug Summary Evidence", 0, 0
+        if lowered == "bug_summary_evidence.json":
+            return "Bug Summary Evidence JSON", 0, 0
         if lowered == "bug_source_evidence.md":
             return "Bug Source Evidence", 0, 0
         if lowered == "skill.md" and ".ai/skills" in str(path):
@@ -9739,6 +10396,10 @@ class BugAnalysisRunner:
             note = "结构化分析结果，必须优先读取，用于结论、时间窗、PID、证据行号。"
         elif lowered.endswith(".html") and "_report" in lowered:
             note = "可视化 HTML 报告；只有 JSON/Markdown 不足时再读取，读取时忽略 CSS/style/script。"
+        elif lowered == "bug_summary_evidence.md":
+            note = "结构化证据包；优先读取，用于最后命中事件、后续同 PID 原始日志、缺失关键节点和禁止结论。"
+        elif lowered == "bug_summary_evidence.json":
+            note = "结构化证据包 JSON；用于程序化核对字段和值，优先级高于 HTML 报告。"
         elif lowered == "bug_source_evidence.md":
             note = "源码证据文件；需要源码链路时读取。"
         elif lowered == "skill.md":
@@ -9793,17 +10454,6 @@ class BugAnalysisRunner:
             seen.add(path)
             resolved.append(path)
         return resolved
-
-    def _render_embedded_file(self, path: Path, *, title: str, max_chars: int = 6000) -> str:
-        try:
-            content = path.read_text(encoding="utf-8")
-        except OSError as exc:
-            return f"## {title}\n路径: `{path}`\n读取失败: {exc}\n\n"
-        normalized = content.strip()
-        if len(normalized) > max_chars:
-            normalized = normalized[: max_chars - 1].rstrip() + "…"
-        return f"## {title}\n路径: `{path}`\n\n```text\n{normalized or '(空文件)'}\n```\n\n"
-
 
 @dataclass(slots=True)
 class BugAnalysisPlan:

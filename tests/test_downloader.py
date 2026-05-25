@@ -87,6 +87,35 @@ class SlowlyCompletedZipLarkClient:
         )
 
 
+class TimeoutAfterValidZipLarkClient:
+    def __init__(self):
+        self.calls = []
+
+    def download_resource(self, **kwargs):
+        self.calls.append(kwargs)
+        output = Path(kwargs["output"])
+        with zipfile.ZipFile(output, "w") as zf:
+            zf.writestr("crash.txt", "#00 pc 0000000000f385e4 /system/app/xp_envirodrive/lib/arm64/libunity.so\n")
+        return __import__("lark_agent_bridge.lark_client", fromlist=["CommandResult"]).CommandResult(
+            command=["download"],
+            returncode=124,
+            stderr="[lark-cli] [WARN] proxy detected",
+        )
+
+
+class TimeoutWithoutOutputLarkClient:
+    def __init__(self):
+        self.calls = []
+
+    def download_resource(self, **kwargs):
+        self.calls.append(kwargs)
+        return __import__("lark_agent_bridge.lark_client", fromlist=["CommandResult"]).CommandResult(
+            command=["download"],
+            returncode=124,
+            stderr="[lark-cli] [WARN] proxy detected",
+        )
+
+
 class DownloaderTests(unittest.TestCase):
     def test_safe_filename_from_url(self):
         self.assertEqual(safe_filename_from_url("https://example.com/a/b/log file.zip?x=1"), "log_file.zip")
@@ -131,6 +160,28 @@ class DownloaderTests(unittest.TestCase):
         self.assertEqual(fake_lark.calls[0]["message_id"], "om_file_msg")
         self.assertEqual(result.path.name, "file_abc123")
 
+    def test_file_resource_uses_display_name_for_download_target(self):
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        config = BridgeConfig(dry_run=False, data_dir=Path(tmpdir.name))
+        context = create_job_context(config.data_dir, job_id="job1")
+        fake_lark = SlowlyCompletedZipLarkClient(pause_seconds=0)
+        self.addCleanup(lambda: fake_lark.thread and fake_lark.thread.join(timeout=1))
+        downloader = LogDownloader(config, fake_lark)
+
+        result = downloader.download(
+            DownloadResource(
+                kind="file",
+                value="file_v3_00120_d905735f-5edc-4122-91ef-ad8d306f401g",
+                source_message_id="om_file_msg",
+                display_name="L1NSPGHB3SB010669log0.zip",
+            ),
+            context=context,
+            message_id="om_followup_msg",
+        )
+
+        self.assertEqual(result.path.name, "L1NSPGHB3SB010669log0.zip")
+
     def test_file_resource_waits_until_download_output_exists(self):
         tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(tmpdir.cleanup)
@@ -169,6 +220,38 @@ class DownloaderTests(unittest.TestCase):
         self.assertTrue(zipfile.is_zipfile(result.path))
         self.assertFalse(fake_lark.final_existed_while_writing)
         self.assertTrue(str(fake_lark.calls[0]["output"]).endswith(".part"))
+
+    def test_file_resource_promotes_valid_zip_when_download_command_times_out(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=False, data_dir=Path(tmp))
+            context = create_job_context(config.data_dir, job_id="job1")
+            fake_lark = TimeoutAfterValidZipLarkClient()
+            downloader = LogDownloader(config, fake_lark)
+
+            result = downloader.download(
+                DownloadResource(kind="file", value="crash.zip", source_message_id="om_file_msg"),
+                context=context,
+                message_id="om_followup_msg",
+            )
+
+            self.assertTrue(zipfile.is_zipfile(result.path))
+            self.assertFalse(result.path.with_name(f"{result.path.name}.part").exists())
+
+    def test_file_resource_timeout_reports_timeout_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=False, data_dir=Path(tmp))
+            context = create_job_context(config.data_dir, job_id="job1")
+            fake_lark = TimeoutWithoutOutputLarkClient()
+            downloader = LogDownloader(config, fake_lark)
+
+            with self.assertRaises(DownloadError) as exc:
+                downloader.download(
+                    DownloadResource(kind="file", value="crash.zip", source_message_id="om_file_msg"),
+                    context=context,
+                    message_id="om_followup_msg",
+                )
+
+        self.assertIn("timed out after 60s", str(exc.exception))
 
     def test_folder_resource_pulls_drive_folder_to_input_subdirectory(self):
         with tempfile.TemporaryDirectory() as tmp:

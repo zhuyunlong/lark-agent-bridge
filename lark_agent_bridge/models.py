@@ -272,14 +272,14 @@ class AIProviderOptions:
 
         [ai_provider]
         enabled = true
-        preset = "xiaomi-tp"   # or "yybb", "cc-switch", "openai", …
-        api_key  = "tp-xxx"    # or set LARK_AGENT_BRIDGE_AI_API_KEY
+        preset = "mimo-claude"   # or "yybb-codex", "cc-switch-yybb-codex", "openai", …
+        api_key  = "provider-key"    # or set LARK_AGENT_BRIDGE_AI_API_KEY
     """
 
     enabled: bool = False
     # Named preset — auto-fills base_url, models and api_format.
-    # Built-in values: "xiaomi-tp", "xiaomi-sk", "yybb", "yybb-codex",
-    #                  "codex-official", "cc-switch", "openai", "deepseek"
+    # Built-in values include "mimo-claude", "deepseek-claude", "yybb-claude",
+    # "yybb-codex", "panda-codex", and the matching "cc-switch-*" variants.
     preset: str = ""
     # Wire protocol used to call the endpoint.
     #   "openai"    – /v1/chat/completions  (Authorization: Bearer <key>)
@@ -287,7 +287,7 @@ class AIProviderOptions:
     # Leave empty; the preset or base_url suffix sets it automatically.
     api_format: str = ""
     # Primary model identifier: "provider:model" or just "model" when base_url is set.
-    # Examples: "claude-sonnet-4-6", "gpt-4.1-mini", "deepseek-chat", "mimo-v2.5-pro"
+    # Examples: "claude-sonnet-4-6", "gpt-5.4", "deepseek-v4-pro", "mimo-v2.5-pro"
     primary_model: str = ""
     fallback_model: str = ""
     # Fast/cheap model for intent classification and lightweight tasks.
@@ -299,6 +299,11 @@ class AIProviderOptions:
     # Fallback provider config (used when primary fails).
     fallback_base_url: str = ""
     fallback_api_key: str = ""
+    profile_type: str = ""
+    agent_provider: str = ""
+    agent_command: str = ""
+    requires_api_key: bool = False
+    precondition: str = ""
     # Intent classification settings
     intent_temperature: float = 0.0
     intent_max_tokens: int = 1024
@@ -565,6 +570,7 @@ class DownloadResource:
     kind: str
     value: str
     source_message_id: str = ""
+    display_name: str = ""
 
     @property
     def resource_type(self) -> str:

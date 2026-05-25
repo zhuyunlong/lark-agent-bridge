@@ -4,10 +4,10 @@
 
 ```bash
 cd /path/to/workspace/tools/lark-agent-bridge
-python3.11 -m lark_agent_bridge listen --config config.toml
+./run.sh
 ```
 
-Use `config.example.toml` only for dry-run checks. For real Feishu traffic, copy it to `config.toml` and keep `dry_run = false`. By default `allowed_chats = []`, so group access is not restricted: any group can `@` the bot for bug analysis, direct analysis, signal analysis, perception summary, follow-up, and ordinary chat. Configure `allowed_chats` only when you want to turn on group access control.
+Use only `config.toml` at runtime. Keep it desensitized and ignored by Git; `config/config.example.toml` is the committed desensitized template. By default `allowed_chats = []`, so group access is not restricted: any group can `@` the bot for bug analysis, direct analysis, signal analysis, perception summary, follow-up, and ordinary chat. Configure `allowed_chats` only when you want to turn on group access control.
 
 Real deployments usually keep these values in local `config.toml` or environment variables:
 
@@ -25,53 +25,37 @@ Real deployments usually keep these values in local `config.toml` or environment
 - admin console: the report HTTP service serves `http://<bridge-lan-ip>:8765/admin` for multi-session progress, historical cases, skill management, report links, job IDs, and backend agent progress stages; `/sessions` remains an alias
 - listener health: `listen` waits for the official `[event] ready event_key=...` marker, keeps the consumer stdin open to avoid EOF shutdown, records daemon health in `data/state/agent_activity.json`, and exposes it through `check` plus `http://<bridge-lan-ip>:8765/api/daemon`
 
-## Default Agent and fallback
+## Default Agent
 
-The bridge has two Agent-facing configuration blocks:
+Profile selection is owned by `run.sh` and `config/presets.toml`:
 
-1. `[bug_analysis]`
-2. `[intent_analysis]`
+- `./run.sh` defaults to `cc-switch-deepseek-claude`.
+- `./run.sh <profile>` keeps `config.toml` and overrides only the profile.
+- `*-claude` maps to `claude`; `*-codex` maps to `codex`.
+- `codex-offi` / `claude-offi` use official CLI login and disable direct API.
+- direct API profiles require `LARK_AGENT_BRIDGE_AI_API_KEY` or local `[ai_provider].api_key`; `run.sh` prints a warning if both are missing.
 
-`[bug_analysis]` controls the preferred Agent for:
-
-- final bug summary
-- bug follow-up
-- bug reanalysis continuation
-
-Example:
+Leave provider and command empty in `config.toml` unless there is a deliberate local override:
 
 ```toml
 [bug_analysis]
-provider = "codex"
-command = "codex"
+provider = ""
+command = ""
 agent_summary_timeout_seconds = 300
-```
 
-or:
-
-```toml
-[bug_analysis]
-provider = "claude"
-command = "claude"
+[intent_analysis]
+provider = ""
+command = ""
 ```
 
 Behavior:
 
-- the configured provider is the startup default
-- if that provider cannot start or fails during the summary/continuation step, the bridge automatically tries the other provider
+- the selected profile determines the only local Agent provider for that route
+- if that provider cannot start or fails during the summary/continuation step, the bridge does not cross-fallback between Codex and Claude
 - `agent_summary_timeout_seconds` bounds only the final Agent summary; when it expires, generated reports are still delivered using the script summary
 - each bug job keeps `bug_agent_summary_prompt.md` and `bug_agent_summary_context.json` in `data/jobs/<job_id>/output/` for prompt/context audit
 
-`[intent_analysis]` is optional. If enabled, it lets a local Agent classify each addressed message first:
-
-```toml
-[intent_analysis]
-enabled = true
-provider = "claude"
-command = "claude"
-```
-
-If `provider` / `command` are left empty there, intent routing reuses `[bug_analysis]`. It now has the same automatic fallback behavior.
+`[intent_analysis]` is optional. If enabled, it lets the selected local Agent classify each addressed message first.
 
 ## Behavior permissions
 
@@ -120,15 +104,15 @@ Free-form ordinary chat is still blocked there.
 ## Dry-run checks
 
 ```bash
-python3.11 -m lark_agent_bridge check --config config.example.toml
-python3.11 -m lark_agent_bridge handle-event --config config.example.toml --event samples/signal_event_with_url.json --dry-run
-python3.11 -m lark_agent_bridge handle-event --config config.example.toml --event samples/signal_event_with_file.json --dry-run
-python3.11 -m lark_agent_bridge handle-event --config config.example.toml --event samples/basic_chat_who_are_you.json --dry-run
-python3.11 -m lark_agent_bridge handle-event --config config.example.toml --event samples/omlx_chat_question.json --dry-run
-python3.11 -m lark_agent_bridge handle-event --config config.example.toml --event samples/group_chat_command.json --dry-run
-python3.11 -m lark_agent_bridge handle-event --config config.example.toml --event samples/group_unmentioned_url.json --dry-run
-python3.11 -m lark_agent_bridge handle-event --config config.example.toml --event samples/p2p_plain_chat.json --dry-run
-python3.11 -m lark_agent_bridge run-signal --config config.example.toml --signal 132002 --log-path /path/to/log --dry-run
+python3.11 -m lark_agent_bridge check --config config.toml
+python3.11 -m lark_agent_bridge handle-event --config config.toml --event samples/signal_event_with_url.json --dry-run
+python3.11 -m lark_agent_bridge handle-event --config config.toml --event samples/signal_event_with_file.json --dry-run
+python3.11 -m lark_agent_bridge handle-event --config config.toml --event samples/basic_chat_who_are_you.json --dry-run
+python3.11 -m lark_agent_bridge handle-event --config config.toml --event samples/omlx_chat_question.json --dry-run
+python3.11 -m lark_agent_bridge handle-event --config config.toml --event samples/group_chat_command.json --dry-run
+python3.11 -m lark_agent_bridge handle-event --config config.toml --event samples/group_unmentioned_url.json --dry-run
+python3.11 -m lark_agent_bridge handle-event --config config.toml --event samples/p2p_plain_chat.json --dry-run
+python3.11 -m lark_agent_bridge run-signal --config config.toml --signal 132002 --log-path /path/to/log --dry-run
 ```
 
 Use Python 3.11+ for these commands. On this machine `/opt/homebrew/bin/python3.11` is available; the system `python3` may be older.
