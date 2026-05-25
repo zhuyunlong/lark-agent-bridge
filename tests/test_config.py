@@ -215,6 +215,7 @@ timeout_seconds = 99
 agent_summary_timeout_seconds = 45
 default_prompt = "分析这个bug"
 resume_followup_sessions = true
+auto_fallback_to_file_agent = true
 force_reanalysis_terms = ["重新分析", "源码"]
 """,
                 encoding="utf-8",
@@ -230,6 +231,7 @@ force_reanalysis_terms = ["重新分析", "源码"]
         self.assertEqual(config.bug_analysis.agent_summary_timeout_seconds, 45)
         self.assertEqual(config.bug_analysis.default_prompt, "分析这个bug")
         self.assertTrue(config.bug_analysis.resume_followup_sessions)
+        self.assertTrue(config.bug_analysis.auto_fallback_to_file_agent)
         self.assertEqual(config.bug_analysis.force_reanalysis_terms, ["重新分析", "源码"])
 
     def test_bug_analysis_command_defaults_to_codex_for_openai_api_format(self):
@@ -508,6 +510,7 @@ provider = "codex"
 command = "codex"
 timeout_seconds = 45
 max_prompt_chars = 6000
+allow_subprocess_fallback = true
 """,
                 encoding="utf-8",
             )
@@ -520,6 +523,7 @@ max_prompt_chars = 6000
         self.assertEqual(config.intent_analysis.model, "gpt-5.4")
         self.assertEqual(config.intent_analysis.timeout_seconds, 45)
         self.assertEqual(config.intent_analysis.max_prompt_chars, 6000)
+        self.assertTrue(config.intent_analysis.allow_subprocess_fallback)
 
     def test_load_knowledge_options(self):
         with tempfile.TemporaryDirectory() as tmp:

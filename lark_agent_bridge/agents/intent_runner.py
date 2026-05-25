@@ -1,13 +1,13 @@
 """Intent analysis runner.
 
-Supports three backends (tried in order):
+Supports three backends:
 1. **Pydantic AI Agent** (best) — when pydantic-ai is installed and
    ``[ai_provider].enabled = true``, uses structured output validation
    with automatic retry on schema failures. Typical latency: 3-10 seconds.
-2. **Direct API** (preferred fallback) — raw LLM HTTP call with manual
-   JSON parsing. Typical latency: 3-10 seconds.
-3. **Subprocess CLI** (legacy fallback) — shells out to ``codex exec``
-   or ``claude --print``. Typical latency: 120-300 seconds.
+2. **Direct API** — raw LLM HTTP call with manual JSON parsing. Typical
+   latency: 3-10 seconds.
+3. **Subprocess CLI** — explicit legacy route-classifier when configured,
+   or optional fallback when ``allow_subprocess_fallback`` is enabled.
 """
 
 from __future__ import annotations
@@ -125,8 +125,13 @@ class IntentAnalysisRunner:
             try:
                 return self._classify_via_api(prompt)
             except (LLMClientError, ValueError) as exc:
+                if not self.config.intent_analysis.allow_subprocess_fallback:
+                    raise IntentAnalysisFailure(
+                        f"Direct API intent classification failed: {exc}",
+                        error_code="intent_analysis_api_failed",
+                        stderr=str(exc),
+                    ) from exc
                 logger.warning("Direct API intent classification failed, trying subprocess fallback: %s", exc)
-                # Fall through to subprocess path
 
         # --- Path 2: Subprocess CLI (legacy fallback) ---
         return self._classify_via_subprocess(prompt)

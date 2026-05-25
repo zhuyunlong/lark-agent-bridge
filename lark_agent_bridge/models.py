@@ -101,6 +101,7 @@ class BugAnalysisOptions:
     upload_result_files: bool = True
     default_prompt: str = ""
     resume_followup_sessions: bool = False
+    auto_fallback_to_file_agent: bool = False
     force_reanalysis_terms: list[str] = field(
         default_factory=lambda: [
             "结果不合理",
@@ -125,6 +126,7 @@ class IntentAnalysisOptions:
     working_dir: Path | None = None
     timeout_seconds: int = 180
     max_prompt_chars: int = 12000
+    allow_subprocess_fallback: bool = False
     system_prompt: str = (
         "你是 Lark Agent Bridge 的意图路由器。"
         "你只能根据输入消息和给定上下文判断路由，不要调用工具，不要假装读取文件。"

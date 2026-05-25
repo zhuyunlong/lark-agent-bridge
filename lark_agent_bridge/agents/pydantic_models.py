@@ -18,7 +18,6 @@ importing this module will raise ImportError. Callers should handle gracefully.
 
 from __future__ import annotations
 
-import json
 import re
 from typing import Any, Literal
 
@@ -114,68 +113,6 @@ class IntentOutput(BaseModel):
     def to_dict(self) -> dict[str, str]:
         """Convert to plain dict for serialization."""
         return self.model_dump(mode="python")
-
-
-# ---------------------------------------------------------------------------
-# Bug Summary Models
-# ---------------------------------------------------------------------------
-
-
-class BugSummarySection(BaseModel):
-    """A section of the bug summary report."""
-
-    title: str = Field(description="Section heading")
-    content: str = Field(description="Section content in markdown")
-
-
-class BugSummaryOutput(BaseModel):
-    """Structured output for bug analysis summary generation.
-
-    This replaces the free-form text summary with a structured report
-    that can be rendered into HTML/markdown with consistent formatting.
-    """
-
-    title: str = Field(description="One-line summary title of the bug")
-    severity: Literal["critical", "high", "medium", "low", "unknown"] = Field(
-        default="unknown", description="Bug severity assessment"
-    )
-    root_cause: str = Field(default="", description="Root cause analysis (1-3 sentences)")
-    conclusion: str = Field(description="Final conclusion and recommendation")
-    sections: list[BugSummarySection] = Field(
-        default_factory=list, description="Detailed analysis sections"
-    )
-    action_items: list[str] = Field(
-        default_factory=list, description="Recommended follow-up actions"
-    )
-
-    @classmethod
-    def from_llm_response(cls, raw: str) -> "BugSummaryOutput":
-        """Parse from raw LLM response, with fallback to free-form text."""
-        try:
-            payload = _extract_json(raw)
-            return cls.model_validate_json(payload)
-        except (ValueError, json.JSONDecodeError):
-            # Fallback: treat entire response as unstructured conclusion
-            return cls(
-                title="Bug Analysis Summary",
-                conclusion=raw.strip()[:4000],
-            )
-
-    def to_markdown(self) -> str:
-        """Render as markdown for report generation."""
-        parts = [f"# {self.title}\n"]
-        if self.root_cause:
-            parts.append(f"**根因分析**: {self.root_cause}\n")
-        if self.severity != "unknown":
-            parts.append(f"**严重程度**: {self.severity}\n")
-        for section in (self.sections or []):
-            parts.append(f"\n## {section.title}\n\n{section.content}\n")
-        if self.action_items:
-            parts.append("\n## 建议行动\n")
-            for item in self.action_items:
-                parts.append(f"- {item}\n")
-        parts.append(f"\n## 结论\n\n{self.conclusion}\n")
-        return "\n".join(parts)
 
 
 # ---------------------------------------------------------------------------

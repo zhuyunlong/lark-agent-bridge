@@ -383,6 +383,9 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
             resume_followup_sessions=bool(
                 bug_data.get("resume_followup_sessions", BugAnalysisOptions().resume_followup_sessions)
             ),
+            auto_fallback_to_file_agent=bool(
+                bug_data.get("auto_fallback_to_file_agent", BugAnalysisOptions().auto_fallback_to_file_agent)
+            ),
             force_reanalysis_terms=_string_list(
                 bug_data.get("force_reanalysis_terms", BugAnalysisOptions().force_reanalysis_terms),
                 "bug_analysis.force_reanalysis_terms",
@@ -396,6 +399,12 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
             working_dir=_optional_path(intent_data.get("working_dir"), base_dir, "intent_analysis.working_dir"),
             timeout_seconds=int(intent_data.get("timeout_seconds", 180)),
             max_prompt_chars=int(intent_data.get("max_prompt_chars", IntentAnalysisOptions().max_prompt_chars)),
+            allow_subprocess_fallback=bool(
+                intent_data.get(
+                    "allow_subprocess_fallback",
+                    IntentAnalysisOptions().allow_subprocess_fallback,
+                )
+            ),
             system_prompt=str(intent_data.get("system_prompt", IntentAnalysisOptions().system_prompt)),
         ),
         omlx_chat=OmlxChatOptions(

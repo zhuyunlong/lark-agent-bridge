@@ -95,6 +95,7 @@ model = "gpt-5.4"
 working_dir = "../.."
 agent_summary_timeout_seconds = 300
 resume_followup_sessions = false
+auto_fallback_to_file_agent = false
 ```
 
 Behavior:
@@ -105,6 +106,7 @@ Behavior:
 - when `provider = "codex"`, the bridge passes `-m` using `model`; the default is `gpt-5.4`
 - the bridge does not cross-fallback between Codex and Claude; keep `provider`, `command`, and the selected protocol route consistent
 - `agent_summary_timeout_seconds` only limits the final Agent-written conclusion; if the Agent is silent longer than this window, the bridge falls back to the script summary and still returns the generated report
+- `auto_fallback_to_file_agent = false` keeps direct API summary failures explicit instead of silently switching to Codex/Claude; set it to `true` only when you prefer automatic recovery over reproducible routing
 - leave `default_prompt` empty unless you intentionally want a configured fallback; generic bug links should ask for a concrete analysis direction instead of silently defaulting to startup
 - follow-ups and reanalysis create a fresh Agent session by default, while reusing the previous bug link, downloaded logs, extracted logs, report metadata, skill decision, and source-repo paths
 - set `resume_followup_sessions = true` only if you explicitly want a follow-up to resume the old Agent session; reanalysis still uses a fresh Agent summary session so the new prompt and current skill/source evidence are not biased by stale private context
@@ -124,12 +126,14 @@ command = "claude"
 working_dir = "../.."
 timeout_seconds = 180
 max_prompt_chars = 12000
+allow_subprocess_fallback = false
 ```
 
 Behavior:
 
 - if `provider` / `command` are empty here, intent routing reuses `[bug_analysis]`
 - the bridge does not cross-fallback to the other intent-routing provider
+- when `[ai_provider]` handles intent routing, subprocess fallback is disabled by default; set `allow_subprocess_fallback = true` only if you prefer slow legacy recovery over an explicit API failure
 - this Agent only decides the route; heavy bug/log analysis still runs in local scripts
 
 ## Example launchd injection

@@ -85,6 +85,7 @@ max_prompt_chars = 16000
 upload_result_files = true
 default_prompt = ""
 resume_followup_sessions = false
+auto_fallback_to_file_agent = false
 
 [intent_analysis]
 enabled = true
@@ -94,6 +95,7 @@ model = "gpt-5.4"
 working_dir = "../.."
 timeout_seconds = 180
 max_prompt_chars = 12000
+allow_subprocess_fallback = false
 
 [source_investigation]
 enabled = true

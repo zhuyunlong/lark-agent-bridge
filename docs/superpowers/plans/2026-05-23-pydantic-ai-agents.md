@@ -43,8 +43,8 @@ lark-agent-bridge, enabling:
 
 | File | Purpose |
 |------|---------|
-| `agents/pydantic_models.py` | Pydantic BaseModel definitions (IntentOutput, BugSummaryOutput, AgentDeps) |
-| `agents/pydantic_agents.py` | IntentAgent + SummaryAgent wrappers around pydantic-ai |
+| `agents/pydantic_models.py` | Pydantic BaseModel definitions (IntentOutput, AgentDeps) |
+| `agents/pydantic_agents.py` | IntentAgent wrapper around pydantic-ai |
 | `agents/routing_fsm.py` | Lightweight state machine for message routing |
 | `tests/test_pydantic_agents.py` | 35+ unit tests for all new modules |
 
@@ -144,7 +144,7 @@ python3 -m pytest tests/test_pydantic_agents.py -v
 
 ## Future Work (Phase 2+)
 
-- [ ] Wire SummaryAgent into bug_runner.py summary path
+- [x] Freeze SummaryAgent path; bug summaries stay on the explicit backend policy instead of adding another agent layer
 - [ ] Use FSM in app.py handle_payload for the main routing flow
 - [ ] Add Tool Calling (knowledge base search as pydantic-ai tool)
 - [ ] Explore pydantic-ai Graph for multi-step analysis workflows

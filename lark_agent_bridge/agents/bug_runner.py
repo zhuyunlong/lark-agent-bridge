@@ -58,6 +58,7 @@ from ._helpers import (
     _normalize_provider_name,
     _provider_candidates,
 )
+from .bug_summary_policy import SummaryBackendInput, choose_summary_backend
 from .omlx_client import OmlxChatClient
 from .routing_terms import (
     CRASH_ROUTE_TERMS,
@@ -7195,19 +7196,42 @@ class BugAnalysisRunner:
     ) -> dict[str, object]:
         explicit_provider = _normalize_provider_name(provider_override)
         if explicit_provider == "omlx":
-            return self._run_bug_agent_summary_omlx_fallback(
-                request_text=request_text,
-                request_artifact=request_artifact,
-                metadata_path=metadata_path,
-                output_path=output_path,
-                followup_text=followup_text,
-                previous_summary_path=previous_summary_path,
-                progress_callback=progress_callback,
-                reason="explicit_agent",
-                allow_file_context=True,
-                snapshot_details=snapshot_details,
-                snapshot_plans=snapshot_plans,
+            return self._annotate_summary_backend_result(
+                self._run_bug_agent_summary_omlx_fallback(
+                    request_text=request_text,
+                    request_artifact=request_artifact,
+                    metadata_path=metadata_path,
+                    output_path=output_path,
+                    followup_text=followup_text,
+                    previous_summary_path=previous_summary_path,
+                    progress_callback=progress_callback,
+                    reason="explicit_agent",
+                    allow_file_context=True,
+                    snapshot_details=snapshot_details,
+                    snapshot_plans=snapshot_plans,
+                ),
+                execution_backend="omlx",
+                backend_reason="explicit_lightweight",
             )
+        skip_direct_api = self._should_skip_direct_api_bug_summary(
+            request_text=request_text,
+            followup_text=followup_text,
+            request_artifact=request_artifact,
+            metadata_path=metadata_path,
+            previous_summary_path=previous_summary_path,
+        )
+        backend_decision = choose_summary_backend(
+            SummaryBackendInput(
+                explicit_provider=explicit_provider,
+                provider_session_id=provider_session_id,
+                prefer_lightweight=False,
+                ai_provider_enabled=self.config.ai_provider.enabled,
+                ai_provider_base_url=self.config.ai_provider.base_url,
+                ai_provider_primary_model=self.config.ai_provider.primary_model,
+                skip_direct_api=skip_direct_api,
+                auto_fallback_to_file_agent=self.config.bug_analysis.auto_fallback_to_file_agent,
+            )
+        )
         invocation = self._build_bug_agent_summary_command(
             request_text=request_text,
             request_artifact=request_artifact,
@@ -7246,7 +7270,11 @@ class BugAnalysisRunner:
                 snapshot_plans=snapshot_plans,
             )
             if omlx_result["message"]:
-                return omlx_result
+                return self._annotate_summary_backend_result(
+                    omlx_result,
+                    execution_backend="omlx",
+                    backend_reason="prefer_lightweight",
+                )
             self._emit_progress(
                 progress_callback,
                 stage="bug_agent_summary_lightweight_unavailable",
@@ -7259,16 +7287,7 @@ class BugAnalysisRunner:
         if (
             not explicit_file_agent
             and not provider_session_id.strip()
-            and self.config.ai_provider.enabled
-            and self.config.ai_provider.base_url
-            and self.config.ai_provider.primary_model
-            and not self._should_skip_direct_api_bug_summary(
-                request_text=request_text,
-                followup_text=followup_text,
-                request_artifact=request_artifact,
-                metadata_path=metadata_path,
-                previous_summary_path=previous_summary_path,
-            )
+            and backend_decision.backend == "direct_api"
         ):
             api_result = self._run_bug_agent_summary_via_api(
                 request_text=request_text,
@@ -7282,11 +7301,37 @@ class BugAnalysisRunner:
                 snapshot_plans=snapshot_plans,
             )
             if api_result["message"]:
-                return api_result
+                return self._annotate_summary_backend_result(
+                    api_result,
+                    execution_backend="direct_api",
+                    backend_reason=backend_decision.reason,
+                    fallback_from=backend_decision.fallback_from,
+                )
+            failure_decision = choose_summary_backend(
+                SummaryBackendInput(
+                    explicit_provider=explicit_provider,
+                    provider_session_id=provider_session_id,
+                    prefer_lightweight=False,
+                    ai_provider_enabled=self.config.ai_provider.enabled,
+                    ai_provider_base_url=self.config.ai_provider.base_url,
+                    ai_provider_primary_model=self.config.ai_provider.primary_model,
+                    skip_direct_api=skip_direct_api,
+                    direct_api_failure=str(api_result.get("error") or "direct_api_failed"),
+                    auto_fallback_to_file_agent=self.config.bug_analysis.auto_fallback_to_file_agent,
+                )
+            )
+            if failure_decision.backend == "direct_api":
+                return self._annotate_summary_backend_result(
+                    api_result,
+                    execution_backend="direct_api",
+                    backend_reason=failure_decision.reason,
+                    fallback_from=failure_decision.fallback_from,
+                )
             logger.warning(
                 "Direct API summary failed (error=%s), falling back to subprocess",
                 api_result.get("error", "unknown"),
             )
+            backend_decision = failure_decision
         result = self._run_bug_agent_summary_once(
             invocation=invocation,
             output_path=output_path,
@@ -7295,11 +7340,26 @@ class BugAnalysisRunner:
             bridge_session_id=bridge_session_id,
         )
         if result["message"] and result["provider"]:
-            return result
+            return self._annotate_summary_backend_result(
+                result,
+                execution_backend="file_agent",
+                backend_reason=backend_decision.reason,
+                fallback_from=backend_decision.fallback_from,
+            )
         if explicit_file_agent:
-            return result
+            return self._annotate_summary_backend_result(
+                result,
+                execution_backend="file_agent",
+                backend_reason=backend_decision.reason,
+                fallback_from=backend_decision.fallback_from,
+            )
         if result["message"]:
-            return result
+            return self._annotate_summary_backend_result(
+                result,
+                execution_backend="file_agent",
+                backend_reason=backend_decision.reason,
+                fallback_from=backend_decision.fallback_from,
+            )
         fallback_result = result
         if provider_session_id.strip() and str(result.get("error") or "") != "agent_summary_timeout":
             self._emit_progress(
@@ -7329,7 +7389,11 @@ class BugAnalysisRunner:
                     bridge_session_id=bridge_session_id,
                 )
                 if fallback_result["message"] and fallback_result["provider"]:
-                    return fallback_result
+                    return self._annotate_summary_backend_result(
+                        fallback_result,
+                        execution_backend="file_agent",
+                        backend_reason="resume_retry_file_agent",
+                    )
         if str(fallback_result.get("error") or "") == "agent_summary_timeout":
             omlx_result = self._run_bug_agent_summary_omlx_fallback(
                 request_text=request_text,
@@ -7344,9 +7408,38 @@ class BugAnalysisRunner:
                 snapshot_plans=snapshot_plans,
             )
             if omlx_result["message"]:
-                return omlx_result
-            return fallback_result
-        return fallback_result
+                return self._annotate_summary_backend_result(
+                    omlx_result,
+                    execution_backend="omlx",
+                    backend_reason="primary_timeout",
+                    fallback_from="file_agent",
+                )
+            return self._annotate_summary_backend_result(
+                fallback_result,
+                execution_backend="file_agent",
+                backend_reason=backend_decision.reason,
+                fallback_from=backend_decision.fallback_from,
+            )
+        return self._annotate_summary_backend_result(
+            fallback_result,
+            execution_backend="file_agent",
+            backend_reason=backend_decision.reason,
+            fallback_from=backend_decision.fallback_from,
+        )
+
+    def _annotate_summary_backend_result(
+        self,
+        result: dict[str, object],
+        *,
+        execution_backend: str,
+        backend_reason: str = "",
+        fallback_from: str = "",
+    ) -> dict[str, object]:
+        annotated = dict(result)
+        annotated["execution_backend"] = execution_backend
+        annotated["backend_reason"] = backend_reason
+        annotated["fallback_from"] = fallback_from
+        return annotated
 
     def _agent_summary_timeout(
         self,
@@ -9262,6 +9355,12 @@ class BugAnalysisRunner:
             details["agent_summary_resumed"] = True
         if agent_summary_result.get("usage_scope"):
             details["agent_summary_usage_scope"] = str(agent_summary_result["usage_scope"])
+        if agent_summary_result.get("execution_backend"):
+            details["agent_summary_execution_backend"] = str(agent_summary_result["execution_backend"])
+        if agent_summary_result.get("backend_reason"):
+            details["agent_summary_backend_reason"] = str(agent_summary_result["backend_reason"])
+        if agent_summary_result.get("fallback_from"):
+            details["agent_summary_fallback_from"] = str(agent_summary_result["fallback_from"])
         if agent_summary_result.get("prompt_file"):
             details["agent_summary_prompt_file"] = str(agent_summary_result["prompt_file"])
         if agent_summary_result.get("context_file"):
@@ -9294,10 +9393,19 @@ class BugAnalysisRunner:
         session_id = str(agent_summary_result.get("session_id") or "").strip()
         resumed = bool(agent_summary_result.get("resumed"))
         usage_scope = str(agent_summary_result.get("usage_scope") or "").strip()
+        execution_backend = str(agent_summary_result.get("execution_backend") or "").strip()
+        backend_reason = str(agent_summary_result.get("backend_reason") or "").strip()
+        fallback_from = str(agent_summary_result.get("fallback_from") or "").strip()
         if not provider and not model and not isinstance(usage, dict) and not isinstance(duration, (int, float)):
             return
         lines = ["", "## Agent 执行信息", ""]
         lines.append(f"- Agent 类型: `{provider or '未知'}`")
+        if execution_backend:
+            lines.append(f"- 执行后端: `{execution_backend}`")
+        if backend_reason:
+            lines.append(f"- 后端选择原因: `{backend_reason}`")
+        if fallback_from:
+            lines.append(f"- fallback_from: `{fallback_from}`")
         if model:
             lines.append(f"- Agent 模型: `{model}`")
         if session_id:
@@ -9429,12 +9537,21 @@ class BugAnalysisRunner:
         session_id = str(agent_summary_result.get("session_id") or "").strip()
         resumed = bool(agent_summary_result.get("resumed"))
         usage_scope = str(agent_summary_result.get("usage_scope") or "").strip()
+        execution_backend = str(agent_summary_result.get("execution_backend") or "").strip()
+        backend_reason = str(agent_summary_result.get("backend_reason") or "").strip()
+        fallback_from = str(agent_summary_result.get("fallback_from") or "").strip()
         if not provider and not model and not isinstance(usage, dict) and not isinstance(duration, (int, float)):
             return ""
         rows = [
             ("Agent 类型", provider or "未知"),
             ("续会话", "是" if resumed else "否"),
         ]
+        if execution_backend:
+            rows.append(("执行后端", execution_backend))
+        if backend_reason:
+            rows.append(("后端选择原因", backend_reason))
+        if fallback_from:
+            rows.append(("Fallback From", fallback_from))
         if model:
             rows.append(("Agent 模型", model))
         if session_id:
@@ -9549,31 +9666,89 @@ class BugAnalysisRunner:
         if not terms:
             return None
         evidence_path = output_dir / "bug_source_evidence.md"
-        repo = self.config.guideengine_repo.expanduser()
+
+        # Use all configured repo_roots (includes Napa5 when configured), fallback to guideengine_repo
+        si_opts = self.config.source_investigation
+        repo_roots = [
+            p.expanduser()
+            for p in (si_opts.repo_roots or [self.config.guideengine_repo])
+        ]
+        existing_repos = [r for r in repo_roots if r.exists()]
+
         lines = [
             "# Bug Source Evidence",
             "",
-            f"- 源码根目录: `{repo}`",
+            f"- 源码根目录: `{', '.join(str(r) for r in (existing_repos or repo_roots))}`",
             f"- 检索词: `{', '.join(terms)}`",
             "",
         ]
-        if not repo.exists():
-            lines.append(f"源码根目录不存在，未执行源码检索: `{repo}`")
+        if not existing_repos:
+            lines.append(f"源码根目录不存在，未执行源码检索: `{', '.join(str(r) for r in repo_roots)}`")
             evidence_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
             return evidence_path
 
-        matches = self._collect_source_evidence(repo=repo, terms=terms)
-        if not matches:
+        all_matches: list[tuple[str, int, str]] = []
+        for repo in existing_repos:
+            # Try codegraph first (semantic symbol search)
+            cg_matches = self._collect_source_evidence_with_codegraph(repo=repo, terms=terms)
+            if cg_matches is not None:
+                repo_prefix = f"[{repo.name}] " if len(existing_repos) > 1 else ""
+                all_matches.extend((repo_prefix + path, ln, text) for path, ln, text in cg_matches)
+                continue
+            # Fall back to existing ripgrep + scan
+            matches = self._collect_source_evidence(repo=repo, terms=terms)
+            if len(existing_repos) > 1:
+                all_matches.extend((f"[{repo.name}] {path}", ln, text) for path, ln, text in matches)
+            else:
+                all_matches.extend(matches)
+
+        if not all_matches:
             lines.append("未检索到匹配源码。")
         else:
             current_file = ""
-            for path, line_no, text in matches:
+            for path, line_no, text in all_matches[:80]:
                 if path != current_file:
                     current_file = path
                     lines.extend(["", f"## {path}"])
                 lines.append(f"- L{line_no}: `{text}`")
         evidence_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
         return evidence_path
+
+    def _collect_source_evidence_with_codegraph(
+        self, *, repo: Path, terms: list[str]
+    ) -> list[tuple[str, int, str]] | None:
+        """Try codegraph semantic search; return None to fall through to ripgrep."""
+        si_opts = self.config.source_investigation
+        if not si_opts.codegraph_enabled:
+            return None
+        try:
+            from ..knowledge.codegraph_client import CodeGraphClient
+        except ImportError:
+            return None
+        cg = CodeGraphClient(
+            command=si_opts.codegraph_command,
+            timeout=si_opts.codegraph_timeout_seconds,
+        )
+        if not cg.is_available() or not cg.is_indexed(repo):
+            return None
+        matches: list[tuple[str, int, str]] = []
+        seen: set[tuple[str, int]] = set()
+        for term in terms[:5]:
+            hits = cg.search_symbol(term, repo, limit=5)
+            for h in hits:
+                key = (h.path, h.line)
+                if key in seen:
+                    continue
+                seen.add(key)
+                matches.append((h.path, h.line, f"[{h.kind}] {h.qualified_name or h.name}"))
+            callers = cg.get_callers(term, repo, limit=5)
+            for c in callers:
+                key = (c.path, c.line)
+                if key in seen:
+                    continue
+                seen.add(key)
+                matches.append((c.path, c.line, f"[caller→{term}] {c.name}"))
+        return matches if matches else None
 
     def _source_evidence_terms(
         self,

@@ -2,20 +2,17 @@
 
 from __future__ import annotations
 
-import json
 import unittest
 from unittest.mock import MagicMock, patch
 
 from lark_agent_bridge.agents.pydantic_models import (
     PYDANTIC_AVAILABLE,
-    BugSummaryOutput,
     IntentOutput,
     _extract_json,
 )
 from lark_agent_bridge.agents.pydantic_agents import (
     AgentResult,
     IntentAgent,
-    SummaryAgent,
     _check_pydantic_ai,
 )
 from lark_agent_bridge.agents.routing_fsm import (
@@ -100,54 +97,6 @@ class TestIntentOutput(unittest.TestCase):
         self.assertEqual(out.reason, "")
 
 
-class TestBugSummaryOutput(unittest.TestCase):
-    """Test BugSummaryOutput Pydantic model."""
-
-    def test_valid_creation(self):
-        out = BugSummaryOutput(
-            title="Crash on startup",
-            severity="critical",
-            root_cause="Null pointer in init",
-            conclusion="Fix the null check",
-        )
-        self.assertEqual(out.title, "Crash on startup")
-        self.assertEqual(out.severity, "critical")
-
-    def test_from_llm_response_valid_json(self):
-        raw = json.dumps({
-            "title": "ANR in main thread",
-            "severity": "high",
-            "root_cause": "Blocking IO on main",
-            "conclusion": "Move to background",
-            "sections": [{"title": "Timeline", "content": "10:00 freeze"}],
-            "action_items": ["Fix IO", "Add timeout"],
-        })
-        out = BugSummaryOutput.from_llm_response(raw)
-        self.assertEqual(out.title, "ANR in main thread")
-        self.assertEqual(len(out.sections), 1)
-        self.assertEqual(len(out.action_items), 2)
-
-    def test_from_llm_response_fallback_on_invalid(self):
-        raw = "This is just a free-form text summary without JSON structure."
-        out = BugSummaryOutput.from_llm_response(raw)
-        self.assertEqual(out.title, "Bug Analysis Summary")
-        self.assertIn("free-form", out.conclusion)
-
-    def test_to_markdown(self):
-        out = BugSummaryOutput(
-            title="Test Bug",
-            severity="medium",
-            root_cause="Root cause here",
-            conclusion="Do this",
-            action_items=["Item 1"],
-        )
-        md = out.to_markdown()
-        self.assertIn("# Test Bug", md)
-        self.assertIn("Root cause here", md)
-        self.assertIn("Item 1", md)
-        self.assertIn("Do this", md)
-
-
 class TestExtractJson(unittest.TestCase):
     """Test _extract_json utility."""
 
@@ -207,21 +156,6 @@ class TestIntentAgent(unittest.TestCase):
         agent = IntentAgent(opts)
         with self.assertRaises(RuntimeError):
             agent.classify(system_prompt="test", user_prompt="test")
-
-
-class TestSummaryAgent(unittest.TestCase):
-    """Test SummaryAgent wrapper."""
-
-    def test_not_available_without_config(self):
-        opts = AIProviderOptions()
-        agent = SummaryAgent(opts)
-        self.assertFalse(agent.is_available())
-
-    def test_summarize_raises_when_not_available(self):
-        opts = AIProviderOptions()
-        agent = SummaryAgent(opts)
-        with self.assertRaises(RuntimeError):
-            agent.summarize(system_prompt="test", user_prompt="test")
 
 
 class TestRoutingFSM(unittest.TestCase):

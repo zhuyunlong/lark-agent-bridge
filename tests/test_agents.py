@@ -17,14 +17,21 @@ from lark_agent_bridge.agents import (
     OmlxChatClient,
     PerceptionSummaryRunner,
 )
+from lark_agent_bridge.agents.bug_summary_policy import (
+    SummaryBackendInput,
+    choose_summary_backend,
+)
+from lark_agent_bridge.agents.llm_client import LLMClientError
 from lark_agent_bridge.models import (
     BridgeConfig,
     BugRequest,
     DirectAnalysisRequest,
     DownloadedResource,
     DownloadResource,
+    IntentDecision,
     LarkEvent,
     PerceptionSummaryRequest,
+    SourceInvestigationOptions,
     TaskResult,
 )
 from lark_agent_bridge.prompt_snapshots import (
@@ -174,6 +181,74 @@ class AgentTests(unittest.TestCase):
                 )
 
         self.assertTrue(fallback_mock.called)
+
+    def test_intent_analysis_api_failure_does_not_use_subprocess_by_default(self):
+        config = BridgeConfig(dry_run=False)
+        config.intent_analysis.enabled = True
+        runner = IntentAnalysisRunner(config)
+        runner._llm_client = mock.Mock()
+        runner._llm_client.is_available.return_value = True
+        api_error = LLMClientError("endpoint unavailable", error_code="llm_api_error")
+
+        with (
+            mock.patch.object(runner, "_classify_via_api", side_effect=api_error),
+            mock.patch.object(runner, "_classify_via_subprocess") as subprocess_mock,
+        ):
+            with self.assertRaises(IntentAnalysisFailure) as raised:
+                runner.classify(
+                    event=LarkEvent(
+                        event_id="evt_1",
+                        message_id="om_1",
+                        chat_id="oc_1",
+                        chat_type="group",
+                        sender_id="ou_1",
+                        message_type="text",
+                        content="@bot 继续分析",
+                    ),
+                    route_content="继续分析",
+                )
+
+        self.assertEqual(raised.exception.error_code, "intent_analysis_api_failed")
+        subprocess_mock.assert_not_called()
+
+    def test_intent_analysis_api_failure_can_use_subprocess_when_enabled(self):
+        config = BridgeConfig(dry_run=False)
+        config.intent_analysis.enabled = True
+        config.intent_analysis.allow_subprocess_fallback = True
+        runner = IntentAnalysisRunner(config)
+        runner._llm_client = mock.Mock()
+        runner._llm_client.is_available.return_value = True
+        expected = IntentDecision(
+            route="chat",
+            followup_action="none",
+            context_source="none",
+            confidence="medium",
+            reason="fallback",
+        )
+
+        with (
+            mock.patch.object(
+                runner,
+                "_classify_via_api",
+                side_effect=LLMClientError("endpoint unavailable", error_code="llm_api_error"),
+            ),
+            mock.patch.object(runner, "_classify_via_subprocess", return_value=expected) as subprocess_mock,
+        ):
+            decision = runner.classify(
+                event=LarkEvent(
+                    event_id="evt_1",
+                    message_id="om_1",
+                    chat_id="oc_1",
+                    chat_type="group",
+                    sender_id="ou_1",
+                    message_type="text",
+                    content="@bot 继续分析",
+                ),
+                route_content="继续分析",
+            )
+
+        self.assertIs(decision, expected)
+        subprocess_mock.assert_called_once()
 
     def test_claude_skill_dry_run_returns_command_and_artifact(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -847,6 +922,75 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(api_mock.call_count, 0)
         self.assertEqual(run_mock.call_count, 1)
         self.assertEqual(result["provider"], "codex")
+
+    def test_summary_backend_policy_routes_source_or_conflict_to_file_agent(self):
+        decision = choose_summary_backend(
+            SummaryBackendInput(
+                explicit_provider="",
+                provider_session_id="",
+                prefer_lightweight=False,
+                ai_provider_enabled=True,
+                ai_provider_base_url="http://127.0.0.1:8000/v1",
+                ai_provider_primary_model="demo",
+                skip_direct_api=True,
+                direct_api_failure="",
+                auto_fallback_to_file_agent=False,
+            )
+        )
+
+        self.assertEqual(decision.backend, "file_agent")
+        self.assertEqual(decision.reason, "direct_api_policy_skip")
+        self.assertFalse(decision.fallback_from)
+
+    def test_bug_summary_direct_api_failure_does_not_fallback_to_file_agent_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=False, data_dir=Path(tmp), workspace_root=Path(tmp))
+            config.bug_analysis.provider = "codex"
+            config.bug_analysis.command = "codex"
+            config.ai_provider.enabled = True
+            config.ai_provider.base_url = "http://127.0.0.1:8000/v1"
+            config.ai_provider.primary_model = "demo"
+            runner = BugAnalysisRunner(config)
+            output_path = Path(tmp) / "bug_agent_summary.md"
+            request_artifact = Path(tmp) / "bug_agent_request.md"
+            metadata_path = Path(tmp) / "bug_metadata.md"
+            request_artifact.write_text("request", encoding="utf-8")
+            metadata_path.write_text("metadata", encoding="utf-8")
+            api_failure = {
+                "message": "",
+                "command": None,
+                "error": "direct_api_error: timeout",
+                "provider": "direct_api",
+                "session_id": "",
+                "resumed": False,
+                "duration_seconds": 1.2,
+                "usage": {},
+                "usage_scope": "",
+            }
+
+            def fake_file_agent(command, **kwargs):
+                output_path.write_text("file-capable agent summary", encoding="utf-8")
+                return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+
+            with (
+                mock.patch.object(runner, "_run_bug_agent_summary_via_api", return_value=api_failure) as api_mock,
+                mock.patch("lark_agent_bridge.agents.run_tracked_process", side_effect=fake_file_agent) as run_mock,
+            ):
+                result = runner._run_bug_agent_summary(
+                    request_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722 分析启动和卡顿",
+                    request_artifact=request_artifact,
+                    metadata_path=metadata_path,
+                    output_path=output_path,
+                    progress_callback=None,
+                    timeout=30,
+                )
+
+        self.assertEqual(api_mock.call_count, 1)
+        self.assertEqual(run_mock.call_count, 0)
+        self.assertEqual(result["provider"], "direct_api")
+        self.assertEqual(result["execution_backend"], "direct_api")
+        self.assertEqual(result["error"], "direct_api_error: timeout")
+        self.assertFalse(result.get("fallback_from"))
 
     def test_bug_reanalysis_snapshot_rebuilds_when_analysis_kind_changes(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2702,6 +2846,33 @@ class AgentTests(unittest.TestCase):
         self.assertIn("Agent 运行信息", html)
         self.assertNotIn("Agent 最终结论", html)
         self.assertNotIn("重复的 agent 原文", html)
+
+    def test_agent_runtime_details_include_summary_backend_decision(self):
+        runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
+        details: dict[str, object] = {}
+
+        runner._apply_agent_runtime_details(
+            details,
+            {
+                "message": "summary",
+                "command": None,
+                "error": "",
+                "provider": "direct_api",
+                "model": "demo",
+                "session_id": "",
+                "resumed": False,
+                "duration_seconds": 1.2,
+                "usage": {},
+                "usage_scope": "direct_api",
+                "execution_backend": "direct_api",
+                "backend_reason": "direct_api_failed_no_fallback",
+                "fallback_from": "",
+            },
+        )
+
+        self.assertEqual(details["agent_summary_execution_backend"], "direct_api")
+        self.assertEqual(details["agent_summary_backend_reason"], "direct_api_failed_no_fallback")
+        self.assertNotIn("agent_summary_fallback_from", details)
 
     def test_bug_analysis_classifies_startup_request(self):
         runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
@@ -5632,7 +5803,149 @@ class AgentTests(unittest.TestCase):
         self.assertIn("SIGNAL_CAMPING_MODE_STATUS", evidence)
         self.assertIn("露营模式", evidence)
 
-    def test_bug_agent_followup_uses_fresh_agent_session_by_default(self):
+    def test_write_reanalysis_source_evidence_searches_all_repo_roots(self):
+        """Source evidence searches all repos in source_investigation.repo_roots (incl. Napa5)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            # Two repos: guideengine and napa5-like
+            repo1 = Path(tmp) / "guideengine"
+            repo2 = Path(tmp) / "Napa5"
+            (repo1 / "module_core").mkdir(parents=True)
+            (repo2 / "module_napa").mkdir(parents=True)
+
+            kt1 = repo1 / "module_core" / "SceneManager.kt"
+            kt1.write_text("class SceneManager { fun enter3DScene() {} }", encoding="utf-8")
+            kt2 = repo2 / "module_napa" / "SceneManager.kt"
+            kt2.write_text("class SceneManager { fun render3DScene() {} }", encoding="utf-8")
+
+            config = BridgeConfig(
+                dry_run=False,
+                data_dir=Path(tmp),
+                workspace_root=Path(tmp),
+                guideengine_repo=repo1,
+                source_investigation=SourceInvestigationOptions(
+                    repo_roots=[repo1, repo2],
+                    codegraph_enabled=False,
+                ),
+            )
+            runner = BugAnalysisRunner(config)
+            output_dir = Path(tmp) / "output"
+            output_dir.mkdir()
+
+            result_path = runner._write_reanalysis_source_evidence(
+                plans=[BugAnalysisPlan(kind="general")],
+                request_text="SceneManager 3D场景",
+                followup_text="基于源码 重新分析",
+                output_dir=output_dir,
+                enabled=True,
+            )
+
+            self.assertIsNotNone(result_path)
+            content = result_path.read_text(encoding="utf-8")
+            # Should contain results from BOTH repos
+            self.assertIn("guideengine", content)
+            self.assertIn("Napa5", content)
+            self.assertIn("SceneManager", content)
+
+    def test_write_reanalysis_source_evidence_uses_codegraph_when_indexed(self):
+        """When codegraph is available and indexed, it's used instead of ripgrep."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "guideengine"
+            repo.mkdir()
+            (repo / ".codegraph").mkdir()  # mark as indexed
+
+            config = BridgeConfig(
+                dry_run=False,
+                data_dir=Path(tmp),
+                workspace_root=Path(tmp),
+                guideengine_repo=repo,
+                source_investigation=SourceInvestigationOptions(
+                    repo_roots=[repo],
+                    codegraph_enabled=True,
+                    codegraph_min_confidence=0.5,
+                ),
+            )
+            runner = BugAnalysisRunner(config)
+            output_dir = Path(tmp) / "output"
+            output_dir.mkdir()
+
+            from lark_agent_bridge.knowledge.codegraph_client import CgCallerHit, CgSymbolHit
+
+            cg_hits = [
+                CgSymbolHit(
+                    name="SceneManager", kind="class",
+                    qualified_name="SceneManager", path="module_core/SceneManager.kt",
+                    line=10, language="Kotlin", score=120.0,
+                ),
+            ]
+            cg_callers = [
+                CgCallerHit(
+                    name="initScene", kind="method",
+                    path="module_display/Launcher.kt", line=55,
+                ),
+            ]
+
+            with (
+                mock.patch("shutil.which", return_value="/usr/local/bin/codegraph"),
+                mock.patch(
+                    "lark_agent_bridge.knowledge.codegraph_client.CodeGraphClient.search_symbol",
+                    return_value=cg_hits,
+                ),
+                mock.patch(
+                    "lark_agent_bridge.knowledge.codegraph_client.CodeGraphClient.get_callers",
+                    return_value=cg_callers,
+                ),
+            ):
+                result_path = runner._write_reanalysis_source_evidence(
+                    plans=[BugAnalysisPlan(kind="general")],
+                    request_text="SceneManager 3D场景问题",
+                    followup_text="基于源码 重新分析",
+                    output_dir=output_dir,
+                    enabled=True,
+                )
+
+            self.assertIsNotNone(result_path)
+            content = result_path.read_text(encoding="utf-8")
+            self.assertIn("SceneManager", content)
+            # Codegraph result has [class] / [caller] markers
+            self.assertIn("[class]", content)
+            self.assertIn("[caller", content)
+
+    def test_write_reanalysis_source_evidence_falls_back_to_rg_when_codegraph_not_indexed(self):
+        """When codegraph is not yet indexed, falls back to ripgrep."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "guideengine"
+            (repo / "module_core").mkdir(parents=True)
+            kt = repo / "module_core" / "ThemeManager.kt"
+            kt.write_text("class ThemeManager { fun applyTheme() {} }", encoding="utf-8")
+            # No .codegraph/ dir → not indexed
+
+            config = BridgeConfig(
+                dry_run=False,
+                data_dir=Path(tmp),
+                workspace_root=Path(tmp),
+                guideengine_repo=repo,
+                source_investigation=SourceInvestigationOptions(
+                    repo_roots=[repo],
+                    codegraph_enabled=True,
+                ),
+            )
+            runner = BugAnalysisRunner(config)
+            output_dir = Path(tmp) / "output"
+            output_dir.mkdir()
+
+            with mock.patch("shutil.which", return_value="/usr/local/bin/codegraph"):
+                result_path = runner._write_reanalysis_source_evidence(
+                    plans=[BugAnalysisPlan(kind="general")],
+                    request_text="ThemeManager 主题切换",
+                    followup_text="基于源码 重新分析",
+                    output_dir=output_dir,
+                    enabled=True,
+                )
+
+            self.assertIsNotNone(result_path)
+            content = result_path.read_text(encoding="utf-8")
+            # Should have found ThemeManager via ripgrep fallback
+            self.assertIn("ThemeManager", content)
         with tempfile.TemporaryDirectory() as tmp:
             config = BridgeConfig(dry_run=False, data_dir=Path(tmp), workspace_root=Path(tmp))
             runner = BugAnalysisRunner(config)

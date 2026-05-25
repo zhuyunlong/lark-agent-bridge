@@ -1,4 +1,4 @@
-"""Pydantic AI agent wrappers for intent classification and summary generation.
+"""Pydantic AI agent wrapper for intent classification.
 
 Architecture:
 - Uses pydantic-ai Agent with structured output_type for guaranteed schema compliance
@@ -12,8 +12,6 @@ Provider mapping:
 
 Key design:
 - IntentAgent: fast classification with auto-retry on schema validation failure
-- SummaryAgent: longer generation with structured BugSummaryOutput
-- Both agents are stateless and thread-safe (create once, call many times)
 """
 
 from __future__ import annotations
@@ -24,7 +22,7 @@ from typing import Any
 
 from ..log import get_logger
 from ..models import AIProviderOptions
-from .pydantic_models import AgentDeps, BugSummaryOutput, IntentOutput
+from .pydantic_models import AgentDeps, IntentOutput
 
 logger = get_logger("pydantic_agents")
 
@@ -49,7 +47,7 @@ def _check_pydantic_ai() -> bool:
 class AgentResult:
     """Result from a pydantic-ai agent call."""
 
-    output: IntentOutput | BugSummaryOutput | str
+    output: IntentOutput | str
     model: str = ""
     duration_seconds: float = 0.0
     usage: dict[str, int] = field(default_factory=dict)
@@ -216,147 +214,4 @@ class IntentAgent:
             "You are an intent classifier for a Feishu (Lark) Bot bridge. "
             "Classify the user message into one of the defined routes. "
             "Always respond with a valid JSON object matching the required schema."
-        )
-
-
-class SummaryAgent:
-    """Pydantic-AI powered bug summary generator with structured output.
-
-    Uses Agent(output_type=BugSummaryOutput) for consistent report formatting.
-    Falls back to unstructured text if the model cannot produce valid JSON.
-    """
-
-    def __init__(self, options: AIProviderOptions) -> None:
-        self.options = options
-        self._agent: Any = None
-        self._model: Any = None
-        self._setup()
-
-    def _setup(self) -> None:
-        """Create the pydantic-ai Agent for summary generation."""
-        if not _check_pydantic_ai():
-            logger.info("pydantic-ai not available; SummaryAgent will be disabled")
-            return
-
-        from pydantic_ai import Agent
-
-        model = self._create_model()
-        if model is None:
-            logger.warning("Could not create model for SummaryAgent")
-            return
-
-        self._model = model
-        self._agent = Agent(
-            model,
-            output_type=BugSummaryOutput,
-            system_prompt=self._default_system_prompt(),
-            retries=2,
-        )
-        logger.info("SummaryAgent initialized: model=%s", self.options.primary_model)
-
-    def _create_model(self) -> Any:
-        """Create model using same logic as IntentAgent."""
-        api_format = self._effective_format()
-        model_name = self.options.primary_model
-        if not model_name or not self.options.base_url:
-            return None
-
-        if api_format == "anthropic":
-            from pydantic_ai.models.anthropic import AnthropicModel
-            from pydantic_ai.providers.anthropic import AnthropicProvider
-
-            provider = AnthropicProvider(
-                base_url=self.options.base_url,
-                api_key=self.options.api_key or "not-set",
-            )
-            return AnthropicModel(model_name, provider=provider)
-        else:
-            from pydantic_ai.models.openai import OpenAIChatModel
-            from pydantic_ai.providers.openai import OpenAIProvider
-
-            provider = OpenAIProvider(
-                base_url=self.options.base_url,
-                api_key=self.options.api_key or "not-set",
-            )
-            return OpenAIChatModel(model_name, provider=provider)
-
-    def _effective_format(self) -> str:
-        if self.options.api_format in {"openai", "anthropic"}:
-            return self.options.api_format
-        url = self.options.base_url or ""
-        if "/anthropic" in url or "mimo" in url or "yybb" in url:
-            return "anthropic"
-        return "openai"
-
-    def is_available(self) -> bool:
-        """Check if the agent is properly configured."""
-        return self._agent is not None
-
-    def summarize(self, *, system_prompt: str, user_prompt: str) -> AgentResult:
-        """Generate a structured bug summary.
-
-        Returns AgentResult with output as BugSummaryOutput (validated).
-        """
-        if not self.is_available():
-            raise RuntimeError("SummaryAgent is not available")
-
-        from pydantic_ai.settings import ModelSettings
-
-        started = time.monotonic()
-        try:
-            # Use a fresh agent with the specific system prompt if different
-            agent = self._agent
-            if system_prompt and system_prompt != self._default_system_prompt():
-                from pydantic_ai import Agent
-
-                agent = Agent(
-                    self._model,
-                    output_type=BugSummaryOutput,
-                    system_prompt=system_prompt,
-                    retries=2,
-                )
-
-            result = agent.run_sync(
-                user_prompt,
-                model_settings=ModelSettings(
-                    temperature=self.options.summary_temperature,
-                    max_tokens=self.options.summary_max_tokens,
-                ),
-            )
-            duration = time.monotonic() - started
-
-            usage: dict[str, int] = {}
-            if hasattr(result, "usage") and result.usage:
-                u = result.usage()
-                usage = {
-                    "prompt_tokens": getattr(u, "request_tokens", 0) or 0,
-                    "completion_tokens": getattr(u, "response_tokens", 0) or 0,
-                    "total_tokens": getattr(u, "total_tokens", 0) or 0,
-                }
-
-            logger.info(
-                "SummaryAgent generated: title=%s severity=%s duration=%.1fs",
-                result.output.title[:50],
-                result.output.severity,
-                duration,
-            )
-
-            return AgentResult(
-                output=result.output,
-                model=self.options.primary_model or "unknown",
-                duration_seconds=duration,
-                usage=usage,
-                provider_tag="pydantic-ai",
-            )
-        except Exception as exc:
-            duration = time.monotonic() - started
-            logger.warning("SummaryAgent failed after %.1fs: %s", duration, exc)
-            raise
-
-    @staticmethod
-    def _default_system_prompt() -> str:
-        return (
-            "You are a bug analysis summarizer. Given analysis results, logs, and context, "
-            "generate a structured summary with title, root cause, severity, sections, "
-            "and action items. Respond with a valid JSON object matching the schema."
         )
