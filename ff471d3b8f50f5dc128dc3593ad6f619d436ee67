@@ -1,0 +1,35 @@
+tests/test_codegraph_client.py
+  e8f34384a9063382 1-222
+config/config.example.toml
+  e8f34384a9063382 108-111
+lark_agent_bridge/knowledge/source_investigation.py
+  e8f34384a9063382 107,119,121-127,148-224,1479-1581
+tests/test_knowledge.py
+  e8f34384a9063382 1050,1130,1177,1242,1547
+lark_agent_bridge/config.py
+  e8f34384a9063382 545-562
+lark_agent_bridge/knowledge/codegraph_client.py
+  e8f34384a9063382 1-262
+lark_agent_bridge/models.py
+  e8f34384a9063382 269-272
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.20",
+  "base_commit_sha": "ff471d3b8f50f5dc128dc3593ad6f619d436ee67",
+  "prompts": {
+    "e8f34384a9063382": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e5ffe-321e-7b90-ab8c-e85d0879a027",
+        "model": "gpt-5.5"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 705,
+      "total_deletions": 6,
+      "accepted_lines": 705,
+      "overriden_lines": 0
+    }
+  }
+}
