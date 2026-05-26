@@ -7000,6 +7000,77 @@ class AppTests(unittest.TestCase):
         self.assertEqual(len(fake_bug.requests), 1)
         self.assertEqual(fake_bug.requests[0].prompt, "分析3D生命周期")
 
+    def test_group_bug_request_custom_skill_executor_not_ready_is_delivered_without_conclusion(self):
+        class NotReadyBugRunner(FakeBugRunner):
+            def run_bug_analysis(self, request, *, event=None, progress_callback=None):
+                self.requests.append(request)
+                self.progress_callbacks.append(progress_callback)
+                if progress_callback is not None:
+                    progress_callback(
+                        {
+                            "stage": "bug_run_analysis",
+                            "message": "执行专用 Skill 分析",
+                            "details": {"analysis_kind": "custom_skill"},
+                        }
+                    )
+                return TaskResult(
+                    success=False,
+                    message=(
+                        "已命中专用 Skill `ld-lane-level-log-analysis-portable`，但当前没有可执行分析器，"
+                        "尚未执行实际日志分析。\n不会基于占位报告给出根因结论。"
+                    ),
+                    error_code="custom_skill_executor_not_ready",
+                    details={
+                        "mode": "bug_analysis",
+                        "analysis_kind": "custom_skill",
+                        "analysis_skill": "ld-lane-level-log-analysis-portable",
+                        "custom_skill_analysis_status": "executor_not_ready",
+                    },
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = Path(tmp) / "bug_metadata.md"
+            html = Path(tmp) / "bug_report.html"
+            metadata.write_text("metadata", encoding="utf-8")
+            html.write_text("<html></html>", encoding="utf-8")
+            fake_lark = FakeLarkClient()
+            fake_bug = NotReadyBugRunner(metadata, html)
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    allowed_chats=["oc_denied"],
+                ),
+                lark_client=fake_lark,
+                bug_runner=fake_bug,
+            )
+
+            result = app.handle_event(
+                event(
+                    event_id="evt_custom_skill_not_ready_group_bug",
+                    message_id="om_custom_skill_not_ready_group_bug",
+                    content=(
+                        "@bot https://project.feishu.cn/xpfailuremgmt/buglo/detail/6998107767 "
+                        "2026-05-22 19:46 退无图"
+                    ),
+                )
+            )
+            delivered_text = "\n".join(
+                [item["text"] for item in fake_lark.replies]
+                + [item["card_json"] for item in fake_lark.card_replies]
+                + [item["card_json"] for item in fake_lark.updated_cards]
+            )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, "custom_skill_executor_not_ready")
+        self.assertEqual(result.details["mode"], "bug_analysis")
+        self.assertEqual(len(fake_bug.requests), 1)
+        self.assertEqual(fake_bug.requests[0].bug_url, "https://project.feishu.cn/xpfailuremgmt/buglo/detail/6998107767")
+        self.assertEqual(fake_bug.requests[0].prompt, "2026-05-22 19:46 退无图")
+        self.assertIn("当前没有可执行分析器", delivered_text)
+        self.assertNotIn("最可能原因", delivered_text)
+        self.assertNotIn("结论摘要", delivered_text)
+
     def test_group_bug_request_accepts_rich_text_wrapped_bot_name(self):
         with tempfile.TemporaryDirectory() as tmp:
             metadata = Path(tmp) / "bug_metadata.md"

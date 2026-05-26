@@ -24,7 +24,7 @@ class SkillManagerTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            manager = SkillManager(BridgeConfig(workspace_root=root))
+            manager = SkillManager(BridgeConfig(workspace_root=root, data_dir=root / "data"))
             skills = {item.name: item for item in manager.list_skills()}
 
             self.assertIn("custom-check", skills)
@@ -42,13 +42,16 @@ class SkillManagerTests(unittest.TestCase):
 
             routed = manager.set_skill_route("custom-check", role="primary")
             self.assertEqual(routed.role, "primary")
-            self.assertEqual(routed.route_status, "bug_primary")
-            self.assertTrue(routed.selectable_in_report_card)
+            self.assertEqual(routed.route_status, "bug_primary_unready")
+            self.assertFalse(routed.selectable_in_report_card)
+            self.assertIn("没有可执行分析器", routed.routing_note)
             self.assertIn("custom-check", manager.primary_skill_map())
             self.assertEqual(manager.primary_skill_map()["custom-check"][0], "custom_skill")
 
             legacy_routed = manager.set_skill_route("custom-check", role="primary", kind="general")
             self.assertEqual(legacy_routed.kind, "custom_skill")
+            self.assertEqual(legacy_routed.route_status, "bug_primary_unready")
+            self.assertFalse(legacy_routed.selectable_in_report_card)
             self.assertEqual(manager.primary_skill_map()["custom-check"][0], "custom_skill")
 
             auxiliary = manager.set_skill_route("custom-check", role="auxiliary")
@@ -62,7 +65,7 @@ class SkillManagerTests(unittest.TestCase):
 
     def test_skill_manager_crud_and_debug(self):
         with tempfile.TemporaryDirectory() as tmp:
-            manager = SkillManager(BridgeConfig(workspace_root=Path(tmp)))
+            manager = SkillManager(BridgeConfig(workspace_root=Path(tmp), data_dir=Path(tmp) / "data"))
 
             created = manager.create_skill(
                 name="traffic-skill",
@@ -93,7 +96,7 @@ class SkillManagerTests(unittest.TestCase):
 
     def test_skill_manager_rejects_path_traversal(self):
         with tempfile.TemporaryDirectory() as tmp:
-            manager = SkillManager(BridgeConfig(workspace_root=Path(tmp)))
+            manager = SkillManager(BridgeConfig(workspace_root=Path(tmp), data_dir=Path(tmp) / "data"))
             with self.assertRaises(SkillManagerError):
                 manager.create_skill(name="../bad")
 

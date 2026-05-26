@@ -1333,21 +1333,17 @@ class BugAnalysisRunner:
                     )
                     completed = subprocess.CompletedProcess(args=current_command, returncode=0, stdout="", stderr="")
                 elif current_plan.kind == "custom_skill":
-                    self._write_custom_skill_bug_report(
-                        html_path=current_html,
-                        json_path=current_json,
-                        title=title,
-                        description=description,
-                        prompt_text=prompt_text,
-                        request_text=request_text,
-                        fault_time=fault_time,
-                        selected_input=selected_input,
-                        source_evidence_path=source_evidence_path,
-                        classification_skill=selection.skill_name,
-                        classification_source=selection.source,
-                        classification_reason=selection.reason,
+                    return self._failure(
+                        context=context,
+                        command=current_command,
+                        started=started,
+                        message=self._custom_skill_executor_not_ready_message(
+                            selection.skill_name or self._skill_name_for_kind(current_plan.kind),
+                            selected_input=selected_input,
+                        ),
+                        error_code="custom_skill_executor_not_ready",
+                        progress_callback=progress_callback,
                     )
-                    completed = subprocess.CompletedProcess(args=current_command, returncode=0, stdout="", stderr="")
                 else:
                     analysis_kwargs = {
                         "plan": current_plan,
@@ -1835,21 +1831,31 @@ class BugAnalysisRunner:
                     )
                     completed = subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
                 elif plan.kind == "custom_skill":
-                    self._write_custom_skill_bug_report(
-                        html_path=html_path,
-                        json_path=json_path,
-                        title="",
-                        description="",
-                        prompt_text=followup_text,
-                        request_text=request_text,
-                        fault_time=target_time,
-                        selected_input=selected_input,
-                        source_evidence_path=source_evidence_path,
-                        classification_skill=classification_skill or self._skill_name_for_kind(plan.kind),
-                        classification_source=classification_source or "manual_fallback",
-                        classification_reason=classification_reason or "",
+                    skill_name = (
+                        classification_skill
+                        or str(details.get("analysis_skill") or "").strip()
+                        or self._skill_name_for_kind(plan.kind)
                     )
-                    completed = subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+                    return TaskResult(
+                        success=False,
+                        message=self._custom_skill_executor_not_ready_message(
+                            skill_name,
+                            selected_input=selected_input,
+                        ),
+                        job_id=job_id,
+                        job_dir=job_dir,
+                        command=command,
+                        duration_seconds=time.monotonic() - started,
+                        error_code="custom_skill_reanalysis_executor_not_ready",
+                        details={
+                            "mode": "bug_reanalysis",
+                            "analysis_kind": "custom_skill",
+                            "analysis_skill": skill_name,
+                            "custom_skill_analysis_status": "executor_not_ready",
+                            "selected_log_input": str(selected_input or ""),
+                            "prepared_log_input": str(prepared_input or ""),
+                        },
+                    )
                 else:
                     analysis_kwargs = {
                         "plan": plan,
@@ -2406,21 +2412,26 @@ class BugAnalysisRunner:
                     completed = subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
                 elif current_plan.kind == "custom_skill":
                     current_skill_name = classification_skill or self._skill_name_for_kind(current_plan.kind)
-                    self._write_custom_skill_bug_report(
-                        html_path=current_html,
-                        json_path=current_json,
-                        title="",
-                        description="",
-                        prompt_text=request.prompt,
-                        request_text=request_text,
-                        fault_time=fault_time,
-                        selected_input=selected_input,
-                        source_evidence_path=source_evidence_path,
-                        classification_skill=current_skill_name,
-                        classification_source=classification_source or "manual_fallback",
-                        classification_reason=classification_reason or "直传文件分析命中自定义专用 skill，交由 Agent 按 Skill 规范分析。",
+                    return TaskResult(
+                        success=False,
+                        message=self._custom_skill_executor_not_ready_message(
+                            current_skill_name,
+                            selected_input=selected_input,
+                        ),
+                        job_id=context.job_id,
+                        job_dir=context.job_dir,
+                        command=command,
+                        duration_seconds=time.monotonic() - started,
+                        error_code="direct_custom_skill_executor_not_ready",
+                        details={
+                            "mode": "direct_analysis",
+                            "analysis_kind": "custom_skill",
+                            "analysis_skill": current_skill_name,
+                            "custom_skill_analysis_status": "executor_not_ready",
+                            "selected_log_input": str(selected_input),
+                            "prepared_log_input": str(prepared_input),
+                        },
                     )
-                    completed = subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
                 else:
                     analysis_kwargs = {
                         "plan": current_plan,
@@ -7173,6 +7184,14 @@ class BugAnalysisRunner:
             stdout=stdout,
             stderr=stderr,
             details={"mode": "bug_analysis"},
+        )
+
+    def _custom_skill_executor_not_ready_message(self, skill_name: str, *, selected_input: Path | None) -> str:
+        display_name = skill_name.strip() or "custom_skill"
+        log_note = f"\n日志输入已准备：`{selected_input}`" if selected_input else ""
+        return (
+            f"已命中专用 Skill `{display_name}`，但当前没有可执行分析器，尚未执行实际日志分析。"
+            f"{log_note}\n不会基于占位报告给出根因结论。请为该 Skill 配置脚本执行器或文件 Agent 执行器后重试。"
         )
 
     def _run_bug_agent_summary(

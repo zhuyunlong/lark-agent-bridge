@@ -310,6 +310,7 @@ class SkillManager:
         scripts = _script_paths(directory)
         route_status, route_status_label, selectable, routing_note = _route_metadata(
             name=name,
+            kind=kind,
             role=role,
             status=status,
         )
@@ -337,6 +338,7 @@ class SkillManager:
         kind, label, requires_logs, role = self._metadata_for(name)
         route_status, route_status_label, selectable, routing_note = _route_metadata(
             name=name,
+            kind=kind,
             role=role,
             status="virtual",
         )
@@ -524,7 +526,7 @@ def _role_order(role: str) -> int:
     return {"primary": 0, "auxiliary": 1, "custom": 2}.get(role, 3)
 
 
-def _route_metadata(*, name: str, role: str, status: str) -> tuple[str, str, bool, str]:
+def _route_metadata(*, name: str, kind: str, role: str, status: str) -> tuple[str, str, bool, str]:
     if role == "primary":
         if name == "general":
             return (
@@ -539,6 +541,13 @@ def _route_metadata(*, name: str, role: str, status: str) -> tuple[str, str, boo
                 "主路由缺目录",
                 False,
                 "已在主路由表中配置，但当前工作区没有对应 .ai/skills 目录，需补齐 SKILL.md 和脚本后才能稳定执行。",
+            )
+        if kind == "custom_skill":
+            return (
+                "bug_primary_unready",
+                "Bug 分析未就绪",
+                False,
+                "已归类到 Bug 分析，但当前没有可执行分析器；分类可命中，但不会作为已就绪的报告卡片选项。",
             )
         return (
             "bug_primary",
