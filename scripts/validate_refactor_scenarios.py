@@ -18,9 +18,10 @@ import time
 from typing import Any
 from unittest import mock
 
-from lark_agent_bridge.agents import BugAnalysisPlan, BugAnalysisRunner
+from lark_agent_bridge.agents import Addr2LineRunner, BugAnalysisPlan, BugAnalysisRunner
 from lark_agent_bridge.config import load_config
 from lark_agent_bridge.knowledge import KnowledgeService
+from lark_agent_bridge.models import Addr2LineRequest, DownloadResource
 from lark_agent_bridge.skill_manager import SkillManager, SkillManagerError
 
 
@@ -89,6 +90,7 @@ def main() -> int:
     config.bug_analysis.auto_fallback_to_file_agent = False
 
     runtime_checks = _runtime_route_checks(config)
+    addr2line_checks = _addr2line_single_file_checks(config, run_dir)
     cases = _load_cases()
     bug_results = [_run_bug_scenario(config, run_dir, cases, item) for item in BUG_SCENARIOS]
     knowledge_results = [_run_knowledge_question(config, question) for question in KNOWLEDGE_QUESTIONS]
@@ -98,11 +100,13 @@ def main() -> int:
         "run_id": run_id,
         "run_dir": str(run_dir),
         "runtime_checks": runtime_checks,
+        "addr2line_checks": addr2line_checks,
         "bug_results": bug_results,
         "knowledge_results": knowledge_results,
         "timing_rows": timing_rows,
         "notes": [
             "Bug scenarios validate local follow-up/reanalysis routing, source-evidence capture, and runtime metadata.",
+            "Addr2line scenarios validate single-file subrealitytrace fallback (no ROM/Napa/APK) and key thread extraction.",
             "Agent summary is stubbed to avoid external LLM/CLI cost; historical durations are kept as the old end-to-end reference.",
             "Knowledge QA uses the existing local knowledge index and source-derived evidence.",
         ],
@@ -170,7 +174,64 @@ def _runtime_route_checks(config: Any) -> list[dict[str, Any]]:
 
 def _validation_passed(payload: dict[str, Any]) -> bool:
     runtime_checks = payload.get("runtime_checks") or []
-    return all(bool(item.get("ok")) for item in runtime_checks if isinstance(item, dict))
+    addr2line_checks = payload.get("addr2line_checks") or []
+    runtime_ok = all(bool(item.get("ok")) for item in runtime_checks if isinstance(item, dict))
+    addr2line_ok = all(bool(item.get("ok")) for item in addr2line_checks if isinstance(item, dict))
+    return runtime_ok and addr2line_ok
+
+
+def _addr2line_single_file_checks(config: Any, run_dir: Path) -> list[dict[str, Any]]:
+    fixture_dir = run_dir / "fixtures"
+    fixture_dir.mkdir(parents=True, exist_ok=True)
+    trace_file = fixture_dir / "subrealitytrace_2026-05-24-20-04-00"
+    trace_file.write_text(
+        "\n".join(
+            [
+                "----- pid 24454 at 2026-05-24 20:04:13.754987528+0800 -----",
+                '"peng.montecarlo" sysTid=24454',
+                "    #00 pc 0000000000085a9c  /apex/com.android.runtime/lib64/bionic/libc.so (syscall+28)",
+                "    #01 pc 00000000030fa9bc  /system/framework/arm64/boot-framework.oat (android.app.ActivityThread.main+732)",
+                '"UnityMain" sysTid=25293',
+                "    #00 pc 00000000012ae2a0  /system/app/xp_envirodrive-mainland/lib/arm64/libunity.so",
+                '"XPD_LD" sysTid=24839',
+                "    #00 pc 00000000000264f0  /system/app/xp_envirodrive-mainland/lib/arm64/libxdata_native.so",
+                '"JniSurfaceTexLoop" sysTid=24859',
+                "    #00 pc 00000000000175a4  /system/app/xp_envirodrive-mainland/lib/arm64/libRenderExtend.so",
+                '"RenderThread" sysTid=24525',
+                "    #00 pc 00000000003c7138  /system/lib64/libhwui.so (android::uirenderer::renderthread::RenderThread::threadLoop()+76)",
+                '"GLThread 883" sysTid=24542',
+                "    #00 pc 000000000153d768  /system/framework/arm64/boot-framework.oat (android.opengl.GLSurfaceView$GLThread.guardedRun+1944)",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    runner = Addr2LineRunner(config)
+    result = runner.run_resolve(
+        Addr2LineRequest(
+            addr_text="",
+            resources=[DownloadResource(kind="local", value=str(trace_file))],
+            triggered=True,
+        )
+    )
+    counts = result.details.get("thread_category_counts") if isinstance(result.details, dict) else {}
+    counts = counts if isinstance(counts, dict) else {}
+    categories_ok = all(
+        int(counts.get(label, 0)) > 0
+        for label in ("UnityMain", "XPD_*", "JniSurfaceTex*", "主线程", "渲染相关线程")
+    )
+    ok = bool(result.success and result.details.get("analysis_mode") == "single_trace_thread_parse" and categories_ok)
+    return [
+        {
+            "case": "addr2line_single_file_subrealitytrace",
+            "ok": ok,
+            "analysis_mode": result.details.get("analysis_mode"),
+            "counts": counts,
+            "error_code": result.error_code,
+            "message_preview": str(result.message or "").splitlines()[:6],
+            "reason": "single-file trace fallback should parse UnityMain/XPD/JniSurfaceTex/main/render threads",
+        }
+    ]
 
 
 def _load_cases() -> dict[str, dict[str, Any]]:

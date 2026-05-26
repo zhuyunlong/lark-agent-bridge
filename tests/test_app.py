@@ -3904,6 +3904,93 @@ class AppTests(unittest.TestCase):
         self.assertEqual(fake_rom.requests[0].rom_version, rom_log1)
         self.assertTrue(str(result.details["addr_source"]).endswith("data/Log/log1/logd/crash.txt"))
 
+    def test_addr2line_runner_parses_subrealitytrace_threads_when_symbol_version_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            trace_file = root / "subrealitytrace_2026-05-24-20-04-00"
+            trace_file.write_text(
+                "\n".join(
+                    [
+                        "----- pid 24454 at 2026-05-24 20:04:13.754987528+0800 -----",
+                        '"peng.montecarlo" sysTid=24454',
+                        "    #00 pc 0000000000085a9c  /apex/com.android.runtime/lib64/bionic/libc.so (syscall+28)",
+                        "    #01 pc 00000000030fa9bc  /system/framework/arm64/boot-framework.oat (android.app.ActivityThread.main+732)",
+                        '"UnityMain" sysTid=25293',
+                        "    #00 pc 00000000012ae2a0  /system/app/xp_envirodrive-mainland/lib/arm64/libunity.so",
+                        "    #01 pc 000000000072afb4  /system/app/xp_envirodrive-mainland/lib/arm64/libunity.so",
+                        '"XPD_LD" sysTid=24839',
+                        "    #00 pc 00000000000264f0  /system/app/xp_envirodrive-mainland/lib/arm64/libxdata_native.so",
+                        "    #01 pc 0000000000402480  /system/app/xp_envirodrive-mainland/lib/arm64/libxdata_sdk.so",
+                        '"JniSurfaceTexLoop" sysTid=24859',
+                        "    #00 pc 00000000000175a4  /system/app/xp_envirodrive-mainland/lib/arm64/libRenderExtend.so",
+                        "    #01 pc 00000000000179dc  /system/app/xp_envirodrive-mainland/lib/arm64/libRenderExtend.so",
+                        '"RenderThread" sysTid=24525',
+                        "    #00 pc 00000000003c7138  /system/lib64/libhwui.so (android::uirenderer::renderthread::RenderThread::threadLoop()+76)",
+                        '"GLThread 883" sysTid=24542',
+                        "    #00 pc 000000000153d768  /system/framework/arm64/boot-framework.oat (android.opengl.GLSurfaceView$GLThread.guardedRun+1944)",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            runner = Addr2LineRunner(
+                BridgeConfig(dry_run=True, data_dir=root / "data", workspace_root=root, guideengine_repo=root)
+            )
+
+            result = runner.run_resolve(
+                Addr2LineRequest(
+                    addr_text="",
+                    resources=[DownloadResource(kind="local", value=str(trace_file))],
+                    triggered=True,
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.details.get("analysis_mode"), "single_trace_thread_parse")
+        self.assertEqual(result.details.get("trace_source"), str(trace_file))
+        counts = result.details.get("thread_category_counts") or {}
+        self.assertGreaterEqual(counts.get("UnityMain", 0), 1)
+        self.assertGreaterEqual(counts.get("XPD_*", 0), 1)
+        self.assertGreaterEqual(counts.get("JniSurfaceTex*", 0), 1)
+        self.assertGreaterEqual(counts.get("主线程", 0), 1)
+        self.assertGreaterEqual(counts.get("渲染相关线程", 0), 1)
+        self.assertIn("UnityMain", result.message)
+        self.assertIn("场景/渲染相关 so:", result.message)
+        self.assertIn("UnityClassic::Baselib_SystemFutex_Wait", result.message)
+        self.assertIn("Semaphore::WaitForSignal", result.message)
+        self.assertIn("JniSurfaceTexLoop", result.message)
+        self.assertNotIn("#00 pc", result.message)
+
+    def test_addr2line_runner_keeps_missing_symbol_version_for_non_trace_single_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script = root / ".ai/skills/addr2line-resolve/scripts/addr2line_resolve.py"
+            script.parent.mkdir(parents=True)
+            script.write_text("# fake script\n", encoding="utf-8")
+            crash_file = root / "crash.txt"
+            crash_file.write_text(
+                "\n".join(
+                    [
+                        "#00 pc 0000000000f385e4 /system/app/xp_envirodrive/lib/arm64/libunity.so",
+                        "#01 pc 00000000010fa7f0 /system/app/xp_envirodrive/lib/arm64/libunity.so",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            runner = Addr2LineRunner(
+                BridgeConfig(dry_run=True, data_dir=root / "data", workspace_root=root, guideengine_repo=root)
+            )
+
+            result = runner.run_resolve(
+                Addr2LineRequest(
+                    addr_text="",
+                    resources=[DownloadResource(kind="local", value=str(crash_file))],
+                    triggered=True,
+                )
+            )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, "missing_symbol_version")
+
     def test_scene_signal_prompt_preempts_generic_signal_route(self):
         with tempfile.TemporaryDirectory() as tmp:
             metadata = Path(tmp) / "analysis.md"
