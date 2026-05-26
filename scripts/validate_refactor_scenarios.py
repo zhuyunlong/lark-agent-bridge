@@ -21,6 +21,7 @@ from unittest import mock
 from lark_agent_bridge.agents import BugAnalysisPlan, BugAnalysisRunner
 from lark_agent_bridge.config import load_config
 from lark_agent_bridge.knowledge import KnowledgeService
+from lark_agent_bridge.skill_manager import SkillManager, SkillManagerError
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -55,6 +56,16 @@ KNOWLEDGE_QUESTIONS = [
     "知识库 上电P 临停P 场景 源码链路 怎么模拟",
 ]
 
+RUNTIME_ROUTE_REQUIREMENTS = [
+    {
+        "skill": "ld-lane-level-log-analysis-portable",
+        "kind": "custom_skill",
+        "executor": "file_agent",
+        "case": "6998107767",
+        "reason": "LD 车道级退无图 custom_skill 必须显式配置文件 Agent 执行器，否则真实群聊会停在 executor_not_ready。",
+    },
+]
+
 
 @dataclass
 class PreviousContext:
@@ -77,6 +88,7 @@ def main() -> int:
     config.source_investigation.codegraph_enabled = False
     config.bug_analysis.auto_fallback_to_file_agent = False
 
+    runtime_checks = _runtime_route_checks(config)
     cases = _load_cases()
     bug_results = [_run_bug_scenario(config, run_dir, cases, item) for item in BUG_SCENARIOS]
     knowledge_results = [_run_knowledge_question(config, question) for question in KNOWLEDGE_QUESTIONS]
@@ -85,6 +97,7 @@ def main() -> int:
     payload = {
         "run_id": run_id,
         "run_dir": str(run_dir),
+        "runtime_checks": runtime_checks,
         "bug_results": bug_results,
         "knowledge_results": knowledge_results,
         "timing_rows": timing_rows,
@@ -99,7 +112,65 @@ def main() -> int:
     md_path = run_dir / "summary.md"
     md_path.write_text(_render_markdown(payload), encoding="utf-8")
     print(json.dumps({"summary_json": str(json_path), "summary_md": str(md_path), **payload}, ensure_ascii=False, indent=2))
-    return 0
+    return 0 if _validation_passed(payload) else 1
+
+
+def _runtime_route_checks(config: Any) -> list[dict[str, Any]]:
+    manager = SkillManager(config)
+    results: list[dict[str, Any]] = []
+    for requirement in RUNTIME_ROUTE_REQUIREMENTS:
+        skill_name = str(requirement["skill"])
+        expected_kind = str(requirement["kind"])
+        expected_executor = str(requirement["executor"])
+        base = {
+            "skill": skill_name,
+            "case": str(requirement.get("case") or ""),
+            "required_kind": expected_kind,
+            "required_executor": expected_executor,
+            "route_file": str(manager.route_file),
+        }
+        try:
+            record = manager.get_skill(skill_name, include_content=False)
+            executor = manager.custom_skill_executor_for(skill_name)
+        except SkillManagerError as exc:
+            results.append(
+                {
+                    **base,
+                    "ok": False,
+                    "reason": f"runtime skill route check failed: {exc}",
+                    "kind": "",
+                    "executor": "",
+                    "route_status": "",
+                    "selectable": False,
+                }
+            )
+            continue
+        reasons: list[str] = []
+        if record.kind != expected_kind:
+            reasons.append(f"kind={record.kind or '<empty>'}, expected {expected_kind}")
+        if executor != expected_executor:
+            reasons.append(f"executor={executor or '<empty>'}, expected executor={expected_executor}")
+        if record.route_status != "bug_primary_agent_ready":
+            reasons.append(f"route_status={record.route_status}, expected bug_primary_agent_ready")
+        if not record.selectable_in_report_card:
+            reasons.append("selectable_in_report_card=false")
+        results.append(
+            {
+                **base,
+                "ok": not reasons,
+                "reason": "; ".join(reasons) if reasons else str(requirement.get("reason") or "runtime route ready"),
+                "kind": record.kind,
+                "executor": executor,
+                "route_status": record.route_status,
+                "selectable": record.selectable_in_report_card,
+            }
+        )
+    return results
+
+
+def _validation_passed(payload: dict[str, Any]) -> bool:
+    runtime_checks = payload.get("runtime_checks") or []
+    return all(bool(item.get("ok")) for item in runtime_checks if isinstance(item, dict))
 
 
 def _load_cases() -> dict[str, dict[str, Any]]:
@@ -324,11 +395,33 @@ def _render_markdown(payload: dict[str, Any]) -> str:
         f"- Run: `{payload['run_id']}`",
         f"- Output: `{payload['run_dir']}`",
         "",
-        "## Bug Follow-up Scenarios",
+        "## Runtime Route Checks",
         "",
-        "| Bug | Success | Source | Evidence Hits | Old Seconds | New Seconds | Backend |",
-        "| --- | --- | --- | ---: | ---: | ---: | --- |",
+        "| Skill | Case | OK | Kind | Executor | Route Status | Selectable | Reason |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
+    for item in payload.get("runtime_checks") or []:
+        lines.append(
+            "| {skill} | {case} | {ok} | {kind} | {executor} | {status} | {selectable} | {reason} |".format(
+                skill=str(item.get("skill") or "").replace("|", "\\|"),
+                case=str(item.get("case") or "").replace("|", "\\|"),
+                ok=item.get("ok"),
+                kind=str(item.get("kind") or "").replace("|", "\\|"),
+                executor=str(item.get("executor") or "").replace("|", "\\|"),
+                status=str(item.get("route_status") or "").replace("|", "\\|"),
+                selectable=item.get("selectable"),
+                reason=str(item.get("reason") or "").replace("|", "\\|"),
+            )
+        )
+    lines.extend(
+        [
+            "",
+            "## Bug Follow-up Scenarios",
+            "",
+            "| Bug | Success | Source | Evidence Hits | Old Seconds | New Seconds | Backend |",
+            "| --- | --- | --- | ---: | ---: | ---: | --- |",
+        ]
+    )
     for item in payload["bug_results"]:
         lines.append(
             "| {bug_id} | {success} | {source} | {hits} | {old:.1f} | {new:.3f} | {backend}/{reason} |".format(
