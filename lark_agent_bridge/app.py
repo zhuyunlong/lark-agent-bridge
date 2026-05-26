@@ -1394,6 +1394,7 @@ class BridgeApp:
             cleaned = self._strip_runtime_bot_mention(content, event)
             if cleaned is not None:
                 return cleaned
+            return None
         if configured_bot:
             return None
         spaced_name_at = re.match(r"^@.+\s+(/chat(?:\s+.*)?)$", content)

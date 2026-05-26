@@ -4,6 +4,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import urllib.error
 import zipfile
 from unittest import mock
 
@@ -101,6 +102,42 @@ class AgentTests(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertEqual(result.details["mode"], "omlx_chat")
         self.assertIn("/chat/completions", result.details["url"])
+
+    def test_omlx_chat_401_without_key_reports_missing_api_key(self):
+        config = BridgeConfig(dry_run=False)
+        config.omlx_chat.api_key = ""
+        error = urllib.error.HTTPError(
+            url="http://127.0.0.1:8000/v1/chat/completions",
+            code=401,
+            msg="Unauthorized",
+            hdrs=None,
+            fp=None,
+        )
+
+        with mock.patch("urllib.request.urlopen", side_effect=error):
+            result = OmlxChatClient(config).reply("你好")
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, "omlx_auth_missing")
+        self.assertIn("LARK_AGENT_BRIDGE_OMLX_API_KEY", result.message)
+
+    def test_omlx_chat_401_with_key_reports_invalid_api_key(self):
+        config = BridgeConfig(dry_run=False)
+        config.omlx_chat.api_key = "wrong-key"
+        error = urllib.error.HTTPError(
+            url="http://127.0.0.1:8000/v1/chat/completions",
+            code=401,
+            msg="Unauthorized",
+            hdrs=None,
+            fp=None,
+        )
+
+        with mock.patch("urllib.request.urlopen", side_effect=error):
+            result = OmlxChatClient(config).reply("你好")
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, "omlx_auth_invalid")
+        self.assertIn("已配置的 OMLX API key 被拒绝", result.message)
 
     def test_intent_analysis_runner_parses_claude_json_response(self):
         config = BridgeConfig(dry_run=False)

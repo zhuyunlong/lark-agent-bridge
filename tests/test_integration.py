@@ -16,6 +16,7 @@ from lark_agent_bridge.log import setup_logging
 from lark_agent_bridge.models import (
     ApprovalOptions,
     BridgeConfig,
+    LarkOptions,
     LarkEvent,
     TaskResult,
 )
@@ -33,6 +34,7 @@ def _make_config(tmp: Path, *, dry_run: bool = True) -> BridgeConfig:
         guideengine_repo=tmp,
         data_dir=tmp / "data",
         approval=ApprovalOptions(enabled=False),
+        lark=LarkOptions(bot_name="bot"),
     )
 
 

@@ -36,6 +36,7 @@ from lark_agent_bridge.knowledge.models import SearchHit
 
 def BridgeConfig(*args, **kwargs):
     kwargs.setdefault("approval", ApprovalOptions(enabled=False))
+    kwargs.setdefault("lark", LarkOptions(bot_name="bot"))
     return RealBridgeConfig(*args, **kwargs)
 
 
@@ -1467,6 +1468,7 @@ class AppTests(unittest.TestCase):
                     dry_run=False,
                     data_dir=Path(tmp),
                     allowed_chats=["oc_denied"],
+                    lark=LarkOptions(bot_name="bot"),
                 ),
                 lark_client=fake_lark,
             )
@@ -1794,6 +1796,7 @@ class AppTests(unittest.TestCase):
                     dry_run=False,
                     data_dir=Path(tmp),
                     allowed_chats=["oc_denied"],
+                    lark=LarkOptions(bot_name="bot"),
                 ),
                 lark_client=fake_lark,
                 chat_client=fake_chat,
@@ -6702,7 +6705,7 @@ class AppTests(unittest.TestCase):
                     dry_run=False,
                     data_dir=Path(tmp),
                     allowed_chats=["oc_denied"],
-                    lark=LarkOptions(bot_name="Test Bot"),
+                    lark=LarkOptions(bot_name="bot"),
                 ),
                 lark_client=fake_lark,
                 chat_client=fake_chat,
@@ -6755,6 +6758,7 @@ class AppTests(unittest.TestCase):
                     dry_run=False,
                     data_dir=Path(tmp),
                     allowed_chats=["oc_denied"],
+                    lark=LarkOptions(bot_name="bot"),
                 ),
                 lark_client=fake_lark,
                 chat_client=fake_chat,
@@ -6767,6 +6771,30 @@ class AppTests(unittest.TestCase):
         self.assertEqual(result.details["mode"], "not_addressed")
         self.assertEqual(fake_chat.prompts, [])
 
+    def test_group_human_mention_is_not_treated_as_bot_when_identity_unconfigured(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_lark = FakeLarkClient()
+            fake_chat = FakeOmlxChatClient()
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    allowed_chats=["oc_denied"],
+                    lark=LarkOptions(bot_open_id="", bot_name=""),
+                ),
+                lark_client=fake_lark,
+                chat_client=fake_chat,
+            )
+
+            result = app.handle_event(event(content="@邸立猛 这个现在正常了吗"))
+
+        self.assertTrue(result.success)
+        self.assertTrue(result.skipped)
+        self.assertEqual(result.details["mode"], "not_addressed")
+        self.assertEqual(fake_chat.prompts, [])
+        self.assertEqual(fake_lark.replies, [])
+        self.assertEqual(fake_lark.sent, [])
+
     def test_group_mentioned_chat_command_uses_omlx(self):
         with tempfile.TemporaryDirectory() as tmp:
             fake_lark = FakeLarkClient()
@@ -6776,6 +6804,7 @@ class AppTests(unittest.TestCase):
                     dry_run=False,
                     data_dir=Path(tmp),
                     allowed_chats=["oc_denied"],
+                    lark=LarkOptions(bot_name="bot"),
                 ),
                 lark_client=fake_lark,
                 chat_client=fake_chat,
@@ -6799,6 +6828,7 @@ class AppTests(unittest.TestCase):
                     dry_run=False,
                     data_dir=Path(tmp),
                     allowed_chats=["oc_denied"],
+                    lark=LarkOptions(bot_name="bot"),
                 ),
                 lark_client=fake_lark,
                 chat_client=fake_chat,
@@ -6820,6 +6850,7 @@ class AppTests(unittest.TestCase):
                     dry_run=False,
                     data_dir=Path(tmp),
                     allowed_chats=["oc_denied"],
+                    lark=LarkOptions(bot_name="Test Bot"),
                 ),
                 lark_client=fake_lark,
                 chat_client=fake_chat,

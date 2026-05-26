@@ -12,7 +12,10 @@ class CliTests(unittest.TestCase):
     def test_run_signal_dry_run(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / "config.toml"
-            config.write_text(f'dry_run = true\ndata_dir = "{tmp}/data"\n', encoding="utf-8")
+            config.write_text(
+                f'dry_run = true\ndata_dir = "{tmp}/data"\n\n[lark]\nbot_name = "bot"\n',
+                encoding="utf-8",
+            )
             output = io.StringIO()
 
             with redirect_stdout(output):
@@ -36,7 +39,10 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / "config.toml"
             event = Path(tmp) / "event.json"
-            config.write_text(f'dry_run = true\ndata_dir = "{tmp}/data"\n', encoding="utf-8")
+            config.write_text(
+                f'dry_run = true\ndata_dir = "{tmp}/data"\n\n[lark]\nbot_name = "bot"\n',
+                encoding="utf-8",
+            )
             event.write_text(
                 """
 {
@@ -63,7 +69,10 @@ class CliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / "config.toml"
             event = Path(tmp) / "event.json"
-            config.write_text(f'dry_run = true\ndata_dir = "{tmp}/data"\n', encoding="utf-8")
+            config.write_text(
+                f'dry_run = true\ndata_dir = "{tmp}/data"\n\n[lark]\nbot_name = "bot"\n',
+                encoding="utf-8",
+            )
             event.write_text(
                 """
 {
@@ -129,7 +138,10 @@ path = "{adb_json}"
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / "config.toml"
             event = Path(tmp) / "event.json"
-            config.write_text(f'dry_run = true\ndata_dir = "{tmp}/data"\n', encoding="utf-8")
+            config.write_text(
+                f'dry_run = true\ndata_dir = "{tmp}/data"\n\n[lark]\nbot_name = "bot"\n',
+                encoding="utf-8",
+            )
             event.write_text(
                 """
 {

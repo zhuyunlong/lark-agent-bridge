@@ -9,7 +9,7 @@ import unittest
 
 from lark_agent_bridge.app import BridgeApp
 from lark_agent_bridge.models import CardActionEvent
-from lark_agent_bridge.models import ApprovalOptions, BridgeConfig, LarkEvent
+from lark_agent_bridge.models import ApprovalOptions, BridgeConfig, LarkEvent, LarkOptions
 
 
 def message_event(**overrides):
@@ -170,7 +170,13 @@ class CardActionEventTests(unittest.TestCase):
 class BridgePayloadRoutingTests(unittest.TestCase):
     def test_handle_payload_routes_card_action_callback(self):
         with tempfile.TemporaryDirectory() as tmp:
-            app = BridgeApp(BridgeConfig(data_dir=Path(tmp), approval=ApprovalOptions(enabled=True)))
+            app = BridgeApp(
+                BridgeConfig(
+                    data_dir=Path(tmp),
+                    approval=ApprovalOptions(enabled=True),
+                    lark=LarkOptions(bot_name="bot"),
+                )
+            )
             pending = app.handle_event(message_event())
             self.assertEqual(pending.error_code, "approval_pending")
 

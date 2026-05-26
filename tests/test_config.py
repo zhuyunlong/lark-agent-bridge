@@ -27,9 +27,25 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.source_investigation.model, "gpt-5.4")
         self.assertEqual(config.source_investigation.timeout_seconds, 120)
         self.assertEqual(config.source_investigation.max_evidence, 20)
+        self.assertEqual(config.omlx_chat.api_key, "1234")
         # Default repo_roots includes guideengine; also Napa5 if it exists on this machine
         self.assertIn(config.guideengine_repo, config.source_investigation.repo_roots)
         self.assertGreaterEqual(len(config.source_investigation.repo_roots), 1)
+
+    def test_omlx_api_key_empty_config_uses_local_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text(
+                """
+[omlx_chat]
+api_key = ""
+""",
+                encoding="utf-8",
+            )
+
+            config = load_config(config_path)
+
+        self.assertEqual(config.omlx_chat.api_key, "1234")
 
     def test_toml_overrides_are_resolved_relative_to_config(self):
         with tempfile.TemporaryDirectory() as tmp:

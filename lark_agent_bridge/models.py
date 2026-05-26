@@ -139,7 +139,7 @@ class OmlxChatOptions:
     enabled: bool = True
     base_url: str = "http://127.0.0.1:8000/v1"
     model: str = "gemma-4-26b-a4b-it-4bit"
-    api_key: str = ""
+    api_key: str = "1234"
     timeout_seconds: int = 120
     max_prompt_chars: int = 2000
     max_tokens: int = 1024

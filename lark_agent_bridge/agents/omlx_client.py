@@ -134,6 +134,32 @@ class OmlxChatClient:
                 body = response.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
+            if exc.code == 401:
+                if not options.api_key.strip():
+                    return TaskResult(
+                        success=False,
+                        message=(
+                            "本地 omlx 模型鉴权失败: HTTP 401，未配置 OMLX API key。"
+                            "请设置环境变量 LARK_AGENT_BRIDGE_OMLX_API_KEY，"
+                            "或在 [omlx_chat].api_key 中配置与 omlx serve 一致的 key。"
+                        ),
+                        duration_seconds=time.monotonic() - started,
+                        error_code="omlx_auth_missing",
+                        stderr=body[:1000],
+                        details={"mode": mode, "url": url, "model": options.model},
+                    )
+                return TaskResult(
+                    success=False,
+                    message=(
+                        "本地 omlx 模型鉴权失败: HTTP 401，已配置的 OMLX API key 被拒绝。"
+                        "请确认 LARK_AGENT_BRIDGE_OMLX_API_KEY 或 [omlx_chat].api_key "
+                        "与 omlx serve 的启动 key 一致。"
+                    ),
+                    duration_seconds=time.monotonic() - started,
+                    error_code="omlx_auth_invalid",
+                    stderr=body[:1000],
+                    details={"mode": mode, "url": url, "model": options.model},
+                )
             return TaskResult(
                 success=False,
                 message=f"本地 omlx 模型请求失败: HTTP {exc.code}",

@@ -417,7 +417,11 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
                 os.environ.get("LARK_AGENT_BRIDGE_OMLX_MODEL")
                 or omlx_data.get("model", "gemma-4-26b-a4b-it-4bit")
             ),
-            api_key=str(os.environ.get("LARK_AGENT_BRIDGE_OMLX_API_KEY") or omlx_data.get("api_key", "")),
+            api_key=str(
+                os.environ.get("LARK_AGENT_BRIDGE_OMLX_API_KEY")
+                or omlx_data.get("api_key")
+                or OmlxChatOptions().api_key
+            ),
             timeout_seconds=int(omlx_data.get("timeout_seconds", 120)),
             max_prompt_chars=int(omlx_data.get("max_prompt_chars", 2000)),
             max_tokens=int(omlx_data.get("max_tokens", 1024)),
