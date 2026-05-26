@@ -289,6 +289,37 @@ class RunTrackedProcessTests(unittest.TestCase):
         if os.name == "posix":
             self.assertTrue(popen.call_args.kwargs.get("start_new_session"))
 
+    def test_input_uses_stdin_pipe_when_watchdog_enabled(self):
+        class FakeProcess:
+            pid = os.getpid()
+            returncode = 0
+
+            def __init__(self):
+                self.received_input = None
+
+            def communicate(self, input=None, timeout=None):
+                self.received_input = input
+                return "ok", ""
+
+        watchdog = ProcessWatchdog(max_idle_seconds=60)
+        process = FakeProcess()
+        with mock.patch("lark_agent_bridge.health.subprocess.Popen", return_value=process) as popen:
+            completed = run_tracked_process(
+                ["cmd"],
+                watchdog=watchdog,
+                name="stdin-process",
+                input="prompt from stdin",
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=1,
+                check=False,
+            )
+
+        self.assertEqual(completed.stdout, "ok")
+        self.assertEqual(process.received_input, "prompt from stdin")
+        self.assertEqual(popen.call_args.kwargs.get("stdin"), subprocess.PIPE)
+
     def test_timeout_terminates_process_group(self):
         class TimeoutProcess:
             pid = 12345

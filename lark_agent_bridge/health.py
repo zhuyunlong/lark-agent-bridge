@@ -253,6 +253,8 @@ def run_tracked_process(
             raise ValueError("stdout and stderr arguments may not be used with capture_output")
         kwargs["stdout"] = subprocess.PIPE
         kwargs["stderr"] = subprocess.PIPE
+    if input_data is not None and "stdin" not in kwargs:
+        kwargs["stdin"] = subprocess.PIPE
 
     if os.name == "posix" and "start_new_session" not in kwargs:
         kwargs["start_new_session"] = True
