@@ -1,0 +1,34 @@
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.20",
+  "base_commit_sha": "d8d800588cc502b4f107559609f8fff54173ded5",
+  "prompts": {
+    "579c43cc6fb139d6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e6260-9c8d-73a2-be4c-719c6fa48f65",
+        "model": "gpt-5.4"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 1,
+      "overriden_lines": 0
+    },
+    "e8f34384a9063382": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e5ffe-321e-7b90-ab8c-e85d0879a027",
+        "model": "gpt-5.5"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 54,
+      "overriden_lines": 0
+    }
+  }
+}
