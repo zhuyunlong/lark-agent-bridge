@@ -3050,7 +3050,10 @@ class AgentTests(unittest.TestCase):
             runner.skill_manager.set_skill_route("lane-level-skill", role="primary")
 
             supported = runner.supported_primary_bug_skills()
-            self.assertTrue(any(item["name"] == "lane-level-skill" for item in supported))
+            self.assertFalse(any(item["name"] == "lane-level-skill" for item in supported))
+            runner.skill_manager.set_skill_route("lane-level-skill", role="primary", executor="file_agent")
+            supported = runner.supported_primary_bug_skills()
+            self.assertTrue(any(item["name"] == "lane-level-skill" and item["executor"] == "file_agent" for item in supported))
             selection = runner.selection_for_skill_name(
                 "lane-level-skill",
                 source="user_selected_card",
@@ -3185,6 +3188,274 @@ class AgentTests(unittest.TestCase):
         self.assertIn("已命中专用 Skill", result.message)
         self.assertIn("当前没有可执行分析器", result.message)
         self.assertIn(skill_name, result.message)
+        summary_mock.assert_not_called()
+
+    def test_custom_skill_analysis_validation_requires_key_evidence_section(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = BugAnalysisRunner(BridgeConfig(dry_run=False, data_dir=Path(tmp), workspace_root=Path(tmp)))
+            valid = Path(tmp) / "custom_skill_analysis.md"
+            valid.write_text(
+                "## 结论摘要\n命中车道级异常。\n\n"
+                "## 关键证据\n"
+                "- `time_anchor.log`: 2026-05-22 19:46 LD 退无图。\n"
+                "- `ld.log`: lane level status changed to NO_MAP。\n\n"
+                "## 待确认项\n无\n",
+                encoding="utf-8",
+            )
+            ok, reason, evidence_count = runner._validate_custom_skill_analysis(valid)
+
+            self.assertTrue(ok)
+            self.assertEqual(reason, "")
+            self.assertEqual(evidence_count, 2)
+
+            missing = Path(tmp) / "missing_key_evidence.md"
+            missing.write_text("## 结论摘要\nL 不是证据计数。\n", encoding="utf-8")
+            ok, reason, evidence_count = runner._validate_custom_skill_analysis(missing)
+            self.assertFalse(ok)
+            self.assertEqual(reason, "missing_key_evidence_section")
+            self.assertEqual(evidence_count, 0)
+
+            empty = Path(tmp) / "empty_key_evidence.md"
+            empty.write_text("## 结论摘要\n占位。\n\n## 关键证据\n\n## 待确认项\n无\n", encoding="utf-8")
+            ok, reason, evidence_count = runner._validate_custom_skill_analysis(empty)
+            self.assertFalse(ok)
+            self.assertEqual(reason, "empty_key_evidence_section")
+            self.assertEqual(evidence_count, 0)
+
+    def test_custom_skill_file_agent_timeout_returns_explicit_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "workspace"
+            skill_name = "timeout-custom-skill"
+            skill_dir = root / ".ai" / "skills" / skill_name
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "---\nname: Timeout Custom Skill\ndescription: timeout test。\n---\n\n# Timeout\n",
+                encoding="utf-8",
+            )
+            config = BridgeConfig(dry_run=False, data_dir=Path(tmp) / "data", workspace_root=root)
+            config.bug_analysis.provider = "codex"
+            config.bug_analysis.command = "codex"
+            runner = BugAnalysisRunner(config)
+            log_root = Path(tmp) / "logs"
+            self._write_matching_log(log_root, "2026-05-22 19:46:00")
+            timeout_error = subprocess.TimeoutExpired(cmd=["codex", "exec"], timeout=12, output="partial", stderr="hung")
+
+            with mock.patch("lark_agent_bridge.agents.run_tracked_process", side_effect=timeout_error):
+                result = runner._run_custom_skill_agent_analysis(
+                    skill_name=skill_name,
+                    request_text="2026-05-22 19:46 退无图",
+                    prompt_text="2026-05-22 19:46 退无图",
+                    title="车道级退无图",
+                    description="",
+                    fault_time="2026-05-22 19:46",
+                    selected_input=log_root,
+                    prepared_input=log_root,
+                    source_evidence_path=None,
+                    html_path=Path(tmp) / "bug_custom_skill_report.html",
+                    json_path=Path(tmp) / "bug_custom_skill_report.json",
+                    analysis_dir=Path(tmp) / "custom_skill_analysis",
+                    progress_callback=None,
+                    timeout=12,
+                )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["error_code"], "custom_skill_agent_timeout")
+        self.assertIn("超时", result["message"])
+        self.assertEqual(result["timeout_seconds"], 12)
+
+    def test_bug_analysis_custom_skill_file_agent_runs_before_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "workspace"
+            data_dir = Path(tmp) / "data"
+            skill_name = "agent-ready-lane-skill"
+            skill_dir = root / ".ai" / "skills" / skill_name
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "---\n"
+                "name: Agent Ready Lane Skill\n"
+                "description: 分析车道级、退无图和 LD 状态日志。\n"
+                "---\n\n"
+                "# Agent Ready Lane\n",
+                encoding="utf-8",
+            )
+            config = BridgeConfig(dry_run=False, data_dir=data_dir, workspace_root=root)
+            config.bug_analysis.provider = "codex"
+            config.bug_analysis.command = "codex"
+            runner = BugAnalysisRunner(config)
+            runner.skill_manager.set_skill_route(skill_name, role="primary", executor="file_agent")
+            log_root = Path(tmp) / "logs"
+            self._write_matching_log(log_root, "2026-05-22 19:46:00")
+
+            def fake_run_json_command(command, timeout):
+                if "check-env" in command:
+                    return {"meegle_installed": True, "auth_ok": True}
+                if "resolve-url" in command:
+                    return {"project_key": "xpfailuremgmt", "work_item_id": "6998107767"}
+                if "fetch-data" in command:
+                    return {
+                        "title": "车道级导航退无图",
+                        "status": "处理中",
+                        "create_time": "2026-05-22 19:40",
+                        "create_by": "tester",
+                        "fields": {},
+                        "attachments": [{"name": "Log.zip", "size": "12MB"}],
+                        "description": "问题时间: 2026-05-22 19:46\n车道级不进，LD 退无图。",
+                    }
+                if command[:3] == ["meegle", "workitem", "get"]:
+                    return {"data": {}}
+                raise AssertionError(f"unexpected command: {command}")
+
+            def fake_file_agent(command, **kwargs):
+                output_path = Path(command[command.index("--output-last-message") + 1])
+                output_path.write_text(
+                    "## 结论摘要\n车道级状态在故障时间进入退无图。\n\n"
+                    "## 关键证据\n"
+                    "- `time_anchor.log`: 2026-05-22 19:46:00 覆盖用户故障时间。\n"
+                    "- `ld.log`: LD lane level status changed to NO_MAP。\n\n"
+                    "## 待确认项\n- 需要业务确认地图源状态。\n\n"
+                    "## 建议动作\n- 继续追踪 LD 状态切换前一帧。\n",
+                    encoding="utf-8",
+                )
+                return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+
+            selection = runner.selection_for_skill_name(
+                skill_name,
+                source="agent",
+                reason="LD 退无图命中车道级专用 Skill",
+                provider="codex",
+            )
+            assert selection is not None
+
+            def fake_build_bug_outputs(**kwargs):
+                custom_json = kwargs["report_jsons"]["custom_skill"]
+                self.assertIsNotNone(custom_json)
+                assert custom_json is not None
+                payload = json.loads(custom_json.read_text(encoding="utf-8"))
+                self.assertEqual(payload["mode"], "custom_skill_agent_analysis")
+                self.assertEqual(payload["custom_skill_analysis_status"], "completed")
+                self.assertEqual(payload["evidence_count"], 2)
+                return "# meta\n", "script summary"
+
+            with (
+                mock.patch.object(runner, "_run_json_command", side_effect=fake_run_json_command),
+                mock.patch.object(runner, "_load_option_map", return_value={}),
+                mock.patch.object(
+                    runner,
+                    "_download_bug_attachments",
+                    return_value={"downloaded": ["Log.zip"], "unzipped": [], "errors": [], "skipped": [], "ok": True},
+                ),
+                mock.patch.object(runner, "_select_log_input", return_value=log_root),
+                mock.patch.object(runner, "_prepare_log_input", return_value=log_root),
+                mock.patch.object(runner, "_classify_bug_request_with_agent", return_value=selection),
+                mock.patch.object(runner, "_build_bug_outputs", side_effect=fake_build_bug_outputs),
+                mock.patch.object(runner, "_build_combined_report_artifacts", return_value=None),
+                mock.patch("lark_agent_bridge.agents.run_tracked_process", side_effect=fake_file_agent) as run_mock,
+                mock.patch.object(
+                    runner,
+                    "_run_bug_agent_summary",
+                    return_value={
+                        "message": "agent final conclusion",
+                        "command": ["codex", "exec"],
+                        "error": "",
+                        "provider": "codex",
+                        "session_id": "sess_custom",
+                        "resumed": False,
+                    },
+                ) as summary_mock,
+            ):
+                result = runner.run_bug_analysis(
+                    BugRequest(
+                        bug_url="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6998107767",
+                        prompt="2026-05-22 19:46 退无图",
+                        raw_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6998107767 2026-05-22 19:46 退无图",
+                        triggered=True,
+                    )
+                )
+                analysis_file_exists = Path(result.details.get("custom_skill_analysis_file", "")).exists()
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.message, "agent final conclusion")
+        self.assertEqual(result.details["custom_skill_analysis_status"], "completed")
+        self.assertEqual(result.details["custom_skill_evidence_count"], 2)
+        self.assertTrue(analysis_file_exists)
+        run_mock.assert_called_once()
+        summary_mock.assert_called_once()
+
+    def test_bug_analysis_custom_skill_invalid_evidence_skips_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "workspace"
+            data_dir = Path(tmp) / "data"
+            skill_name = "agent-ready-lane-skill"
+            skill_dir = root / ".ai" / "skills" / skill_name
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "---\nname: Agent Ready Lane Skill\ndescription: 分析车道级日志。\n---\n\n# Lane\n",
+                encoding="utf-8",
+            )
+            config = BridgeConfig(dry_run=False, data_dir=data_dir, workspace_root=root)
+            config.bug_analysis.provider = "codex"
+            config.bug_analysis.command = "codex"
+            runner = BugAnalysisRunner(config)
+            runner.skill_manager.set_skill_route(skill_name, role="primary", executor="file_agent")
+            log_root = Path(tmp) / "logs"
+            self._write_matching_log(log_root, "2026-05-22 19:46:00")
+
+            def fake_run_json_command(command, timeout):
+                if "check-env" in command:
+                    return {"meegle_installed": True, "auth_ok": True}
+                if "resolve-url" in command:
+                    return {"project_key": "xpfailuremgmt", "work_item_id": "6998107767"}
+                if "fetch-data" in command:
+                    return {
+                        "title": "车道级导航退无图",
+                        "status": "处理中",
+                        "create_time": "2026-05-22 19:40",
+                        "create_by": "tester",
+                        "fields": {},
+                        "attachments": [{"name": "Log.zip", "size": "12MB"}],
+                        "description": "问题时间: 2026-05-22 19:46\n车道级不进，LD 退无图。",
+                    }
+                if command[:3] == ["meegle", "workitem", "get"]:
+                    return {"data": {}}
+                raise AssertionError(f"unexpected command: {command}")
+
+            def fake_file_agent(command, **kwargs):
+                output_path = Path(command[command.index("--output-last-message") + 1])
+                output_path.write_text(
+                    "## 结论摘要\n占位结论。\n\n## 关键证据\n\n## 待确认项\n无\n",
+                    encoding="utf-8",
+                )
+                return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+
+            selection = runner.selection_for_skill_name(skill_name, source="agent", reason="LD 退无图", provider="codex")
+            assert selection is not None
+            with (
+                mock.patch.object(runner, "_run_json_command", side_effect=fake_run_json_command),
+                mock.patch.object(runner, "_load_option_map", return_value={}),
+                mock.patch.object(
+                    runner,
+                    "_download_bug_attachments",
+                    return_value={"downloaded": ["Log.zip"], "unzipped": [], "errors": [], "skipped": [], "ok": True},
+                ),
+                mock.patch.object(runner, "_select_log_input", return_value=log_root),
+                mock.patch.object(runner, "_prepare_log_input", return_value=log_root),
+                mock.patch.object(runner, "_classify_bug_request_with_agent", return_value=selection),
+                mock.patch("lark_agent_bridge.agents.run_tracked_process", side_effect=fake_file_agent),
+                mock.patch.object(runner, "_build_bug_outputs", side_effect=AssertionError("summary metadata should not build")),
+                mock.patch.object(runner, "_run_bug_agent_summary") as summary_mock,
+            ):
+                result = runner.run_bug_analysis(
+                    BugRequest(
+                        bug_url="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6998107767",
+                        prompt="2026-05-22 19:46 退无图",
+                        raw_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6998107767 2026-05-22 19:46 退无图",
+                        triggered=True,
+                    )
+                )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, "custom_skill_agent_invalid_evidence")
+        self.assertIn("关键证据", result.message)
         summary_mock.assert_not_called()
 
     def test_bug_analysis_classifies_startup_and_stuck_requests_together(self):
@@ -5411,6 +5682,85 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(result.details["custom_skill_analysis_status"], "executor_not_ready")
         summary_mock.assert_not_called()
 
+    def test_direct_analysis_custom_skill_file_agent_runs_before_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "workspace"
+            skill_name = "agent-ready-direct-skill"
+            skill_dir = root / ".ai" / "skills" / skill_name
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "---\nname: Agent Ready Direct Skill\ndescription: 直传日志专用分析。\n---\n\n# Direct\n",
+                encoding="utf-8",
+            )
+            config = BridgeConfig(dry_run=False, data_dir=Path(tmp) / "data", workspace_root=root)
+            config.bug_analysis.provider = "codex"
+            config.bug_analysis.command = "codex"
+            runner = BugAnalysisRunner(config)
+            runner.skill_manager.set_skill_route(skill_name, role="primary", executor="file_agent")
+            log_root = Path(tmp) / "direct_logs"
+            self._write_matching_log(log_root, "2026-05-22 07:46:00")
+            resource = DownloadResource(kind="file", value="log.zip")
+
+            class FakeDownloader:
+                def download_all(self, resources, *, context, message_id):
+                    return [DownloadedResource(resource=resource, path=log_root)]
+
+            def fake_file_agent(command, **kwargs):
+                output_path = Path(command[command.index("--output-last-message") + 1])
+                output_path.write_text(
+                    "## 结论摘要\n直传日志已完成专用分析。\n\n"
+                    "## 关键证据\n"
+                    "- `time_anchor.log`: 2026-05-22 07:46:00 覆盖故障时间。\n\n"
+                    "## 待确认项\n- 无。\n\n"
+                    "## 建议动作\n- 继续复核业务状态。\n",
+                    encoding="utf-8",
+                )
+                return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+
+            runner._direct_downloader = FakeDownloader()
+
+            with (
+                mock.patch.object(runner, "_prepare_log_input", return_value=log_root),
+                mock.patch.object(runner, "_write_reanalysis_source_evidence", return_value=None),
+                mock.patch.object(runner, "_build_combined_report_artifacts", return_value=None),
+                mock.patch("lark_agent_bridge.agents.run_tracked_process", side_effect=fake_file_agent) as run_mock,
+                mock.patch.object(
+                    runner,
+                    "_run_bug_agent_summary",
+                    return_value={
+                        "message": "direct agent final",
+                        "provider": "codex",
+                        "model": "gpt-5.4",
+                        "session_id": "sess_direct",
+                        "resumed": False,
+                        "duration_seconds": 1.2,
+                        "usage": {},
+                        "usage_scope": "",
+                    },
+                ) as summary_mock,
+            ):
+                result = runner.run_direct_analysis(
+                    DirectAnalysisRequest(
+                        prompt="时间点2026-05-22 07:46 分析直传日志",
+                        resources=[resource],
+                        raw_text="时间点2026-05-22 07:46 分析直传日志",
+                        triggered=True,
+                    ),
+                    plans_override=[BugAnalysisPlan(kind="custom_skill")],
+                    classification_skill=skill_name,
+                    classification_source="user_selected_card",
+                    classification_reason="用户选择 ready custom skill",
+                )
+                analysis_file_exists = Path(result.details.get("custom_skill_analysis_file", "")).exists()
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.message, "direct agent final")
+        self.assertEqual(result.details["custom_skill_analysis_status"], "completed")
+        self.assertEqual(result.details["custom_skill_evidence_count"], 1)
+        self.assertTrue(analysis_file_exists)
+        run_mock.assert_called_once()
+        summary_mock.assert_called_once()
+
     def test_bug_reanalysis_custom_skill_executor_not_ready_skips_summary(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = BridgeConfig(dry_run=False, data_dir=Path(tmp), workspace_root=Path(tmp))
@@ -5479,6 +5829,96 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(result.details["analysis_skill"], "ld-lane-level-log-analysis-portable")
         self.assertEqual(result.details["custom_skill_analysis_status"], "executor_not_ready")
         summary_mock.assert_not_called()
+
+    def test_bug_reanalysis_custom_skill_file_agent_runs_before_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "workspace"
+            skill_name = "agent-ready-reanalysis-skill"
+            skill_dir = root / ".ai" / "skills" / skill_name
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "---\nname: Agent Ready Reanalysis Skill\ndescription: 续聊专用分析。\n---\n\n# Reanalysis\n",
+                encoding="utf-8",
+            )
+            config = BridgeConfig(dry_run=False, data_dir=Path(tmp) / "data", workspace_root=root)
+            config.bug_analysis.provider = "codex"
+            config.bug_analysis.command = "codex"
+            runner = BugAnalysisRunner(config)
+            runner.skill_manager.set_skill_route(skill_name, role="primary", executor="file_agent")
+            job_dir = Path(tmp) / "jobs" / "job_custom_ready"
+            output_dir = job_dir / "output"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            prepared_input = Path(tmp) / "logs"
+            self._write_matching_log(prepared_input, "2026-05-22 19:46:00")
+            previous_summary = output_dir / "bug_agent_summary.md"
+            previous_summary.write_text("old summary", encoding="utf-8")
+            previous_session = {
+                "job_id": "job_custom_ready",
+                "job_dir": str(job_dir),
+                "details": {
+                    "analysis_kinds": ["custom_skill"],
+                    "analysis_skill": skill_name,
+                    "prepared_log_input": str(prepared_input),
+                    "selected_log_input": str(prepared_input),
+                    "target_time": "2026-05-22 19:46",
+                    "user_request_text": "2026-05-22 19:46 退无图",
+                    "agent_summary_file": str(previous_summary),
+                },
+            }
+            previous_context = mock.Mock(
+                request_text=previous_session["details"]["user_request_text"],
+                summary_text="上一轮摘要",
+                report_excerpt="上一轮报告摘录",
+                history=[],
+            )
+
+            def fake_file_agent(command, **kwargs):
+                output_path = Path(command[command.index("--output-last-message") + 1])
+                output_path.write_text(
+                    "## 结论摘要\n续聊已重新读取日志。\n\n"
+                    "## 关键证据\n"
+                    "- `time_anchor.log`: 2026-05-22 19:46:00 覆盖追问时间。\n\n"
+                    "## 待确认项\n- 无。\n\n"
+                    "## 建议动作\n- 输出给用户前再做最终总结。\n",
+                    encoding="utf-8",
+                )
+                return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+
+            with (
+                mock.patch.object(runner, "_write_reanalysis_source_evidence", return_value=None),
+                mock.patch.object(runner, "_build_combined_report_artifacts", return_value=None),
+                mock.patch("lark_agent_bridge.agents.run_tracked_process", side_effect=fake_file_agent) as run_mock,
+                mock.patch.object(
+                    runner,
+                    "_run_bug_agent_summary",
+                    return_value={
+                        "message": "reanalysis agent final",
+                        "command": ["codex", "exec"],
+                        "error": "",
+                        "provider": "codex",
+                        "session_id": "sess_custom",
+                        "resumed": False,
+                    },
+                ) as summary_mock,
+            ):
+                result = runner.run_bug_reanalysis(
+                    followup_text="重新分析，确认 LD 退无图根因",
+                    previous_context=previous_context,
+                    previous_session=previous_session,
+                    plans_override=[BugAnalysisPlan(kind="custom_skill")],
+                    classification_skill=skill_name,
+                    classification_source="agent",
+                    classification_reason="ready custom skill",
+                )
+                analysis_file_exists = Path(result.details.get("custom_skill_analysis_file", "")).exists()
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.message, "reanalysis agent final")
+        self.assertEqual(result.details["custom_skill_analysis_status"], "completed")
+        self.assertEqual(result.details["custom_skill_evidence_count"], 1)
+        self.assertTrue(analysis_file_exists)
+        run_mock.assert_called_once()
+        summary_mock.assert_called_once()
 
     def test_source_evidence_terms_keep_explicit_source_file_and_class(self):
         runner = BugAnalysisRunner(BridgeConfig(dry_run=False))

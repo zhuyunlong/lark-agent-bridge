@@ -229,6 +229,7 @@
               <button id="save-skill" class="primary">保存</button>
               <button id="debug-skill">调试</button>
               <button id="route-primary-skill">进 Bug 分析</button>
+              <button id="route-primary-agent-skill">进 Bug 分析 + Agent执行</button>
               <button id="route-aux-skill">设为辅助</button>
               <button id="route-default-skill">恢复默认路由</button>
               <button id="delete-skill" class="danger">删除</button>
@@ -737,7 +738,16 @@
       return skillsData.filter(item => {
         if (route && item.route_status !== route) return false;
         if (!keyword) return true;
-        const body = [item.name, item.label, item.description, item.kind, item.role, item.route_status_label, item.routing_note].join(" ").toLowerCase();
+        const body = [
+          item.name,
+          item.label,
+          item.description,
+          item.kind,
+          item.role,
+          item.executor,
+          item.route_status_label,
+          item.routing_note
+        ].join(" ").toLowerCase();
         return body.includes(keyword);
       });
     }
@@ -776,7 +786,18 @@
           "div",
           { class: "check " + (skill.selectable_in_report_card ? "ok" : "bad") },
           el("strong", { text: "报告卡片可选：" + (skill.selectable_in_report_card ? "是" : "否") }),
-          el("div", { class: "meta", text: [skill.role, skill.kind || "custom", skill.requires_logs ? "需要日志" : "不强制日志"].join(" · ") })
+          el(
+            "div",
+            {
+              class: "meta",
+              text: [
+                skill.role,
+                skill.kind || "custom",
+                skill.executor || "无执行器",
+                skill.requires_logs ? "需要日志" : "不强制日志"
+              ].join(" · ")
+            }
+          )
         )
       );
     }
@@ -981,13 +1002,13 @@
       }
     }
 
-    async function routeSkill(role) {
+    async function routeSkill(role, executor = "") {
       if (!selectedSkill) return;
       const kind = "";
       const response = await authFetch("/api/skills/" + encodeURIComponent(selectedSkill) + "/route", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ role, kind, requires_logs: role === "primary" })
+        body: JSON.stringify({ role, kind, executor, requires_logs: role === "primary" })
       });
       const data = await response.json();
       if (!response.ok) {
@@ -1045,6 +1066,7 @@
     $("delete-skill").onclick = deleteSkill;
     $("debug-skill").onclick = debugSkill;
     $("route-primary-skill").onclick = () => routeSkill("primary");
+    $("route-primary-agent-skill").onclick = () => routeSkill("primary", "file_agent");
     $("route-aux-skill").onclick = () => routeSkill("auxiliary");
     $("route-default-skill").onclick = () => routeSkill("custom");
     $("skill-keyword").addEventListener("input", renderSkills);

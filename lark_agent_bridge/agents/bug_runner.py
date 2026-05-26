@@ -6,6 +6,7 @@ import concurrent.futures
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import hashlib
+import html as html_lib
 import importlib
 import json
 import math
@@ -283,9 +284,9 @@ class BugAnalysisRunner:
 
     def supported_primary_bug_skills(self) -> list[dict[str, object]]:
         return [
-            item
-            for item in self._available_bug_skills()
-            if item.get("role") == "primary" and item.get("name") != "general"
+            record.to_dict(include_content=False)
+            for record in self.skill_manager.list_skills()
+            if record.role == "primary" and record.name != "general" and record.selectable_in_report_card
         ]
 
     def selection_for_skill_name(
@@ -1291,6 +1292,7 @@ class BugAnalysisRunner:
                     source_evidence_path = None
             html_paths: list[Path] = []
             report_jsons: dict[str, Path | None] = {}
+            custom_skill_execution_result: dict[str, object] | None = None
             for current_plan in plans:
                 current_html = context.output_dir / self._report_name(current_plan.kind, "html")
                 current_json = context.output_dir / self._report_name(current_plan.kind, "json")
@@ -1333,16 +1335,58 @@ class BugAnalysisRunner:
                     )
                     completed = subprocess.CompletedProcess(args=current_command, returncode=0, stdout="", stderr="")
                 elif current_plan.kind == "custom_skill":
-                    return self._failure(
-                        context=context,
-                        command=current_command,
-                        started=started,
-                        message=self._custom_skill_executor_not_ready_message(
-                            selection.skill_name or self._skill_name_for_kind(current_plan.kind),
-                            selected_input=selected_input,
-                        ),
-                        error_code="custom_skill_executor_not_ready",
+                    current_skill_name = selection.skill_name or self._skill_name_for_kind(current_plan.kind)
+                    if self.skill_manager.custom_skill_executor_for(current_skill_name) != "file_agent":
+                        return self._failure(
+                            context=context,
+                            command=current_command,
+                            started=started,
+                            message=self._custom_skill_executor_not_ready_message(
+                                current_skill_name,
+                                selected_input=selected_input,
+                            ),
+                            error_code="custom_skill_executor_not_ready",
+                            progress_callback=progress_callback,
+                        )
+                    custom_result = self._run_custom_skill_agent_analysis(
+                        skill_name=current_skill_name,
+                        request_text=request_text,
+                        prompt_text=prompt_text,
+                        title=title,
+                        description=description,
+                        fault_time=fault_time,
+                        selected_input=selected_input,
+                        prepared_input=prepared_input,
+                        source_evidence_path=source_evidence_path,
+                        html_path=current_html,
+                        json_path=current_json,
+                        analysis_dir=current_analysis_dir,
                         progress_callback=progress_callback,
+                        timeout=self._agent_summary_timeout(
+                            options.timeout_seconds,
+                            reference_seconds=max(time.monotonic() - started, 240.0),
+                        ),
+                        bridge_session_id=bridge_session_id,
+                    )
+                    custom_skill_execution_result = custom_result
+                    command = list(custom_result.get("command") or current_command)
+                    current_command = command
+                    if not custom_result.get("ok"):
+                        return self._failure(
+                            context=context,
+                            command=current_command,
+                            started=started,
+                            message=str(custom_result.get("message") or "专用 Skill 文件 Agent 执行失败。"),
+                            error_code=str(custom_result.get("error_code") or "custom_skill_agent_failed"),
+                            stdout=str(custom_result.get("stdout") or ""),
+                            stderr=str(custom_result.get("stderr") or ""),
+                            progress_callback=progress_callback,
+                        )
+                    completed = subprocess.CompletedProcess(
+                        args=current_command,
+                        returncode=0,
+                        stdout=str(custom_result.get("stdout") or ""),
+                        stderr=str(custom_result.get("stderr") or ""),
                     )
                 else:
                     analysis_kwargs = {
@@ -1521,6 +1565,8 @@ class BugAnalysisRunner:
             "agent_request_file": str(request_artifact),
             "agent_summary_file": str(agent_summary_path),
         }
+        if custom_skill_execution_result is not None:
+            details.update(self._custom_skill_execution_details(custom_skill_execution_result))
         if source_evidence_path is not None:
             details["source_evidence_file"] = str(source_evidence_path)
         if evidence_log_bundle is not None:
@@ -1762,6 +1808,7 @@ class BugAnalysisRunner:
         rerun_kinds: list[str] = []
         reused_kinds: list[str] = []
         command: list[str] | None = None
+        custom_skill_execution_result: dict[str, object] | None = None
         try:
             for plan in plans:
                 html_path = output_dir / self._report_name(plan.kind, "html")
@@ -1836,25 +1883,81 @@ class BugAnalysisRunner:
                         or str(details.get("analysis_skill") or "").strip()
                         or self._skill_name_for_kind(plan.kind)
                     )
-                    return TaskResult(
-                        success=False,
-                        message=self._custom_skill_executor_not_ready_message(
-                            skill_name,
-                            selected_input=selected_input,
+                    if self.skill_manager.custom_skill_executor_for(skill_name) != "file_agent":
+                        return TaskResult(
+                            success=False,
+                            message=self._custom_skill_executor_not_ready_message(
+                                skill_name,
+                                selected_input=selected_input,
+                            ),
+                            job_id=job_id,
+                            job_dir=job_dir,
+                            command=command,
+                            duration_seconds=time.monotonic() - started,
+                            error_code="custom_skill_reanalysis_executor_not_ready",
+                            details={
+                                "mode": "bug_reanalysis",
+                                "analysis_kind": "custom_skill",
+                                "analysis_skill": skill_name,
+                                "custom_skill_analysis_status": "executor_not_ready",
+                                "selected_log_input": str(selected_input or ""),
+                                "prepared_log_input": str(prepared_input or ""),
+                            },
+                        )
+                    custom_result = self._run_custom_skill_agent_analysis(
+                        skill_name=skill_name,
+                        request_text=request_text,
+                        prompt_text=prompt_text,
+                        title="",
+                        description=reference_text,
+                        fault_time=target_time,
+                        selected_input=selected_input,
+                        prepared_input=prepared_input,
+                        source_evidence_path=source_evidence_path,
+                        html_path=html_path,
+                        json_path=json_path,
+                        analysis_dir=analysis_dir,
+                        progress_callback=progress_callback,
+                        timeout=self._agent_summary_timeout(
+                            self.config.bug_analysis.timeout_seconds,
+                            reference_seconds=max(
+                                self._agent_summary_timeout_reference(previous_session) or 0.0,
+                                time.monotonic() - started,
+                                240.0,
+                            ),
                         ),
-                        job_id=job_id,
-                        job_dir=job_dir,
-                        command=command,
-                        duration_seconds=time.monotonic() - started,
-                        error_code="custom_skill_reanalysis_executor_not_ready",
-                        details={
-                            "mode": "bug_reanalysis",
-                            "analysis_kind": "custom_skill",
-                            "analysis_skill": skill_name,
-                            "custom_skill_analysis_status": "executor_not_ready",
-                            "selected_log_input": str(selected_input or ""),
-                            "prepared_log_input": str(prepared_input or ""),
-                        },
+                        bridge_session_id=bridge_session_id,
+                    )
+                    custom_skill_execution_result = custom_result
+                    command = list(custom_result.get("command") or command or [])
+                    if not custom_result.get("ok"):
+                        return TaskResult(
+                            success=False,
+                            message=str(custom_result.get("message") or "Bug 续聊专用 Skill 文件 Agent 执行失败。"),
+                            job_id=job_id,
+                            job_dir=job_dir,
+                            command=command,
+                            duration_seconds=time.monotonic() - started,
+                            error_code=self._custom_skill_mode_error_code(
+                                str(custom_result.get("error_code") or "custom_skill_agent_failed"),
+                                mode="bug_reanalysis",
+                            ),
+                            stdout=str(custom_result.get("stdout") or ""),
+                            stderr=str(custom_result.get("stderr") or ""),
+                            details={
+                                "mode": "bug_reanalysis",
+                                "analysis_kind": "custom_skill",
+                                "analysis_skill": skill_name,
+                                "custom_skill_analysis_status": "failed",
+                                "selected_log_input": str(selected_input or ""),
+                                "prepared_log_input": str(prepared_input or ""),
+                            },
+                        )
+                    completed = subprocess.CompletedProcess(
+                        args=command,
+                        returncode=0,
+                        stdout=str(custom_result.get("stdout") or ""),
+                        stderr=str(custom_result.get("stderr") or ""),
                     )
                 else:
                     analysis_kwargs = {
@@ -2053,6 +2156,8 @@ class BugAnalysisRunner:
         if combined_artifacts is not None:
             result_details["combined_report_html"] = str(combined_artifacts["html_path"])
             result_details["combined_report_json"] = str(combined_artifacts["json_path"])
+        if custom_skill_execution_result is not None:
+            result_details.update(self._custom_skill_execution_details(custom_skill_execution_result))
         self._apply_agent_runtime_details(result_details, agent_summary_result)
         return TaskResult(
             success=True,
@@ -2338,6 +2443,7 @@ class BugAnalysisRunner:
         report_jsons: dict[str, Path | None] = {}
         command: list[str] | None = None
         evidence_log_bundle: dict[str, object] | None = None
+        custom_skill_execution_result: dict[str, object] | None = None
         log_coverage = self._scan_log_time_coverage(prepared_input, fault_time=fault_time)
         if not log_coverage.has_time_evidence:
             return self._bug_time_clarification_result(
@@ -2412,25 +2518,77 @@ class BugAnalysisRunner:
                     completed = subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
                 elif current_plan.kind == "custom_skill":
                     current_skill_name = classification_skill or self._skill_name_for_kind(current_plan.kind)
-                    return TaskResult(
-                        success=False,
-                        message=self._custom_skill_executor_not_ready_message(
-                            current_skill_name,
-                            selected_input=selected_input,
+                    if self.skill_manager.custom_skill_executor_for(current_skill_name) != "file_agent":
+                        return TaskResult(
+                            success=False,
+                            message=self._custom_skill_executor_not_ready_message(
+                                current_skill_name,
+                                selected_input=selected_input,
+                            ),
+                            job_id=context.job_id,
+                            job_dir=context.job_dir,
+                            command=command,
+                            duration_seconds=time.monotonic() - started,
+                            error_code="direct_custom_skill_executor_not_ready",
+                            details={
+                                "mode": "direct_analysis",
+                                "analysis_kind": "custom_skill",
+                                "analysis_skill": current_skill_name,
+                                "custom_skill_analysis_status": "executor_not_ready",
+                                "selected_log_input": str(selected_input),
+                                "prepared_log_input": str(prepared_input),
+                            },
+                        )
+                    custom_result = self._run_custom_skill_agent_analysis(
+                        skill_name=current_skill_name,
+                        request_text=request_text,
+                        prompt_text=request.prompt,
+                        title="",
+                        description="",
+                        fault_time=fault_time,
+                        selected_input=selected_input,
+                        prepared_input=prepared_input,
+                        source_evidence_path=source_evidence_path,
+                        html_path=current_html,
+                        json_path=current_json,
+                        analysis_dir=current_analysis_dir,
+                        progress_callback=progress_callback,
+                        timeout=self._agent_summary_timeout(
+                            self.config.bug_analysis.timeout_seconds,
+                            reference_seconds=max(time.monotonic() - started, 240.0),
                         ),
-                        job_id=context.job_id,
-                        job_dir=context.job_dir,
-                        command=command,
-                        duration_seconds=time.monotonic() - started,
-                        error_code="direct_custom_skill_executor_not_ready",
-                        details={
-                            "mode": "direct_analysis",
-                            "analysis_kind": "custom_skill",
-                            "analysis_skill": current_skill_name,
-                            "custom_skill_analysis_status": "executor_not_ready",
-                            "selected_log_input": str(selected_input),
-                            "prepared_log_input": str(prepared_input),
-                        },
+                        bridge_session_id=bridge_session_id,
+                    )
+                    custom_skill_execution_result = custom_result
+                    command = list(custom_result.get("command") or command or [])
+                    if not custom_result.get("ok"):
+                        return TaskResult(
+                            success=False,
+                            message=str(custom_result.get("message") or "直传专用 Skill 文件 Agent 执行失败。"),
+                            job_id=context.job_id,
+                            job_dir=context.job_dir,
+                            command=command,
+                            duration_seconds=time.monotonic() - started,
+                            error_code=self._custom_skill_mode_error_code(
+                                str(custom_result.get("error_code") or "custom_skill_agent_failed"),
+                                mode="direct_analysis",
+                            ),
+                            stdout=str(custom_result.get("stdout") or ""),
+                            stderr=str(custom_result.get("stderr") or ""),
+                            details={
+                                "mode": "direct_analysis",
+                                "analysis_kind": "custom_skill",
+                                "analysis_skill": current_skill_name,
+                                "custom_skill_analysis_status": "failed",
+                                "selected_log_input": str(selected_input),
+                                "prepared_log_input": str(prepared_input),
+                            },
+                        )
+                    completed = subprocess.CompletedProcess(
+                        args=command,
+                        returncode=0,
+                        stdout=str(custom_result.get("stdout") or ""),
+                        stderr=str(custom_result.get("stderr") or ""),
                     )
                 else:
                     analysis_kwargs = {
@@ -2564,6 +2722,52 @@ class BugAnalysisRunner:
             analysis_kinds=[item.kind for item in plans],
             html_reports=[str(path) for path in html_paths],
         )
+        direct_details = {
+            "mode": "direct_analysis",
+            "analysis_kinds": [item.kind for item in plans],
+            "selected_log_input": str(selected_input),
+            "prepared_log_input": str(prepared_input),
+            "fault_time": fault_time,
+            "log_coverage_start": log_coverage.start_time,
+            "log_coverage_end": log_coverage.end_time,
+            "log_coverage_scanned_files": log_coverage.scanned_files,
+            "log_coverage_scanned_lines": log_coverage.scanned_lines,
+            "analysis_skill": classification_skill or self._skill_name_for_kind(plans[0].kind if plans else "general"),
+            "analysis_skill_label": (
+                "源码导向文件分析"
+                if classification_skill == "source_analysis"
+                else self._analysis_label(plans[0].kind if plans else "general")
+            ),
+            "classification_source": classification_source or "manual_fallback",
+            "classification_reason": classification_reason or "",
+            "agent_request_file": str(request_artifact),
+            "agent_summary_file": str(context.output_dir / "bug_agent_summary.md"),
+            **(
+                {
+                    "combined_report_html": str(combined_artifacts["html_path"]),
+                    "combined_report_json": str(combined_artifacts["json_path"]),
+                }
+                if combined_artifacts is not None
+                else {}
+            ),
+            "files_to_send": (
+                [metadata_path, Path(combined_artifacts["html_path"])]
+                if combined_artifacts is not None
+                else [metadata_path, *html_paths]
+            ),
+            **(
+                {
+                    "evidence_log_bundle": str(evidence_log_bundle.get("bundle_dir") or ""),
+                    "evidence_log_manifest": str(evidence_log_bundle.get("manifest_path") or ""),
+                    "evidence_log_focus_logs": evidence_log_bundle.get("focus_logs") or [],
+                    "evidence_log_file_count": evidence_log_bundle.get("file_count") or 0,
+                }
+                if evidence_log_bundle is not None
+                else {}
+            ),
+        }
+        if custom_skill_execution_result is not None:
+            direct_details.update(self._custom_skill_execution_details(custom_skill_execution_result))
         return TaskResult(
             success=True,
             message=final_message,
@@ -2571,50 +2775,7 @@ class BugAnalysisRunner:
             job_dir=context.job_dir,
             command=command,
             duration_seconds=time.monotonic() - started,
-            details={
-                "mode": "direct_analysis",
-                "analysis_kinds": [item.kind for item in plans],
-                "selected_log_input": str(selected_input),
-                "prepared_log_input": str(prepared_input),
-                "fault_time": fault_time,
-                "log_coverage_start": log_coverage.start_time,
-                "log_coverage_end": log_coverage.end_time,
-                "log_coverage_scanned_files": log_coverage.scanned_files,
-                "log_coverage_scanned_lines": log_coverage.scanned_lines,
-                "analysis_skill": classification_skill or self._skill_name_for_kind(plans[0].kind if plans else "general"),
-                "analysis_skill_label": (
-                    "源码导向文件分析"
-                    if classification_skill == "source_analysis"
-                    else self._analysis_label(plans[0].kind if plans else "general")
-                ),
-                "classification_source": classification_source or "manual_fallback",
-                "classification_reason": classification_reason or "",
-                "agent_request_file": str(request_artifact),
-                "agent_summary_file": str(context.output_dir / "bug_agent_summary.md"),
-                **(
-                    {
-                        "combined_report_html": str(combined_artifacts["html_path"]),
-                        "combined_report_json": str(combined_artifacts["json_path"]),
-                    }
-                    if combined_artifacts is not None
-                    else {}
-                ),
-                "files_to_send": (
-                    [metadata_path, Path(combined_artifacts["html_path"])]
-                    if combined_artifacts is not None
-                    else [metadata_path, *html_paths]
-                ),
-                **(
-                    {
-                        "evidence_log_bundle": str(evidence_log_bundle.get("bundle_dir") or ""),
-                        "evidence_log_manifest": str(evidence_log_bundle.get("manifest_path") or ""),
-                        "evidence_log_focus_logs": evidence_log_bundle.get("focus_logs") or [],
-                        "evidence_log_file_count": evidence_log_bundle.get("file_count") or 0,
-                    }
-                    if evidence_log_bundle is not None
-                    else {}
-                ),
-            },
+            details=direct_details,
         )
 
     def classify_requests(self, *, prompt_text: str, title: str, description: str) -> list["BugAnalysisPlan"]:
@@ -7193,6 +7354,498 @@ class BugAnalysisRunner:
             f"已命中专用 Skill `{display_name}`，但当前没有可执行分析器，尚未执行实际日志分析。"
             f"{log_note}\n不会基于占位报告给出根因结论。请为该 Skill 配置脚本执行器或文件 Agent 执行器后重试。"
         )
+
+    def _build_custom_skill_agent_command(
+        self,
+        *,
+        skill_name: str,
+        request_text: str,
+        prompt_text: str,
+        title: str,
+        description: str,
+        fault_time: str,
+        selected_input: Path | None,
+        prepared_input: Path | None,
+        source_evidence_path: Path | None,
+        analysis_markdown_path: Path,
+        provider_override: str = "",
+        command_override: str = "",
+    ) -> dict[str, object]:
+        provider = _normalize_provider_name(provider_override or self.config.bug_analysis.provider)
+        if command_override.strip():
+            command_name = command_override.strip()
+        elif provider_override:
+            command_name = _default_command_for_provider(provider)
+        else:
+            command_name = (self.config.bug_analysis.command or "").strip() or _default_command_for_provider(provider)
+        prompt = self._build_custom_skill_agent_prompt(
+            skill_name=skill_name,
+            request_text=request_text,
+            prompt_text=prompt_text,
+            title=title,
+            description=description,
+            fault_time=fault_time,
+            selected_input=selected_input,
+            prepared_input=prepared_input,
+            source_evidence_path=source_evidence_path,
+            analysis_markdown_path=analysis_markdown_path,
+        )
+        if not provider or not command_name:
+            return {"command": [], "provider": provider, "prompt": prompt, "output_path": analysis_markdown_path}
+        if provider == "codex":
+            model = (self.config.bug_analysis.model or "").strip()
+            command = [
+                command_name,
+                "exec",
+                "--skip-git-repo-check",
+                "-s",
+                "read-only",
+                "-C",
+                str(self._working_dir()),
+            ]
+            if model:
+                command.extend(["-m", model])
+            command.extend(["--json", "--output-last-message", str(analysis_markdown_path), prompt])
+            return {
+                "command": command,
+                "provider": provider,
+                "model": model,
+                "prompt": prompt,
+                "output_path": analysis_markdown_path,
+            }
+        if provider in {"claude", "claude-code", "claude_code"}:
+            model = (self.config.claude_agent.model or "").strip()
+            allowed_tools = self.config.claude_agent.allowed_tools or ["Read", "Grep", "Glob", "LS"]
+            command = [
+                command_name,
+                "--print",
+                "--output-format",
+                "text",
+                "--permission-mode",
+                "dontAsk",
+                "--allowedTools",
+                ",".join(allowed_tools),
+                "--append-system-prompt",
+                (
+                    "你是通过飞书触发的专用 Skill 执行 Agent。"
+                    "你负责读取本地日志、源码和 SKILL.md 产出执行证据，不负责跳过证据直接总结。"
+                    "只读分析，不修改文件。输出中文 Markdown。"
+                ),
+            ]
+            for directory in self._custom_skill_agent_add_dirs(
+                skill_name=skill_name,
+                selected_input=selected_input,
+                prepared_input=prepared_input,
+                source_evidence_path=source_evidence_path,
+            ):
+                command.extend(["--add-dir", str(directory)])
+            command.append(prompt)
+            return {
+                "command": command,
+                "provider": provider,
+                "model": model,
+                "prompt": prompt,
+                "output_path": analysis_markdown_path,
+            }
+        return {"command": [], "provider": provider, "prompt": prompt, "output_path": analysis_markdown_path}
+
+    def _build_custom_skill_agent_prompt(
+        self,
+        *,
+        skill_name: str,
+        request_text: str,
+        prompt_text: str,
+        title: str,
+        description: str,
+        fault_time: str,
+        selected_input: Path | None,
+        prepared_input: Path | None,
+        source_evidence_path: Path | None,
+        analysis_markdown_path: Path,
+    ) -> str:
+        skill_paths = self._skill_context_paths(skill_name)
+        lines = [
+            "请执行专用 Skill 的实际问题分析，而不是做最终总结。",
+            "",
+            "硬性要求：",
+            "1. 必须先读取 SKILL.md、日志输入和可用源码证据；不能只根据标题/描述直接下根因结论。",
+            "2. 只读分析，不修改文件，不生成无证据结论。",
+            "3. 输出中文 Markdown，并写入指定输出路径。",
+            "4. Markdown 必须包含这些二级标题：`## 结论摘要`、`## 关键证据`、`## 待确认项`、`## 建议动作`。",
+            "5. `## 关键证据` 必须非空，每条证据要能回指到日志/源码/工具结果；证据不足时明确写待确认，不要编造。",
+            "",
+            "输出路径：",
+            f"- custom_skill_analysis.md: `{analysis_markdown_path}`",
+            "",
+            "用户与 Bug 上下文：",
+            f"- 命中 Skill: `{skill_name}`",
+            f"- Bug 标题: {title or '未返回 / 未设置'}",
+            f"- 用户请求: {prompt_text or request_text or '未设置'}",
+            f"- 原始请求: {request_text or '未设置'}",
+            f"- 故障时间: {fault_time or '未识别'}",
+            "",
+            "输入材料：",
+            f"- selected log input: `{selected_input}`" if selected_input else "- selected log input: 未提供",
+            f"- prepared log input: `{prepared_input}`" if prepared_input else "- prepared log input: 未提供",
+            f"- source evidence: `{source_evidence_path}`" if source_evidence_path else "- source evidence: 未生成",
+            "",
+            "Skill 上下文文件：",
+        ]
+        if skill_paths:
+            lines.extend(f"- `{path}`" for path in skill_paths)
+        else:
+            lines.append("- 未找到 SKILL.md 或 references；如果无法执行，必须在待确认项里说明。")
+        if description.strip():
+            lines.extend(["", "Bug 描述：", description.strip()])
+        lines.extend(
+            [
+                "",
+                "请开始只读分析，并只输出该 custom_skill_analysis.md 的正文内容。",
+            ]
+        )
+        return "\n".join(lines).strip() + "\n"
+
+    def _custom_skill_agent_add_dirs(
+        self,
+        *,
+        skill_name: str,
+        selected_input: Path | None,
+        prepared_input: Path | None,
+        source_evidence_path: Path | None,
+    ) -> list[Path]:
+        dirs: list[Path] = []
+        for path in [self._working_dir(), *self._skill_context_paths(skill_name), selected_input, prepared_input, source_evidence_path]:
+            if path is None:
+                continue
+            candidate = path if path.is_dir() else path.parent
+            try:
+                resolved = candidate.resolve()
+            except OSError:
+                continue
+            if resolved not in dirs and resolved.exists():
+                dirs.append(resolved)
+        return dirs
+
+    def _run_custom_skill_agent_analysis(
+        self,
+        *,
+        skill_name: str,
+        request_text: str,
+        prompt_text: str,
+        title: str,
+        description: str,
+        fault_time: str,
+        selected_input: Path | None,
+        prepared_input: Path | None,
+        source_evidence_path: Path | None,
+        html_path: Path,
+        json_path: Path,
+        analysis_dir: Path,
+        progress_callback: Callable[[dict[str, object]], None] | None,
+        timeout: int,
+        bridge_session_id: str = "",
+    ) -> dict[str, object]:
+        started = time.monotonic()
+        analysis_dir.mkdir(parents=True, exist_ok=True)
+        html_path.parent.mkdir(parents=True, exist_ok=True)
+        json_path.parent.mkdir(parents=True, exist_ok=True)
+        analysis_markdown_path = analysis_dir / "custom_skill_analysis.md"
+        invocation = self._build_custom_skill_agent_command(
+            skill_name=skill_name,
+            request_text=request_text,
+            prompt_text=prompt_text,
+            title=title,
+            description=description,
+            fault_time=fault_time,
+            selected_input=selected_input,
+            prepared_input=prepared_input,
+            source_evidence_path=source_evidence_path,
+            analysis_markdown_path=analysis_markdown_path,
+        )
+        command = list(invocation.get("command") or [])
+        provider = str(invocation.get("provider") or "")
+        if not command:
+            return {
+                "ok": False,
+                "error_code": "custom_skill_agent_not_configured",
+                "message": f"专用 Skill `{skill_name}` 已配置 file_agent，但未配置可用 Agent 命令。",
+                "command": command,
+                "provider": provider,
+                "analysis_markdown_path": analysis_markdown_path,
+                "stdout": "",
+                "stderr": "",
+                "duration_seconds": time.monotonic() - started,
+            }
+        self._emit_progress(
+            progress_callback,
+            stage="custom_skill_agent_analysis",
+            message="执行专用 Skill 文件 Agent 分析",
+            skill=skill_name,
+            provider=provider,
+            output_path=str(analysis_markdown_path),
+            timeout_seconds=timeout,
+        )
+        try:
+            completed = _run_tracked_process(
+                command,
+                watchdog=self.process_watchdog,
+                name=f"custom-skill-agent-analysis-{provider or 'agent'}",
+                cwd=self._working_dir(),
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+                session_id=bridge_session_id,
+            )
+        except subprocess.TimeoutExpired as exc:
+            return {
+                "ok": False,
+                "error_code": "custom_skill_agent_timeout",
+                "message": f"专用 Skill `{skill_name}` 文件 Agent 执行超时，未生成可验证证据。",
+                "command": command,
+                "provider": provider,
+                "analysis_markdown_path": analysis_markdown_path,
+                "stdout": exc.stdout or "",
+                "stderr": exc.stderr or "",
+                "duration_seconds": time.monotonic() - started,
+                "timeout_seconds": timeout,
+            }
+        except OSError as exc:
+            return {
+                "ok": False,
+                "error_code": "custom_skill_agent_failed_to_start",
+                "message": f"专用 Skill `{skill_name}` 文件 Agent 启动失败：{exc}",
+                "command": command,
+                "provider": provider,
+                "analysis_markdown_path": analysis_markdown_path,
+                "stdout": "",
+                "stderr": str(exc),
+                "duration_seconds": time.monotonic() - started,
+            }
+        stdout = completed.stdout or ""
+        stderr = completed.stderr or ""
+        if not analysis_markdown_path.exists() and stdout.strip():
+            analysis_markdown_path.write_text(stdout.strip() + "\n", encoding="utf-8")
+        if completed.returncode != 0:
+            return {
+                "ok": False,
+                "error_code": "custom_skill_agent_failed",
+                "message": f"专用 Skill `{skill_name}` 文件 Agent 执行失败，未允许进入最终总结。",
+                "command": command,
+                "provider": provider,
+                "analysis_markdown_path": analysis_markdown_path,
+                "stdout": stdout,
+                "stderr": stderr,
+                "duration_seconds": time.monotonic() - started,
+            }
+        if not analysis_markdown_path.exists():
+            return {
+                "ok": False,
+                "error_code": "custom_skill_agent_missing_output",
+                "message": f"专用 Skill `{skill_name}` 文件 Agent 未生成 custom_skill_analysis.md，未允许进入最终总结。",
+                "command": command,
+                "provider": provider,
+                "analysis_markdown_path": analysis_markdown_path,
+                "stdout": stdout,
+                "stderr": stderr,
+                "duration_seconds": time.monotonic() - started,
+            }
+        valid, reason, evidence_count = self._validate_custom_skill_analysis(analysis_markdown_path)
+        if not valid:
+            return {
+                "ok": False,
+                "error_code": "custom_skill_agent_invalid_evidence",
+                "message": f"专用 Skill `{skill_name}` 文件 Agent 输出缺少有效 `## 关键证据`：{reason}。不会进入最终总结。",
+                "command": command,
+                "provider": provider,
+                "analysis_markdown_path": analysis_markdown_path,
+                "stdout": stdout,
+                "stderr": stderr,
+                "duration_seconds": time.monotonic() - started,
+                "evidence_count": evidence_count,
+                "validation_error": reason,
+            }
+        self._write_custom_skill_agent_report(
+            html_path=html_path,
+            json_path=json_path,
+            analysis_markdown_path=analysis_markdown_path,
+            skill_name=skill_name,
+            provider=provider,
+            request_text=request_text,
+            prompt_text=prompt_text,
+            title=title,
+            description=description,
+            fault_time=fault_time,
+            selected_input=selected_input,
+            prepared_input=prepared_input,
+            source_evidence_path=source_evidence_path,
+            evidence_count=evidence_count,
+            duration_seconds=time.monotonic() - started,
+        )
+        return {
+            "ok": True,
+            "error_code": "",
+            "message": "",
+            "command": command,
+            "provider": provider,
+            "analysis_markdown_path": analysis_markdown_path,
+            "html_path": html_path,
+            "json_path": json_path,
+            "stdout": stdout,
+            "stderr": stderr,
+            "duration_seconds": time.monotonic() - started,
+            "evidence_count": evidence_count,
+            "custom_skill_analysis_status": "completed",
+        }
+
+    def _validate_custom_skill_analysis(self, analysis_markdown_path: Path) -> tuple[bool, str, int]:
+        try:
+            text = analysis_markdown_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return False, "missing_analysis_markdown", 0
+        lines = text.splitlines()
+        start: int | None = None
+        for index, line in enumerate(lines):
+            if re.match(r"^\s*##\s+关键证据\s*$", line):
+                start = index + 1
+                break
+        if start is None:
+            return False, "missing_key_evidence_section", 0
+        section_lines: list[str] = []
+        for line in lines[start:]:
+            if re.match(r"^\s*##\s+", line):
+                break
+            section_lines.append(line)
+        evidence_lines = [
+            line.strip()
+            for line in section_lines
+            if line.strip() and not line.strip().startswith("<!--")
+        ]
+        if not evidence_lines:
+            return False, "empty_key_evidence_section", 0
+        return True, "", len(evidence_lines)
+
+    def _write_custom_skill_agent_report(
+        self,
+        *,
+        html_path: Path,
+        json_path: Path,
+        analysis_markdown_path: Path,
+        skill_name: str,
+        provider: str,
+        request_text: str,
+        prompt_text: str,
+        title: str,
+        description: str,
+        fault_time: str,
+        selected_input: Path | None,
+        prepared_input: Path | None,
+        source_evidence_path: Path | None,
+        evidence_count: int,
+        duration_seconds: float,
+    ) -> None:
+        analysis_text = analysis_markdown_path.read_text(encoding="utf-8", errors="replace")
+        skill_paths = self._skill_context_paths(skill_name)
+        verdict_text = f"专用 Skill `{skill_name}` 已通过文件 Agent 产出执行证据，允许进入最终总结。"
+        cards = [
+            ("执行器", "file_agent", "green", provider or "未记录 provider"),
+            ("命中 Skill", skill_name or "未记录", "green" if skill_name else "yellow", ""),
+            ("关键证据", str(evidence_count), "green" if evidence_count > 0 else "red", "来自 custom_skill_analysis.md 的 ## 关键证据"),
+            ("故障时间", fault_time or "未识别", "green" if fault_time else "yellow", ""),
+            ("日志输入", selected_input.name if selected_input else "无", "green" if selected_input else "yellow", str(selected_input or "")),
+            ("执行耗时", f"{duration_seconds:.1f}s", "green", ""),
+        ]
+        context_rows = [
+            ("Bug 标题", title or "未返回 / 未设置"),
+            ("用户请求", prompt_text or request_text or "未设置"),
+            ("原始请求", request_text or "未设置"),
+            ("故障时间", fault_time or "未识别"),
+            ("selected log input", str(selected_input or "未提供")),
+            ("prepared log input", str(prepared_input or "未提供")),
+            ("source evidence", str(source_evidence_path or "未生成")),
+            ("custom_skill_analysis.md", str(analysis_markdown_path)),
+        ]
+        skill_rows = [(path.name, str(path)) for path in skill_paths]
+        detail_body = (
+            "<pre class=\"evidence-block\">"
+            + html_lib.escape(analysis_text.strip() or "(空)")
+            + "</pre>"
+        )
+        raw_body = (
+            "<div class=\"split-grid\">"
+            f"{combined_bug_html.render_table([('原始请求', request_text.strip() or '(无请求)')], ('字段', '内容'))}"
+            f"{combined_bug_html.render_table([('缺陷描述', description.strip() or '(无描述)')], ('字段', '内容'))}"
+            "</div>"
+        )
+        composition = ReportComposition(
+            title="专用 Skill 文件 Agent 分析",
+            heading="专用 Skill 文件 Agent 分析",
+            subtitle=f"Bug 标题：{title or '未返回 / 未设置'}",
+            verdict=ReportVerdict(sev="green", text=verdict_text),
+            cards=cards,
+            sections=[
+                ReportSection(
+                    kind="issues",
+                    title="执行状态",
+                    items=[
+                        {
+                            "sev": "green",
+                            "title": "Execution artifact 已生成",
+                            "detail": f"`{analysis_markdown_path}` 已通过 `## 关键证据` 非空校验。",
+                        }
+                    ],
+                ),
+                ReportSection(kind="table", title="Skill 上下文", cols=["文件", "路径"], rows=skill_rows, empty_text="未找到 Skill 文件"),
+                ReportSection(kind="table", title="分析上下文", cols=["字段", "内容"], rows=context_rows),
+                ReportSection(kind="details", title="执行证据 Markdown", summary="展开查看 custom_skill_analysis.md", body_html=detail_body),
+                ReportSection(kind="details", title="原始输入", summary="展开查看请求与缺陷描述", body_html=raw_body),
+            ],
+        )
+        payload = {
+            "mode": "custom_skill_agent_analysis",
+            "summary": verdict_text,
+            "verdict": {"sev": "green", "text": verdict_text},
+            "custom_skill_analysis_status": "completed",
+            "analysis_skill": skill_name,
+            "executor": "file_agent",
+            "provider": provider,
+            "evidence_count": evidence_count,
+            "analysis_markdown": str(analysis_markdown_path),
+            "fault_time": fault_time,
+            "selected_input": str(selected_input) if selected_input else "",
+            "prepared_input": str(prepared_input) if prepared_input else "",
+            "source_evidence_file": str(source_evidence_path) if source_evidence_path else "",
+            "skill_context_files": [str(path) for path in skill_paths],
+            "title": title,
+            "prompt_text": prompt_text,
+            "request_text": request_text,
+            "description": description.strip(),
+            "duration_seconds": duration_seconds,
+        }
+        html_path.write_text(
+            combined_bug_html.render_report_shell(**composition_to_renderer_payload(composition)),
+            encoding="utf-8",
+        )
+        json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _custom_skill_execution_details(self, result: dict[str, object]) -> dict[str, object]:
+        return {
+            "custom_skill_executor": "file_agent",
+            "custom_skill_analysis_status": str(result.get("custom_skill_analysis_status") or "completed"),
+            "custom_skill_analysis_file": str(result.get("analysis_markdown_path") or ""),
+            "custom_skill_report_html": str(result.get("html_path") or ""),
+            "custom_skill_report_json": str(result.get("json_path") or ""),
+            "custom_skill_evidence_count": int(result.get("evidence_count") or 0),
+            "custom_skill_agent_provider": str(result.get("provider") or ""),
+            "custom_skill_agent_duration_seconds": result.get("duration_seconds") or 0.0,
+        }
+
+    def _custom_skill_mode_error_code(self, base_code: str, *, mode: str) -> str:
+        if mode == "bug_reanalysis":
+            return base_code.replace("custom_skill_agent_", "custom_skill_reanalysis_agent_", 1)
+        if mode == "direct_analysis":
+            return base_code.replace("custom_skill_agent_", "direct_custom_skill_agent_", 1)
+        return base_code
 
     def _run_bug_agent_summary(
         self,

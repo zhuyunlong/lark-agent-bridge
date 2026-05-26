@@ -44,6 +44,7 @@ class SkillManagerTests(unittest.TestCase):
             self.assertEqual(routed.role, "primary")
             self.assertEqual(routed.route_status, "bug_primary_unready")
             self.assertFalse(routed.selectable_in_report_card)
+            self.assertEqual(routed.executor, "")
             self.assertIn("没有可执行分析器", routed.routing_note)
             self.assertIn("custom-check", manager.primary_skill_map())
             self.assertEqual(manager.primary_skill_map()["custom-check"][0], "custom_skill")
@@ -54,8 +55,17 @@ class SkillManagerTests(unittest.TestCase):
             self.assertFalse(legacy_routed.selectable_in_report_card)
             self.assertEqual(manager.primary_skill_map()["custom-check"][0], "custom_skill")
 
+            agent_routed = manager.set_skill_route("custom-check", role="primary", executor="file_agent")
+            self.assertEqual(agent_routed.kind, "custom_skill")
+            self.assertEqual(agent_routed.executor, "file_agent")
+            self.assertEqual(agent_routed.route_status, "bug_primary_agent_ready")
+            self.assertTrue(agent_routed.selectable_in_report_card)
+            self.assertIn("文件 Agent", agent_routed.routing_note)
+            self.assertEqual(manager.custom_skill_executor_for("custom-check"), "file_agent")
+
             auxiliary = manager.set_skill_route("custom-check", role="auxiliary")
             self.assertEqual(auxiliary.role, "auxiliary")
+            self.assertEqual(auxiliary.executor, "")
             self.assertIn("custom-check", manager.auxiliary_skill_names())
             self.assertNotIn("custom-check", manager.primary_skill_map())
 

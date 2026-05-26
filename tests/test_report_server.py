@@ -330,7 +330,9 @@ class ReportServerTests(unittest.TestCase):
                     created_skill = json.loads(response.read().decode("utf-8"))
                 route_request = urllib.request.Request(
                     f"http://127.0.0.1:{port}/api/skills/http-debug-skill/route",
-                    data=json.dumps({"role": "primary", "kind": "general", "requires_logs": True}).encode("utf-8"),
+                    data=json.dumps(
+                        {"role": "primary", "kind": "general", "requires_logs": True, "executor": "file_agent"}
+                    ).encode("utf-8"),
                     headers={"Content-Type": "application/json"},
                     method="POST",
                 )
@@ -384,9 +386,10 @@ class ReportServerTests(unittest.TestCase):
         self.assertEqual(created_skill["skill"]["name"], "http-debug-skill")
         self.assertEqual(created_skill["skill"]["route_status"], "custom_unrouted")
         self.assertFalse(created_skill["skill"]["selectable_in_report_card"])
-        self.assertEqual(routed_skill["skill"]["route_status"], "bug_primary_unready")
-        self.assertFalse(routed_skill["skill"]["selectable_in_report_card"])
-        self.assertIn("没有可执行分析器", routed_skill["skill"]["routing_note"])
+        self.assertEqual(routed_skill["skill"]["route_status"], "bug_primary_agent_ready")
+        self.assertTrue(routed_skill["skill"]["selectable_in_report_card"])
+        self.assertEqual(routed_skill["skill"]["executor"], "file_agent")
+        self.assertIn("文件 Agent", routed_skill["skill"]["routing_note"])
         self.assertIn("summary", debug_skill)
         self.assertEqual(daemon["daemon"]["stage"], "event_consumer_ready")
         self.assertIn("report ok", report)

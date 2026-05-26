@@ -810,12 +810,14 @@ def _build_handler(
                 raise SkillManagerError("skill manager not configured", status_code=503)
             role = str(payload.get("role") or "")
             kind = str(payload.get("kind") or "")
+            executor = str(payload.get("executor") or "")
             requires_logs_value = payload.get("requires_logs")
             requires_logs = requires_logs_value if isinstance(requires_logs_value, bool) else None
             return skill_manager.set_skill_route(
                 name,
                 role=role,
                 kind=kind,
+                executor=executor,
                 requires_logs=requires_logs,
             ).to_dict(include_content=True)
 

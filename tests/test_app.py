@@ -7071,6 +7071,90 @@ class AppTests(unittest.TestCase):
         self.assertNotIn("最可能原因", delivered_text)
         self.assertNotIn("结论摘要", delivered_text)
 
+    def test_group_bug_request_custom_skill_file_agent_ready_delivers_after_execution(self):
+        class ReadyBugRunner(FakeBugRunner):
+            def run_bug_analysis(self, request, *, event=None, progress_callback=None):
+                self.requests.append(request)
+                self.progress_callbacks.append(progress_callback)
+                if progress_callback is not None:
+                    progress_callback(
+                        {
+                            "stage": "custom_skill_agent_analysis",
+                            "message": "执行专用 Skill 文件 Agent 分析",
+                            "details": {
+                                "analysis_kind": "custom_skill",
+                                "analysis_skill": "agent-ready-lane-skill",
+                                "custom_skill_analysis_status": "completed",
+                            },
+                        }
+                    )
+                    progress_callback(
+                        {
+                            "stage": "bug_agent_summary",
+                            "message": "基于执行证据整理最终结论",
+                            "details": {"provider": "codex", "session_id": "sess_ready"},
+                        }
+                    )
+                return TaskResult(
+                    success=True,
+                    message="file agent summary：已基于 custom_skill_analysis.md 的关键证据完成分析。",
+                    job_id="job_custom_ready",
+                    job_dir=self.html_path.parent,
+                    details={
+                        "mode": "bug_analysis",
+                        "analysis_kind": "custom_skill",
+                        "analysis_skill": "agent-ready-lane-skill",
+                        "custom_skill_executor": "file_agent",
+                        "custom_skill_analysis_status": "completed",
+                        "custom_skill_evidence_count": 2,
+                        "files_to_send": [self.html_path],
+                    },
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = Path(tmp) / "bug_metadata.md"
+            html = Path(tmp) / "bug_custom_skill_report.html"
+            metadata.write_text("metadata", encoding="utf-8")
+            html.write_text("<html>custom skill report</html>", encoding="utf-8")
+            fake_lark = FakeLarkClient()
+            fake_bug = ReadyBugRunner(metadata, html)
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    allowed_chats=["oc_denied"],
+                ),
+                lark_client=fake_lark,
+                bug_runner=fake_bug,
+            )
+
+            result = app.handle_event(
+                event(
+                    event_id="evt_custom_skill_ready_group_bug",
+                    message_id="om_custom_skill_ready_group_bug",
+                    content=(
+                        "@bot https://project.feishu.cn/xpfailuremgmt/buglo/detail/6998107767 "
+                        "2026-05-22 19:46 退无图"
+                    ),
+                )
+            )
+            delivered_text = "\n".join(
+                [item["text"] for item in fake_lark.replies]
+                + [item["card_json"] for item in fake_lark.card_replies]
+                + [item["card_json"] for item in fake_lark.updated_cards]
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.details["mode"], "bug_analysis")
+        self.assertEqual(result.details["analysis_kind"], "custom_skill")
+        self.assertEqual(result.details["custom_skill_analysis_status"], "completed")
+        self.assertEqual(len(fake_bug.requests), 1)
+        self.assertEqual(fake_bug.requests[0].bug_url, "https://project.feishu.cn/xpfailuremgmt/buglo/detail/6998107767")
+        self.assertEqual(fake_bug.requests[0].prompt, "2026-05-22 19:46 退无图")
+        self.assertIn("file agent summary", delivered_text)
+        self.assertNotIn("当前没有可执行分析器", delivered_text)
+        self.assertEqual([Path(item["path"]).name for item in fake_lark.files], ["bug_custom_skill_report.html"])
+
     def test_group_bug_request_accepts_rich_text_wrapped_bot_name(self):
         with tempfile.TemporaryDirectory() as tmp:
             metadata = Path(tmp) / "bug_metadata.md"

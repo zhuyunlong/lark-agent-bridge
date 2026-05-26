@@ -27,6 +27,7 @@ _ROUTE_KINDS = {
     "xtheme",
     "custom_skill",
 }
+_ROUTE_EXECUTORS = {"", "file_agent"}
 
 
 class SkillManagerError(ValueError):
@@ -42,6 +43,7 @@ class SkillRecord:
     description: str
     role: str
     kind: str = ""
+    executor: str = ""
     requires_logs: bool = False
     path: str = ""
     skill_md_path: str = ""
@@ -62,6 +64,7 @@ class SkillRecord:
             "description": self.description,
             "role": self.role,
             "kind": self.kind,
+            "executor": self.executor,
             "requires_logs": self.requires_logs,
             "path": self.path,
             "skill_md_path": self.skill_md_path,
@@ -159,6 +162,7 @@ class SkillManager:
         *,
         role: str,
         kind: str = "",
+        executor: str = "",
         requires_logs: bool | None = None,
     ) -> SkillRecord:
         normalized = self._normalize_name(name)
@@ -190,6 +194,9 @@ class SkillManager:
             route_kind = ""
         elif route_kind not in _ROUTE_KINDS:
             raise SkillManagerError("analysis kind 不支持", status_code=400)
+        route_executor = self._normalize_route_executor(str(executor or "").strip())
+        if normalized_role != "primary" or route_kind != "custom_skill":
+            route_executor = ""
         if requires_logs is None:
             effective_requires_logs = bool(default_requires_logs if default_kind else normalized_role == "primary")
         else:
@@ -197,6 +204,7 @@ class SkillManager:
         routes[normalized] = {
             "role": normalized_role,
             "kind": route_kind,
+            "executor": route_executor,
             "label": default_label,
             "requires_logs": effective_requires_logs,
         }
@@ -217,6 +225,17 @@ class SkillManager:
                     bool(route.get("requires_logs", True)),
                 )
         return mapping
+
+    def custom_skill_executor_for(self, name: str) -> str:
+        normalized = self._normalize_name(name)
+        route = self._load_routes().get(normalized)
+        if not isinstance(route, dict) or str(route.get("role") or "") != "primary":
+            return ""
+        default_kind, _default_label, _default_requires_logs, _default_role = self._default_metadata_for(normalized)
+        kind = self._normalize_primary_route_kind(normalized, str(route.get("kind") or "").strip(), default_kind)
+        if kind != "custom_skill":
+            return ""
+        return self._normalize_route_executor(str(route.get("executor") or "").strip())
 
     def auxiliary_skill_names(self) -> set[str]:
         names = set(AUX_BUG_SKILLS)
@@ -307,10 +326,12 @@ class SkillManager:
         else:
             status = "missing_skill_md"
         kind, label, requires_logs, role = self._metadata_for(name)
+        executor = self.custom_skill_executor_for(name) if kind == "custom_skill" else ""
         scripts = _script_paths(directory)
         route_status, route_status_label, selectable, routing_note = _route_metadata(
             name=name,
             kind=kind,
+            executor=executor,
             role=role,
             status=status,
         )
@@ -320,6 +341,7 @@ class SkillManager:
             description=description,
             role=role,
             kind=kind,
+            executor=executor,
             requires_logs=requires_logs,
             path=str(directory),
             skill_md_path=str(skill_md),
@@ -336,9 +358,11 @@ class SkillManager:
 
     def _virtual_record(self, name: str) -> SkillRecord:
         kind, label, requires_logs, role = self._metadata_for(name)
+        executor = self.custom_skill_executor_for(name) if kind == "custom_skill" else ""
         route_status, route_status_label, selectable, routing_note = _route_metadata(
             name=name,
             kind=kind,
+            executor=executor,
             role=role,
             status="virtual",
         )
@@ -348,6 +372,7 @@ class SkillManager:
             description="内置路由候选；当前工作区没有对应 .ai/skills 目录。",
             role=role,
             kind=kind,
+            executor=executor,
             requires_logs=requires_logs,
             status="virtual",
             route_status=route_status,
@@ -390,6 +415,12 @@ class SkillManager:
             return normalized or "general"
         if normalized == "general" or not normalized:
             return "custom_skill"
+        return normalized
+
+    def _normalize_route_executor(self, executor: str) -> str:
+        normalized = executor.strip()
+        if normalized not in _ROUTE_EXECUTORS:
+            raise SkillManagerError("executor 只能是 file_agent 或空", status_code=400)
         return normalized
 
     def _skill_dir(self, name: str) -> Path:
@@ -526,7 +557,7 @@ def _role_order(role: str) -> int:
     return {"primary": 0, "auxiliary": 1, "custom": 2}.get(role, 3)
 
 
-def _route_metadata(*, name: str, kind: str, role: str, status: str) -> tuple[str, str, bool, str]:
+def _route_metadata(*, name: str, kind: str, executor: str, role: str, status: str) -> tuple[str, str, bool, str]:
     if role == "primary":
         if name == "general":
             return (
@@ -543,6 +574,13 @@ def _route_metadata(*, name: str, kind: str, role: str, status: str) -> tuple[st
                 "已在主路由表中配置，但当前工作区没有对应 .ai/skills 目录，需补齐 SKILL.md 和脚本后才能稳定执行。",
             )
         if kind == "custom_skill":
+            if executor == "file_agent":
+                return (
+                    "bug_primary_agent_ready",
+                    "Bug Agent 可执行",
+                    True,
+                    "已归类到 Bug 分析，并配置文件 Agent 执行器；会先产出执行证据再允许最终总结。",
+                )
             return (
                 "bug_primary_unready",
                 "Bug 分析未就绪",
