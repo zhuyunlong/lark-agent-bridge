@@ -73,7 +73,7 @@ git diff --check -- lark_agent_bridge/agents/bug_runner.py lark_agent_bridge/ski
 
 ## Completion Criteria
 
-- Existing LD route for `6998107767` remains `executor_not_ready` until explicitly configured.
-- Test custom skill with `executor=file_agent` runs through real Execution artifact before summary.
-- Empty/invalid `## 关键证据` blocks fail and skip summary.
-- Admin readiness distinguishes unready custom skills from file-agent-ready custom skills.
+- [x] Existing LD route for `6998107767` remains `executor_not_ready` until explicitly configured.
+- [x] Test custom skill with `executor=file_agent` runs through real Execution artifact before summary.
+- [x] Empty/invalid `## 关键证据` blocks fail and skip summary.
+- [x] Admin readiness distinguishes unready custom skills from file-agent-ready custom skills.
