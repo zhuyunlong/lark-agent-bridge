@@ -2122,9 +2122,12 @@ class BugAnalysisRunner:
                 f"故障时间: {str(details.get('target_time') or details.get('fault_time') or '').strip()}",
             ]
         ).strip()
+        # Recover bug title from metadata so follow-ups like
+        # "请根据BUG问题实际时间继续分析" can extract the correct time.
+        recovered_bug_title = self._recover_bug_title_from_metadata(output_dir)
         time_context = self._resolve_bug_time_context(
             request_text=followup_text,
-            title="",
+            title=recovered_bug_title,
             description=reference_text,
             reference_time=str(details.get("target_time") or details.get("fault_time") or "").strip(),
         )
@@ -3984,6 +3987,27 @@ class BugAnalysisRunner:
                 payload["created_at"] = str(existing.get("created_at"))
         payload.setdefault("created_at", now)
         metadata_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _recover_bug_title_from_metadata(self, output_dir: Path) -> str:
+        """Recover bug title from bug_metadata.md in the job output.
+
+        This is needed for follow-ups like "请根据BUG问题实际时间继续分析"
+        where the agent needs the title to extract the correct fault time.
+        """
+        metadata_path = output_dir / "bug_metadata.md"
+        if not metadata_path.exists():
+            return ""
+        try:
+            text = metadata_path.read_text(encoding="utf-8")[:2000]
+        except OSError:
+            return ""
+        match = re.search(r"[标題标题]:\s*`([^`]+)`", text)
+        if match:
+            return match.group(1).strip()
+        match = re.search(r"[标題标题]:\s*(.+)", text)
+        if match:
+            return match.group(1).strip()
+        return ""
 
     def _recover_cached_bug_log_input(
         self,
