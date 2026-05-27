@@ -1651,30 +1651,87 @@ class BugAnalysisRunner:
                                 prior_findings=self._summarize_prior_report_jsons(report_jsons),
                             )
                     else:
-                        custom_result = self._run_custom_skill_agent_analysis(
-                            analysis_kind=current_plan.kind,
-                            analysis_label=self._analysis_label(current_plan.kind),
-                            skill_name=current_skill_name,
-                            request_text=request_text,
-                            prompt_text=prompt_text,
-                            title=title,
-                            description=description,
-                            fault_time=fault_time,
-                            selected_input=selected_input,
-                            prepared_input=prepared_input,
-                            source_evidence_path=source_evidence_path,
-                            html_path=current_html,
-                            json_path=current_json,
-                            analysis_dir=current_analysis_dir,
-                            progress_callback=progress_callback,
-                            timeout=self._agent_summary_timeout(
-                                options.timeout_seconds,
-                                reference_seconds=max(time.monotonic() - started, 240.0),
-                            ),
-                            bridge_session_id=bridge_session_id,
-                            prior_findings=self._summarize_prior_report_jsons(report_jsons),
-                            context_profile=getattr(source_decision, "context_profile", "") if current_plan.kind in SOURCE_STAGE_KINDS else "",
-                        )
+                        # Source stage: try pydantic-ai runtime first (fast path)
+                        if current_plan.kind in SOURCE_STAGE_KINDS:
+                            custom_result = self._run_source_stage_pydantic_ai(
+                                analysis_kind=current_plan.kind,
+                                skill_name=current_skill_name,
+                                request_text=request_text,
+                                prompt_text=prompt_text,
+                                title=title,
+                                description=description,
+                                fault_time=fault_time,
+                                selected_input=selected_input,
+                                prepared_input=prepared_input,
+                                source_evidence_path=source_evidence_path,
+                                html_path=current_html,
+                                json_path=current_json,
+                                analysis_dir=current_analysis_dir,
+                                progress_callback=progress_callback,
+                                context_profile=getattr(source_decision, "context_profile", ""),
+                                prior_findings=self._summarize_prior_report_jsons(report_jsons),
+                            )
+                            if custom_result.get("ok"):
+                                logger.info("source_stage pydantic-ai succeeded, skipping file_agent")
+                            else:
+                                logger.warning(
+                                    "source_stage pydantic-ai failed (error=%s), falling back to file_agent",
+                                    custom_result.get("error_code", "unknown"),
+                                )
+                                self._emit_progress(
+                                    progress_callback,
+                                    stage="source_stage_pydantic_ai_fallback",
+                                    message=f"pydantic-ai 失败（{custom_result.get('error_code')}），切换 file_agent",
+                                )
+                                custom_result = self._run_custom_skill_agent_analysis(
+                                    analysis_kind=current_plan.kind,
+                                    analysis_label=self._analysis_label(current_plan.kind),
+                                    skill_name=current_skill_name,
+                                    request_text=request_text,
+                                    prompt_text=prompt_text,
+                                    title=title,
+                                    description=description,
+                                    fault_time=fault_time,
+                                    selected_input=selected_input,
+                                    prepared_input=prepared_input,
+                                    source_evidence_path=source_evidence_path,
+                                    html_path=current_html,
+                                    json_path=current_json,
+                                    analysis_dir=current_analysis_dir,
+                                    progress_callback=progress_callback,
+                                    timeout=self._agent_summary_timeout(
+                                        options.timeout_seconds,
+                                        reference_seconds=max(time.monotonic() - started, 240.0),
+                                    ),
+                                    bridge_session_id=bridge_session_id,
+                                    prior_findings=self._summarize_prior_report_jsons(report_jsons),
+                                    context_profile=getattr(source_decision, "context_profile", ""),
+                                )
+                        else:
+                            custom_result = self._run_custom_skill_agent_analysis(
+                                analysis_kind=current_plan.kind,
+                                analysis_label=self._analysis_label(current_plan.kind),
+                                skill_name=current_skill_name,
+                                request_text=request_text,
+                                prompt_text=prompt_text,
+                                title=title,
+                                description=description,
+                                fault_time=fault_time,
+                                selected_input=selected_input,
+                                prepared_input=prepared_input,
+                                source_evidence_path=source_evidence_path,
+                                html_path=current_html,
+                                json_path=current_json,
+                                analysis_dir=current_analysis_dir,
+                                progress_callback=progress_callback,
+                                timeout=self._agent_summary_timeout(
+                                    options.timeout_seconds,
+                                    reference_seconds=max(time.monotonic() - started, 240.0),
+                                ),
+                                bridge_session_id=bridge_session_id,
+                                prior_findings=self._summarize_prior_report_jsons(report_jsons),
+                                context_profile=getattr(source_decision, "context_profile", "") if current_plan.kind in SOURCE_STAGE_KINDS else "",
+                            )
                     skill_file_agent_execution_result = custom_result
                     command = list(custom_result.get("command") or current_command)
                     current_command = command
@@ -3019,30 +3076,80 @@ class BugAnalysisRunner:
                                 "prepared_log_input": str(prepared_input),
                             },
                         )
-                    custom_result = self._run_custom_skill_agent_analysis(
-                        analysis_kind=current_plan.kind,
-                        analysis_label=self._analysis_label(current_plan.kind),
-                        skill_name=current_skill_name,
-                        request_text=request_text,
-                        prompt_text=request.prompt,
-                        title="",
-                        description="",
-                        fault_time=fault_time,
-                        selected_input=selected_input,
-                        prepared_input=prepared_input,
-                        source_evidence_path=source_evidence_path,
-                        html_path=current_html,
-                        json_path=current_json,
-                        analysis_dir=current_analysis_dir,
-                        progress_callback=progress_callback,
-                        timeout=self._agent_summary_timeout(
-                            self.config.bug_analysis.timeout_seconds,
-                            reference_seconds=max(time.monotonic() - started, 240.0),
-                        ),
-                        bridge_session_id=bridge_session_id,
-                        prior_findings=self._summarize_prior_report_jsons(report_jsons),
-                        context_profile=getattr(source_decision, "context_profile", "") if current_plan.kind in SOURCE_STAGE_KINDS else "",
-                    )
+                    # Source stage: try pydantic-ai runtime first (fast path)
+                    if current_plan.kind in SOURCE_STAGE_KINDS:
+                        custom_result = self._run_source_stage_pydantic_ai(
+                            analysis_kind=current_plan.kind,
+                            skill_name=current_skill_name,
+                            request_text=request_text,
+                            prompt_text=request.prompt,
+                            title="",
+                            description="",
+                            fault_time=fault_time,
+                            selected_input=selected_input,
+                            prepared_input=prepared_input,
+                            source_evidence_path=source_evidence_path,
+                            html_path=current_html,
+                            json_path=current_json,
+                            analysis_dir=current_analysis_dir,
+                            progress_callback=progress_callback,
+                            context_profile=getattr(source_decision, "context_profile", ""),
+                            prior_findings=self._summarize_prior_report_jsons(report_jsons),
+                        )
+                        if not custom_result.get("ok"):
+                            logger.warning(
+                                "direct_analysis source_stage pydantic-ai failed (error=%s), falling back to file_agent",
+                                custom_result.get("error_code", "unknown"),
+                            )
+                            custom_result = self._run_custom_skill_agent_analysis(
+                                analysis_kind=current_plan.kind,
+                                analysis_label=self._analysis_label(current_plan.kind),
+                                skill_name=current_skill_name,
+                                request_text=request_text,
+                                prompt_text=request.prompt,
+                                title="",
+                                description="",
+                                fault_time=fault_time,
+                                selected_input=selected_input,
+                                prepared_input=prepared_input,
+                                source_evidence_path=source_evidence_path,
+                                html_path=current_html,
+                                json_path=current_json,
+                                analysis_dir=current_analysis_dir,
+                                progress_callback=progress_callback,
+                                timeout=self._agent_summary_timeout(
+                                    self.config.bug_analysis.timeout_seconds,
+                                    reference_seconds=max(time.monotonic() - started, 240.0),
+                                ),
+                                bridge_session_id=bridge_session_id,
+                                prior_findings=self._summarize_prior_report_jsons(report_jsons),
+                                context_profile=getattr(source_decision, "context_profile", ""),
+                            )
+                    else:
+                        custom_result = self._run_custom_skill_agent_analysis(
+                            analysis_kind=current_plan.kind,
+                            analysis_label=self._analysis_label(current_plan.kind),
+                            skill_name=current_skill_name,
+                            request_text=request_text,
+                            prompt_text=request.prompt,
+                            title="",
+                            description="",
+                            fault_time=fault_time,
+                            selected_input=selected_input,
+                            prepared_input=prepared_input,
+                            source_evidence_path=source_evidence_path,
+                            html_path=current_html,
+                            json_path=current_json,
+                            analysis_dir=current_analysis_dir,
+                            progress_callback=progress_callback,
+                            timeout=self._agent_summary_timeout(
+                                self.config.bug_analysis.timeout_seconds,
+                                reference_seconds=max(time.monotonic() - started, 240.0),
+                            ),
+                            bridge_session_id=bridge_session_id,
+                            prior_findings=self._summarize_prior_report_jsons(report_jsons),
+                            context_profile=getattr(source_decision, "context_profile", "") if current_plan.kind in SOURCE_STAGE_KINDS else "",
+                        )
                     skill_file_agent_execution_result = custom_result
                     command = list(custom_result.get("command") or command or [])
                     if not custom_result.get("ok"):
@@ -9190,6 +9297,210 @@ class BugAnalysisRunner:
             f"匹配行数: {total_lines}\n\n"
             + "\n".join(evidence_parts)
         )
+
+    def _run_source_stage_pydantic_ai(
+        self,
+        *,
+        analysis_kind: str,
+        skill_name: str,
+        request_text: str,
+        prompt_text: str,
+        title: str,
+        description: str,
+        fault_time: str,
+        selected_input: Path | None,
+        prepared_input: Path | None,
+        source_evidence_path: Path | None,
+        html_path: Path,
+        json_path: Path,
+        analysis_dir: Path,
+        progress_callback: Callable[[dict[str, object]], None] | None,
+        context_profile: str = "",
+        prior_findings: list[tuple[str, str, str]] | None = None,
+    ) -> dict[str, object]:
+        """Run source analysis via pydantic-ai agent runtime (fast path).
+
+        Returns custom_result-compatible dict. On failure, returns ok=False
+        so the caller can fall through to subprocess.
+        """
+        from .agent_runtime import AgentRuntime
+        from .agent_output_models import SourceAnalysisOutput
+
+        started = time.monotonic()
+        provider_tag = "pydantic_ai"
+        analysis_dir.mkdir(parents=True, exist_ok=True)
+        analysis_markdown_path = analysis_dir / self._skill_agent_analysis_markdown_name(analysis_kind)
+
+        ai_opts = self.config.ai_provider
+        workspace = Path(self._working_dir())
+        runtime = AgentRuntime(ai_opts, workspace=workspace)
+
+        if not runtime.is_available():
+            return {
+                "ok": False,
+                "error_code": "pydantic_ai_not_available",
+                "message": "pydantic-ai runtime 不可用，将 fallback 到 file_agent。",
+                "command": [],
+                "provider": provider_tag,
+                "analysis_markdown_path": analysis_markdown_path,
+                "duration_seconds": time.monotonic() - started,
+            }
+
+        self._emit_progress(
+            progress_callback,
+            stage=f"{analysis_kind}_pydantic_ai",
+            message=f"源码分析：pydantic-ai runtime（{ai_opts.primary_model}）",
+            provider=provider_tag,
+            model=ai_opts.primary_model,
+        )
+
+        # Build skill context
+        skill_record = self.skill_manager.get_skill(context_profile or skill_name, include_content=True)
+        skill_content = skill_record.content if skill_record and skill_record.content else ""
+
+        # Build source evidence context
+        source_evidence_text = ""
+        if source_evidence_path and source_evidence_path.exists():
+            try:
+                source_evidence_text = source_evidence_path.read_text(encoding="utf-8", errors="replace")[:30000]
+            except OSError:
+                pass
+
+        # Build prior findings context
+        prior_context = ""
+        if prior_findings:
+            parts = []
+            for kind, label, content in prior_findings:
+                parts.append(f"### {label} ({kind})\n{content[:5000]}")
+            prior_context = "\n\n".join(parts)
+
+        system_prompt = (
+            "你是一个专业的源码分析 Agent，通过飞书触发。"
+            "你的任务是根据 Bug 信息、日志证据和源代码，分析问题的根因。"
+            "使用提供的工具（read_file, grep, glob, list_dir）来探索代码库。"
+            "必须输出结构化的分析结果，包含：conclusion, root_cause, evidence, pending_items, suggested_actions。"
+            "每条 evidence 必须包含具体的 file 路径和 line 号。"
+            "证据不足时明确写待确认，不要编造。"
+            "输出中文。"
+        )
+
+        user_prompt = (
+            f"# 源码分析请求\n\n"
+            f"## Bug 信息\n"
+            f"- 标题: {title}\n"
+            f"- 故障时间: {fault_time}\n"
+            f"- 用户请求: {request_text}\n"
+            f"- 缺陷描述: {description}\n\n"
+        )
+        if skill_content:
+            user_prompt += f"## 分析方法论\n{skill_content[:6000]}\n\n"
+        if source_evidence_text:
+            user_prompt += f"## 源码证据\n{source_evidence_text[:20000]}\n\n"
+        if prior_context:
+            user_prompt += f"## 前序分析结果\n{prior_context[:10000]}\n\n"
+        user_prompt += (
+            "请使用工具探索代码库，找到与此 Bug 相关的源码文件，分析根因。\n"
+            "必须提供具体的代码证据（文件路径 + 行号 + 代码片段）。"
+        )
+
+        try:
+            result = runtime.run(
+                output_type=SourceAnalysisOutput,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                tools_enabled=True,
+            )
+        except Exception as exc:
+            logger.warning("pydantic-ai source analysis failed: %s", exc)
+            return {
+                "ok": False,
+                "error_code": "pydantic_ai_execution_error",
+                "message": f"pydantic-ai 源码分析执行失败：{exc}",
+                "command": [],
+                "provider": provider_tag,
+                "analysis_markdown_path": analysis_markdown_path,
+                "duration_seconds": time.monotonic() - started,
+            }
+
+        if not result.ok:
+            return {
+                "ok": False,
+                "error_code": result.error_code or "pydantic_ai_failed",
+                "message": result.error or "pydantic-ai 分析失败",
+                "command": [],
+                "provider": provider_tag,
+                "analysis_markdown_path": analysis_markdown_path,
+                "duration_seconds": result.duration_seconds,
+            }
+
+        # Write analysis markdown
+        markdown = result.markdown or str(result.output)
+        analysis_markdown_path.write_text(markdown + "\n", encoding="utf-8")
+
+        # Validate evidence
+        valid, reason, evidence_count = self._validate_custom_skill_analysis(analysis_markdown_path)
+        if not valid:
+            logger.warning("pydantic-ai source analysis output missing evidence: %s", reason)
+            return {
+                "ok": False,
+                "error_code": "pydantic_ai_invalid_evidence",
+                "message": f"pydantic-ai 源码分析输出缺少有效关键证据：{reason}",
+                "command": [],
+                "provider": provider_tag,
+                "analysis_markdown_path": analysis_markdown_path,
+                "duration_seconds": result.duration_seconds,
+                "evidence_count": evidence_count,
+            }
+
+        # Write report
+        self._write_custom_skill_agent_report(
+            analysis_kind=analysis_kind,
+            analysis_label=self._analysis_label(analysis_kind),
+            html_path=html_path,
+            json_path=json_path,
+            analysis_markdown_path=analysis_markdown_path,
+            skill_name=skill_name,
+            provider=provider_tag,
+            request_text=request_text,
+            prompt_text=prompt_text,
+            title=title,
+            description=description,
+            fault_time=fault_time,
+            selected_input=selected_input,
+            prepared_input=prepared_input,
+            source_evidence_path=source_evidence_path,
+            evidence_count=evidence_count,
+            duration_seconds=result.duration_seconds,
+        )
+
+        self._emit_progress(
+            progress_callback,
+            stage=f"{analysis_kind}_pydantic_ai_done",
+            message=f"源码分析完成（{result.duration_seconds:.1f}s, pydantic-ai runtime）",
+            provider=provider_tag,
+            model=result.model,
+            evidence_count=evidence_count,
+            tool_calls=result.tool_calls,
+            runtime_path=result.runtime_path,
+        )
+
+        return {
+            "ok": True,
+            "error_code": "",
+            "message": "",
+            "command": [],
+            "analysis_kind": analysis_kind,
+            "provider": provider_tag,
+            "analysis_markdown_path": analysis_markdown_path,
+            "stdout": markdown,
+            "stderr": "",
+            "duration_seconds": result.duration_seconds,
+            "evidence_count": evidence_count,
+            "runtime_path": result.runtime_path,
+            "tool_calls": result.tool_calls,
+            "tool_trace": result.tool_trace,
+            "usage": result.usage,
+        }
 
     def _run_ld_direct_api_analysis(
         self,
