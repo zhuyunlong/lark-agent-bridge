@@ -1166,6 +1166,9 @@ class BridgeApp:
         classification_source = str(result.details.get("classification_source") or "").strip()
         if classification_source:
             metadata["分类来源"] = classification_source
+        source_mode = str(result.details.get("source_mode") or "").strip()
+        if source_mode and source_mode != "off":
+            metadata["源码模式"] = source_mode
 
         root_message_id = session_id or event.root_id or event.message_id
         card_actions_enabled = self._card_actions_enabled()
@@ -3268,6 +3271,9 @@ class BridgeApp:
                     summary_text=result.message,
                     report_url="",
                     report_excerpt="",
+                    source_mode=str(details.get("source_mode", "")),
+                    context_profile=str(details.get("context_profile", "")),
+                    classification_source=str(details.get("classification_source", "")),
                 )
                 self._remember_progress_card_aliases(event, context_root_message_id)
             return result
@@ -3292,6 +3298,9 @@ class BridgeApp:
             summary_text=summary_text,
             report_url=published.url,
             report_excerpt=published.context_excerpt,
+            source_mode=str(details.get("source_mode", "")),
+            context_profile=str(details.get("context_profile", "")),
+            classification_source=str(details.get("classification_source", "")),
         )
         self._remember_progress_card_aliases(event, context_root_message_id)
         if bug_url and not details.get("bug_url"):
@@ -5013,6 +5022,9 @@ class BridgeApp:
                 summary_text=result.message,
                 report_url=followup_context.report_url,
                 report_excerpt=str(getattr(followup_context, "report_excerpt", "") or ""),
+                source_mode=str(result.details.get("source_mode", "")),
+                context_profile=str(result.details.get("context_profile", "")),
+                classification_source=str(result.details.get("classification_source", "")),
             )
             self.conversation_store.rewrite_branch(
                 followup_context.root_message_id,

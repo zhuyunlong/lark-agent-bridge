@@ -113,6 +113,10 @@ class ConversationContext:
     created_at: str = ""
     updated_at: str = ""
     context_key: str = ""
+    # Source-analysis context (Phase 4)
+    source_mode: str = ""
+    context_profile: str = ""
+    classification_source: str = ""
 
 
 class ConversationContextStore:
@@ -172,6 +176,9 @@ class ConversationContextStore:
         summary_text: str,
         report_url: str,
         report_excerpt: str,
+        source_mode: str = "",
+        context_profile: str = "",
+        classification_source: str = "",
     ) -> ConversationContext | None:
         key = root_message_id.strip()
         if not key:
@@ -190,6 +197,9 @@ class ConversationContextStore:
             history=list(previous.history) if previous is not None else [],
             created_at=previous.created_at if previous is not None and previous.created_at else now,
             updated_at=now,
+            source_mode=source_mode or (previous.source_mode if previous else ""),
+            context_profile=context_profile or (previous.context_profile if previous else ""),
+            classification_source=classification_source or (previous.classification_source if previous else ""),
         )
         self._contexts[key] = context
         self._save()
@@ -324,6 +334,9 @@ class ConversationContextStore:
                 history=_coerce_history(value.get("history")),
                 created_at=str(value.get("created_at", "")),
                 updated_at=str(value.get("updated_at", "")),
+                source_mode=str(value.get("source_mode", "")),
+                context_profile=str(value.get("context_profile", "")),
+                classification_source=str(value.get("classification_source", "")),
             )
         return contexts
 
@@ -341,6 +354,9 @@ class ConversationContextStore:
                 "history": context.history,
                 "created_at": context.created_at,
                 "updated_at": context.updated_at,
+                "source_mode": context.source_mode,
+                "context_profile": context.context_profile,
+                "classification_source": context.classification_source,
             }
             for key, context in self._contexts.items()
         }
