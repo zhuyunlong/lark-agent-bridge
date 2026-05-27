@@ -40,9 +40,17 @@ BUG_SCENARIOS = [
     },
     {
         "bug_id": "6998811703",
-        "source_job_id": "d1ba5d2a04eb6dda88d3d73b6890f44c",
-        "followup": "基于源码重新分析 3D场景模式；重点检索 CarModel.cs HUCameraState.cs SceneType.kt",
+        "source_job_id": "6e50c4c5ae60f11b37ecdc50f6829142",
+        "followup": "重新分析 SIGNAL_SR_SCENE_TYPE 信号链路，检查 3D 场景模式下的信号传递是否完整",
         "requires_source": True,
+        "analysis_kind": "scene_signal",
+    },
+    {
+        "bug_id": "6998107767",
+        "source_job_id": "a61e05b5efc733cf81aff19b6a54858c",
+        "followup": "重新分析车道级进不去问题，检查 CheckTileRender 链路和 LDConf 条件",
+        "requires_source": False,
+        "analysis_kind": "ld_lane_level",
     },
     {
         "bug_id": "6991604970",
@@ -277,8 +285,8 @@ def _run_bug_scenario(
         "duration_seconds": float(case.get("duration_seconds") or 0.0),
         "details": {
             "bug_url": str(case.get("bug_url") or _extract_bug_url(previous_context.request_text)),
-            "analysis_kinds": ["general"],
-            "analysis_skill": "source_analysis" if scenario["requires_source"] else "general",
+            "analysis_kinds": [str(scenario.get("analysis_kind") or "general")],
+            "analysis_skill": "source_analysis" if scenario["requires_source"] else str(scenario.get("analysis_kind") or "general"),
             "user_request_text": previous_context.request_text,
             "agent_summary_file": str(output_dir / "bug_agent_summary.md"),
             "target_time": target_time,
@@ -303,12 +311,14 @@ def _run_bug_scenario(
             ),
         ),
     ):
+        plan_kind = str(scenario.get("analysis_kind") or "general")
+        classification_skill = "source_analysis" if scenario["requires_source"] else plan_kind
         result = runner.run_bug_reanalysis(
             followup_text=str(scenario["followup"]),
             previous_context=previous_context,
             previous_session=previous_session,
-            plans_override=[BugAnalysisPlan(kind="general")],
-            classification_skill="source_analysis" if scenario["requires_source"] else "general",
+            plans_override=[BugAnalysisPlan(kind=plan_kind)],
+            classification_skill=classification_skill,
             classification_source="refactor_validation",
             classification_reason="historical bug follow-up validation",
         )
