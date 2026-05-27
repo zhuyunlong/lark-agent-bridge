@@ -25,6 +25,7 @@ _ROUTE_KINDS = {
     "signal",
     "perception",
     "xtheme",
+    "ld_lane_level",
     "custom_skill",
 }
 _ROUTE_EXECUTORS = {"", "file_agent"}
@@ -413,7 +414,9 @@ class SkillManager:
             if normalized == "general" and default_kind and default_kind != "general":
                 return default_kind
             return normalized or "general"
-        if normalized == "general" or not normalized:
+        if normalized == "custom_skill":
+            return "custom_skill"
+        if normalized == "general" or not normalized or normalized not in _ROUTE_KINDS:
             return "custom_skill"
         return normalized
 
@@ -579,13 +582,13 @@ def _route_metadata(*, name: str, kind: str, executor: str, role: str, status: s
                     "bug_primary_agent_ready",
                     "Bug Agent 可执行",
                     True,
-                    "已归类到 Bug 分析，并配置文件 Agent 执行器；会先产出执行证据再允许最终总结。",
+                    "已配置文件 Agent 执行器；会先产出执行证据再允许最终总结。",
                 )
             return (
                 "bug_primary_unready",
                 "Bug 分析未就绪",
                 False,
-                "已归类到 Bug 分析，但当前没有可执行分析器；分类可命中，但不会作为已就绪的报告卡片选项。",
+                "已接入 Bug 主路由，但当前没有可执行分析器；分类可命中，但不会作为已就绪的报告卡片选项。",
             )
         return (
             "bug_primary",

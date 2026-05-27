@@ -185,16 +185,6 @@ _FOLLOWUP_STOP_TERMS = (
     "结论",
 )
 
-_SOURCE_ANALYSIS_TERMS = (
-    "源码分析",
-    "基于源码",
-    "根据源码",
-    "重新源码分析",
-    "重点看",
-    "关键字",
-)
-
-
 @dataclass
 class _IntentPreflightDecision:
     title: str
@@ -1750,18 +1740,6 @@ class BridgeApp:
                 pass
         return kind or "通用问题分析"
 
-    def _has_explicit_source_clue(self, text: str) -> bool:
-        normalized = str(text or "")
-        if any(term in normalized for term in _SOURCE_ANALYSIS_TERMS):
-            return True
-        if re.search(r"\b[\w.-]+\.(?:kt|java|cpp|cc|c|h|hpp|py)\b", normalized, re.I):
-            return True
-        if re.search(r"\b[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)+\b", normalized):
-            return True
-        if re.search(r"\b(?=[A-Za-z0-9_]*[a-z])(?=[A-Za-z0-9_]*[A-Z])[A-Za-z_][A-Za-z0-9_]{5,}\b", normalized):
-            return True
-        return False
-
     def _build_direct_analysis_clarification_options(self) -> list[dict[str, object]]:
         options: list[dict[str, object]] = []
         provider = getattr(self.bug_runner, "supported_primary_bug_skills", None)
@@ -1870,19 +1848,38 @@ class BridgeApp:
                 strategy_label="自动执行",
                 reason="消息已包含可执行的文件分析资源。",
             )
-        explicit_source = self._has_explicit_source_clue(prompt)
         plans = self.bug_runner.classify_requests(prompt_text=prompt, title="", description="")
         first_plan = plans[0] if plans else BugAnalysisPlan(kind="general")
-        if explicit_source:
+        source_decision = self.bug_runner._decide_source_analysis_request(
+            request_text=request.raw_text or prompt,
+            prompt_text=prompt,
+            title="",
+            description="",
+            plans=plans,
+            skill_name=self.bug_runner._skill_name_for_kind(first_plan.kind) if first_plan.kind != "general" else "",
+        )
+        if source_decision.requested:
+            if first_plan.kind != "general":
+                plan_label = self._analysis_label_for_plan_kind(first_plan.kind)
+                return _IntentPreflightDecision(
+                    title="文件分析",
+                    intent_label=f"{plan_label} + 源码分析",
+                    confidence_label="高置信度",
+                    strategy_label="自动执行",
+                    reason=source_decision.reason or "已识别源码分析诉求，将在专用分析后继续执行源码分析。",
+                    plans_override=[first_plan, BugAnalysisPlan(kind="source_stage")],
+                    classification_skill=self.bug_runner._skill_name_for_kind(first_plan.kind),
+                    classification_reason=source_decision.reason or f"已命中专用分析方向：{plan_label}，并识别到源码分析诉求。",
+                )
             return _IntentPreflightDecision(
                 title="文件分析",
                 intent_label="源码导向文件分析",
                 confidence_label="高置信度",
                 strategy_label="自动执行",
-                reason="已识别到明确源码线索，将基于日志和源码证据直接执行文件分析。",
-                plans_override=[BugAnalysisPlan(kind="custom_skill")],
+                reason=source_decision.reason or "已识别到源码分析诉求，将基于日志和源码证据直接执行文件分析。",
+                plans_override=[BugAnalysisPlan(kind="source_stage")],
                 classification_skill="source_analysis",
-                classification_reason="文件请求包含明确源码线索，优先按源码导向分析执行。",
+                classification_reason=source_decision.reason or "文件请求命中源码分析意图，优先按源码导向分析执行。",
             )
         if first_plan.kind != "general":
             plan_label = self._analysis_label_for_plan_kind(first_plan.kind)
@@ -4777,8 +4774,8 @@ class BridgeApp:
                     event,
                     followup_context,
                     followup_text="",
-                    plans_override=[BugAnalysisPlan(kind="general")],
-                    classification_skill="general",
+                    plans_override=[BugAnalysisPlan(kind="source_stage")],
+                    classification_skill="source_analysis",
                     classification_source="user_selected_source_analysis",
                     classification_reason="用户明确要求直接源码分析。",
                 )

@@ -23,6 +23,7 @@ from lark_agent_bridge.config import load_config
 from lark_agent_bridge.knowledge import KnowledgeService
 from lark_agent_bridge.models import Addr2LineRequest, DownloadResource
 from lark_agent_bridge.skill_manager import SkillManager, SkillManagerError
+from lark_agent_bridge.agents.bug_runner import SourceAnalysisDecision
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -60,10 +61,10 @@ KNOWLEDGE_QUESTIONS = [
 RUNTIME_ROUTE_REQUIREMENTS = [
     {
         "skill": "ld-lane-level-log-analysis-portable",
-        "kind": "custom_skill",
-        "executor": "file_agent",
+        "kind": "ld_lane_level",
+        "executor": "",
         "case": "6998107767",
-        "reason": "LD 车道级退无图 custom_skill 必须显式配置文件 Agent 执行器，否则真实群聊会停在 executor_not_ready。",
+        "reason": "LD 车道级退无图应作为内建 bug kind，而不是 custom_skill；custom_skill 保留给基于 skill 的源码分析。",
     },
 ]
 
@@ -154,8 +155,9 @@ def _runtime_route_checks(config: Any) -> list[dict[str, Any]]:
             reasons.append(f"kind={record.kind or '<empty>'}, expected {expected_kind}")
         if executor != expected_executor:
             reasons.append(f"executor={executor or '<empty>'}, expected executor={expected_executor}")
-        if record.route_status != "bug_primary_agent_ready":
-            reasons.append(f"route_status={record.route_status}, expected bug_primary_agent_ready")
+        expected_route_status = "bug_primary_agent_ready" if expected_kind == "custom_skill" and expected_executor == "file_agent" else "bug_primary"
+        if record.route_status != expected_route_status:
+            reasons.append(f"route_status={record.route_status}, expected {expected_route_status}")
         if not record.selectable_in_report_card:
             reasons.append("selectable_in_report_card=false")
         results.append(
@@ -288,7 +290,19 @@ def _run_bug_scenario(
 
     runner = BugAnalysisRunner(config)
     started = time.monotonic()
-    with mock.patch.object(runner, "_run_bug_agent_summary", side_effect=_summary_stub):
+    with (
+        mock.patch.object(runner, "_run_bug_agent_summary", side_effect=_summary_stub),
+        mock.patch.object(
+            runner,
+            "_decide_source_analysis_request",
+            return_value=SourceAnalysisDecision(
+                requested=False,
+                reason="offline validation keeps source-analysis intent disabled",
+                targets=[],
+                source="validation_stub",
+            ),
+        ),
+    ):
         result = runner.run_bug_reanalysis(
             followup_text=str(scenario["followup"]),
             previous_context=previous_context,

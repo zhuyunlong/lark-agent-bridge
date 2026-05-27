@@ -6,6 +6,7 @@ import tempfile
 import time
 import unittest
 import zipfile
+from types import SimpleNamespace
 from unittest import mock
 
 from lark_agent_bridge.app import BridgeApp
@@ -290,6 +291,29 @@ class FakeBugRunner:
             "general": "general",
         }
         return mapping.get(kind, kind or "general")
+
+    def _decide_source_analysis_request(self, *, request_text, prompt_text, title, description, plans, skill_name):
+        merged = f"{request_text}\n{prompt_text}"
+        requested = any(term in merged for term in ("源码", "源代码", "根据源码", "基于源码")) or "debug" in merged.lower()
+        domain_kind = next((plan.kind for plan in plans if plan.kind != "general"), "general")
+        source_mode = "off"
+        if requested:
+            source_mode = "standalone" if domain_kind == "general" else "append"
+        stage_kinds = []
+        if source_mode in {"off", "append"}:
+            stage_kinds.append("domain")
+        if source_mode in {"append", "standalone"}:
+            stage_kinds.append("source")
+        stage_kinds.append("summary")
+        return SimpleNamespace(
+            requested=requested,
+            reason="测试源码分析诉求" if requested else "测试未命中源码诉求",
+            source="test",
+            domain_kind=domain_kind,
+            source_mode=source_mode,
+            context_profile=self._skill_name_for_kind(domain_kind) if domain_kind != "general" else "",
+            stage_kinds=stage_kinds,
+        )
 
     def run_direct_analysis(
         self,
@@ -1786,6 +1810,39 @@ class AppTests(unittest.TestCase):
         self.assertEqual(session["status"], "succeeded")
         self.assertEqual(session["report_url"], result.details["published_report_url"])
         self.assertTrue(any(item["stage"] == "bug_fetch_data" for item in session["progress"]))
+
+    def test_6998811703_3D场景模式_shell_cleans_prompt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = Path(tmp) / "bug_metadata.md"
+            html = Path(tmp) / "bug_report.html"
+            metadata.write_text("bug", encoding="utf-8")
+            html.write_text("<html></html>", encoding="utf-8")
+            fake_lark = FakeLarkClient()
+            fake_bug = FakeBugRunner(metadata, html)
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    allowed_chats=["oc_denied"],
+                ),
+                lark_client=fake_lark,
+                bug_runner=fake_bug,
+            )
+
+            result = app.handle_event(
+                event(
+                    content=(
+                        "@bot @朱云龙的飞书 CLI "
+                        "[ [缺陷] 2026-05-25 16:50:41 【d03】6.2.3】拾光主题切换成天玑主题，进入场景模式没有展示3D场景]"
+                        "(https://project.feishu.cn/xpfailuremgmt/buglo/detail/6998811703) "
+                        "分析 3D场景模式"
+                    )
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(fake_bug.requests[0].bug_url, "https://project.feishu.cn/xpfailuremgmt/buglo/detail/6998811703")
+        self.assertEqual(fake_bug.requests[0].prompt, "分析 3D场景模式")
 
     def test_simple_question_uses_omlx_chat(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -7118,7 +7175,7 @@ class AppTests(unittest.TestCase):
         self.assertEqual(len(fake_bug.requests), 1)
         self.assertEqual(fake_bug.requests[0].prompt, "分析3D生命周期")
 
-    def test_group_bug_request_custom_skill_executor_not_ready_is_delivered_without_conclusion(self):
+    def test_group_bug_request_source_stage_executor_not_ready_is_delivered_without_conclusion(self):
         class NotReadyBugRunner(FakeBugRunner):
             def run_bug_analysis(self, request, *, event=None, progress_callback=None):
                 self.requests.append(request)
@@ -7127,22 +7184,22 @@ class AppTests(unittest.TestCase):
                     progress_callback(
                         {
                             "stage": "bug_run_analysis",
-                            "message": "执行专用 Skill 分析",
-                            "details": {"analysis_kind": "custom_skill"},
+                            "message": "执行源码分析阶段",
+                            "details": {"analysis_kind": "source_stage"},
                         }
                     )
                 return TaskResult(
                     success=False,
                     message=(
-                        "已命中专用 Skill `ld-lane-level-log-analysis-portable`，但当前没有可执行分析器，"
-                        "尚未执行实际日志分析。\n不会基于占位报告给出根因结论。"
+                        "已命中专用 Skill `source-analysis-skill`，但当前没有可执行分析器，"
+                        "尚未执行实际 Skill 分析。\n不会基于占位报告给出根因结论。"
                     ),
-                    error_code="custom_skill_executor_not_ready",
+                    error_code="source_stage_executor_not_ready",
                     details={
                         "mode": "bug_analysis",
-                        "analysis_kind": "custom_skill",
-                        "analysis_skill": "ld-lane-level-log-analysis-portable",
-                        "custom_skill_analysis_status": "executor_not_ready",
+                        "analysis_kind": "source_stage",
+                        "analysis_skill": "source-analysis-skill",
+                        "source_stage_analysis_status": "executor_not_ready",
                     },
                 )
 
@@ -7165,8 +7222,8 @@ class AppTests(unittest.TestCase):
 
             result = app.handle_event(
                 event(
-                    event_id="evt_custom_skill_not_ready_group_bug",
-                    message_id="om_custom_skill_not_ready_group_bug",
+                    event_id="evt_source_stage_not_ready_group_bug",
+                    message_id="om_source_stage_not_ready_group_bug",
                     content=(
                         "@bot https://project.feishu.cn/xpfailuremgmt/buglo/detail/6998107767 "
                         "2026-05-22 19:46 退无图"
@@ -7180,7 +7237,7 @@ class AppTests(unittest.TestCase):
             )
 
         self.assertFalse(result.success)
-        self.assertEqual(result.error_code, "custom_skill_executor_not_ready")
+        self.assertEqual(result.error_code, "source_stage_executor_not_ready")
         self.assertEqual(result.details["mode"], "bug_analysis")
         self.assertEqual(len(fake_bug.requests), 1)
         self.assertEqual(fake_bug.requests[0].bug_url, "https://project.feishu.cn/xpfailuremgmt/buglo/detail/6998107767")
@@ -7189,7 +7246,7 @@ class AppTests(unittest.TestCase):
         self.assertNotIn("最可能原因", delivered_text)
         self.assertNotIn("结论摘要", delivered_text)
 
-    def test_group_bug_request_custom_skill_file_agent_ready_delivers_after_execution(self):
+    def test_group_bug_request_source_stage_file_agent_ready_delivers_after_execution(self):
         class ReadyBugRunner(FakeBugRunner):
             def run_bug_analysis(self, request, *, event=None, progress_callback=None):
                 self.requests.append(request)
@@ -7197,12 +7254,12 @@ class AppTests(unittest.TestCase):
                 if progress_callback is not None:
                     progress_callback(
                         {
-                            "stage": "custom_skill_agent_analysis",
-                            "message": "执行专用 Skill 文件 Agent 分析",
+                            "stage": "source_stage_agent_analysis",
+                            "message": "执行源码分析文件 Agent 分析",
                             "details": {
-                                "analysis_kind": "custom_skill",
-                                "analysis_skill": "agent-ready-lane-skill",
-                                "custom_skill_analysis_status": "completed",
+                                "analysis_kind": "source_stage",
+                                "analysis_skill": "agent-ready-source-skill",
+                                "source_stage_analysis_status": "completed",
                             },
                         }
                     )
@@ -7215,23 +7272,23 @@ class AppTests(unittest.TestCase):
                     )
                 return TaskResult(
                     success=True,
-                    message="file agent summary：已基于 custom_skill_analysis.md 的关键证据完成分析。",
+                    message="file agent summary：已基于 source_stage_analysis.md 的关键证据完成分析。",
                     job_id="job_custom_ready",
                     job_dir=self.html_path.parent,
                     details={
                         "mode": "bug_analysis",
-                        "analysis_kind": "custom_skill",
-                        "analysis_skill": "agent-ready-lane-skill",
-                        "custom_skill_executor": "file_agent",
-                        "custom_skill_analysis_status": "completed",
-                        "custom_skill_evidence_count": 2,
+                        "analysis_kind": "source_stage",
+                        "analysis_skill": "agent-ready-source-skill",
+                        "source_stage_executor": "file_agent",
+                        "source_stage_analysis_status": "completed",
+                        "source_stage_evidence_count": 2,
                         "files_to_send": [self.html_path],
                     },
                 )
 
         with tempfile.TemporaryDirectory() as tmp:
             metadata = Path(tmp) / "bug_metadata.md"
-            html = Path(tmp) / "bug_custom_skill_report.html"
+            html = Path(tmp) / "source_stage_report.html"
             metadata.write_text("metadata", encoding="utf-8")
             html.write_text("<html>custom skill report</html>", encoding="utf-8")
             fake_lark = FakeLarkClient()
@@ -7248,8 +7305,8 @@ class AppTests(unittest.TestCase):
 
             result = app.handle_event(
                 event(
-                    event_id="evt_custom_skill_ready_group_bug",
-                    message_id="om_custom_skill_ready_group_bug",
+                    event_id="evt_source_stage_ready_group_bug",
+                    message_id="om_source_stage_ready_group_bug",
                     content=(
                         "@bot https://project.feishu.cn/xpfailuremgmt/buglo/detail/6998107767 "
                         "2026-05-22 19:46 退无图"
@@ -7264,14 +7321,14 @@ class AppTests(unittest.TestCase):
 
         self.assertTrue(result.success)
         self.assertEqual(result.details["mode"], "bug_analysis")
-        self.assertEqual(result.details["analysis_kind"], "custom_skill")
-        self.assertEqual(result.details["custom_skill_analysis_status"], "completed")
+        self.assertEqual(result.details["analysis_kind"], "source_stage")
+        self.assertEqual(result.details["source_stage_analysis_status"], "completed")
         self.assertEqual(len(fake_bug.requests), 1)
         self.assertEqual(fake_bug.requests[0].bug_url, "https://project.feishu.cn/xpfailuremgmt/buglo/detail/6998107767")
         self.assertEqual(fake_bug.requests[0].prompt, "2026-05-22 19:46 退无图")
         self.assertIn("file agent summary", delivered_text)
         self.assertNotIn("当前没有可执行分析器", delivered_text)
-        self.assertEqual([Path(item["path"]).name for item in fake_lark.files], ["bug_custom_skill_report.html"])
+        self.assertEqual([Path(item["path"]).name for item in fake_lark.files], ["source_stage_report.html"])
 
     def test_group_bug_request_accepts_rich_text_wrapped_bot_name(self):
         with tempfile.TemporaryDirectory() as tmp:

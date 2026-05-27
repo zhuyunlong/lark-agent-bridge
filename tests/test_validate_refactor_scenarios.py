@@ -8,7 +8,7 @@ import scripts.validate_refactor_scenarios as scenarios
 
 
 class ValidateRefactorScenariosTests(unittest.TestCase):
-    def _config_with_ld_skill(self, tmp: str, route: dict[str, object]) -> BridgeConfig:
+    def _config_with_ld_skill(self, tmp: str, route: dict[str, object] | None) -> BridgeConfig:
         root = Path(tmp) / "workspace"
         data_dir = Path(tmp) / "data"
         skill_dir = root / ".ai" / "skills" / "ld-lane-level-log-analysis-portable"
@@ -23,13 +23,11 @@ class ValidateRefactorScenariosTests(unittest.TestCase):
         )
         route_file = data_dir / "state" / "skill_routes.json"
         route_file.parent.mkdir(parents=True)
-        route_file.write_text(
-            json.dumps({"ld-lane-level-log-analysis-portable": route}, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        payload = {"ld-lane-level-log-analysis-portable": route} if route is not None else {}
+        route_file.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         return BridgeConfig(dry_run=False, workspace_root=root, data_dir=data_dir)
 
-    def test_runtime_route_checks_reject_ld_custom_skill_without_executor(self):
+    def test_runtime_route_checks_reject_stale_ld_custom_skill_route(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = self._config_with_ld_skill(
                 tmp,
@@ -45,26 +43,18 @@ class ValidateRefactorScenariosTests(unittest.TestCase):
 
         self.assertFalse(checks[0]["ok"])
         self.assertEqual(checks[0]["skill"], "ld-lane-level-log-analysis-portable")
-        self.assertIn("executor=file_agent", checks[0]["reason"])
+        self.assertIn("kind=custom_skill", checks[0]["reason"])
         self.assertFalse(scenarios._validation_passed({"runtime_checks": checks}))
 
-    def test_runtime_route_checks_accept_ld_file_agent_ready_route(self):
+    def test_runtime_route_checks_accept_builtin_ld_kind_without_custom_route(self):
         with tempfile.TemporaryDirectory() as tmp:
-            config = self._config_with_ld_skill(
-                tmp,
-                {
-                    "executor": "file_agent",
-                    "kind": "custom_skill",
-                    "label": "ld-lane-level-log-analysis",
-                    "requires_logs": True,
-                    "role": "primary",
-                },
-            )
+            config = self._config_with_ld_skill(tmp, None)
 
             checks = scenarios._runtime_route_checks(config)
 
         self.assertTrue(checks[0]["ok"])
-        self.assertEqual(checks[0]["route_status"], "bug_primary_agent_ready")
+        self.assertEqual(checks[0]["kind"], "ld_lane_level")
+        self.assertEqual(checks[0]["route_status"], "bug_primary")
         self.assertTrue(checks[0]["selectable"])
         self.assertTrue(scenarios._validation_passed({"runtime_checks": checks}))
 

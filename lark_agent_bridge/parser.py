@@ -587,7 +587,7 @@ def parse_bug_request(text: str, *, bug_url_re: re.Pattern[str] | None = None) -
         prompt_source = f"{cleaned[:link_span[0]]}{cleaned[link_span[1]:]}"
     else:
         prompt_source = cleaned.replace(match.group(0), "", 1)
-    prompt = prompt_source.strip(" \t\r\n，。；;")
+    prompt = _strip_bug_message_shell_prefix(prompt_source.strip(" \t\r\n，。；;"))
     return BugRequest(
         bug_url=bug_url,
         prompt=prompt,
@@ -830,6 +830,12 @@ def _strip_leading_mentions(text: str) -> str:
     cleaned = text.strip()
     cleaned = re.sub(r"^(?:<at\s+[^>]+></at>\s*)+", "", cleaned).strip()
     cleaned = re.sub(r"^(?:@\S+\s*)+", "", cleaned).strip()
+    return cleaned
+
+
+def _strip_bug_message_shell_prefix(text: str) -> str:
+    cleaned = text.strip()
+    cleaned = re.sub(r"^(?:CLI|飞书\s*CLI)\s+", "", cleaned, flags=re.I).strip()
     return cleaned
 
 
