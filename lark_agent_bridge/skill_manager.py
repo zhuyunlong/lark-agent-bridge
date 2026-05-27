@@ -28,7 +28,7 @@ _ROUTE_KINDS = {
     "ld_lane_level",
     "custom_skill",
 }
-_ROUTE_EXECUTORS = {"", "file_agent"}
+_ROUTE_EXECUTORS = {"", "file_agent", "pydantic_ai"}
 
 
 class SkillManagerError(ValueError):
@@ -45,6 +45,7 @@ class SkillRecord:
     role: str
     kind: str = ""
     executor: str = ""
+    runtime_type: str = ""
     requires_logs: bool = False
     path: str = ""
     skill_md_path: str = ""
@@ -66,6 +67,7 @@ class SkillRecord:
             "role": self.role,
             "kind": self.kind,
             "executor": self.executor,
+            "runtime_type": self.runtime_type,
             "requires_logs": self.requires_logs,
             "path": self.path,
             "skill_md_path": self.skill_md_path,
@@ -297,6 +299,17 @@ class SkillManager:
                 "发现脚本: " + ", ".join(record.scripts) if record.scripts else "纯说明型 skill 可以没有脚本",
             )
         )
+        # Runtime readiness check
+        if record.role == "primary":
+            rt = record.runtime_type
+            if rt == "pydantic_ai":
+                checks.append(_check("runtime", "运行时就绪", True, "pydantic-ai 进程内执行"))
+            elif rt == "subprocess":
+                checks.append(_check("runtime", "运行时就绪", True, "file-agent 子进程执行"))
+            elif rt == "builtin":
+                checks.append(_check("runtime", "运行时就绪", True, "内置域分析"))
+            else:
+                checks.append(_check("runtime", "运行时就绪", False, "未配置执行器，无法进行 Bug 分析"))
         sample = _score_sample(record, sample_text)
         return {
             "skill": record.to_dict(include_content=True),
@@ -329,7 +342,7 @@ class SkillManager:
         kind, label, requires_logs, role = self._metadata_for(name)
         executor = self.custom_skill_executor_for(name) if kind == "custom_skill" else ""
         scripts = _script_paths(directory)
-        route_status, route_status_label, selectable, routing_note = _route_metadata(
+        route_status, route_status_label, selectable, routing_note, runtime_type = _route_metadata(
             name=name,
             kind=kind,
             executor=executor,
@@ -343,6 +356,7 @@ class SkillManager:
             role=role,
             kind=kind,
             executor=executor,
+            runtime_type=runtime_type,
             requires_logs=requires_logs,
             path=str(directory),
             skill_md_path=str(skill_md),
@@ -360,7 +374,7 @@ class SkillManager:
     def _virtual_record(self, name: str) -> SkillRecord:
         kind, label, requires_logs, role = self._metadata_for(name)
         executor = self.custom_skill_executor_for(name) if kind == "custom_skill" else ""
-        route_status, route_status_label, selectable, routing_note = _route_metadata(
+        route_status, route_status_label, selectable, routing_note, runtime_type = _route_metadata(
             name=name,
             kind=kind,
             executor=executor,
@@ -374,6 +388,7 @@ class SkillManager:
             role=role,
             kind=kind,
             executor=executor,
+            runtime_type=runtime_type,
             requires_logs=requires_logs,
             status="virtual",
             route_status=route_status,
@@ -423,7 +438,7 @@ class SkillManager:
     def _normalize_route_executor(self, executor: str) -> str:
         normalized = executor.strip()
         if normalized not in _ROUTE_EXECUTORS:
-            raise SkillManagerError("executor 只能是 file_agent 或空", status_code=400)
+            raise SkillManagerError("executor 只能是 file_agent、pydantic_ai 或空", status_code=400)
         return normalized
 
     def _skill_dir(self, name: str) -> Path:
@@ -560,7 +575,14 @@ def _role_order(role: str) -> int:
     return {"primary": 0, "auxiliary": 1, "custom": 2}.get(role, 3)
 
 
-def _route_metadata(*, name: str, kind: str, executor: str, role: str, status: str) -> tuple[str, str, bool, str]:
+_BUILTIN_DOMAIN_KINDS = frozenset({
+    "general", "startup", "stuck", "crash", "scene_signal",
+    "signal", "perception", "xtheme", "ld_lane_level",
+})
+
+
+def _route_metadata(*, name: str, kind: str, executor: str, role: str, status: str) -> tuple[str, str, bool, str, str]:
+    """Return (route_status, route_status_label, selectable, routing_note, runtime_type)."""
     if role == "primary":
         if name == "general":
             return (
@@ -568,33 +590,48 @@ def _route_metadata(*, name: str, kind: str, executor: str, role: str, status: s
                 "兜底分诊",
                 False,
                 "general 只作为兜底分诊，不作为报告卡片里的专用 Skill 选择。",
+                "builtin",
             )
         if status == "virtual":
+            runtime = "builtin" if kind in _BUILTIN_DOMAIN_KINDS else ""
             return (
                 "configured_missing",
                 "主路由缺目录",
                 False,
                 "已在主路由表中配置，但当前工作区没有对应 .ai/skills 目录，需补齐 SKILL.md 和脚本后才能稳定执行。",
+                runtime,
             )
         if kind == "custom_skill":
+            if executor == "pydantic_ai":
+                return (
+                    "bug_primary_pydantic_ai_ready",
+                    "Bug Agent 就绪 (in-process)",
+                    True,
+                    "已配置 pydantic-ai 进程内执行器；结构化输出 + 工具增强。",
+                    "pydantic_ai",
+                )
             if executor == "file_agent":
                 return (
                     "bug_primary_agent_ready",
                     "Bug Agent 可执行",
                     True,
                     "已配置文件 Agent 执行器；会先产出执行证据再允许最终总结。",
+                    "subprocess",
                 )
             return (
                 "bug_primary_unready",
                 "Bug 分析未就绪",
                 False,
                 "已接入 Bug 主路由，但当前没有可执行分析器；分类可命中，但不会作为已就绪的报告卡片选项。",
+                "",
             )
+        runtime = "builtin" if kind in _BUILTIN_DOMAIN_KINDS else "pydantic_ai"
         return (
             "bug_primary",
             "Bug 主路由",
             True,
             "会进入 Bug 意图分类候选，并会出现在报告完成后的 Skill 纠偏按钮里。",
+            runtime,
         )
     if role == "auxiliary":
         return (
@@ -602,12 +639,14 @@ def _route_metadata(*, name: str, kind: str, executor: str, role: str, status: s
             "辅助 Skill",
             False,
             "用于下载、解码、取版本等辅助流程，不作为用户可选的主分析方向。",
+            "",
         )
     return (
         "custom_unrouted",
         "未接入主路由",
         False,
         "目录存在但未接入 Bug 主路由，因此不会出现在报告完成后的 Skill 纠偏按钮里。",
+        "",
     )
 
 
