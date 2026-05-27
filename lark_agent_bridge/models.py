@@ -97,6 +97,7 @@ class BugAnalysisOptions:
     working_dir: Path | None = None
     timeout_seconds: int = 5400
     agent_summary_timeout_seconds: int = 300
+    file_agent_debug_logs: bool = True
     max_prompt_chars: int = 16000
     upload_result_files: bool = True
     default_prompt: str = ""

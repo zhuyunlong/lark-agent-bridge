@@ -66,5 +66,7 @@ launchctl unsetenv LARK_AGENT_BRIDGE_OMLX_API_KEY
 
 ```bash
 lsof -i :15721
-python3 -m lark_agent_bridge check --config config.toml
+.venv/bin/python -m lark_agent_bridge check --config config.toml
 ```
+
+直接运行 `python -m lark_agent_bridge ...` 时优先使用项目虚拟环境。裸 `python3` 只有在装了与 `.venv` 相同依赖时才等价；否则可选能力（例如 `pydantic-ai` 的结构化意图识别）会自动降级。

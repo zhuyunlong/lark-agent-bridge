@@ -11,6 +11,7 @@ __pycache__/
 /.env.*
 !/.env.example
 data/
+/config/secrets.toml
 
 .pytest_cache/
 .mypy_cache/

@@ -22,10 +22,22 @@ Local Feishu Bot bridge for controlled AI agent tasks. The current version suppo
 
 ```bash
 cd /path/to/workspace/tools/lark-agent-bridge
-python3.11 -m lark_agent_bridge --help
+
+# One-time: create the project virtualenv and install the package + extras.
+python3 -m venv .venv
+.venv/bin/pip install -e .
+
+# Verify the CLI loads from the venv.
+.venv/bin/python -m lark_agent_bridge --help
 ```
 
-The project intentionally uses Python standard library modules only and requires Python 3.11+.
+Use the project virtualenv for runtime commands. `run.sh` resolves the Python interpreter in this order:
+
+1. `$LARK_AGENT_BRIDGE_PYTHON` (explicit override, e.g. a pyenv/corporate interpreter)
+2. `.venv/bin/python` (default project virtualenv)
+3. `python3` from `$PATH` (last resort — only works when it already has the same dependencies, including optional extras such as `pydantic-ai`)
+
+Direct `python -m lark_agent_bridge ...` invocations should use `.venv/bin/python` (or the same interpreter `run.sh` would pick) so optional extras stay available.
 
 ## Quick Start
 
@@ -53,10 +65,10 @@ cp config/config.example.toml config.toml
 ./run.sh claude-offi
 ```
 
-Or use the CLI directly with the same config:
+Or use the CLI directly with the same config and interpreter:
 
 ```bash
-python3 -m lark_agent_bridge listen --config config.toml
+.venv/bin/python -m lark_agent_bridge listen --config config.toml
 ```
 
 ## Configure
@@ -159,11 +171,11 @@ api_key = ""
 Personal knowledge QA is backed by `[knowledge]`, `[source_investigation]`, and `data/knowledge/knowledge.sqlite`. Sync configured sources first:
 
 ```bash
-python3.11 -m lark_agent_bridge knowledge sync --config config.toml
-python3.11 -m lark_agent_bridge knowledge search --config config.toml "打开Debug面板"
-python3.11 -m lark_agent_bridge knowledge answer --config config.toml "OTA信号如何模拟"
-python3.11 -m lark_agent_bridge knowledge answer --config config.toml "主题信号如何模拟"
-python3.11 -m lark_agent_bridge knowledge answer --config config.toml "PB对象怎么ADB模拟"
+.venv/bin/python -m lark_agent_bridge knowledge sync --config config.toml
+.venv/bin/python -m lark_agent_bridge knowledge search --config config.toml "打开Debug面板"
+.venv/bin/python -m lark_agent_bridge knowledge answer --config config.toml "OTA信号如何模拟"
+.venv/bin/python -m lark_agent_bridge knowledge answer --config config.toml "主题信号如何模拟"
+.venv/bin/python -m lark_agent_bridge knowledge answer --config config.toml "PB对象怎么ADB模拟"
 ```
 
 The desensitized `config.toml` wires only the local guideengine signal-source snippets by default. Add private knowledge sources locally when needed; do not commit Feishu Wiki/Base URLs or local credential-bearing paths.
@@ -211,44 +223,44 @@ Job retention is controlled by `[job_retention]`. The default local policy is:
 ## Dry-run examples
 
 ```bash
-python3.11 -m lark_agent_bridge check --config config.toml
+.venv/bin/python -m lark_agent_bridge check --config config.toml
 
-python3.11 -m lark_agent_bridge handle-event \
+.venv/bin/python -m lark_agent_bridge handle-event \
   --config config.toml \
   --event samples/signal_event_with_url.json \
   --dry-run
 
-python3.11 -m lark_agent_bridge handle-event \
+.venv/bin/python -m lark_agent_bridge handle-event \
   --config config.toml \
   --event samples/signal_event_with_file.json \
   --dry-run
 
-python3.11 -m lark_agent_bridge handle-event \
+.venv/bin/python -m lark_agent_bridge handle-event \
   --config config.toml \
   --event samples/basic_chat_who_are_you.json \
   --dry-run
 
-python3.11 -m lark_agent_bridge handle-event \
+.venv/bin/python -m lark_agent_bridge handle-event \
   --config config.toml \
   --event samples/omlx_chat_question.json \
   --dry-run
 
-python3.11 -m lark_agent_bridge handle-event \
+.venv/bin/python -m lark_agent_bridge handle-event \
   --config config.toml \
   --event samples/group_chat_command.json \
   --dry-run
 
-python3.11 -m lark_agent_bridge handle-event \
+.venv/bin/python -m lark_agent_bridge handle-event \
   --config config.toml \
   --event samples/group_unmentioned_url.json \
   --dry-run
 
-python3.11 -m lark_agent_bridge handle-event \
+.venv/bin/python -m lark_agent_bridge handle-event \
   --config config.toml \
   --event samples/p2p_plain_chat.json \
   --dry-run
 
-python3.11 -m lark_agent_bridge run-signal \
+.venv/bin/python -m lark_agent_bridge run-signal \
   --config config.toml \
   --signal 132002 \
   --log-path /path/to/log \
@@ -257,7 +269,7 @@ python3.11 -m lark_agent_bridge run-signal \
 
 ## Real run
 
-Real mode requires a working `lark-cli` bot login and Feishu app scopes for message events, message reads, attachment downloads, and replies. `python3.11 -m lark_agent_bridge check --config config.toml` will show the current `userOpenId` from `lark-cli auth status`.
+Real mode requires a working `lark-cli` bot login and Feishu app scopes for message events, message reads, attachment downloads, and replies. `.venv/bin/python -m lark_agent_bridge check --config config.toml` will show the current `userOpenId` from `lark-cli auth status`.
 
 ```bash
 ./run.sh
@@ -266,7 +278,7 @@ Real mode requires a working `lark-cli` bot login and Feishu app scopes for mess
 For diagnostics without starting the listener:
 
 ```bash
-python3.11 -m lark_agent_bridge check --config config.toml
+.venv/bin/python -m lark_agent_bridge check --config config.toml
 ```
 
 After `listen` starts, open `http://<bridge-lan-ip>:8765/admin` to view the local management console. It includes multi-session progress, historical cases with the latest report per Bug, listener health, and skill management for listing, creating, editing, deleting, and statically debugging local `.ai/skills` entries. `/sessions` still opens the same console for older bookmarks.
@@ -278,7 +290,7 @@ Do not expose this bridge as a generic shell executor. The supported behaviors a
 For a persistent macOS service, use a `launchd` plist that runs:
 
 ```bash
-python3.11 -m lark_agent_bridge listen --config /absolute/path/to/config.toml
+/absolute/path/to/lark-agent-bridge/.venv/bin/python -m lark_agent_bridge listen --config /absolute/path/to/config.toml
 ```
 
 Run it from a normal user session so `lark-cli` can access macOS Keychain credentials.

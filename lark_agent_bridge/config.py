@@ -33,6 +33,86 @@ from .models import (
 )
 from .profile_registry import PROFILE_REGISTRY_PATH, load_profile_specs
 
+try:
+    from .log import get_logger
+except Exception:  # pragma: no cover - logging is optional at config load time
+    class _FallbackLogger:
+        def warning(self, *_args: Any, **_kwargs: Any) -> None: ...
+        def info(self, *_args: Any, **_kwargs: Any) -> None: ...
+        def debug(self, *_args: Any, **_kwargs: Any) -> None: ...
+
+    def get_logger(_name: str):  # type: ignore[override]
+        return _FallbackLogger()
+
+_logger = get_logger("config")
+
+
+TEMP_PATH_MARKERS = ("/var/folders/", "/tmp/", "/private/var/folders/", "/private/tmp/")
+
+
+def _is_under_tool_dir(path: Path) -> bool:
+    """True when ``path`` is (or lives inside) the lark-agent-bridge tool itself."""
+    try:
+        resolved = path.resolve()
+    except OSError:
+        resolved = Path(path).expanduser()
+    return resolved.name == "lark-agent-bridge" and resolved.parent.name == "tools"
+
+
+def _is_temp_path(path: Path) -> bool:
+    try:
+        text = str(path.resolve())
+    except OSError:
+        text = str(path)
+    return any(marker in text for marker in TEMP_PATH_MARKERS)
+
+
+def _warn_suspicious_paths(config: "BridgeConfig") -> None:
+    """Emit warnings when workspace_root / guideengine_repo look misconfigured.
+
+    Targets the failure mode where subprocess prompts receive either a sandbox
+    tempdir as workspace_root or the tool's own directory as guideengine_repo.
+    """
+    workspace = config.workspace_root
+    repo = config.guideengine_repo
+
+    if _is_temp_path(workspace):
+        _logger.warning(
+            "workspace_root=%s is a sandbox/temp path; subprocess skill scripts will not be found. "
+            "Set LARK_AGENT_BRIDGE_WORKSPACE_ROOT or workspace_root in config.toml.",
+            workspace,
+        )
+    elif _is_under_tool_dir(workspace):
+        _logger.warning(
+            "workspace_root=%s points at the lark-agent-bridge tool itself; set an explicit "
+            "LARK_AGENT_BRIDGE_WORKSPACE_ROOT or workspace_root in config.toml.",
+            workspace,
+        )
+
+    if _is_under_tool_dir(repo):
+        _logger.warning(
+            "guideengine_repo=%s points at the lark-agent-bridge tool itself; "
+            "set LARK_AGENT_BRIDGE_GUIDEENGINE_REPO or guideengine_repo in config.toml.",
+            repo,
+        )
+    elif _is_temp_path(repo):
+        _logger.warning(
+            "guideengine_repo=%s is a sandbox/temp path; source analysis will see no code. "
+            "Set LARK_AGENT_BRIDGE_GUIDEENGINE_REPO or guideengine_repo in config.toml.",
+            repo,
+        )
+    elif not repo.exists():
+        _logger.warning(
+            "guideengine_repo=%s does not exist; source investigation will fail. "
+            "Set LARK_AGENT_BRIDGE_GUIDEENGINE_REPO or guideengine_repo in config.toml.",
+            repo,
+        )
+    elif repo == workspace:
+        _logger.warning(
+            "guideengine_repo=%s equals workspace_root; source analysis needs an explicit code repo.",
+            repo,
+        )
+
 
 DEFAULT_SIGNAL_ALIASES = {
     "LD normal": "SIGNAL_X3D_LD_NORMAL_OVER_ALL_DATA",
@@ -58,7 +138,7 @@ _BUILTIN_PRESETS_PATH = PROFILE_REGISTRY_PATH
 
 
 def _load_provider_presets(user_presets: dict[str, dict[str, Any]] | None = None) -> dict[str, dict[str, Any]]:
-    """Load built-in presets from presets.toml, then merge user overrides."""
+    """Load built-in presets from presets.toml, then merge user overrides and secrets."""
     presets: dict[str, dict[str, Any]] = {}
     if _BUILTIN_PRESETS_PATH.exists():
         presets.update(load_profile_specs(_BUILTIN_PRESETS_PATH))
@@ -68,6 +148,13 @@ def _load_provider_presets(user_presets: dict[str, dict[str, Any]] | None = None
                 merged = dict(presets.get(name, {}))
                 merged.update(dict(values))
                 presets[name] = merged
+    secrets_path = _BUILTIN_PRESETS_PATH.parent / "secrets.toml"
+    if secrets_path.exists():
+        with secrets_path.open("rb") as fh:
+            secrets = tomllib.load(fh)
+        for name, secret in secrets.items():
+            if name in presets and isinstance(secret, dict) and secret.get("api_key"):
+                presets[name]["api_key"] = secret["api_key"]
     return presets
 
 
@@ -252,7 +339,7 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
         base_dir,
     )
 
-    return BridgeConfig(
+    config = BridgeConfig(
         dry_run=_bool_value(os.environ.get("LARK_AGENT_BRIDGE_DRY_RUN"), bool(data.get("dry_run", True))),
         workspace_root=_resolve_path(
             os.environ.get("LARK_AGENT_BRIDGE_WORKSPACE_ROOT") or data.get("workspace_root", default_workspace_root),
@@ -376,6 +463,9 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
                     "agent_summary_timeout_seconds",
                     BugAnalysisOptions().agent_summary_timeout_seconds,
                 )
+            ),
+            file_agent_debug_logs=bool(
+                bug_data.get("file_agent_debug_logs", BugAnalysisOptions().file_agent_debug_logs)
             ),
             max_prompt_chars=int(bug_data.get("max_prompt_chars", 16000)),
             upload_result_files=bool(bug_data.get("upload_result_files", True)),
@@ -589,6 +679,8 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
         ai_provider=ai_provider,
         runner_timeout_seconds=int(runner_data.get("timeout_seconds", 900)),
     )
+    _warn_suspicious_paths(config)
+    return config
 
 
 def with_cli_overrides(config: BridgeConfig, *, dry_run: bool = False) -> BridgeConfig:

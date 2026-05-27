@@ -104,18 +104,18 @@ Free-form ordinary chat is still blocked there.
 ## Dry-run checks
 
 ```bash
-python3.11 -m lark_agent_bridge check --config config.toml
-python3.11 -m lark_agent_bridge handle-event --config config.toml --event samples/signal_event_with_url.json --dry-run
-python3.11 -m lark_agent_bridge handle-event --config config.toml --event samples/signal_event_with_file.json --dry-run
-python3.11 -m lark_agent_bridge handle-event --config config.toml --event samples/basic_chat_who_are_you.json --dry-run
-python3.11 -m lark_agent_bridge handle-event --config config.toml --event samples/omlx_chat_question.json --dry-run
-python3.11 -m lark_agent_bridge handle-event --config config.toml --event samples/group_chat_command.json --dry-run
-python3.11 -m lark_agent_bridge handle-event --config config.toml --event samples/group_unmentioned_url.json --dry-run
-python3.11 -m lark_agent_bridge handle-event --config config.toml --event samples/p2p_plain_chat.json --dry-run
-python3.11 -m lark_agent_bridge run-signal --config config.toml --signal 132002 --log-path /path/to/log --dry-run
+.venv/bin/python -m lark_agent_bridge check --config config.toml
+.venv/bin/python -m lark_agent_bridge handle-event --config config.toml --event samples/signal_event_with_url.json --dry-run
+.venv/bin/python -m lark_agent_bridge handle-event --config config.toml --event samples/signal_event_with_file.json --dry-run
+.venv/bin/python -m lark_agent_bridge handle-event --config config.toml --event samples/basic_chat_who_are_you.json --dry-run
+.venv/bin/python -m lark_agent_bridge handle-event --config config.toml --event samples/omlx_chat_question.json --dry-run
+.venv/bin/python -m lark_agent_bridge handle-event --config config.toml --event samples/group_chat_command.json --dry-run
+.venv/bin/python -m lark_agent_bridge handle-event --config config.toml --event samples/group_unmentioned_url.json --dry-run
+.venv/bin/python -m lark_agent_bridge handle-event --config config.toml --event samples/p2p_plain_chat.json --dry-run
+.venv/bin/python -m lark_agent_bridge run-signal --config config.toml --signal 132002 --log-path /path/to/log --dry-run
 ```
 
-Use Python 3.11+ for these commands. On this machine `/opt/homebrew/bin/python3.11` is available; the system `python3` may be older.
+Use the project virtualenv for these commands. `run.sh` already prefers `.venv/bin/python`; direct CLI diagnostics should use the same interpreter so optional extras such as `pydantic-ai` are visible. A bare Python 3.11+ interpreter is acceptable only when it has the same dependencies installed.
 
 ## Agent Routes
 
@@ -125,6 +125,26 @@ Use Python 3.11+ for these commands. On this machine `/opt/homebrew/bin/python3.
 - A mentioned Feishu bug detail URL such as `@My Feishu CLI Bot https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722 调查3D启动时序` calls the local bug-analysis pipeline. The bridge still runs the local bug-fetch/decode/analyzer scripts directly for the heavy work, but the final Bug conclusion is handed to the configured Bug agent (`codex` / `claude`), and both generic follow-ups and follow-up reanalysis try to stay in that same agent session.
 - Private-chat ordinary questions such as `帮我解释一下什么是 token？`, or explicit mentioned group commands such as `@My Feishu CLI Bot /chat 讲个笑话` or `@My Feishu CLI Bot chat 讲个笑话`, call the local omlx OpenAI-compatible endpoint at `http://127.0.0.1:8000/v1`, model `gemma-4-26b-a4b-it-4bit`, and a locally configured API key. This route has no local tools or shell permissions.
 - To avoid cross-bot conflicts, set `[lark].bot_name` or `[lark].bot_open_id` in `config.toml`; then only that bot's leading mention can trigger group handling.
+
+## Source Analysis Stage Verification
+
+Source analysis is a bug-analysis stage, not a route-visible skill. Verify changes to this path with both focused tests and a real Feishu group message.
+
+Focused checks:
+
+```bash
+PYTHONPATH=. pytest -q tests/test_app.py -k "6998811703 and 3D场景模式"
+PYTHONPATH=. pytest -q tests/test_agents.py -k "stage_plan or context_profile or source_evidence_terms_ignore_environment_labels"
+git diff --check
+```
+
+Real group check:
+
+1. Send a mentioned group message containing a real bug link and the plain prompt `分析 3D场景模式`.
+2. Inspect `data/state/agent_activity.json` for the latest session.
+3. Confirm result details show `source_mode=off` and `stage_kinds=["domain","summary"]`.
+4. Confirm the latest job does not create or run a source stage for this ordinary request.
+5. For an explicit source request such as `基于源码分析 3D场景模式`, confirm `source_mode=append`, `context_profile` is the matched domain skill, and source-stage context includes that domain skill's `SKILL.md`.
 
 ## launchd background run
 

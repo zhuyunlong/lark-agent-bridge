@@ -226,6 +226,80 @@ class ProcessWatchdog:
         ]
 
 
+def _subprocess_text_mode_requested(kwargs: dict[str, Any]) -> bool:
+    return bool(
+        kwargs.get("text")
+        or kwargs.get("universal_newlines")
+        or kwargs.get("encoding") is not None
+        or kwargs.get("errors") is not None
+    )
+
+
+def _coerce_subprocess_stream(
+    value: Any,
+    *,
+    text_mode: bool,
+    encoding: str | None,
+    errors: str | None,
+) -> Any:
+    if value is None or not text_mode or not isinstance(value, bytes):
+        return value
+    return value.decode(encoding or "utf-8", errors=errors or "replace")
+
+
+def _debug_stream_preview(value: Any, *, limit: int = 12000) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        text = value.decode("utf-8", errors="replace")
+    else:
+        text = str(value)
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}\n... <truncated {len(text) - limit} chars>"
+
+
+def _write_subprocess_debug_log(
+    debug_log_path: str | os.PathLike[str] | None,
+    *,
+    name: str,
+    command: list[str],
+    cwd: Any,
+    returncode: int | None,
+    stdout: Any = None,
+    stderr: Any = None,
+    timeout: float | None = None,
+    error: str = "",
+) -> None:
+    if debug_log_path is None:
+        return
+    path = Path(debug_log_path).expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        "# Subprocess Debug Log",
+        f"name: {name}",
+        "command:",
+        "  " + " ".join(str(item) for item in command),
+        f"cwd: {cwd or ''}",
+        f"timeout: {timeout if timeout is not None else ''}",
+        f"returncode: {returncode if returncode is not None else ''}",
+    ]
+    if error:
+        lines.append(f"error: {error}")
+    lines.extend(
+        [
+            "",
+            "## stdout",
+            _debug_stream_preview(stdout),
+            "",
+            "## stderr",
+            _debug_stream_preview(stderr),
+            "",
+        ]
+    )
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
 def run_tracked_process(
     command: list[str],
     *,
@@ -233,6 +307,7 @@ def run_tracked_process(
     name: str,
     max_idle_seconds: float | None = None,
     session_id: str = "",
+    debug_log_path: str | os.PathLike[str] | None = None,
     **kwargs: Any,
 ) -> subprocess.CompletedProcess[str]:
     """Run a subprocess and register its PID with the watchdog when available.
@@ -240,8 +315,71 @@ def run_tracked_process(
     Falls back to ``subprocess.run`` when no watchdog is supplied so existing
     tests and standalone runners keep their previous behavior.
     """
+    text_mode = _subprocess_text_mode_requested(kwargs)
+    encoding = kwargs.get("encoding")
+    errors = kwargs.get("errors")
+    cwd = kwargs.get("cwd")
+
     if watchdog is None:
-        return subprocess.run(command, **kwargs)
+        try:
+            completed = subprocess.run(command, **kwargs)
+        except subprocess.TimeoutExpired as exc:
+            output = _coerce_subprocess_stream(
+                getattr(exc, "output", None),
+                text_mode=text_mode,
+                encoding=encoding,
+                errors=errors,
+            )
+            stderr = _coerce_subprocess_stream(
+                exc.stderr,
+                text_mode=text_mode,
+                encoding=encoding,
+                errors=errors,
+            )
+            _write_subprocess_debug_log(
+                debug_log_path,
+                name=name,
+                command=command,
+                cwd=cwd,
+                timeout=exc.timeout,
+                returncode=None,
+                stdout=output,
+                stderr=stderr,
+                error="TimeoutExpired",
+            )
+            raise subprocess.TimeoutExpired(
+                exc.cmd,
+                exc.timeout,
+                output=output,
+                stderr=stderr,
+            ) from exc
+        result = subprocess.CompletedProcess(
+            completed.args,
+            completed.returncode,
+            _coerce_subprocess_stream(
+                completed.stdout,
+                text_mode=text_mode,
+                encoding=encoding,
+                errors=errors,
+            ),
+            _coerce_subprocess_stream(
+                completed.stderr,
+                text_mode=text_mode,
+                encoding=encoding,
+                errors=errors,
+            ),
+        )
+        _write_subprocess_debug_log(
+            debug_log_path,
+            name=name,
+            command=command,
+            cwd=cwd,
+            timeout=kwargs.get("timeout"),
+            returncode=result.returncode,
+            stdout=result.stdout,
+            stderr=result.stderr,
+        )
+        return result
 
     timeout = kwargs.pop("timeout", None)
     check = bool(kwargs.pop("check", False))
@@ -279,16 +417,64 @@ def run_tracked_process(
             except subprocess.TimeoutExpired:
                 _safe_terminate(process.pid, sig=signal.SIGKILL)
                 stdout, stderr = process.communicate()
+            output = _coerce_subprocess_stream(
+                exc.output if exc.output is not None else stdout,
+                text_mode=text_mode,
+                encoding=encoding,
+                errors=errors,
+            )
+            stderr_text = _coerce_subprocess_stream(
+                exc.stderr if exc.stderr is not None else stderr,
+                text_mode=text_mode,
+                encoding=encoding,
+                errors=errors,
+            )
+            _write_subprocess_debug_log(
+                debug_log_path,
+                name=name,
+                command=command,
+                cwd=cwd,
+                timeout=timeout,
+                returncode=process.returncode,
+                stdout=output,
+                stderr=stderr_text,
+                error="TimeoutExpired",
+            )
             raise subprocess.TimeoutExpired(
                 command,
                 timeout,
-                output=exc.output if exc.output is not None else stdout,
-                stderr=exc.stderr if exc.stderr is not None else stderr,
+                output=output,
+                stderr=stderr_text,
             ) from exc
     finally:
         watchdog.untrack(process.pid)
 
-    completed = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+    completed = subprocess.CompletedProcess(
+        command,
+        process.returncode,
+        _coerce_subprocess_stream(
+            stdout,
+            text_mode=text_mode,
+            encoding=encoding,
+            errors=errors,
+        ),
+        _coerce_subprocess_stream(
+            stderr,
+            text_mode=text_mode,
+            encoding=encoding,
+            errors=errors,
+        ),
+    )
+    _write_subprocess_debug_log(
+        debug_log_path,
+        name=name,
+        command=command,
+        cwd=cwd,
+        timeout=timeout,
+        returncode=completed.returncode,
+        stdout=completed.stdout,
+        stderr=completed.stderr,
+    )
     if check and completed.returncode:
         raise subprocess.CalledProcessError(
             completed.returncode,

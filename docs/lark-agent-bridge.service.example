@@ -11,8 +11,9 @@ WorkingDirectory=/path/to/lark-agent-bridge
 Environment="PATH=/usr/local/bin:/usr/bin"
 EnvironmentFile=/path/to/lark-agent-bridge/.env
 
-# Choose ONE: cc-switch or openai
-ExecStart=/path/to/lark-agent-bridge/run.sh openai
+# Choose a profile from config/presets.toml.
+# run.sh prefers the project .venv, so optional extras stay available.
+ExecStart=/path/to/lark-agent-bridge/run.sh cc-switch-deepseek-claude
 
 # Auto-restart on failure
 Restart=on-failure

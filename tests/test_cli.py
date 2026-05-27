@@ -1,4 +1,5 @@
 import io
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -188,12 +189,28 @@ data_dir = "{tmp}/data"
 
 [ai_provider]
 enabled = true
-preset = "mimo-claude"
+preset = "test-direct"
+
+[provider_presets.test-direct]
+type = "direct_api"
+api_format = "anthropic"
+base_url = "https://example.invalid"
+primary_model = "test-model"
+requires_api_key = true
 """,
                 encoding="utf-8",
             )
 
-            with self.assertLogs("bridge.cli", level="WARNING") as logs:
+            env_keys = [
+                "LARK_AGENT_BRIDGE_AI_API_KEY",
+                "LARK_AGENT_BRIDGE_AI_FALLBACK_API_KEY",
+                "LARK_AGENT_BRIDGE_AI_BASE_URL",
+                "LARK_AGENT_BRIDGE_AI_FALLBACK_BASE_URL",
+            ]
+            with (
+                mock.patch.dict(os.environ, {key: "" for key in env_keys}),
+                self.assertLogs("bridge.cli", level="WARNING") as logs,
+            ):
                 exit_code = main(["listen", "--config", str(config), "--dry-run"])
 
         self.assertEqual(exit_code, 0)

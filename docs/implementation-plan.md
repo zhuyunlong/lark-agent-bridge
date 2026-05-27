@@ -106,7 +106,7 @@ Feishu Bot Message
 
 验收：
 
-- `python3 -m lark_agent_bridge --help` 能输出命令帮助。
+- `.venv/bin/python -m lark_agent_bridge --help` 能输出命令帮助。
 - README 包含安装、配置、dry-run、真实运行、后台运行说明。
 
 具体步骤：
@@ -385,23 +385,23 @@ python3 .github/skills/signal-chain-analyzer/scripts/analyze_signal_chain.py \
 
 ```bash
 # 检查环境
-python3 -m lark_agent_bridge check --config config.toml
+.venv/bin/python -m lark_agent_bridge check --config config.toml
 
 # 处理一个样例事件
-python3 -m lark_agent_bridge handle-event \
+.venv/bin/python -m lark_agent_bridge handle-event \
   --config config.toml \
   --event samples/signal_event_with_url.json \
   --dry-run
 
 # 直接跑 signal handler，便于本地调试
-python3 -m lark_agent_bridge run-signal \
+.venv/bin/python -m lark_agent_bridge run-signal \
   --config config.toml \
   --signal 132002 \
   --log-path /path/to/log \
   --dry-run
 
 # 真实监听飞书消息
-python3 -m lark_agent_bridge listen --config config.toml
+.venv/bin/python -m lark_agent_bridge listen --config config.toml
 ```
 
 验收：
@@ -475,8 +475,8 @@ python3 -m unittest discover -s tests -v
 
 初版完成后必须满足：
 
-- [x] `python3 -m unittest discover -s tests -v` 通过。
-- [x] `python3 -m lark_agent_bridge check --config config.toml` 可运行。
+- [x] `.venv/bin/python -m unittest discover -s tests -v` 通过。
+- [x] `.venv/bin/python -m lark_agent_bridge check --config config.toml` 可运行。
 - [x] `handle-event --dry-run` 对 URL 样例输出可执行计划。
 - [x] `handle-event --dry-run` 对 file 样例输出飞书附件下载计划。
 - [x] 缺 signal / 缺日志输入时给出清晰错误。

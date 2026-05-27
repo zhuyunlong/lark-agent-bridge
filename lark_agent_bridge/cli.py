@@ -68,6 +68,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     setup_logging()
+    if not args.config:
+        discovered = _discover_config()
+        if discovered is not None:
+            args.config = str(discovered)
+            logger.info("auto-discovered config: %s", discovered)
     try:
         config = with_cli_overrides(load_config(args.config), dry_run=args.dry_run)
         _warn_missing_direct_api_key(config)
@@ -167,8 +172,27 @@ def _warn_missing_direct_api_key(config: object) -> None:
     )
 
 
+def _discover_config(start: Path | None = None) -> Path | None:
+    """Search upward from ``start`` (default cwd) for a ``config.toml`` file.
+
+    Returns the first hit or ``None``. Never raises. Stops at filesystem root.
+    """
+    current = (start or Path.cwd()).resolve()
+    for candidate in [current, *current.parents]:
+        probe = candidate / "config.toml"
+        if probe.is_file():
+            return probe
+    return None
+
+
 def _add_common_options(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--config", help="Path to TOML config. Defaults to safe built-in dry-run config.")
+    parser.add_argument(
+        "--config",
+        help=(
+            "Path to TOML config. If omitted, searches upward from cwd for config.toml "
+            "before falling back to safe built-in dry-run defaults."
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true", help="Force dry-run mode.")
 
 

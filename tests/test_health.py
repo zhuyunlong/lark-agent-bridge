@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
 from unittest import mock
@@ -228,6 +230,28 @@ class RunTrackedProcessTests(unittest.TestCase):
         self.assertIsInstance(completed, subprocess.CompletedProcess)
         self.assertEqual(completed.stdout.strip(), "fallback")
 
+    def test_writes_debug_log_for_subprocess_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            debug_path = Path(tmp) / "unit-subprocess.debug.log"
+
+            completed = run_tracked_process(
+                [sys.executable, "-c", "print('debuggable')"],
+                watchdog=None,
+                name="debuggable-subprocess",
+                debug_log_path=debug_path,
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+
+            debug_text = debug_path.read_text(encoding="utf-8")
+
+        self.assertEqual(completed.returncode, 0)
+        self.assertIn("debuggable-subprocess", debug_text)
+        self.assertIn("returncode: 0", debug_text)
+        self.assertIn("debuggable", debug_text)
+
     def test_timeout_kill_race_still_untracks_process(self):
         class RaceProcess:
             pid = os.getpid()
@@ -351,6 +375,44 @@ class RunTrackedProcessTests(unittest.TestCase):
                 )
 
         terminate.assert_called_once_with(12345)
+
+    def test_timeout_coerces_bytes_to_text_when_text_mode_requested(self):
+        class TimeoutProcess:
+            pid = 12345
+            returncode = None
+
+            def __init__(self):
+                self.calls = 0
+
+            def communicate(self, input=None, timeout=None):
+                self.calls += 1
+                if self.calls == 1:
+                    raise subprocess.TimeoutExpired(
+                        ["cmd"],
+                        timeout=timeout,
+                        output=b"partial stdout",
+                        stderr=b"partial stderr",
+                    )
+                return "", ""
+
+        watchdog = ProcessWatchdog(max_idle_seconds=60)
+        with (
+            mock.patch("lark_agent_bridge.health.subprocess.Popen", return_value=TimeoutProcess()),
+            mock.patch("lark_agent_bridge.health._safe_terminate", return_value=True),
+        ):
+            with self.assertRaises(subprocess.TimeoutExpired) as exc_info:
+                run_tracked_process(
+                    ["cmd"],
+                    watchdog=watchdog,
+                    name="timeout-process",
+                    capture_output=True,
+                    text=True,
+                    timeout=1,
+                    check=False,
+                )
+
+        self.assertEqual(exc_info.exception.stdout, "partial stdout")
+        self.assertEqual(exc_info.exception.stderr, "partial stderr")
 
     def test_safe_terminate_prefers_process_group_for_session_leader(self):
         with (

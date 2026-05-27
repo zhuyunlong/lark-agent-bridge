@@ -27,6 +27,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.source_investigation.model, "gpt-5.4")
         self.assertEqual(config.source_investigation.timeout_seconds, 120)
         self.assertEqual(config.source_investigation.max_evidence, 20)
+        self.assertTrue(config.bug_analysis.file_agent_debug_logs)
         self.assertEqual(config.omlx_chat.api_key, "1234")
         # Default repo_roots includes guideengine; also Napa5 if it exists on this machine
         self.assertIn(config.guideengine_repo, config.source_investigation.repo_roots)
@@ -229,6 +230,7 @@ provider = "codex"
 command = "codex"
 timeout_seconds = 99
 agent_summary_timeout_seconds = 45
+file_agent_debug_logs = true
 default_prompt = "分析这个bug"
 resume_followup_sessions = true
 auto_fallback_to_file_agent = true
@@ -245,6 +247,7 @@ force_reanalysis_terms = ["重新分析", "源码"]
         self.assertEqual(config.bug_analysis.model, "gpt-5.4")
         self.assertEqual(config.bug_analysis.timeout_seconds, 99)
         self.assertEqual(config.bug_analysis.agent_summary_timeout_seconds, 45)
+        self.assertTrue(config.bug_analysis.file_agent_debug_logs)
         self.assertEqual(config.bug_analysis.default_prompt, "分析这个bug")
         self.assertTrue(config.bug_analysis.resume_followup_sessions)
         self.assertTrue(config.bug_analysis.auto_fallback_to_file_agent)

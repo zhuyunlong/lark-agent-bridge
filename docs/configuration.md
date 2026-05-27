@@ -17,6 +17,16 @@ cp config/config.example.toml config.toml
 
 Provider URL/model/protocol/agent/key-policy values live in `config/presets.toml`. Routing keyword tables live in `config/routing_terms.toml`. `run.sh <profile>` sets environment overrides for the current process while still loading `config.toml`.
 
+## Python interpreter
+
+`run.sh` picks the Python binary in this order:
+
+1. `$LARK_AGENT_BRIDGE_PYTHON` — explicit override (e.g. a pyenv shim or corporate-managed interpreter).
+2. `$PROJECT_DIR/.venv/bin/python` — the project virtualenv. Create once with `python3 -m venv .venv && .venv/bin/pip install -e .`.
+3. `python3` from `$PATH` — last resort; only works when it already has the project's dependencies, including optional extras such as `pydantic-ai`.
+
+Direct `python -m lark_agent_bridge ...` diagnostics should use the same interpreter `run.sh` would pick so optional capabilities (structured intent recognition, pydantic-ai runtime) do not silently degrade.
+
 ## Environment variables
 
 Supported overrides:
@@ -449,5 +459,5 @@ Messages from other senders, or messages that contain only a filename without th
 Check the effective local configuration with:
 
 ```bash
-python3.11 -m lark_agent_bridge check --config config.toml
+.venv/bin/python -m lark_agent_bridge check --config config.toml
 ```
