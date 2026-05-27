@@ -181,13 +181,14 @@ class IntentAgent:
 
             # Extract usage if available
             usage: dict[str, int] = {}
-            if hasattr(result, "usage") and result.usage:
-                u = result.usage()
-                usage = {
-                    "prompt_tokens": getattr(u, "request_tokens", 0) or 0,
-                    "completion_tokens": getattr(u, "response_tokens", 0) or 0,
-                    "total_tokens": getattr(u, "total_tokens", 0) or 0,
-                }
+            if hasattr(result, "usage"):
+                u = result.usage() if callable(result.usage) else result.usage
+                if u:
+                    usage = {
+                        "prompt_tokens": getattr(u, "request_tokens", 0) or 0,
+                        "completion_tokens": getattr(u, "response_tokens", 0) or 0,
+                        "total_tokens": getattr(u, "total_tokens", 0) or 0,
+                    }
 
             logger.info(
                 "IntentAgent classified: route=%s confidence=%s duration=%.1fs",

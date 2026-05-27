@@ -231,12 +231,13 @@ class AgentRuntime:
         usage: dict[str, int] = {}
         try:
             if hasattr(result, "usage"):
-                u = result.usage()
-                usage = {
-                    "request_tokens": getattr(u, "request_tokens", 0) or 0,
-                    "response_tokens": getattr(u, "response_tokens", 0) or 0,
-                    "total_tokens": getattr(u, "total_tokens", 0) or 0,
-                }
+                u = result.usage() if callable(result.usage) else result.usage
+                if u:
+                    usage = {
+                        "request_tokens": getattr(u, "request_tokens", 0) or 0,
+                        "response_tokens": getattr(u, "response_tokens", 0) or 0,
+                        "total_tokens": getattr(u, "total_tokens", 0) or 0,
+                    }
         except Exception:
             pass
 
