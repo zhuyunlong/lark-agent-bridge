@@ -3909,7 +3909,7 @@ class BugAnalysisRunner:
             "ld_lane_level": f"bug_ld_lane_level_report.{suffix}",
             "general": f"bug_general_analysis_report.{suffix}",
             SOURCE_STAGE_KIND: f"source_stage_report.{suffix}",
-            "custom_skill": f"bug_custom_skill_report.{suffix}",
+            "custom_skill": f"bug_source_code_report.{suffix}",
         }[kind]
 
     def _combined_report_name(self, suffix: str) -> str:
@@ -3927,7 +3927,7 @@ class BugAnalysisRunner:
             "ld_lane_level": "LD车道级日志分析",
             "general": "通用问题分析",
             SOURCE_STAGE_KIND: "源码分析阶段",
-            "custom_skill": "专用 Skill 源码分析",
+            "custom_skill": "源码分析 (source_code_skill)",
         }[kind]
 
     def _effective_skill_name_for_plan(self, plan_kind: str, candidate_skill_name: str) -> str:
@@ -10363,14 +10363,14 @@ class BugAnalysisRunner:
         return {
             SOURCE_STAGE_KIND: "source_stage_analysis.md",
             "ld_lane_level": "ld_lane_level_analysis.md",
-            "custom_skill": "custom_skill_analysis.md",
+            "custom_skill": "source_code_skill_analysis.md",
         }.get(analysis_kind, f"{analysis_kind}_analysis.md")
 
     def _skill_agent_sidecar_name(self, analysis_kind: str, suffix: str) -> str:
         prefix = {
             SOURCE_STAGE_KIND: "source_stage",
             "ld_lane_level": "ld_lane_level_agent",
-            "custom_skill": "custom_skill_agent",
+            "custom_skill": "source_code_skill_agent",
         }.get(analysis_kind, f"{analysis_kind}_agent")
         return f"{prefix}.{suffix}"
 
@@ -10921,6 +10921,7 @@ class BugAnalysisRunner:
                 ("bug_ld_lane_level_report", "ld_lane_level"),
                 ("bug_general_analysis_report", "general"),
                 ("bug_custom_skill_report", "custom_skill"),
+                ("bug_source_code_report", "custom_skill"),
             ):
                 if marker in metadata_text:
                     inferred_kind = kind

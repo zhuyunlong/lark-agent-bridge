@@ -4078,7 +4078,7 @@ class AgentTests(unittest.TestCase):
         self.assertNotIn("NO_PROXY", env)
         self.assertIn("--tools", captured["command"])
         self.assertIn("--debug-file", captured["command"])
-        self.assertTrue(str(result["debug_log_path"]).endswith("custom_skill_agent.debug.log"))
+        self.assertTrue(str(result["debug_log_path"]).endswith("source_code_skill_agent.debug.log"))
         self.assertTrue(context_exists)
         self.assertTrue(focused_log_input_exists)
         self.assertTrue(log_focus_manifest_exists)

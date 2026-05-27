@@ -27,6 +27,7 @@ _ROUTE_KINDS = {
     "xtheme",
     "ld_lane_level",
     "custom_skill",
+    "source_code_skill",
 }
 _ROUTE_EXECUTORS = {"", "file_agent", "pydantic_ai"}
 
@@ -425,6 +426,9 @@ class SkillManager:
         normalized = route_kind.strip()
         if not normalized:
             normalized = default_kind.strip()
+        # Normalize source_code_skill alias to canonical internal kind
+        if normalized == "source_code_skill":
+            normalized = "custom_skill"
         if name in PRIMARY_BUG_SKILL_MAP:
             if normalized == "general" and default_kind and default_kind != "general":
                 return default_kind
