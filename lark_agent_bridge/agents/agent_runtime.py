@@ -193,12 +193,20 @@ class AgentRuntime:
             register_tools(agent, self.workspace)
 
         try:
+            from pydantic_ai import UsageLimits
+            usage_limits = UsageLimits(
+                request_limit=15,
+                tool_calls_limit=30,
+            )
+            # Use higher max_tokens for pydantic-ai since tool results consume context
+            effective_max_tokens = max(self.options.summary_max_tokens, 8192)
             result = agent.run_sync(
                 user_prompt,
                 model_settings=ModelSettings(
                     temperature=self.options.summary_temperature,
-                    max_tokens=self.options.summary_max_tokens,
+                    max_tokens=effective_max_tokens,
                 ),
+                usage_limits=usage_limits,
             )
         except Exception as exc:
             duration = time.monotonic() - started

@@ -15,6 +15,15 @@ from ..log import get_logger
 
 logger = get_logger("agent_tools")
 
+# Directories to skip during recursive scans
+_SKIP_DIRS = frozenset({
+    ".git", ".venv", "venv", "__pycache__", "node_modules", ".mypy_cache",
+    ".pytest_cache", ".tox", ".eggs", "build", "dist", ".idea", ".vscode",
+    "data", ".gradle", ".cache", "Pods",
+})
+# Max file size to read during grep (256KB)
+_MAX_GREP_FILE_SIZE = 256 * 1024
+
 
 def _safe_resolve(path_str: str, workspace: Path) -> Path | None:
     """Resolve a path and verify it's within workspace. Returns None if unsafe."""
@@ -57,26 +66,47 @@ def grep_text(pattern: str, *, workspace: Path, glob_filter: str = "**/*", max_r
     results: list[str] = []
     count = 0
     ws = workspace.resolve()
-    for filepath in ws.rglob("*"):
-        if not filepath.is_file():
-            continue
-        if filepath.suffix in {".pyc", ".class", ".o", ".so", ".dylib", ".exe"}:
-            continue
-        rel = filepath.relative_to(ws)
-        rel_str = str(rel)
-        if glob_filter != "**/*" and not fnmatch.fnmatch(rel_str, glob_filter):
-            continue
+
+    def _walk(root: Path) -> None:
+        nonlocal count
+        if count >= max_results:
+            return
         try:
-            content = filepath.read_text(encoding="utf-8", errors="replace")
+            entries = sorted(root.iterdir())
         except OSError:
-            continue
-        for i, line in enumerate(content.splitlines(), 1):
-            if regex.search(line):
-                results.append(f"{rel}:{i}: {line.strip()}")
-                count += 1
-                if count >= max_results:
-                    results.append(f"\n[... {max_results} results limit reached ...]")
-                    return "\n".join(results)
+            return
+        for entry in entries:
+            if count >= max_results:
+                return
+            if entry.is_dir():
+                if entry.name in _SKIP_DIRS or entry.name.startswith("."):
+                    continue
+                _walk(entry)
+            elif entry.is_file():
+                if entry.suffix in {".pyc", ".class", ".o", ".so", ".dylib", ".exe", ".jar", ".zip", ".gz", ".tar", ".png", ".jpg", ".ico", ".woff", ".woff2", ".ttf"}:
+                    continue
+                try:
+                    if entry.stat().st_size > _MAX_GREP_FILE_SIZE:
+                        continue
+                except OSError:
+                    continue
+                rel = entry.relative_to(ws)
+                rel_str = str(rel)
+                if glob_filter != "**/*" and not fnmatch.fnmatch(rel_str, glob_filter):
+                    continue
+                try:
+                    content = entry.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+                for i, line in enumerate(content.splitlines(), 1):
+                    if regex.search(line):
+                        results.append(f"{rel}:{i}: {line.strip()}")
+                        count += 1
+                        if count >= max_results:
+                            results.append(f"\n[... {max_results} results limit reached ...]")
+                            return
+
+    _walk(ws)
     if not results:
         return f"No matches found for pattern: {pattern}"
     return "\n".join(results)
@@ -87,6 +117,13 @@ def glob_paths(pattern: str, *, workspace: Path, max_results: int = 100) -> str:
     ws = workspace.resolve()
     matches: list[str] = []
     for filepath in ws.glob(pattern):
+        # Skip excluded directories
+        try:
+            rel_parts = filepath.relative_to(ws).parts
+        except ValueError:
+            continue
+        if any(p in _SKIP_DIRS or (p.startswith(".") and p != ".") for p in rel_parts):
+            continue
         matches.append(str(filepath.relative_to(ws)))
         if len(matches) >= max_results:
             matches.append(f"[... {max_results} results limit reached ...]")
@@ -108,6 +145,8 @@ def list_dir(path: str = ".", *, workspace: Path) -> str:
     try:
         entries: list[str] = []
         for entry in sorted(resolved.iterdir()):
+            if entry.name in _SKIP_DIRS:
+                continue
             rel = entry.relative_to(workspace.resolve())
             suffix = "/" if entry.is_dir() else ""
             entries.append(f"{rel}{suffix}")
