@@ -86,6 +86,58 @@ class SourceAnalysisOutput(BaseModel):
         return "\n\n".join(parts) + "\n"
 
 
+class LDLaneLevelOutput(BaseModel):
+    """Structured output for LD lane-level analysis."""
+
+    conclusion: str = Field(default="", description="结论摘要：一句话概述 LD 车道级问题根因")
+    root_cause: str = Field(default="", description="最可能原因：详细分析")
+    evidence: list[dict[str, str]] = Field(
+        default_factory=list,
+        description="关键证据列表，每项含 file, line, content, relevance",
+    )
+    montecarlo_findings: str = Field(default="", description="蒙特卡洛日志关键发现")
+    tile_render_findings: str = Field(default="", description="瓦片渲染关键发现")
+    pending_items: list[str] = Field(
+        default_factory=list,
+        description="待确认项",
+    )
+    suggested_actions: list[str] = Field(
+        default_factory=list,
+        description="建议动作",
+    )
+    confidence: str = Field(default="medium", description="分析置信度: high/medium/low")
+
+    def to_markdown(self) -> str:
+        """Render as Markdown report."""
+        parts = []
+        if self.conclusion:
+            parts.append(f"## 结论摘要\n\n{self.conclusion}")
+        if self.root_cause:
+            parts.append(f"## 最可能原因\n\n{self.root_cause}")
+        if self.montecarlo_findings:
+            parts.append(f"## 蒙特卡洛日志发现\n\n{self.montecarlo_findings}")
+        if self.tile_render_findings:
+            parts.append(f"## 瓦片渲染发现\n\n{self.tile_render_findings}")
+        if self.evidence:
+            items = []
+            for ev in self.evidence:
+                file_ref = ev.get("file", "")
+                line_ref = ev.get("line", "")
+                content = ev.get("content", "")
+                relevance = ev.get("relevance", "")
+                loc = f"{file_ref}:{line_ref}" if line_ref else file_ref
+                entry = f"- **{loc}**: {content}"
+                if relevance:
+                    entry += f" _{relevance}_"
+                items.append(entry)
+            parts.append("## 关键证据\n\n" + "\n".join(items))
+        if self.pending_items:
+            parts.append("## 待确认项\n\n" + "\n".join(f"- {item}" for item in self.pending_items))
+        if self.suggested_actions:
+            parts.append("## 建议动作\n\n" + "\n".join(f"- {action}" for action in self.suggested_actions))
+        return "\n\n".join(parts) + "\n"
+
+
 class BugAnalysisOutput(BaseModel):
     """Structured output for general bug analysis."""
 

@@ -40,14 +40,14 @@ BUG_SCENARIOS = [
     },
     {
         "bug_id": "6998811703",
-        "source_job_id": "6e50c4c5ae60f11b37ecdc50f6829142",
+        "source_job_id": "07f25238168f4e3e00101fa3eb034728",
         "followup": "重新分析 SIGNAL_SR_SCENE_TYPE 信号链路，检查 3D 场景模式下的信号传递是否完整",
         "requires_source": True,
         "analysis_kind": "scene_signal",
     },
     {
         "bug_id": "6998107767",
-        "source_job_id": "a61e05b5efc733cf81aff19b6a54858c",
+        "source_job_id": "d0a8406bea2b41a8a5ecf5615d165080",
         "followup": "重新分析车道级进不去问题，检查 CheckTileRender 链路和 LDConf 条件",
         "requires_source": False,
         "analysis_kind": "ld_lane_level",
