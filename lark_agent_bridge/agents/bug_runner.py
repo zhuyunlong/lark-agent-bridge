@@ -521,6 +521,134 @@ class BugAnalysisRunner:
             return normalized
         return [*normalized, BugAnalysisPlan(kind=SOURCE_STAGE_KIND)]
 
+    # ------------------------------------------------------------------
+    # Unified classification + source-decision (Phase 2)
+    # ------------------------------------------------------------------
+
+    def _unified_classify_and_decide(
+        self,
+        *,
+        request_text: str,
+        prompt_text: str,
+        title: str,
+        description: str,
+        attachments: object = (),
+        time_context: "BugTimeContext | None" = None,
+    ) -> "UnifiedBugDecision":
+        """Single entry-point that replaces the old two-step flow.
+
+        1. Agent classification → ``BugAnalysisSelection``
+        2. Source analysis decision → ``SourceAnalysisDecision``
+        3. Plan augmentation (append ``source_stage`` if needed)
+        4. Skill-name normalization (rename to ``source_analysis`` when applicable)
+
+        The result is a ``UnifiedBugDecision`` with both sub-decisions.
+        """
+        # --- step 1: domain classification ---
+        selection = self._classify_bug_request_with_agent(
+            prompt_text=prompt_text,
+            title=title,
+            description=description,
+            attachments=attachments,
+            time_context=time_context,
+        )
+        if selection is not None and any(
+            plan.kind == "signal" and not plan.signal_code for plan in selection.plans
+        ):
+            selection = None
+        if selection is None:
+            selection = self._manual_bug_selection(
+                prompt_text=prompt_text, title=title, description=description,
+            )
+
+        # --- step 2: source analysis decision ---
+        source_decision = self._decide_source_analysis_request(
+            request_text=request_text,
+            prompt_text=prompt_text,
+            title=title,
+            description=description,
+            plans=selection.plans,
+            skill_name=selection.skill_name,
+        )
+
+        # --- step 3: augment plans ---
+        selection.plans = self._augment_plans_for_source_analysis(
+            selection.plans, source_decision=source_decision,
+        )
+
+        # --- step 4: normalize skill name ---
+        if (
+            source_decision.requested
+            and all(plan.kind in SOURCE_STAGE_KINDS for plan in selection.plans)
+            and selection.skill_name.strip() in {"", "general"}
+        ):
+            selection.skill_name = "source_analysis"
+            selection.skill_label = self._analysis_label(SOURCE_STAGE_KIND)
+            if source_decision.reason:
+                selection.reason = source_decision.reason
+
+        return UnifiedBugDecision(selection=selection, source_decision=source_decision)
+
+    def classify_and_decide(
+        self,
+        *,
+        request_text: str,
+        prompt_text: str,
+        title: str = "",
+        description: str = "",
+        plans: "list[BugAnalysisPlan] | None" = None,
+    ) -> "UnifiedBugDecision":
+        """Public API for external callers (e.g. ``app.py`` preflight).
+
+        When *plans* is provided the classification step is skipped
+        and only the source-analysis decision is performed.
+        """
+        if plans is not None:
+            first_plan = plans[0] if plans else BugAnalysisPlan(kind="general")
+            skill_name = (
+                self._skill_name_for_kind(first_plan.kind)
+                if first_plan.kind != "general"
+                else ""
+            )
+            selection = self._selection_from_plans(
+                plans,
+                source="preflight_rules",
+                reason="",
+            )
+            if skill_name:
+                selection.skill_name = skill_name
+                selection.skill_label = self._skill_label_for_name(
+                    skill_name, first_plan.kind,
+                )
+            source_decision = self._decide_source_analysis_request(
+                request_text=request_text,
+                prompt_text=prompt_text,
+                title=title,
+                description=description,
+                plans=plans,
+                skill_name=skill_name,
+            )
+            selection.plans = self._augment_plans_for_source_analysis(
+                selection.plans, source_decision=source_decision,
+            )
+            if (
+                source_decision.requested
+                and all(plan.kind in SOURCE_STAGE_KINDS for plan in selection.plans)
+                and selection.skill_name.strip() in {"", "general"}
+            ):
+                selection.skill_name = "source_analysis"
+                selection.skill_label = self._analysis_label(SOURCE_STAGE_KIND)
+                if source_decision.reason:
+                    selection.reason = source_decision.reason
+            return UnifiedBugDecision(selection=selection, source_decision=source_decision)
+
+        return self._unified_classify_and_decide(
+            request_text=request_text,
+            prompt_text=prompt_text,
+            title=title,
+            description=description,
+        )
+
     def _needs_general_direction(
         self,
         selection: "BugAnalysisSelection",
@@ -1344,35 +1472,16 @@ class BugAnalysisRunner:
                 description=description,
                 reference_time=self._bug_reference_time(fetched, full_item),
             )
-            selection = self._classify_bug_request_with_agent(
+            decision = self._unified_classify_and_decide(
+                request_text=request_text,
                 prompt_text=prompt_text,
                 title=title,
                 description=description,
                 attachments=fetched.get("attachments", []),
                 time_context=time_context,
             )
-            if selection is not None and any(plan.kind == "signal" and not plan.signal_code for plan in selection.plans):
-                selection = None
-            if selection is None:
-                selection = self._manual_bug_selection(prompt_text=prompt_text, title=title, description=description)
-            source_decision = self._decide_source_analysis_request(
-                request_text=request_text,
-                prompt_text=prompt_text,
-                title=title,
-                description=description,
-                plans=selection.plans,
-                skill_name=selection.skill_name,
-            )
-            selection.plans = self._augment_plans_for_source_analysis(selection.plans, source_decision=source_decision)
-            if (
-                source_decision.requested
-                and all(plan.kind in SOURCE_STAGE_KINDS for plan in selection.plans)
-                and selection.skill_name.strip() in {"", "general"}
-            ):
-                selection.skill_name = "source_analysis"
-                selection.skill_label = self._analysis_label(SOURCE_STAGE_KIND)
-                if source_decision.reason:
-                    selection.reason = source_decision.reason
+            selection = decision.selection
+            source_decision = decision.source_decision
             if self._needs_general_direction(selection, prompt_text=prompt_text):
                 return self._general_direction_needed_result(
                     context=context,
@@ -14105,6 +14214,18 @@ class BugAnalysisSelection:
     source: str
     reason: str = ""
     provider: str = ""
+
+
+@dataclass(slots=True)
+class UnifiedBugDecision:
+    """Combined domain classification + source analysis decision.
+
+    Produced by ``_unified_classify_and_decide`` to replace the previous
+    two-step classify → decide_source → augment flow with a single call.
+    """
+
+    selection: "BugAnalysisSelection"
+    source_decision: "SourceAnalysisDecision"
 
 
 @dataclass(slots=True)

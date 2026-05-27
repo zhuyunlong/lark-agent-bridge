@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from lark_agent_bridge.app import BridgeApp
-from lark_agent_bridge.agents import Addr2LineRunner, BugAnalysisPlan, BugAnalysisSelection, BugFollowupSelection
+from lark_agent_bridge.agents import Addr2LineRunner, BugAnalysisPlan, BugAnalysisSelection, BugFollowupSelection, UnifiedBugDecision
 from lark_agent_bridge.lark_client import CommandResult
 from lark_agent_bridge.models import (
     Addr2LineRequest,
@@ -314,6 +314,31 @@ class FakeBugRunner:
             context_profile=self._skill_name_for_kind(domain_kind) if domain_kind != "general" else "",
             stage_kinds=stage_kinds,
         )
+
+    def classify_and_decide(self, *, request_text, prompt_text, title="", description="", plans=None):
+        if plans is None:
+            plans = self.classify_requests(prompt_text=prompt_text, title=title, description=description)
+        first_plan = plans[0] if plans else BugAnalysisPlan(kind="general")
+        skill_name = self._skill_name_for_kind(first_plan.kind) if first_plan.kind != "general" else ""
+        source_decision = self._decide_source_analysis_request(
+            request_text=request_text, prompt_text=prompt_text,
+            title=title, description=description,
+            plans=plans, skill_name=skill_name,
+        )
+        # Augment plans with source_stage if requested
+        if source_decision.requested:
+            if all(p.kind == "general" for p in plans):
+                plans = [BugAnalysisPlan(kind="source_stage")]
+            elif not any(p.kind == "source_stage" for p in plans):
+                plans = [*plans, BugAnalysisPlan(kind="source_stage")]
+        selection = BugAnalysisSelection(
+            plans=plans,
+            skill_name=skill_name or ("source_analysis" if source_decision.requested and all(p.kind == "source_stage" for p in plans) else "general"),
+            skill_label="",
+            source="preflight_rules",
+            reason=source_decision.reason,
+        )
+        return UnifiedBugDecision(selection=selection, source_decision=source_decision)
 
     def run_direct_analysis(
         self,

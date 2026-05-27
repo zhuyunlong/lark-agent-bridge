@@ -40,6 +40,7 @@ from .bug_runner import (
     BugFollowupSelection,
     BugTimeContext,
     LogCoverage,
+    UnifiedBugDecision,
 )
 from .claude_runner import ClaudeSkillRunner
 from .intent_runner import IntentAnalysisFailure, IntentAnalysisRunner
@@ -112,6 +113,7 @@ __all__ = [
     "STUCK_ROUTE_TERMS",
     "SignalResolver",
     "TaskResult",
+    "UnifiedBugDecision",
     "XTHEME_ROUTE_TERMS",
     "build_structured_summary_sections",
     "combined_bug_html",

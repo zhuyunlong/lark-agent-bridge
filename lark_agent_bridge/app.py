@@ -1849,26 +1849,27 @@ class BridgeApp:
                 reason="消息已包含可执行的文件分析资源。",
             )
         plans = self.bug_runner.classify_requests(prompt_text=prompt, title="", description="")
-        first_plan = plans[0] if plans else BugAnalysisPlan(kind="general")
-        source_decision = self.bug_runner._decide_source_analysis_request(
+        decision = self.bug_runner.classify_and_decide(
             request_text=request.raw_text or prompt,
             prompt_text=prompt,
-            title="",
-            description="",
             plans=plans,
-            skill_name=self.bug_runner._skill_name_for_kind(first_plan.kind) if first_plan.kind != "general" else "",
         )
+        selection = decision.selection
+        source_decision = decision.source_decision
+        first_plan = selection.plans[0] if selection.plans else BugAnalysisPlan(kind="general")
+        domain_kind = getattr(source_decision, "domain_kind", first_plan.kind)
         if source_decision.requested:
-            if first_plan.kind != "general":
-                plan_label = self._analysis_label_for_plan_kind(first_plan.kind)
+            if domain_kind not in {"general", "source_stage"}:
+                plan_label = self._analysis_label_for_plan_kind(domain_kind)
+                domain_plan = BugAnalysisPlan(kind=domain_kind)
                 return _IntentPreflightDecision(
                     title="文件分析",
                     intent_label=f"{plan_label} + 源码分析",
                     confidence_label="高置信度",
                     strategy_label="自动执行",
                     reason=source_decision.reason or "已识别源码分析诉求，将在专用分析后继续执行源码分析。",
-                    plans_override=[first_plan, BugAnalysisPlan(kind="source_stage")],
-                    classification_skill=self.bug_runner._skill_name_for_kind(first_plan.kind),
+                    plans_override=[domain_plan, BugAnalysisPlan(kind="source_stage")],
+                    classification_skill=selection.skill_name,
                     classification_reason=source_decision.reason or f"已命中专用分析方向：{plan_label}，并识别到源码分析诉求。",
                 )
             return _IntentPreflightDecision(
@@ -1881,16 +1882,16 @@ class BridgeApp:
                 classification_skill="source_analysis",
                 classification_reason=source_decision.reason or "文件请求命中源码分析意图，优先按源码导向分析执行。",
             )
-        if first_plan.kind != "general":
-            plan_label = self._analysis_label_for_plan_kind(first_plan.kind)
+        if domain_kind not in {"general", "source_stage"}:
+            plan_label = self._analysis_label_for_plan_kind(domain_kind)
             return _IntentPreflightDecision(
                 title="文件分析",
                 intent_label=f"文件型Bug分析（{plan_label}）",
                 confidence_label="高置信度",
                 strategy_label="自动执行",
                 reason=f"已命中专用分析方向：{plan_label}。",
-                plans_override=plans,
-                classification_skill=self.bug_runner._skill_name_for_kind(first_plan.kind),
+                plans_override=selection.plans,
+                classification_skill=selection.skill_name,
                 classification_reason=f"文件请求已稳定命中专用分析方向：{plan_label}。",
             )
         if not self._direct_analysis_needs_user_direction(prompt):
