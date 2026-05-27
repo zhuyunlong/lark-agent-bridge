@@ -10362,6 +10362,33 @@ class BugAnalysisRunner:
                 lightweight_provider="omlx",
                 lightweight_error=str(omlx_result.get("error") or ""),
             )
+        # --- Pydantic-AI path (structured output + tools, preferred before direct_api) ---
+        if (
+            not explicit_file_agent
+            and not provider_session_id.strip()
+            and backend_decision.backend == "direct_api"
+        ):
+            pai_result = self._run_bug_summary_pydantic_ai(
+                request_text=request_text,
+                request_artifact=request_artifact,
+                metadata_path=metadata_path,
+                output_path=output_path,
+                followup_text=followup_text,
+                previous_summary_path=previous_summary_path,
+                progress_callback=progress_callback,
+                snapshot_details=snapshot_details,
+                snapshot_plans=snapshot_plans,
+            )
+            if pai_result["message"]:
+                return self._annotate_summary_backend_result(
+                    pai_result,
+                    execution_backend="pydantic_ai",
+                    backend_reason="pydantic_ai_summary",
+                )
+            logger.info(
+                "pydantic-ai summary did not produce result (error=%s), trying direct_api",
+                pai_result.get("error", ""),
+            )
         # --- Direct API path (fast, preferred when [ai_provider] is enabled) ---
         if (
             not explicit_file_agent
@@ -11496,6 +11523,220 @@ class BugAnalysisRunner:
             return output_path.read_text(encoding="utf-8").strip()
         except OSError:
             return ""
+
+    def _run_bug_summary_pydantic_ai(
+        self,
+        *,
+        request_text: str,
+        request_artifact: Path,
+        metadata_path: Path,
+        output_path: Path,
+        followup_text: str = "",
+        previous_summary_path: Path | None = None,
+        progress_callback: Callable[[dict[str, object]], None] | None,
+        snapshot_details: dict[str, object] | None = None,
+        snapshot_plans: list["BugAnalysisPlan"] | None = None,
+    ) -> dict[str, object]:
+        """Run bug summary via pydantic-ai agent runtime (structured output + tools).
+
+        Unlike direct_api which inlines all files, this uses tools so the agent
+        can selectively read analysis artifacts. Falls back to direct_api on failure.
+        """
+        from .agent_runtime import AgentRuntime, _check_pydantic_ai
+
+        if not _check_pydantic_ai():
+            return {
+                "message": "",
+                "command": None,
+                "error": "pydantic_ai_not_available",
+                "provider": "pydantic_ai",
+                "session_id": "",
+                "resumed": False,
+                "duration_seconds": 0.0,
+                "usage": {},
+                "usage_scope": "",
+            }
+
+        ai_opts = self.config.ai_provider
+        started = time.monotonic()
+
+        # Build a tool-oriented prompt: list file paths instead of inlining content.
+        prompt = self._build_bug_summary_prompt_for_pydantic_ai(
+            request_text=request_text,
+            request_artifact=request_artifact,
+            metadata_path=metadata_path,
+            followup_text=followup_text,
+            previous_summary_path=previous_summary_path,
+            snapshot_details=snapshot_details,
+            snapshot_plans=snapshot_plans,
+        )
+        if not prompt.strip():
+            return {
+                "message": "",
+                "command": None,
+                "error": "pydantic_ai_prompt_empty",
+                "provider": "pydantic_ai",
+                "session_id": "",
+                "resumed": False,
+                "duration_seconds": time.monotonic() - started,
+                "usage": {},
+                "usage_scope": "",
+            }
+
+        self._emit_progress(
+            progress_callback,
+            stage="bug_agent_summary_pydantic_ai",
+            message="pydantic-ai Agent 整理最终结论（结构化输出 + 工具增强）",
+            provider="pydantic_ai",
+            model=ai_opts.primary_model,
+        )
+
+        system_prompt = (
+            "你是一个通过飞书触发的 bug 分析总结 agent。\n"
+            "你可以使用 read_file / grep_text 工具读取分析产物文件。\n"
+            "只读分析，不修改文件，不执行写入命令。\n"
+            "必须完整响应用户原始请求中的所有诉求，输出中文 Markdown，结论先行。\n"
+            "所有分析数据的路径已列在用户消息中，请使用工具读取需要的文件。"
+        )
+
+        workspace = metadata_path.parent if metadata_path.exists() else Path.cwd()
+        runtime = AgentRuntime(ai_opts, workspace=workspace, max_retries=1)
+        result = runtime.run(
+            system_prompt=system_prompt,
+            user_prompt=prompt,
+            tools_enabled=True,
+        )
+
+        duration = time.monotonic() - started
+        if result.ok and result.markdown.strip():
+            message = result.markdown.strip()
+            # Write to output_path for downstream consumers
+            try:
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_text(message, encoding="utf-8")
+            except OSError:
+                pass
+            self._emit_progress(
+                progress_callback,
+                stage="bug_agent_summary_completed",
+                message=f"pydantic-ai Agent 已整理最终结论（{duration:.1f}s）",
+                provider="pydantic_ai",
+                model=result.model,
+                duration_seconds=round(duration, 1),
+                tool_calls=result.tool_calls,
+            )
+            return {
+                "message": message,
+                "command": None,
+                "error": "",
+                "provider": "pydantic_ai",
+                "session_id": "",
+                "resumed": False,
+                "duration_seconds": duration,
+                "usage": result.usage,
+                "usage_scope": "summary",
+                "runtime_path": result.runtime_path,
+                "tool_calls": result.tool_calls,
+            }
+
+        logger.warning(
+            "pydantic-ai summary failed (%.1fs, error=%s), will fallback",
+            duration, result.error_code or result.error,
+        )
+        return {
+            "message": "",
+            "command": None,
+            "error": result.error or "pydantic_ai_summary_failed",
+            "provider": "pydantic_ai",
+            "session_id": "",
+            "resumed": False,
+            "duration_seconds": duration,
+            "usage": result.usage,
+            "usage_scope": "",
+        }
+
+    def _build_bug_summary_prompt_for_pydantic_ai(
+        self,
+        *,
+        request_text: str,
+        request_artifact: Path,
+        metadata_path: Path,
+        followup_text: str = "",
+        previous_summary_path: Path | None = None,
+        snapshot_details: dict[str, object] | None = None,
+        snapshot_plans: list["BugAnalysisPlan"] | None = None,
+    ) -> str:
+        """Build a tool-oriented summary prompt.
+
+        Unlike _build_bug_agent_summary_prompt_for_api which inlines file content,
+        this lists file paths so the pydantic-ai agent can use read_file/grep_text
+        tools to read them selectively.
+        """
+        prompt = "请基于以下分析材料完成 bug 会话的最终回答。\n"
+        prompt += "材料文件路径已列出，请使用 read_file 工具读取需要的文件内容。\n\n"
+
+        snapshot_prefix = ""
+        if followup_text.strip():
+            prompt += (
+                "这是续聊/追问。要求：\n"
+                "1. 直接回答新问题，延续上一轮分析。\n"
+                "2. 使用工具读取已有材料。\n"
+                "3. 只读分析，不修改文件。\n"
+                "4. 输出中文 Markdown，结论先行。\n\n"
+            )
+            snapshot_prefix = self._build_bug_prompt_snapshot_prefix(
+                request_text=request_text,
+                metadata_path=metadata_path,
+                followup_text=followup_text,
+                snapshot_details=snapshot_details,
+                plans_override=snapshot_plans,
+            )
+        else:
+            prompt += (
+                "这是全新 bug 分析请求。要求：\n"
+                "1. 完整覆盖用户请求里的所有诉求。\n"
+                "2. 只读分析，不修改文件。\n"
+                "3. 输出中文 Markdown，结论先行。\n\n"
+            )
+
+        prompt += (
+            "输出结构：\n"
+            "## 结论摘要\n- 3-5 条最重要结论，标明置信边界。\n"
+            "## 关键证据\n- 每条带文件、行号、时间。\n"
+            "## 最可能原因\n- 按可能性排序。\n"
+            "## 待确认项\n- 真实证据缺口。\n"
+            "## 建议动作\n- 下一轮可执行动作。\n\n"
+        )
+
+        if snapshot_prefix:
+            prompt += snapshot_prefix
+
+        prompt += f"### 用户原始请求\n{request_text}\n\n"
+        if followup_text.strip():
+            prompt += f"### 本次追问\n{followup_text.strip()}\n\n"
+
+        # List file paths for the agent to read
+        prompt += "### 可用材料文件\n"
+        file_list: list[str] = []
+        if request_artifact.exists():
+            file_list.append(f"- Bug 请求文件: `{request_artifact}`")
+        if metadata_path.exists():
+            file_list.append(f"- Bug 元数据: `{metadata_path}`")
+        if previous_summary_path and previous_summary_path.exists():
+            file_list.append(f"- 上一轮总结: `{previous_summary_path}`")
+        for item in self._bug_summary_context_items(metadata_path, include_html_reports=False):
+            path = Path(str(item["path"]))
+            title = str(item["title"])
+            if path.exists():
+                file_list.append(f"- {title}: `{path}`")
+
+        if file_list:
+            prompt += "\n".join(file_list) + "\n\n"
+            prompt += "请使用 read_file 工具读取上述文件，然后基于内容整理回答。\n"
+        else:
+            prompt += "（无可用材料文件）\n"
+
+        return prompt
 
     def _run_bug_agent_summary_via_api(
         self,

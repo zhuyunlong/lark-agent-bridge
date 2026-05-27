@@ -40,7 +40,7 @@ BUG_SCENARIOS = [
     },
     {
         "bug_id": "6998811703",
-        "source_job_id": "07f25238168f4e3e00101fa3eb034728",
+        "source_job_id": "1b8eb2e7f19754986ac4130c7e75c5e8",
         "followup": "重新分析 SIGNAL_SR_SCENE_TYPE 信号链路，检查 3D 场景模式下的信号传递是否完整",
         "requires_source": True,
         "analysis_kind": "scene_signal",
