@@ -10,6 +10,7 @@ PRIMARY_BUG_SKILL_MAP: dict[str, tuple[str, str, bool]] = {
     "signal-chain-analyzer": ("signal", "信号链路分析", False),
     "perception-data-summary": ("perception", "当前感知数据总结", True),
     "xtheme-analyzer": ("xtheme", "XTheme时光主题分析", True),
+    "ld-lane-level-log-analysis-portable": ("ld_lane_level", "LD车道级日志分析", True),
     "general": ("general", "通用问题分析", False),
 }
 

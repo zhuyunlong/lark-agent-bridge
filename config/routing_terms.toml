@@ -84,6 +84,19 @@ terms = [
     "日出日落", "主题切换", "黑白夜", "xuiconditionhelper",
 ]
 
+[ld_lane_level]
+terms = [
+    "车道级", "不进车道级", "退无图", "无图", "ld不显示",
+    "车道级消失", "tile没铺满", "tilefull", "checktilerender",
+    "百度normal", "百度tile", "ldconf", "ldstate",
+    "ld_state_changed", "checkldstate",
+    "lane-level", "lane level",
+    "ld:false", "ld:true",
+    "bizcode:132002",
+    "ld车道级", "ld 车道级",
+    "xpd_ldtilecachemanager",
+]
+
 [core_scene_signals]
 values = [
     "100002", "100008", "100009", "100010",

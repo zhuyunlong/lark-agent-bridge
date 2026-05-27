@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import shutil
+
+
 def _extract_chat_answer(payload: dict[str, object]) -> str:
     choices = payload["choices"]
     if not isinstance(choices, list) or not choices:
@@ -33,6 +36,18 @@ def _normalize_provider_name(provider: str) -> str:
     if normalized == "codex":
         return "codex"
     return normalized
+
+
+def _detect_available_provider() -> tuple[str, str]:
+    """Auto-detect an available agent provider on the system.
+
+    Returns (provider, command) or ("", "") if none found.
+    Prefers codex over claude.
+    """
+    for provider, command in [("codex", "codex"), ("claude", "claude")]:
+        if shutil.which(command):
+            return provider, command
+    return "", ""
 
 
 def _provider_candidates(provider: str, command_name: str) -> list[tuple[str, str]]:
