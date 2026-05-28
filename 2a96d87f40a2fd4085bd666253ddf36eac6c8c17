@@ -1,0 +1,31 @@
+tests/test_agents.py
+  a8b3ae0a102fc596 5066-5118
+lark_agent_bridge/parser.py
+  a8b3ae0a102fc596 435-441,443,452,473,831-846,848-864
+lark_agent_bridge/agents/bug_runner.py
+  a8b3ae0a102fc596 3971-3972,4242,4261
+lark_agent_bridge/skill_registry.py
+  a8b3ae0a102fc596 14
+tests/test_parser.py
+  a8b3ae0a102fc596 234-265
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.20",
+  "base_commit_sha": "2a96d87f40a2fd4085bd666253ddf36eac6c8c17",
+  "prompts": {
+    "a8b3ae0a102fc596": {
+      "agent_id": {
+        "tool": "qoder",
+        "id": "0b7afe88-d799-4525-a2e9-9fb2cc7417e8",
+        "model": "qoder-model"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 137,
+      "total_deletions": 5,
+      "accepted_lines": 133,
+      "overriden_lines": 0
+    }
+  }
+}
