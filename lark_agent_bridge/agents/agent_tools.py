@@ -607,6 +607,157 @@ def register_tools(
             return f"Error reading log metadata: {exc}"
 
     # ------------------------------------------------------------------
+    # New tools: get_file_outline, think, git_log, git_blame_range, repo_overview
+    # ------------------------------------------------------------------
+
+    @agent.tool_plain
+    def get_file_outline(path: str) -> str:
+        """获取文件的符号大纲（类、方法、函数列表及行号）。
+        适合先了解文件整体结构，再用 read_file(start_line, end_line) 精确读取具体实现。
+        支持 .kt .java .cs .py .swift .go .ts .js .rs 等语言。"""
+        logger.info("[tool_call] get_file_outline(path=%s)", path)
+        _emit_tool_progress("get_file_outline", path.split("/")[-1] if "/" in path else path)
+        return extract_file_outline(path, roots=all_roots)
+
+    @agent.tool_plain
+    def think(thought: str) -> str:
+        """记录分析思路（推理草稿）。不执行任何操作，仅记录当前推理步骤。
+        用于：梳理复杂调用链、记录假设、规划下一步搜索方向。
+        建议在开始复杂分析前用 think 写下分析计划。"""
+        logger.info("[tool_call] think(thought=%s...)", thought[:80])
+        _emit_tool_progress("think", f"💭 {thought[:60]}...")
+        return f"[思路记录] {thought}"
+
+    @agent.tool_plain
+    def git_log(path: str = ".", max_count: int = 20) -> str:
+        """查看文件或目录的 git 提交历史。返回最近 N 条提交（hash, 时间, 作者, 消息）。
+        用于：了解某个文件/函数最近被谁修改过、何时引入某改动。
+        path 可以是文件路径或目录路径。"""
+        logger.info("[tool_call] git_log(path=%s, max_count=%d)", path, max_count)
+        _emit_tool_progress("git_log", f"{path} (last {max_count})")
+        # Resolve path against workspace roots
+        resolved = _safe_resolve_multi(path, all_roots)
+        if resolved is None:
+            resolved = all_roots[0] if all_roots else None
+        if resolved is None:
+            return "Error: no workspace configured"
+        git_root = _find_git_root(resolved) or resolved
+        rel = str(resolved.relative_to(git_root)) if resolved != git_root else "."
+        out = _git_run(
+            ["log", f"--max-count={min(max_count, 50)}", "--follow",
+             "--pretty=format:%h  %ai  %an  %s", "--", rel],
+            cwd=git_root,
+        )
+        if not out.strip():
+            return f"No git history found for: {path}"
+        return f"git log --follow {rel} (last {max_count}):\n{out.strip()}"
+
+    @agent.tool_plain
+    def git_blame_range(path: str, start_line: int, end_line: int) -> str:
+        """查看文件指定行范围的 git blame（每行的最后修改 commit、时间、作者）。
+        用于：确定某个关键代码行是何时、由谁引入的。
+        start_line/end_line 均为 1-indexed 行号。"""
+        logger.info("[tool_call] git_blame_range(path=%s, %d-%d)", path, start_line, end_line)
+        _emit_tool_progress("git_blame_range", f"{path.split('/')[-1]}:{start_line}-{end_line}")
+        resolved = _safe_resolve_multi(path, all_roots)
+        if resolved is None or not resolved.exists():
+            return f"Error: file not found: {path}"
+        git_root = _find_git_root(resolved)
+        if git_root is None:
+            return f"Error: {path} is not inside a git repository"
+        rel = str(resolved.relative_to(git_root))
+        s = max(1, start_line)
+        e = max(s, min(end_line, s + 200))  # cap at 200 lines
+        out = _git_run(
+            ["blame", f"-L{s},{e}", "--date=short", "--porcelain", rel],
+            cwd=git_root,
+        )
+        if not out.strip():
+            return f"No blame info for {path}:{s}-{e}"
+        # Parse porcelain format into a readable table
+        lines_out: list[str] = []
+        current: dict[str, str] = {}
+        line_no = s
+        for bl in out.splitlines():
+            if bl.startswith("\t"):
+                # source line
+                code = bl[1:]
+                commit = current.get("commit", "?")[:8]
+                author = current.get("author", "?")[:20]
+                date = current.get("author-time-formatted", current.get("author-time", "?"))
+                lines_out.append(f"{line_no:5d}  {commit}  {date}  {author:<20}  {code}")
+                line_no += 1
+                current = {}
+            elif bl[:40].replace(" ", "").isalnum() and len(bl) > 40:
+                current["commit"] = bl[:40]
+            elif bl.startswith("author "):
+                current["author"] = bl[7:]
+            elif bl.startswith("author-time "):
+                import datetime
+                ts = int(bl[12:].split()[0])
+                current["author-time-formatted"] = datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+        return f"git blame {rel} L{s}-{e}:\n" + "\n".join(lines_out)
+
+    @agent.tool_plain
+    def repo_overview(path: str = ".") -> str:
+        """获取代码仓库概览：git 分支、最近提交、顶层目录结构、技术栈。
+        用于：快速了解一个不熟悉的仓库的整体情况。"""
+        logger.info("[tool_call] repo_overview(path=%s)", path)
+        _emit_tool_progress("repo_overview", path[:50])
+        resolved = _safe_resolve_multi(path, all_roots)
+        if resolved is None:
+            resolved = all_roots[0] if all_roots else Path(".")
+        if not resolved.is_dir():
+            resolved = resolved.parent
+        git_root = _find_git_root(resolved) or resolved
+
+        parts: list[str] = [f"Repository: {git_root.name}", f"Path: {git_root}"]
+
+        # Git info
+        branch = _git_run(["rev-parse", "--abbrev-ref", "HEAD"], cwd=git_root).strip()
+        if branch:
+            parts.append(f"Branch: {branch}")
+        head = _git_run(["log", "-1", "--pretty=format:%h  %ai  %an  %s"], cwd=git_root).strip()
+        if head:
+            parts.append(f"HEAD: {head}")
+
+        # Recent commits
+        recent = _git_run(["log", "--max-count=5", "--pretty=format:%h  %ai  %s"], cwd=git_root).strip()
+        if recent:
+            parts.append("Recent commits:")
+            for c in recent.splitlines():
+                parts.append(f"  {c}")
+
+        # Top-level structure
+        try:
+            entries = sorted(git_root.iterdir(), key=lambda p: (p.is_file(), p.name))
+            struct: list[str] = []
+            for e in entries[:40]:
+                if e.name in _SKIP_DIRS or e.name.startswith("."):
+                    continue
+                struct.append(f"  {'📁' if e.is_dir() else '📄'} {e.name}{'/' if e.is_dir() else ''}")
+            if struct:
+                parts.append("Structure:")
+                parts.extend(struct)
+        except OSError:
+            pass
+
+        # Tech stack detection
+        stack: list[str] = []
+        for marker, label in [
+            ("build.gradle", "Gradle/Android"), ("build.gradle.kts", "Gradle/Kotlin"),
+            ("pom.xml", "Maven/Java"), ("package.json", "Node.js"),
+            ("requirements.txt", "Python"), ("pyproject.toml", "Python"),
+            ("go.mod", "Go"), ("Cargo.toml", "Rust"), ("*.csproj", "C#/.NET"),
+        ]:
+            if (git_root / marker).exists() or list(git_root.glob(marker)):
+                stack.append(label)
+        if stack:
+            parts.append(f"Tech stack: {', '.join(stack)}")
+
+        return "\n".join(parts)
+
+    # ------------------------------------------------------------------
     # Codegraph tools (semantic code intelligence)
     # ------------------------------------------------------------------
     if codegraph_client is not None:
@@ -680,3 +831,10 @@ def register_tools(
             logger.info("Codegraph tools registered: search_codegraph, get_callers, get_code_context")
         else:
             logger.info("Codegraph client provided but no indexed repos found, skipping codegraph tools")
+
+    logger.info(
+        "Tools registered: read_file(+line range), get_file_outline, grep(+context), glob, list_dir, "
+        "think, git_log, git_blame_range, repo_overview, read_report_artifact, read_prepared_log_metadata"
+        "%s",
+        " + search_codegraph, get_callers, get_code_context" if codegraph_client else "",
+    )
