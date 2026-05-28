@@ -18,6 +18,7 @@ Usage:
 
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -114,26 +115,48 @@ class AgentRuntime:
         system_prompt: str,
         user_prompt: str,
         tools_enabled: bool = True,
+        strict_tools: bool = False,
+        extra_roots: list[Path] | None = None,
+        report_dir: Path | None = None,
+        log_metadata_path: Path | None = None,
+        progress_callback: Any | None = None,
+        stream: bool = False,
     ) -> RuntimeResult:
         """Execute the agent and return structured result.
 
-        Tries runtime paths in order of preference:
-        1. pydantic_ai_agent (if tools + structured output supported)
-        2. pydantic_ai_structured (structured output only)
-        3. direct_api (raw LLMClient)
+        Args:
+            strict_tools: if True, do NOT fallback to direct_api when pydantic-ai fails.
+                Use for source analysis where tool calls are mandatory.
+            extra_roots: additional workspace roots for tool access.
+            report_dir: job output dir for reading prior report artifacts.
+            log_metadata_path: path to prepared log metadata file.
+            progress_callback: optional callback(stage, message, **kw) for real-time tool progress.
+            stream: if True, use run_stream() for real-time text output (calls progress_callback
+                with stage="stream_text" for each chunk).
         """
         started = time.monotonic()
 
         if self._preferred_path in ("pydantic_ai_agent", "pydantic_ai_structured") and _check_pydantic_ai():
             use_tools = tools_enabled and self._preferred_path == "pydantic_ai_agent"
-            result = self._run_pydantic_ai(
+            runner = self._run_pydantic_ai_stream if stream else self._run_pydantic_ai
+            result = runner(
                 output_type=output_type,
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 use_tools=use_tools,
                 started=started,
+                extra_roots=extra_roots,
+                report_dir=report_dir,
+                log_metadata_path=log_metadata_path,
+                progress_callback=progress_callback,
             )
             if result.ok:
+                return result
+            if strict_tools:
+                logger.warning(
+                    "pydantic-ai failed (error=%s) and strict_tools=True, NOT falling back",
+                    result.error_code,
+                )
                 return result
             logger.warning(
                 "pydantic-ai runtime failed (error=%s), trying direct_api fallback",
@@ -155,6 +178,10 @@ class AgentRuntime:
         user_prompt: str,
         use_tools: bool,
         started: float,
+        extra_roots: list[Path] | None = None,
+        report_dir: Path | None = None,
+        log_metadata_path: Path | None = None,
+        progress_callback: Any | None = None,
     ) -> RuntimeResult:
         """Execute via pydantic-ai Agent."""
         try:
@@ -190,13 +217,22 @@ class AgentRuntime:
 
         if use_tools:
             from .agent_tools import register_tools
-            register_tools(agent, self.workspace)
+            register_tools(
+                agent,
+                self.workspace,
+                extra_roots=extra_roots,
+                report_dir=report_dir,
+                log_metadata_path=log_metadata_path,
+                progress_callback=progress_callback,
+            )
 
         try:
             from pydantic_ai import UsageLimits
+            # Source analysis needs many rounds of exploration;
+            # non-tool tasks can finish well under these limits.
             usage_limits = UsageLimits(
-                request_limit=15,
-                tool_calls_limit=30,
+                request_limit=50,
+                tool_calls_limit=80,
             )
             # Use higher max_tokens for pydantic-ai since tool results consume context
             effective_max_tokens = max(self.options.summary_max_tokens, 8192)
@@ -256,7 +292,7 @@ class AgentRuntime:
             if hasattr(result, "all_messages"):
                 for msg in result.all_messages():
                     msg_kind = getattr(msg, "kind", "")
-                    if msg_kind == "request" and hasattr(msg, "parts"):
+                    if msg_kind == "response" and hasattr(msg, "parts"):
                         for part in msg.parts:
                             part_kind = getattr(part, "part_kind", "")
                             if part_kind == "tool-call":
@@ -285,6 +321,183 @@ class AgentRuntime:
             usage=usage,
             tool_calls=tool_calls,
             tool_trace=tool_trace,
+        )
+
+    def _run_pydantic_ai_stream(
+        self,
+        *,
+        output_type: type | None,
+        system_prompt: str,
+        user_prompt: str,
+        use_tools: bool,
+        started: float,
+        extra_roots: list[Path] | None = None,
+        report_dir: Path | None = None,
+        log_metadata_path: Path | None = None,
+        progress_callback: Any | None = None,
+    ) -> RuntimeResult:
+        """Execute via pydantic-ai Agent with streaming output.
+
+        Uses run_stream() for real-time text generation. Tool calls
+        still happen in the loop, but the final text response is streamed
+        so we get partial results even for long generations.
+        """
+        try:
+            return asyncio.run(self._run_pydantic_ai_stream_async(
+                output_type=output_type,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                use_tools=use_tools,
+                started=started,
+                extra_roots=extra_roots,
+                report_dir=report_dir,
+                log_metadata_path=log_metadata_path,
+                progress_callback=progress_callback,
+            ))
+        except Exception as exc:
+            duration = time.monotonic() - started
+            logger.warning("pydantic-ai stream failed after %.1fs: %s", duration, exc)
+            return RuntimeResult(
+                ok=False,
+                error=str(exc),
+                error_code="pydantic_ai_stream_error",
+                runtime_path="pydantic_ai_agent" if use_tools else "pydantic_ai_structured",
+                duration_seconds=duration,
+                model=self.options.primary_model,
+            )
+
+    async def _run_pydantic_ai_stream_async(
+        self,
+        *,
+        output_type: type | None,
+        system_prompt: str,
+        user_prompt: str,
+        use_tools: bool,
+        started: float,
+        extra_roots: list[Path] | None = None,
+        report_dir: Path | None = None,
+        log_metadata_path: Path | None = None,
+        progress_callback: Any | None = None,
+    ) -> RuntimeResult:
+        """Async implementation of streaming pydantic-ai execution."""
+        from pydantic_ai import Agent
+        from pydantic_ai.settings import ModelSettings
+
+        model = self._create_pydantic_model()
+        if model is None:
+            return RuntimeResult(
+                ok=False, error="Could not create pydantic-ai model",
+                error_code="model_creation_failed", runtime_path="pydantic_ai",
+                duration_seconds=time.monotonic() - started,
+            )
+
+        agent_kwargs: dict[str, Any] = {
+            "system_prompt": system_prompt,
+            "retries": self.max_retries,
+        }
+        if output_type is not None:
+            agent_kwargs["output_type"] = output_type
+
+        agent = Agent(model, **agent_kwargs)
+
+        if use_tools:
+            from .agent_tools import register_tools
+            register_tools(
+                agent, self.workspace,
+                extra_roots=extra_roots,
+                report_dir=report_dir,
+                log_metadata_path=log_metadata_path,
+                progress_callback=progress_callback,
+            )
+
+        from pydantic_ai import UsageLimits
+        usage_limits = UsageLimits(request_limit=50, tool_calls_limit=80)
+        effective_max_tokens = max(self.options.summary_max_tokens, 8192)
+
+        accumulated_text = ""
+        chunk_count = 0
+        _STREAM_PROGRESS_INTERVAL = 500  # emit progress every N chars
+
+        async with agent.run_stream(
+            user_prompt,
+            model_settings=ModelSettings(
+                temperature=self.options.summary_temperature,
+                max_tokens=effective_max_tokens,
+            ),
+            usage_limits=usage_limits,
+        ) as stream_result:
+            async for chunk in stream_result.stream_text(delta=True):
+                accumulated_text += chunk
+                chunk_count += 1
+                # Emit streaming progress periodically
+                if progress_callback and len(accumulated_text) % _STREAM_PROGRESS_INTERVAL < len(chunk):
+                    try:
+                        progress_callback(
+                            stage="stream_text",
+                            message=f"📝 生成中... {len(accumulated_text)} chars",
+                            text_length=len(accumulated_text),
+                        )
+                    except Exception:
+                        pass
+
+            # Get structured output if available
+            try:
+                output = stream_result.output
+            except Exception:
+                output = accumulated_text
+
+        duration = time.monotonic() - started
+
+        # Extract markdown
+        markdown = ""
+        if hasattr(output, "to_markdown"):
+            markdown = output.to_markdown()
+        elif isinstance(output, str):
+            markdown = output
+        else:
+            markdown = accumulated_text or str(output)
+
+        # Extract usage
+        usage: dict[str, int] = {}
+        try:
+            u = stream_result.usage()
+            if u:
+                usage = {
+                    "request_tokens": getattr(u, "request_tokens", 0) or 0,
+                    "response_tokens": getattr(u, "response_tokens", 0) or 0,
+                    "total_tokens": getattr(u, "total_tokens", 0) or 0,
+                }
+        except Exception:
+            pass
+
+        # Extract tool trace from messages
+        tool_trace: list[dict[str, str]] = []
+        tool_calls = 0
+        try:
+            for msg in stream_result.all_messages():
+                msg_kind = getattr(msg, "kind", "")
+                if msg_kind == "response" and hasattr(msg, "parts"):
+                    for part in msg.parts:
+                        if getattr(part, "part_kind", "") == "tool-call":
+                            tool_calls += 1
+                            tool_trace.append({
+                                "tool": getattr(part, "tool_name", ""),
+                                "args": str(getattr(part, "args", ""))[:200],
+                            })
+        except Exception:
+            pass
+
+        runtime_path = "pydantic_ai_agent" if use_tools else "pydantic_ai_structured"
+        logger.info(
+            "pydantic-ai stream %s completed: %.1fs, %d tool calls, %d chunks, %d chars",
+            runtime_path, duration, tool_calls, chunk_count, len(accumulated_text),
+        )
+
+        return RuntimeResult(
+            ok=True, output=output, markdown=markdown,
+            runtime_path=runtime_path, model=self.options.primary_model,
+            duration_seconds=duration, usage=usage,
+            tool_calls=tool_calls, tool_trace=tool_trace,
         )
 
     def _run_direct_api(
