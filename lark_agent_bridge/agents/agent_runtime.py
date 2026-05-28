@@ -417,6 +417,7 @@ class AgentRuntime:
         accumulated_text = ""
         chunk_count = 0
         _STREAM_PROGRESS_INTERVAL = 500  # emit progress every N chars
+        is_structured = output_type is not None
 
         async with agent.run_stream(
             user_prompt,
@@ -426,24 +427,23 @@ class AgentRuntime:
             ),
             usage_limits=usage_limits,
         ) as stream_result:
-            async for chunk in stream_result.stream_text(delta=True):
-                accumulated_text += chunk
-                chunk_count += 1
-                # Emit streaming progress periodically
-                if progress_callback and len(accumulated_text) % _STREAM_PROGRESS_INTERVAL < len(chunk):
-                    try:
-                        progress_callback(
-                            stage="stream_text",
-                            message=f"📝 生成中... {len(accumulated_text)} chars",
-                            text_length=len(accumulated_text),
-                        )
-                    except Exception:
-                        pass
-
-            # Get structured output if available
-            try:
-                output = stream_result.output
-            except Exception:
+            if is_structured:
+                # Structured output: can't use stream_text(); wait for
+                # the full response (tool loop still runs during the stream).
+                output = await stream_result.get_output()
+            else:
+                async for chunk in stream_result.stream_text(delta=True):
+                    accumulated_text += chunk
+                    chunk_count += 1
+                    if progress_callback and len(accumulated_text) % _STREAM_PROGRESS_INTERVAL < len(chunk):
+                        try:
+                            progress_callback(
+                                stage="stream_text",
+                                message=f"📝 生成中... {len(accumulated_text)} chars",
+                                text_length=len(accumulated_text),
+                            )
+                        except Exception:
+                            pass
                 output = accumulated_text
 
         duration = time.monotonic() - started
