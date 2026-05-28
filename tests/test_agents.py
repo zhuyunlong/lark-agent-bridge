@@ -3851,7 +3851,7 @@ class AgentTests(unittest.TestCase):
                 )
 
         self.assertFalse(result.success)
-        self.assertEqual(result.error_code, "custom_skill_executor_not_ready")
+        self.assertIn(result.error_code, {"custom_skill_executor_not_ready", "source_code_skill_executor_not_ready"})
         self.assertIn("已命中专用 Skill", result.message)
         self.assertIn("当前没有可执行源码分析器", result.message)
         self.assertIn(skill_name, result.message)

@@ -1108,7 +1108,10 @@ class BugAnalysisRunner:
         fallback = self._skill_name_for_kind(SOURCE_STAGE_KIND)
         if not normalized or normalized == fallback:
             return fallback
-        if self.skill_manager.custom_skill_executor_for(normalized) == "file_agent":
+        # Return the skill name for any configured executor (file_agent, pydantic_ai, or "").
+        # Caller's executor_not_ready check handles the "" case (unconfigured skill).
+        executor = self.skill_manager.custom_skill_executor_for(normalized)
+        if executor in {"file_agent", "pydantic_ai", ""}:
             return normalized
         return fallback
 
@@ -1957,7 +1960,7 @@ class BugAnalysisRunner:
                         current_skill_name = self._resolve_source_stage_skill_name(selection.skill_name)
                     else:
                         current_skill_name = selection.skill_name or self._skill_name_for_kind(current_plan.kind)
-                    if _kind_spec(current_plan.kind).needs_custom_executor_check and current_skill_name != "source_analysis" and self.skill_manager.custom_skill_executor_for(current_skill_name) != "file_agent":
+                    if _kind_spec(current_plan.kind).needs_custom_executor_check and current_skill_name != "source_analysis" and self.skill_manager.custom_skill_executor_for(current_skill_name) not in {"file_agent", "pydantic_ai"}:
                         prefix = SOURCE_CODE_SKILL_KIND if current_plan.kind in _SOURCE_SKILL_KINDS else SOURCE_STAGE_KIND
                         return self._failure(
                             context=context,
@@ -2753,7 +2756,7 @@ class BugAnalysisRunner:
                             or str(details.get("analysis_skill") or "").strip()
                             or self._skill_name_for_kind(plan.kind)
                         )
-                    if _kind_spec(plan.kind).needs_custom_executor_check and skill_name != "source_analysis" and self.skill_manager.custom_skill_executor_for(skill_name) != "file_agent":
+                    if _kind_spec(plan.kind).needs_custom_executor_check and skill_name != "source_analysis" and self.skill_manager.custom_skill_executor_for(skill_name) not in {"file_agent", "pydantic_ai"}:
                         prefix = SOURCE_CODE_SKILL_KIND if plan.kind in _SOURCE_SKILL_KINDS else SOURCE_STAGE_KIND
                         return TaskResult(
                             success=False,
@@ -3575,7 +3578,7 @@ class BugAnalysisRunner:
                         current_skill_name = self._resolve_source_stage_skill_name(classification_skill)
                     else:
                         current_skill_name = classification_skill or self._skill_name_for_kind(current_plan.kind)
-                    if _kind_spec(current_plan.kind).needs_custom_executor_check and current_skill_name != "source_analysis" and self.skill_manager.custom_skill_executor_for(current_skill_name) != "file_agent":
+                    if _kind_spec(current_plan.kind).needs_custom_executor_check and current_skill_name != "source_analysis" and self.skill_manager.custom_skill_executor_for(current_skill_name) not in {"file_agent", "pydantic_ai"}:
                         prefix = SOURCE_CODE_SKILL_KIND if current_plan.kind in _SOURCE_SKILL_KINDS else SOURCE_STAGE_KIND
                         return TaskResult(
                             success=False,
