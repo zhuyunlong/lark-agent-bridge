@@ -5001,7 +5001,7 @@ class BugAnalysisRunner:
         target_time: str | None,
         bridge_session_id: str = "",
     ) -> subprocess.CompletedProcess[str] | None:
-        if plan.kind not in {"scene_signal", "perception", "xtheme", "startup", "stuck", "ld_lane_level"}:
+        if plan.kind not in {"scene_signal", "perception", "xtheme", "startup", "stuck"}:
             return None
         if input_path is None or not input_path.exists():
             return None
@@ -5013,9 +5013,10 @@ class BugAnalysisRunner:
             return None
         decoder_python = shutil.which("python3") or "python3"
         command = [decoder_python, str(decoder), str(input_path)]
-        time_arg = self._decoder_time_arg(target_time)
-        if time_arg:
-            command.append(time_arg)
+        if not input_path.is_file():
+            time_arg = self._decoder_time_arg(target_time)
+            if time_arg:
+                command.append(time_arg)
         return _run_tracked_process(
             command,
             watchdog=self.process_watchdog,

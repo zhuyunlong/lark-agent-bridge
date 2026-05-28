@@ -147,6 +147,34 @@ class AgentTests(unittest.TestCase):
             self.assertTrue(html_path.exists())
             self.assertTrue(json_path.exists())
 
+    def test_scene_signal_analysis_decodes_single_raw_alog_without_time_arg(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace_root = Path(tmp) / "workspace"
+            decoder_script = workspace_root / ".ai" / "skills" / "log-decoder" / "tools" / "alog_decoder.py"
+            decoder_script.parent.mkdir(parents=True)
+            decoder_script.write_text("# decoder\n", encoding="utf-8")
+            config = BridgeConfig(dry_run=False, data_dir=Path(tmp) / "data", workspace_root=workspace_root)
+            runner = BugAnalysisRunner(config)
+            raw_log = Path(tmp) / "main_2026-05-25_16-00.alog"
+            raw_log.write_bytes(b"\x06raw-alog")
+            analysis_dir = Path(tmp) / "analysis"
+
+            with mock.patch(
+                "lark_agent_bridge.agents.bug_runner._run_tracked_process",
+                return_value=subprocess.CompletedProcess(["python3"], 0, "ok", ""),
+            ) as run_mock:
+                runner._decode_raw_logs_before_analysis(
+                    plan=BugAnalysisPlan(kind="scene_signal"),
+                    input_path=raw_log,
+                    analysis_dir=analysis_dir,
+                    target_time="2026-05-25 16:50:41",
+                )
+
+            command = run_mock.call_args.args[0]
+            self.assertEqual(Path(command[1]).name, "alog_decoder.py")
+            self.assertEqual(command[2], str(raw_log))
+            self.assertEqual(len(command), 3)
+
     def test_omlx_chat_posts_to_chat_completions(self):
         response_payload = {"choices": [{"message": {"content": "本地模型回复"}}]}
 
