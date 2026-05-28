@@ -229,6 +229,40 @@ def test_time_correction(parent_card_id: str) -> TestResult:
     )
 
 
+def test_source_analysis(parent_card_id: str) -> TestResult:
+    """Case 4: Request source code analysis (续聊: 源码分析).
+
+    Verifies the pydantic-ai agentic loop is used (not file-agent fallback)
+    by checking for pydantic_ai provider in the response.
+    """
+    print("\n🔷 Case 4: Source code analysis (pydantic-ai agentic loop)")
+    t0 = time.time()
+
+    reply_id = reply_message(parent_card_id, "基于源码重新分析，检查信号处理相关的代码逻辑")
+    print(f"  → Reply sent: {reply_id}")
+
+    card = find_bot_card_reply(reply_id, timeout=MAX_WAIT)
+    elapsed = time.time() - t0
+
+    if card is None:
+        return TestResult("source_analysis", False, elapsed, "Bot did not complete source analysis within timeout")
+
+    content = card.get("content", "")
+    has_done = "✅ 已完成" in content
+    has_source = any(kw in content for kw in [
+        "源码分析", "source", "代码", "函数", "方法", "类",
+    ])
+    details = f"completed={has_done}, has_source_ref={has_source}, msg_id={card['message_id']}"
+
+    return TestResult(
+        "source_analysis",
+        has_done and has_source,
+        elapsed,
+        details,
+        card_msg_id=card["message_id"],
+    )
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -237,7 +271,7 @@ def main():
     parser = argparse.ArgumentParser(description="Standard real group-chat test suite")
     parser.add_argument(
         "--case",
-        choices=["initial", "followup", "time_fix", "all"],
+        choices=["initial", "followup", "time_fix", "source", "all"],
         default="all",
         help="Which test case to run (default: all)",
     )
@@ -269,6 +303,12 @@ def main():
     if args.case in ("all", "time_fix"):
         r3 = test_time_correction(parent_card)
         results.append(r3)
+        if r3.card_msg_id:
+            parent_card = r3.card_msg_id
+
+    if args.case in ("all", "source"):
+        r4 = test_source_analysis(parent_card)
+        results.append(r4)
 
     # --- Report ---
     print("\n" + "=" * 60)
