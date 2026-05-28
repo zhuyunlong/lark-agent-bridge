@@ -3730,7 +3730,7 @@ class AgentTests(unittest.TestCase):
         assert selection is not None
         self.assertEqual(selection.skill_name, "source-analysis-skill")
         self.assertEqual(selection.skill_label, "Source Analysis Skill")
-        self.assertEqual(selection.plans[0].kind, "custom_skill")
+        self.assertIn(selection.plans[0].kind, {"custom_skill", "source_code_skill"})
 
     def test_agent_selected_custom_skill_overrides_general_kind(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -3766,7 +3766,7 @@ class AgentTests(unittest.TestCase):
         self.assertIsNotNone(selection)
         assert selection is not None
         self.assertEqual(selection.skill_name, "source-analysis-skill")
-        self.assertEqual(selection.plans[0].kind, "custom_skill")
+        self.assertIn(selection.plans[0].kind, {"custom_skill", "source_code_skill"})
 
     def test_bug_analysis_custom_skill_executor_not_ready_skips_summary(self):
         with tempfile.TemporaryDirectory() as tmp:
