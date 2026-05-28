@@ -63,6 +63,11 @@ from ._helpers import (
     _provider_candidates,
 )
 from .bug_summary_policy import SummaryBackendInput, choose_summary_backend
+from .codex_app_server_runtime import (
+    CodexAppServerRuntime,
+    app_server_event_preview,
+    check_codex_app_server_available,
+)
 from .omlx_client import OmlxChatClient
 from .routing_terms import (
     CRASH_ROUTE_TERMS,
@@ -1108,11 +1113,19 @@ class BugAnalysisRunner:
         fallback = self._skill_name_for_kind(SOURCE_STAGE_KIND)
         if not normalized or normalized == fallback:
             return fallback
-        # Return the skill name for any configured executor (file_agent, pydantic_ai, or "").
-        # Caller's executor_not_ready check handles the "" case (unconfigured skill).
         executor = self.skill_manager.custom_skill_executor_for(normalized)
-        if executor in {"file_agent", "pydantic_ai", ""}:
+        if executor in {"file_agent", "pydantic_ai"}:
+            # Explicitly configured executor → use this skill
             return normalized
+        # executor == "" for two reasons:
+        #   (a) builtin/non-routed skill (scene-signal-diagnosis, signal-chain-analyzer, etc.)
+        #       → use fallback "source_analysis" so pydantic-ai runs without custom routing
+        #   (b) explicitly registered as primary source skill but no executor configured
+        #       → return name so executor_not_ready check fires downstream
+        # Distinguish by checking if primary_skill_map kind is a source skill kind.
+        entry = self.skill_manager.primary_skill_map().get(normalized)
+        if entry is not None and entry[0] in _SOURCE_SKILL_KINDS:
+            return normalized  # explicitly configured as source skill → trigger executor_not_ready
         return fallback
 
     def _skill_label_for_name(self, skill_name: str, fallback_kind: str = "general") -> str:
@@ -1961,7 +1974,7 @@ class BugAnalysisRunner:
                     else:
                         current_skill_name = selection.skill_name or self._skill_name_for_kind(current_plan.kind)
                     if _kind_spec(current_plan.kind).needs_custom_executor_check and current_skill_name != "source_analysis" and self.skill_manager.custom_skill_executor_for(current_skill_name) not in {"file_agent", "pydantic_ai"}:
-                        prefix = SOURCE_CODE_SKILL_KIND if current_plan.kind in _SOURCE_SKILL_KINDS else SOURCE_STAGE_KIND
+                        prefix = current_plan.kind if current_plan.kind in _SOURCE_SKILL_KINDS else SOURCE_STAGE_KIND
                         return self._failure(
                             context=context,
                             command=current_command,
@@ -2757,7 +2770,7 @@ class BugAnalysisRunner:
                             or self._skill_name_for_kind(plan.kind)
                         )
                     if _kind_spec(plan.kind).needs_custom_executor_check and skill_name != "source_analysis" and self.skill_manager.custom_skill_executor_for(skill_name) not in {"file_agent", "pydantic_ai"}:
-                        prefix = SOURCE_CODE_SKILL_KIND if plan.kind in _SOURCE_SKILL_KINDS else SOURCE_STAGE_KIND
+                        prefix = plan.kind if plan.kind in _SOURCE_SKILL_KINDS else SOURCE_STAGE_KIND
                         return TaskResult(
                             success=False,
                             message=self._custom_skill_executor_not_ready_message(
@@ -3579,7 +3592,7 @@ class BugAnalysisRunner:
                     else:
                         current_skill_name = classification_skill or self._skill_name_for_kind(current_plan.kind)
                     if _kind_spec(current_plan.kind).needs_custom_executor_check and current_skill_name != "source_analysis" and self.skill_manager.custom_skill_executor_for(current_skill_name) not in {"file_agent", "pydantic_ai"}:
-                        prefix = SOURCE_CODE_SKILL_KIND if current_plan.kind in _SOURCE_SKILL_KINDS else SOURCE_STAGE_KIND
+                        prefix = current_plan.kind if current_plan.kind in _SOURCE_SKILL_KINDS else SOURCE_STAGE_KIND
                         return TaskResult(
                             success=False,
                             message=self._custom_skill_executor_not_ready_message(
@@ -9406,6 +9419,112 @@ class BugAnalysisRunner:
                 dirs.append(resolved)
         return dirs
 
+    def _should_use_codex_app_server_for_file_agent(self, provider: str) -> bool:
+        options = self.config.codex_app_server
+        return (
+            options.enabled
+            and options.use_for_file_agent
+            and _normalize_provider_name(provider) == "codex"
+        )
+
+    def _write_app_server_event_audit(self, path: Path, events: list[dict[str, object]]) -> None:
+        lines = [json.dumps(event, ensure_ascii=False) for event in events]
+        path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+
+    def _run_custom_skill_agent_via_codex_app_server(
+        self,
+        *,
+        analysis_kind: str,
+        skill_name: str,
+        prompt_text: str,
+        command_path: Path,
+        stdout_path: Path,
+        stderr_path: Path,
+        events_path: Path,
+        progress_callback: Callable[[dict[str, object]], None] | None,
+        timeout: int,
+        bridge_session_id: str,
+    ) -> dict[str, object]:
+        options = self.config.codex_app_server
+        ok, version_or_error = check_codex_app_server_available(options.command, options.min_version)
+        if not ok:
+            return {
+                "ok": False,
+                "error_code": "codex_app_server_unavailable",
+                "message": f"Codex app-server 不可用：{version_or_error}",
+                "executor": "codex_app_server",
+                "provider": "codex",
+                "command": [options.command, "app-server"],
+                "stdout": "",
+                "stderr": version_or_error,
+                "usage": {},
+                "thread_id": "",
+                "turn_id": "",
+                "events": [],
+                "events_path": events_path,
+                "duration_seconds": 0.0,
+                "bridge_session_id": bridge_session_id,
+            }
+
+        subprocess_env = build_internal_network_env(self.config.internal_network_env)
+        runtime = CodexAppServerRuntime(
+            command=options.command,
+            cwd=self._working_dir(),
+            startup_timeout_seconds=options.startup_timeout_seconds,
+            turn_timeout_seconds=min(float(timeout), options.turn_timeout_seconds),
+            post_tool_quiet_timeout_seconds=options.post_tool_quiet_timeout_seconds,
+            notification_poll_seconds=options.notification_poll_seconds,
+            max_event_audit=options.max_event_audit,
+            sandbox_mode=options.sandbox_mode,
+            env=subprocess_env,
+        )
+
+        def _stream_event(event: dict[str, object]) -> None:
+            preview = app_server_event_preview(event)
+            if not preview:
+                return
+            self._emit_progress(
+                progress_callback,
+                stage=f"{analysis_kind}_agent_analysis_stream",
+                message=f"Codex app-server: {preview}",
+                provider="codex",
+                stream_preview=preview,
+            )
+
+        result = runtime.run_turn(prompt_text, on_event=_stream_event if progress_callback is not None else None)
+        stdout_path.write_text(result.stdout, encoding="utf-8")
+        stderr_path.write_text(result.stderr, encoding="utf-8")
+        self._write_app_server_event_audit(events_path, result.events)
+        command_path.write_text(json.dumps(result.command, ensure_ascii=False, indent=2), encoding="utf-8")
+        if progress_callback is not None:
+            summary_preview = result.stdout.splitlines()[0] if result.stdout.strip() else ""
+            self._emit_progress(
+                progress_callback,
+                stage=f"{analysis_kind}_agent_analysis_stream",
+                message=f"Codex app-server result: {summary_preview or ('ok' if result.ok else result.error_code or 'failed')}",
+                provider="codex",
+                stream_preview=summary_preview,
+            )
+        return {
+            "ok": result.ok,
+            "error_code": result.error_code,
+            "message": result.error,
+            "final_text": result.final_text,
+            "executor": "codex_app_server",
+            "provider": "codex",
+            "command": result.command,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "usage": result.usage,
+            "thread_id": result.thread_id,
+            "turn_id": result.turn_id,
+            "events": result.events,
+            "events_path": events_path,
+            "duration_seconds": result.duration_seconds,
+            "should_retire": result.should_retire,
+            "app_server_version": version_or_error,
+        }
+
     def _run_custom_skill_agent_analysis(
         self,
         *,
@@ -9438,6 +9557,7 @@ class BugAnalysisRunner:
         stdout_path = analysis_dir / self._skill_agent_sidecar_name(analysis_kind, "stdout.txt")
         stderr_path = analysis_dir / self._skill_agent_sidecar_name(analysis_kind, "stderr.txt")
         command_path = analysis_dir / self._skill_agent_sidecar_name(analysis_kind, "command.txt")
+        events_path = analysis_dir / self._skill_agent_sidecar_name(analysis_kind, "app_server_events.jsonl")
         context_path = analysis_dir / self._skill_agent_sidecar_name(analysis_kind, "context.md")
         log_focus_manifest_path = analysis_dir / "log_focus.md"
         debug_log_path = (
@@ -9452,6 +9572,7 @@ class BugAnalysisRunner:
             stdout_path,
             stderr_path,
             command_path,
+            events_path,
             context_path,
             log_focus_manifest_path,
         ]
@@ -9520,6 +9641,7 @@ class BugAnalysisRunner:
                 "stdout_path": stdout_path,
                 "stderr_path": stderr_path,
                 "command_path": command_path,
+                "events_path": events_path,
                 "context_path": context_path,
                 "log_focus_manifest_path": focus_manifest,
                 "focused_log_input": focused_log_input,
@@ -9540,10 +9662,86 @@ class BugAnalysisRunner:
         )
         stdout = ""
         stderr = ""
+        usage: dict[str, object] = {}
+        thread_id = ""
+        turn_id = ""
+        executor = "file_agent"
+        app_server_error_code = ""
+        app_server_error_message = ""
+        app_server_version = ""
         subprocess_env = build_internal_network_env(self.config.internal_network_env)
         process_debug_log_path = None if provider in {"claude", "claude-code", "claude_code"} else debug_log_path
         try:
-            if output_mode == "stdout_json":
+            if self._should_use_codex_app_server_for_file_agent(provider):
+                app_server_result = self._run_custom_skill_agent_via_codex_app_server(
+                    analysis_kind=analysis_kind,
+                    skill_name=skill_name,
+                    prompt_text=str(invocation.get("prompt") or ""),
+                    command_path=command_path,
+                    stdout_path=stdout_path,
+                    stderr_path=stderr_path,
+                    events_path=events_path,
+                    progress_callback=progress_callback,
+                    timeout=timeout,
+                    bridge_session_id=bridge_session_id,
+                )
+                app_server_error_code = str(app_server_result.get("error_code") or "")
+                app_server_error_message = str(app_server_result.get("message") or "")
+                app_server_version = str(app_server_result.get("app_server_version") or "")
+                app_server_command = list(app_server_result.get("command") or [])
+                if app_server_result.get("ok"):
+                    if app_server_command:
+                        command = app_server_command
+                    executor = "codex_app_server"
+                    stdout = str(app_server_result.get("stdout") or "")
+                    stderr = str(app_server_result.get("stderr") or "")
+                    usage_value = app_server_result.get("usage") or {}
+                    if isinstance(usage_value, dict):
+                        usage = dict(usage_value)
+                    thread_id = str(app_server_result.get("thread_id") or "")
+                    turn_id = str(app_server_result.get("turn_id") or "")
+                    final_text = str(app_server_result.get("final_text") or "").strip()
+                    if final_text:
+                        analysis_markdown_path.write_text(final_text + "\n", encoding="utf-8")
+                    completed = subprocess.CompletedProcess(command, 0, stdout, stderr)
+                elif self.config.codex_app_server.fallback_to_exec:
+                    self._emit_progress(
+                        progress_callback,
+                        stage=f"{analysis_kind}_agent_analysis_stream",
+                        message="Codex app-server 失败，回退到现有 codex exec 路径",
+                        provider=provider,
+                        app_server_error_code=app_server_error_code,
+                    )
+                    stdout = ""
+                    stderr = ""
+                else:
+                    return {
+                        "ok": False,
+                        "error_code": app_server_error_code or "codex_app_server_failed",
+                        "message": app_server_error_message or f"专用 Skill `{skill_name}` Codex app-server 执行失败。",
+                        "command": list(app_server_result.get("command") or command),
+                        "provider": provider,
+                        "executor": "codex_app_server",
+                        "analysis_markdown_path": analysis_markdown_path,
+                        "stdout_path": stdout_path,
+                        "stderr_path": stderr_path,
+                        "command_path": command_path,
+                        "events_path": events_path,
+                        "context_path": context_path,
+                        "log_focus_manifest_path": focus_manifest,
+                        "focused_log_input": focused_log_input,
+                        "focused_log_files": [str(path) for path in focused_files],
+                        "debug_log_path": debug_log_path,
+                        "stdout": str(app_server_result.get("stdout") or ""),
+                        "stderr": str(app_server_result.get("stderr") or ""),
+                        "duration_seconds": time.monotonic() - started,
+                        "usage": usage,
+                        "thread_id": thread_id,
+                        "turn_id": turn_id,
+                        "app_server_version": app_server_version,
+                        "app_server_error_code": app_server_error_code,
+                    }
+            if executor == "file_agent" and output_mode == "stdout_json":
                 completed = _run_tracked_process(
                     command,
                     watchdog=self.process_watchdog,
@@ -9561,7 +9759,7 @@ class BugAnalysisRunner:
                 raw_stdout = _coerce_process_text(completed.stdout)
                 stderr = _coerce_process_text(completed.stderr)
                 stdout = self._extract_text_from_agent_json(raw_stdout, analysis_markdown_path)
-            elif output_mode == "stdout_redirect":
+            elif executor == "file_agent" and output_mode == "stdout_redirect":
                 with analysis_markdown_path.open("w", encoding="utf-8") as stdout_handle:
                     completed = _run_tracked_process(
                         command,
@@ -9580,7 +9778,7 @@ class BugAnalysisRunner:
                     )
                 stdout = analysis_markdown_path.read_text(encoding="utf-8", errors="replace") if analysis_markdown_path.exists() else ""
                 stderr = _coerce_process_text(completed.stderr)
-            else:
+            elif executor == "file_agent":
                 completed = _run_tracked_process(
                     command,
                     watchdog=self.process_watchdog,
@@ -9614,6 +9812,7 @@ class BugAnalysisRunner:
                 "stdout_path": stdout_path,
                 "stderr_path": stderr_path,
                 "command_path": command_path,
+                "events_path": events_path,
                 "context_path": context_path,
                 "log_focus_manifest_path": focus_manifest,
                 "focused_log_input": focused_log_input,
@@ -9637,6 +9836,7 @@ class BugAnalysisRunner:
                 "stdout_path": stdout_path,
                 "stderr_path": stderr_path,
                 "command_path": command_path,
+                "events_path": events_path,
                 "context_path": context_path,
                 "log_focus_manifest_path": focus_manifest,
                 "focused_log_input": focused_log_input,
@@ -9657,10 +9857,12 @@ class BugAnalysisRunner:
                 "message": f"专用 Skill `{skill_name}` 文件 Agent 执行失败，未允许进入最终总结。",
                 "command": command,
                 "provider": provider,
+                "executor": executor,
                 "analysis_markdown_path": analysis_markdown_path,
                 "stdout_path": stdout_path,
                 "stderr_path": stderr_path,
                 "command_path": command_path,
+                "events_path": events_path,
                 "context_path": context_path,
                 "log_focus_manifest_path": focus_manifest,
                 "focused_log_input": focused_log_input,
@@ -9680,10 +9882,12 @@ class BugAnalysisRunner:
                 ),
                 "command": command,
                 "provider": provider,
+                "executor": executor,
                 "analysis_markdown_path": analysis_markdown_path,
                 "stdout_path": stdout_path,
                 "stderr_path": stderr_path,
                 "command_path": command_path,
+                "events_path": events_path,
                 "context_path": context_path,
                 "log_focus_manifest_path": focus_manifest,
                 "focused_log_input": focused_log_input,
@@ -9709,10 +9913,12 @@ class BugAnalysisRunner:
                 ),
                 "command": command,
                 "provider": provider,
+                "executor": executor,
                 "analysis_markdown_path": analysis_markdown_path,
                 "stdout_path": stdout_path,
                 "stderr_path": stderr_path,
                 "command_path": command_path,
+                "events_path": events_path,
                 "context_path": context_path,
                 "debug_log_path": debug_log_path,
                 "stdout": stdout,
@@ -9727,10 +9933,12 @@ class BugAnalysisRunner:
                 "message": f"专用 Skill `{skill_name}` 文件 Agent 输出缺少有效 `## 关键证据`：{reason}。不会进入最终总结。",
                 "command": command,
                 "provider": provider,
+                "executor": executor,
                 "analysis_markdown_path": analysis_markdown_path,
                 "stdout_path": stdout_path,
                 "stderr_path": stderr_path,
                 "command_path": command_path,
+                "events_path": events_path,
                 "context_path": context_path,
                 "log_focus_manifest_path": focus_manifest,
                 "focused_log_input": focused_log_input,
@@ -9760,6 +9968,13 @@ class BugAnalysisRunner:
             source_evidence_path=source_evidence_path,
             evidence_count=evidence_count,
             duration_seconds=time.monotonic() - started,
+            executor=executor,
+            extra_payload={
+                "usage": usage,
+                "thread_id": thread_id,
+                "turn_id": turn_id,
+                "app_server_version": app_server_version,
+            },
         )
         return {
             "ok": True,
@@ -9768,12 +9983,14 @@ class BugAnalysisRunner:
             "command": command,
             "analysis_kind": analysis_kind,
             "provider": provider,
+            "executor": executor,
             "analysis_markdown_path": analysis_markdown_path,
             "html_path": html_path,
             "json_path": json_path,
             "stdout_path": stdout_path,
             "stderr_path": stderr_path,
             "command_path": command_path,
+            "events_path": events_path,
             "context_path": context_path,
             "log_focus_manifest_path": focus_manifest,
             "focused_log_input": focused_log_input,
@@ -9783,6 +10000,12 @@ class BugAnalysisRunner:
             "stderr": stderr,
             "duration_seconds": time.monotonic() - started,
             "evidence_count": evidence_count,
+            "usage": usage,
+            "thread_id": thread_id,
+            "turn_id": turn_id,
+            "app_server_version": app_server_version,
+            "app_server_error_code": app_server_error_code,
+            "app_server_error_message": app_server_error_message,
             "custom_skill_analysis_status": "completed",
         }
 
@@ -10746,6 +10969,8 @@ class BugAnalysisRunner:
         source_evidence_path: Path | None,
         evidence_count: int,
         duration_seconds: float,
+        executor: str = "file_agent",
+        extra_payload: dict[str, object] | None = None,
     ) -> None:
         analysis_text = analysis_markdown_path.read_text(encoding="utf-8", errors="replace")
         analysis_file_name = analysis_markdown_path.name
@@ -10805,7 +11030,7 @@ class BugAnalysisRunner:
                 ReportSection(kind="details", title="原始输入", summary="展开查看请求与缺陷描述", body_html=raw_body),
             ],
         )
-        status_key = "source_code_skill_analysis_status" if analysis_kind in _SOURCE_SKILL_KINDS else f"{analysis_kind}_analysis_status"
+        status_key = f"{analysis_kind}_analysis_status"
         payload = {
             "mode": f"{analysis_kind}_agent_analysis",
             "summary": verdict_text,
@@ -10813,7 +11038,7 @@ class BugAnalysisRunner:
             status_key: "completed",
             "analysis_kind": analysis_kind,
             "analysis_skill": skill_name,
-            "executor": "file_agent",
+            "executor": executor,
             "provider": provider,
             "evidence_count": evidence_count,
             "analysis_markdown": str(analysis_markdown_path),
@@ -10828,6 +11053,8 @@ class BugAnalysisRunner:
             "description": description.strip(),
             "duration_seconds": duration_seconds,
         }
+        if extra_payload:
+            payload.update(extra_payload)
         html_path.write_text(
             combined_bug_html.render_report_shell(**composition_to_renderer_payload(composition)),
             encoding="utf-8",
@@ -10835,10 +11062,18 @@ class BugAnalysisRunner:
         json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def _skill_file_agent_execution_details(self, analysis_kind: str, result: dict[str, object]) -> dict[str, object]:
-        prefix = SOURCE_CODE_SKILL_KIND if analysis_kind in _SOURCE_SKILL_KINDS else analysis_kind
+        prefix = analysis_kind
         status_key = f"{prefix}_analysis_status"
+        executor = str(result.get("executor") or "file_agent")
+        usage = result.get("usage") or {}
+        total_tokens = 0
+        if isinstance(usage, dict):
+            if isinstance(usage.get("totalTokens"), int):
+                total_tokens = int(usage.get("totalTokens") or 0)
+            elif isinstance(usage.get("total_tokens"), int):
+                total_tokens = int(usage.get("total_tokens") or 0)
         details = {
-            f"{prefix}_executor": "file_agent",
+            f"{prefix}_executor": executor,
             status_key: str(result.get(status_key) or result.get("custom_skill_analysis_status") or "completed"),
             f"{prefix}_analysis_file": str(result.get("analysis_markdown_path") or ""),
             f"{prefix}_report_html": str(result.get("html_path") or ""),
@@ -10847,15 +11082,21 @@ class BugAnalysisRunner:
             f"{prefix}_log_focus_manifest": str(result.get("log_focus_manifest_path") or ""),
             f"{prefix}_focused_log_input": str(result.get("focused_log_input") or ""),
             f"{prefix}_debug_log": str(result.get("debug_log_path") or ""),
+            f"{prefix}_events_file": str(result.get("events_path") or ""),
             f"{prefix}_evidence_count": int(result.get("evidence_count") or 0),
             f"{prefix}_agent_provider": str(result.get("provider") or ""),
             f"{prefix}_agent_duration_seconds": result.get("duration_seconds") or 0.0,
+            f"{prefix}_app_server_thread_id": str(result.get("thread_id") or ""),
+            f"{prefix}_app_server_turn_id": str(result.get("turn_id") or ""),
+            f"{prefix}_runtime_path": str(result.get("runtime_path") or ""),
+            f"{prefix}_tool_calls": int(result.get("tool_calls") or 0),
+            f"{prefix}_total_tokens": total_tokens,
         }
         if _kind_spec(analysis_kind).is_source_stage:
             stage_status = str(result.get(status_key) or result.get("custom_skill_analysis_status") or "completed")
             details.update(
                 {
-                    "source_stage_executor": "file_agent",
+                    "source_stage_executor": executor,
                     "source_stage_analysis_status": stage_status,
                     "source_stage_analysis_file": str(result.get("analysis_markdown_path") or ""),
                     "source_stage_report_html": str(result.get("html_path") or ""),
@@ -10864,9 +11105,15 @@ class BugAnalysisRunner:
                     "source_stage_log_focus_manifest": str(result.get("log_focus_manifest_path") or ""),
                     "source_stage_focused_log_input": str(result.get("focused_log_input") or ""),
                     "source_stage_debug_log": str(result.get("debug_log_path") or ""),
+                    "source_stage_events_file": str(result.get("events_path") or ""),
                     "source_stage_evidence_count": int(result.get("evidence_count") or 0),
                     "source_stage_agent_provider": str(result.get("provider") or ""),
                     "source_stage_agent_duration_seconds": result.get("duration_seconds") or 0.0,
+                    "source_stage_app_server_thread_id": str(result.get("thread_id") or ""),
+                    "source_stage_app_server_turn_id": str(result.get("turn_id") or ""),
+                    "source_stage_runtime_path": str(result.get("runtime_path") or ""),
+                    "source_stage_tool_calls": int(result.get("tool_calls") or 0),
+                    "source_stage_total_tokens": total_tokens,
                 }
             )
         return details

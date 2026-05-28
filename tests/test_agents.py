@@ -23,10 +23,12 @@ from lark_agent_bridge.agents.bug_summary_policy import (
     SummaryBackendInput,
     choose_summary_backend,
 )
+from lark_agent_bridge.agents.codex_app_server_runtime import CodexAppServerResult
 from lark_agent_bridge.agents.llm_client import LLMClientError
 from lark_agent_bridge.models import (
     BridgeConfig,
     BugRequest,
+    CodexAppServerOptions,
     DirectAnalysisRequest,
     DownloadedResource,
     DownloadResource,
@@ -4333,6 +4335,172 @@ class AgentTests(unittest.TestCase):
         self.assertIn("## 执行约束", context_body)
         self.assertNotIn("project.feishu.cn", context_body)
 
+    def test_custom_skill_file_agent_uses_codex_app_server_when_enabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "workspace"
+            skill_name = "app-server-custom-skill"
+            skill_dir = root / ".ai" / "skills" / skill_name
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "---\nname: App Server Custom Skill\ndescription: app-server test.\n---\n\n# App Server\n",
+                encoding="utf-8",
+            )
+            config = BridgeConfig(
+                dry_run=False,
+                data_dir=Path(tmp) / "data",
+                workspace_root=root,
+                codex_app_server=CodexAppServerOptions(
+                    enabled=True,
+                    use_for_file_agent=True,
+                    fallback_to_exec=True,
+                ),
+            )
+            config.bug_analysis.provider = "codex"
+            config.bug_analysis.command = "codex"
+            runner = BugAnalysisRunner(config)
+            log_root = Path(tmp) / "logs"
+            self._write_matching_log(log_root, "2026-05-25 16:50:41")
+            progress_events: list[dict[str, object]] = []
+            runtime = mock.Mock()
+            runtime.run_turn.return_value = CodexAppServerResult(
+                ok=True,
+                final_text=(
+                    "## 结论摘要\n- app-server 已完成。\n\n"
+                    "## 关键证据\n- L1: scene evidence\n\n"
+                    "## 待确认项\n- 无\n\n"
+                    "## 建议动作\n- 继续验证。\n"
+                ),
+                command=["codex", "app-server", "-c", 'sandbox_mode=\"read-only\"'],
+                stdout="Codex command rg --line-number 3D场景",
+                stderr="",
+                thread_id="thread-app-server",
+                turn_id="turn-app-server",
+                duration_seconds=4.2,
+                events=[
+                    {"method": "turn/started", "params": {"turn": {"id": "turn-app-server"}}},
+                    {"method": "turn/completed", "params": {"turn": {"status": "completed"}}},
+                ],
+                usage={"totalTokens": 2468, "inputTokens": 2000, "outputTokens": 468},
+            )
+
+            with (
+                mock.patch(
+                    "lark_agent_bridge.agents.bug_runner.check_codex_app_server_available",
+                    return_value=(True, "0.134.0"),
+                ),
+                mock.patch(
+                    "lark_agent_bridge.agents.bug_runner.CodexAppServerRuntime",
+                    return_value=runtime,
+                ),
+                mock.patch("lark_agent_bridge.agents.run_tracked_process") as run_mock,
+            ):
+                result = runner._run_custom_skill_agent_analysis(
+                    skill_name=skill_name,
+                    request_text="2026-05-25 16:50:41 3D场景模式",
+                    prompt_text="2026-05-25 16:50:41 3D场景模式",
+                    title="3D 场景模式",
+                    description="",
+                    fault_time="2026-05-25 16:50:41",
+                    selected_input=log_root,
+                    prepared_input=log_root,
+                    source_evidence_path=None,
+                    html_path=Path(tmp) / "bug_custom_skill_report.html",
+                    json_path=Path(tmp) / "bug_custom_skill_report.json",
+                    analysis_dir=Path(tmp) / "custom_skill_analysis",
+                    progress_callback=progress_events.append,
+                    timeout=30,
+                )
+                analysis_text = Path(result["analysis_markdown_path"]).read_text(encoding="utf-8")
+                event_audit_text = Path(result["events_path"]).read_text(encoding="utf-8")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["executor"], "codex_app_server")
+        self.assertEqual(result["usage"]["totalTokens"], 2468)
+        self.assertEqual(result["thread_id"], "thread-app-server")
+        self.assertIn("app-server 已完成", analysis_text)
+        self.assertIn("\"method\": \"turn/completed\"", event_audit_text)
+        self.assertTrue(any("Codex" in str(event.get("message") or "") for event in progress_events))
+        run_mock.assert_not_called()
+
+    def test_custom_skill_file_agent_app_server_falls_back_to_exec(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "workspace"
+            skill_name = "app-server-fallback-skill"
+            skill_dir = root / ".ai" / "skills" / skill_name
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "---\nname: App Server Fallback Skill\ndescription: fallback test.\n---\n\n# Fallback\n",
+                encoding="utf-8",
+            )
+            config = BridgeConfig(
+                dry_run=False,
+                data_dir=Path(tmp) / "data",
+                workspace_root=root,
+                codex_app_server=CodexAppServerOptions(
+                    enabled=True,
+                    use_for_file_agent=True,
+                    fallback_to_exec=True,
+                ),
+            )
+            config.bug_analysis.provider = "codex"
+            config.bug_analysis.command = "codex"
+            runner = BugAnalysisRunner(config)
+            log_root = Path(tmp) / "logs"
+            self._write_matching_log(log_root, "2026-05-25 16:50:41")
+            runtime = mock.Mock()
+            runtime.run_turn.return_value = CodexAppServerResult(
+                ok=False,
+                error="startup failed",
+                error_code="codex_app_server_startup_failed",
+                command=["codex", "app-server"],
+                stderr="startup failed",
+                should_retire=True,
+            )
+
+            def fake_file_agent(command, **kwargs):
+                output_path = Path(command[command.index("--output-last-message") + 1])
+                output_path.write_text(
+                    "## 结论摘要\n- exec fallback 完成。\n\n"
+                    "## 关键证据\n- L1: fallback evidence\n\n"
+                    "## 待确认项\n- 无\n\n"
+                    "## 建议动作\n- 无\n",
+                    encoding="utf-8",
+                )
+                return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+
+            with (
+                mock.patch(
+                    "lark_agent_bridge.agents.bug_runner.check_codex_app_server_available",
+                    return_value=(True, "0.134.0"),
+                ),
+                mock.patch(
+                    "lark_agent_bridge.agents.bug_runner.CodexAppServerRuntime",
+                    return_value=runtime,
+                ),
+                mock.patch("lark_agent_bridge.agents.run_tracked_process", side_effect=fake_file_agent) as run_mock,
+            ):
+                result = runner._run_custom_skill_agent_analysis(
+                    skill_name=skill_name,
+                    request_text="2026-05-25 16:50:41 3D场景模式",
+                    prompt_text="2026-05-25 16:50:41 3D场景模式",
+                    title="3D 场景模式",
+                    description="",
+                    fault_time="2026-05-25 16:50:41",
+                    selected_input=log_root,
+                    prepared_input=log_root,
+                    source_evidence_path=None,
+                    html_path=Path(tmp) / "bug_custom_skill_report.html",
+                    json_path=Path(tmp) / "bug_custom_skill_report.json",
+                    analysis_dir=Path(tmp) / "custom_skill_analysis",
+                    progress_callback=None,
+                    timeout=30,
+                )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["executor"], "file_agent")
+        self.assertEqual(result["app_server_error_code"], "codex_app_server_startup_failed")
+        run_mock.assert_called_once()
+
     def test_bug_analysis_custom_skill_file_agent_runs_before_summary(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "workspace"
@@ -4397,13 +4565,13 @@ class AgentTests(unittest.TestCase):
             assert selection is not None
 
             def fake_build_bug_outputs(**kwargs):
-                custom_json = kwargs["report_jsons"]["custom_skill"]
+                custom_json = kwargs["report_jsons"].get("source_code_skill") or kwargs["report_jsons"].get("custom_skill")
                 self.assertIsNotNone(custom_json)
                 assert custom_json is not None
                 payload = json.loads(custom_json.read_text(encoding="utf-8"))
-                self.assertEqual(payload["mode"], "custom_skill_agent_analysis")
-                self.assertEqual(payload["custom_skill_analysis_status"], "completed")
-                self.assertEqual(payload["analysis_kind"], "custom_skill")
+                self.assertEqual(payload["mode"], "source_code_skill_agent_analysis")
+                self.assertEqual(payload["source_code_skill_analysis_status"], "completed")
+                self.assertEqual(payload["analysis_kind"], "source_code_skill")
                 self.assertEqual(payload["evidence_count"], 2)
                 return "# meta\n", "script summary"
 
@@ -4442,13 +4610,18 @@ class AgentTests(unittest.TestCase):
                         triggered=True,
                     )
                 )
-                analysis_file_exists = Path(result.details.get("custom_skill_analysis_file", "")).exists()
+                analysis_file = (
+                    result.details.get("source_code_skill_analysis_file")
+                    or result.details.get("custom_skill_analysis_file")
+                    or ""
+                )
+                analysis_file_exists = Path(analysis_file).exists()
 
         self.assertTrue(result.success)
         self.assertEqual(result.message, "agent final conclusion")
-        self.assertEqual(result.details["analysis_kind"], "custom_skill")
-        self.assertEqual(result.details["custom_skill_analysis_status"], "completed")
-        self.assertEqual(result.details["custom_skill_evidence_count"], 2)
+        self.assertEqual(result.details["analysis_kind"], "source_code_skill")
+        self.assertEqual(result.details["source_code_skill_analysis_status"], "completed")
+        self.assertEqual(result.details["source_code_skill_evidence_count"], 2)
         self.assertTrue(analysis_file_exists)
         run_mock.assert_called_once()
         summary_mock.assert_called_once()
