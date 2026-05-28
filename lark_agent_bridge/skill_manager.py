@@ -199,7 +199,7 @@ class SkillManager:
         elif route_kind not in _ROUTE_KINDS:
             raise SkillManagerError("analysis kind 不支持", status_code=400)
         route_executor = self._normalize_route_executor(str(executor or "").strip())
-        if normalized_role != "primary" or route_kind != "custom_skill":
+        if normalized_role != "primary" or route_kind not in {"custom_skill", "source_code_skill"}:
             route_executor = ""
         if requires_logs is None:
             effective_requires_logs = bool(default_requires_logs if default_kind else normalized_role == "primary")
@@ -237,7 +237,7 @@ class SkillManager:
             return ""
         default_kind, _default_label, _default_requires_logs, _default_role = self._default_metadata_for(normalized)
         kind = self._normalize_primary_route_kind(normalized, str(route.get("kind") or "").strip(), default_kind)
-        if kind != "custom_skill":
+        if kind not in {"custom_skill", "source_code_skill"}:
             return ""
         return self._normalize_route_executor(str(route.get("executor") or "").strip())
 
@@ -341,7 +341,7 @@ class SkillManager:
         else:
             status = "missing_skill_md"
         kind, label, requires_logs, role = self._metadata_for(name)
-        executor = self.custom_skill_executor_for(name) if kind == "custom_skill" else ""
+        executor = self.custom_skill_executor_for(name) if kind in {"custom_skill", "source_code_skill"} else ""
         scripts = _script_paths(directory)
         route_status, route_status_label, selectable, routing_note, runtime_type = _route_metadata(
             name=name,
@@ -374,7 +374,7 @@ class SkillManager:
 
     def _virtual_record(self, name: str) -> SkillRecord:
         kind, label, requires_logs, role = self._metadata_for(name)
-        executor = self.custom_skill_executor_for(name) if kind == "custom_skill" else ""
+        executor = self.custom_skill_executor_for(name) if kind in {"custom_skill", "source_code_skill"} else ""
         route_status, route_status_label, selectable, routing_note, runtime_type = _route_metadata(
             name=name,
             kind=kind,
@@ -426,17 +426,17 @@ class SkillManager:
         normalized = route_kind.strip()
         if not normalized:
             normalized = default_kind.strip()
-        # Normalize source_code_skill alias to canonical internal kind
-        if normalized == "source_code_skill":
-            normalized = "custom_skill"
+        # Normalize legacy custom_skill → source_code_skill (canonical name)
+        if normalized == "custom_skill":
+            normalized = "source_code_skill"
         if name in PRIMARY_BUG_SKILL_MAP:
             if normalized == "general" and default_kind and default_kind != "general":
                 return default_kind
             return normalized or "general"
-        if normalized == "custom_skill":
-            return "custom_skill"
+        if normalized == "source_code_skill":
+            return "source_code_skill"
         if normalized == "general" or not normalized or normalized not in _ROUTE_KINDS:
-            return "custom_skill"
+            return "source_code_skill"
         return normalized
 
     def _normalize_route_executor(self, executor: str) -> str:

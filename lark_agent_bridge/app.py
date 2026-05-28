@@ -1851,11 +1851,10 @@ class BridgeApp:
                 strategy_label="自动执行",
                 reason="消息已包含可执行的文件分析资源。",
             )
-        plans = self.bug_runner.classify_requests(prompt_text=prompt, title="", description="")
+        plans = None  # let classify_and_decide handle classification internally
         decision = self.bug_runner.classify_and_decide(
             request_text=request.raw_text or prompt,
             prompt_text=prompt,
-            plans=plans,
         )
         selection = decision.selection
         source_decision = decision.source_decision

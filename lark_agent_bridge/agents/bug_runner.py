@@ -83,7 +83,10 @@ from .routing_terms import (
 logger = get_logger("agents")
 
 SOURCE_STAGE_KIND = "source_stage"
-SOURCE_STAGE_KINDS = {SOURCE_STAGE_KIND}
+# Canonical name for the source-code analysis capability.
+# source_stage is kept as an alias for backward compatibility.
+SOURCE_CODE_SKILL_KIND = "source_code_skill"
+SOURCE_STAGE_KINDS = {SOURCE_STAGE_KIND, SOURCE_CODE_SKILL_KIND}
 
 
 @dataclass(frozen=True)
@@ -126,6 +129,10 @@ PLAN_KIND_REGISTRY: dict[str, PlanKindSpec] = {
     "general":       PlanKindSpec(is_agent_handled=True, needs_source_evidence=True),
     "custom_skill":  PlanKindSpec(is_agent_handled=True, is_custom_agent=True, needs_source_evidence=True),
     SOURCE_STAGE_KIND: PlanKindSpec(
+        is_agent_handled=True, is_custom_agent=True,
+        needs_source_evidence=True, is_source_stage=True,
+    ),
+    SOURCE_CODE_SKILL_KIND: PlanKindSpec(
         is_agent_handled=True, is_custom_agent=True,
         needs_source_evidence=True, is_source_stage=True,
     ),
