@@ -127,7 +127,7 @@ PLAN_KIND_REGISTRY: dict[str, PlanKindSpec] = {
     "ld_lane_level": PlanKindSpec(is_agent_handled=True, is_custom_agent=True),
     "pullover_chain": PlanKindSpec(is_agent_handled=True, is_custom_agent=True),
     "general":       PlanKindSpec(is_agent_handled=True, needs_source_evidence=True),
-    "custom_skill":  PlanKindSpec(is_agent_handled=True, is_custom_agent=True, needs_source_evidence=True),
+    "custom_skill":  PlanKindSpec(is_agent_handled=True, is_custom_agent=True, needs_source_evidence=True),  # legacy alias
     SOURCE_STAGE_KIND: PlanKindSpec(
         is_agent_handled=True, is_custom_agent=True,
         needs_source_evidence=True, is_source_stage=True,
@@ -137,6 +137,9 @@ PLAN_KIND_REGISTRY: dict[str, PlanKindSpec] = {
         needs_source_evidence=True, is_source_stage=True,
     ),
 }
+
+# Canonical set for "custom_skill or source_code_skill" checks.
+_SOURCE_SKILL_KINDS = {"custom_skill", SOURCE_CODE_SKILL_KIND}
 
 # Derived sets — kept for call sites that need a set (e.g. set membership tests
 # on lists of plans, or unpacking into other sets).
@@ -1883,7 +1886,7 @@ class BugAnalysisRunner:
             # search is slow or codegraph is cold.
             source_evidence_path: Path | None = None
             if source_evidence_future is not None:
-                if any(item.kind == "custom_skill" for item in plans):
+                if any(item.kind in _SOURCE_SKILL_KINDS for item in plans):
                     source_evidence_path = context.output_dir / "bug_source_evidence.md"
                 else:
                     source_evidence_path = self._resolve_source_evidence_future(source_evidence_future)
@@ -1955,7 +1958,7 @@ class BugAnalysisRunner:
                     else:
                         current_skill_name = selection.skill_name or self._skill_name_for_kind(current_plan.kind)
                     if _kind_spec(current_plan.kind).needs_custom_executor_check and current_skill_name != "source_analysis" and self.skill_manager.custom_skill_executor_for(current_skill_name) != "file_agent":
-                        prefix = "custom_skill" if current_plan.kind == "custom_skill" else SOURCE_STAGE_KIND
+                        prefix = SOURCE_CODE_SKILL_KIND if current_plan.kind in _SOURCE_SKILL_KINDS else SOURCE_STAGE_KIND
                         return self._failure(
                             context=context,
                             command=current_command,
@@ -2751,7 +2754,7 @@ class BugAnalysisRunner:
                             or self._skill_name_for_kind(plan.kind)
                         )
                     if _kind_spec(plan.kind).needs_custom_executor_check and skill_name != "source_analysis" and self.skill_manager.custom_skill_executor_for(skill_name) != "file_agent":
-                        prefix = "custom_skill" if plan.kind == "custom_skill" else SOURCE_STAGE_KIND
+                        prefix = SOURCE_CODE_SKILL_KIND if plan.kind in _SOURCE_SKILL_KINDS else SOURCE_STAGE_KIND
                         return TaskResult(
                             success=False,
                             message=self._custom_skill_executor_not_ready_message(
@@ -3573,7 +3576,7 @@ class BugAnalysisRunner:
                     else:
                         current_skill_name = classification_skill or self._skill_name_for_kind(current_plan.kind)
                     if _kind_spec(current_plan.kind).needs_custom_executor_check and current_skill_name != "source_analysis" and self.skill_manager.custom_skill_executor_for(current_skill_name) != "file_agent":
-                        prefix = "custom_skill" if current_plan.kind == "custom_skill" else SOURCE_STAGE_KIND
+                        prefix = SOURCE_CODE_SKILL_KIND if current_plan.kind in _SOURCE_SKILL_KINDS else SOURCE_STAGE_KIND
                         return TaskResult(
                             success=False,
                             message=self._custom_skill_executor_not_ready_message(
@@ -4194,6 +4197,7 @@ class BugAnalysisRunner:
             "perception",
             "general",
             "custom_skill",
+            SOURCE_CODE_SKILL_KIND,
         ):
             report_json = output_dir / self._report_name(kind, "json")
             report_html = output_dir / self._report_name(kind, "html")
@@ -4250,6 +4254,7 @@ class BugAnalysisRunner:
             "general": f"bug_general_analysis_report.{suffix}",
             SOURCE_STAGE_KIND: f"source_stage_report.{suffix}",
             "custom_skill": f"bug_source_code_report.{suffix}",
+            SOURCE_CODE_SKILL_KIND: f"bug_source_code_report.{suffix}",
         }[kind]
 
     def _combined_report_name(self, suffix: str) -> str:
@@ -4269,6 +4274,7 @@ class BugAnalysisRunner:
             "general": "通用问题分析",
             SOURCE_STAGE_KIND: "源码分析阶段",
             "custom_skill": "源码分析 (source_code_skill)",
+            SOURCE_CODE_SKILL_KIND: "源码分析 (source_code_skill)",
         }[kind]
 
     def _effective_skill_name_for_plan(self, plan_kind: str, candidate_skill_name: str) -> str:
@@ -4281,7 +4287,7 @@ class BugAnalysisRunner:
             ):
                 return normalized
             return default_skill
-        if plan_kind == "custom_skill":
+        if plan_kind in _SOURCE_SKILL_KINDS:
             return normalized or default_skill
         return default_skill
 
@@ -6146,7 +6152,7 @@ class BugAnalysisRunner:
                 else "已生成源码分析报告"
                 if _kind_spec(plan.kind).is_source_stage
                 else "已生成专用 Skill 源码分析入口"
-                if plan.kind == "custom_skill"
+                if plan.kind in _SOURCE_SKILL_KINDS
                 else "已生成通用问题分析报告"
             )
             msg = str(verdict.get("text") or payload.get("summary") or default_summary)
@@ -8860,7 +8866,7 @@ class BugAnalysisRunner:
         )
 
     def _custom_skill_executor_not_ready_message(self, skill_name: str, *, selected_input: Path | None) -> str:
-        display_name = skill_name.strip() or "custom_skill"
+        display_name = skill_name.strip() or "source_code_skill"
         log_note = f"\n日志输入已准备：`{selected_input}`" if selected_input else ""
         route_note = ""
         try:
@@ -8869,10 +8875,10 @@ class BugAnalysisRunner:
             record = None
         if record is None:
             route_note = "\n当前状态：未找到 Skill 目录或主路由记录。"
-        elif record.kind != "custom_skill":
-            route_note = f"\n当前状态：已配置主路由，但 kind=`{record.kind or '未配置'}`，不是 custom_skill。"
+        elif record.kind not in _SOURCE_SKILL_KINDS:
+            route_note = f"\n当前状态：已配置主路由，但 kind=`{record.kind or '未配置'}`，不是 source_code_skill。"
         elif not record.executor:
-            route_note = "\n当前状态：已配置为 custom_skill，但 executor 为空；需要配置 executor=`file_agent`。"
+            route_note = "\n当前状态：已配置为 source_code_skill，但 executor 为空；需要配置 executor=`file_agent`。"
         elif record.executor != "file_agent":
             route_note = f"\n当前状态：已配置 executor=`{record.executor}`，但当前只支持 file_agent。"
         return (
@@ -9172,7 +9178,7 @@ class BugAnalysisRunner:
     def _build_custom_skill_agent_command(
         self,
         *,
-        analysis_kind: str = "custom_skill",
+        analysis_kind: str = "source_code_skill",
         skill_name: str,
         request_text: str,
         prompt_text: str,
@@ -9400,7 +9406,7 @@ class BugAnalysisRunner:
     def _run_custom_skill_agent_analysis(
         self,
         *,
-        analysis_kind: str = "custom_skill",
+        analysis_kind: str = "source_code_skill",
         analysis_label: str = "",
         skill_name: str,
         request_text: str,
@@ -10779,7 +10785,7 @@ class BugAnalysisRunner:
                 ReportSection(kind="details", title="原始输入", summary="展开查看请求与缺陷描述", body_html=raw_body),
             ],
         )
-        status_key = "custom_skill_analysis_status" if analysis_kind == "custom_skill" else f"{analysis_kind}_analysis_status"
+        status_key = "source_code_skill_analysis_status" if analysis_kind in _SOURCE_SKILL_KINDS else f"{analysis_kind}_analysis_status"
         payload = {
             "mode": f"{analysis_kind}_agent_analysis",
             "summary": verdict_text,
@@ -10809,7 +10815,7 @@ class BugAnalysisRunner:
         json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def _skill_file_agent_execution_details(self, analysis_kind: str, result: dict[str, object]) -> dict[str, object]:
-        prefix = "custom_skill" if analysis_kind == "custom_skill" else analysis_kind
+        prefix = SOURCE_CODE_SKILL_KIND if analysis_kind in _SOURCE_SKILL_KINDS else analysis_kind
         status_key = f"{prefix}_analysis_status"
         details = {
             f"{prefix}_executor": "file_agent",
@@ -10850,6 +10856,7 @@ class BugAnalysisRunner:
             SOURCE_STAGE_KIND: "source_stage_analysis.md",
             "ld_lane_level": "ld_lane_level_analysis.md",
             "custom_skill": "source_code_skill_analysis.md",
+            SOURCE_CODE_SKILL_KIND: "source_code_skill_analysis.md",
         }.get(analysis_kind, f"{analysis_kind}_analysis.md")
 
     def _skill_agent_sidecar_name(self, analysis_kind: str, suffix: str) -> str:
@@ -10857,11 +10864,12 @@ class BugAnalysisRunner:
             SOURCE_STAGE_KIND: "source_stage",
             "ld_lane_level": "ld_lane_level_agent",
             "custom_skill": "source_code_skill_agent",
+            SOURCE_CODE_SKILL_KIND: "source_code_skill_agent",
         }.get(analysis_kind, f"{analysis_kind}_agent")
         return f"{prefix}.{suffix}"
 
     def _skill_file_agent_mode_error_code(self, analysis_kind: str, base_code: str, *, mode: str) -> str:
-        if analysis_kind == "custom_skill":
+        if analysis_kind in _SOURCE_SKILL_KINDS:
             if mode == "bug_reanalysis":
                 return base_code.replace("custom_skill_agent_", "custom_skill_reanalysis_agent_", 1)
             if mode == "direct_analysis":
@@ -11405,8 +11413,8 @@ class BugAnalysisRunner:
                 ("bug_xtheme_analysis_report", "xtheme"),
                 ("bug_ld_lane_level_report", "ld_lane_level"),
                 ("bug_general_analysis_report", "general"),
-                ("bug_custom_skill_report", "custom_skill"),
-                ("bug_source_code_report", "custom_skill"),
+                ("bug_custom_skill_report", SOURCE_CODE_SKILL_KIND),
+                ("bug_source_code_report", SOURCE_CODE_SKILL_KIND),
             ):
                 if marker in metadata_text:
                     inferred_kind = kind

@@ -605,7 +605,7 @@ def _route_metadata(*, name: str, kind: str, executor: str, role: str, status: s
                 "已在主路由表中配置，但当前工作区没有对应 .ai/skills 目录，需补齐 SKILL.md 和脚本后才能稳定执行。",
                 runtime,
             )
-        if kind == "custom_skill":
+        if kind in {"custom_skill", "source_code_skill"}:
             if executor == "pydantic_ai":
                 return (
                     "bug_primary_pydantic_ai_ready",
