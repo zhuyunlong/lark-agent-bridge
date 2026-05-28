@@ -68,6 +68,7 @@ from .routing_terms import (
     CRASH_ROUTE_TERMS,
     LD_LANE_LEVEL_ROUTE_TERMS,
     PERCEPTION_ROUTE_TERMS,
+    PULLOVER_CHAIN_ROUTE_TERMS,
     SCENE_SIGNAL_ROUTE_TERMS,
     SIGNAL_ROUTE_TERMS,
     STARTUP_BLOCK_ROUTE_TERMS,
@@ -83,6 +84,241 @@ logger = get_logger("agents")
 
 SOURCE_STAGE_KIND = "source_stage"
 SOURCE_STAGE_KINDS = {SOURCE_STAGE_KIND}
+
+
+@dataclass(frozen=True)
+class PlanKindSpec:
+    """Irreducible business-policy attributes of a plan kind.
+
+    Excluded by design (handled elsewhere):
+      - decoding: now in _ensure_decoded_in_place (runs for all kinds with raw logs)
+      - target-time: in _SCRIPT_ACCEPTS_TARGET_TIME (script-side capability)
+      - report path discovery & verdict normalization: in BugReportAdapter
+    """
+    is_agent_handled: bool = False        # 走 AI agent 路径而非确定性脚本
+    is_custom_agent: bool = False         # custom/source-stage 分发器分支
+    is_source_stage: bool = False         # source_stage 家族成员
+    needs_source_evidence: bool = False   # 触发源码证据收集（非执行路径属性）
+
+    @property
+    def log_dependent(self) -> bool:
+        # 脚本类 kind（非 agent）才需要智能日志分析
+        return not self.is_agent_handled
+
+    @property
+    def needs_custom_executor_check(self) -> bool:
+        # 既走 custom agent 分发、又需要源码证据的 kind 才检查 executor
+        return self.is_custom_agent and self.needs_source_evidence
+
+
+# Single source of truth for all plan-kind policy decisions.
+# Adding a new kind: insert one entry here — all call sites pick it up automatically.
+PLAN_KIND_REGISTRY: dict[str, PlanKindSpec] = {
+    "startup":       PlanKindSpec(),
+    "stuck":         PlanKindSpec(),
+    "crash":         PlanKindSpec(),
+    "scene_signal":  PlanKindSpec(),
+    "perception":    PlanKindSpec(),
+    "xtheme":        PlanKindSpec(),
+    "signal":        PlanKindSpec(),
+    "ld_lane_level": PlanKindSpec(is_agent_handled=True, is_custom_agent=True),
+    "pullover_chain": PlanKindSpec(is_agent_handled=True, is_custom_agent=True),
+    "general":       PlanKindSpec(is_agent_handled=True, needs_source_evidence=True),
+    "custom_skill":  PlanKindSpec(is_agent_handled=True, is_custom_agent=True, needs_source_evidence=True),
+    SOURCE_STAGE_KIND: PlanKindSpec(
+        is_agent_handled=True, is_custom_agent=True,
+        needs_source_evidence=True, is_source_stage=True,
+    ),
+}
+
+# Derived sets — kept for call sites that need a set (e.g. set membership tests
+# on lists of plans, or unpacking into other sets).
+ALL_PLAN_KINDS = frozenset(PLAN_KIND_REGISTRY)
+
+
+def _kind_spec(kind: str) -> PlanKindSpec:
+    return PLAN_KIND_REGISTRY.get(kind, PlanKindSpec())
+
+
+# Script capability table — which analysis scripts accept the --target-time CLI arg.
+# Decoupled from PlanKindSpec because it's a property of the underlying script,
+# not of the kind's policy.
+_SCRIPT_ACCEPTS_TARGET_TIME = frozenset({
+    "startup", "stuck", "crash", "perception", "xtheme", "scene_signal",
+})
+
+
+# Kinds whose analysis script gets one automatic retry on non-zero returncode.
+# Historically only startup, due to higher transient-failure rate in tracetag/PID
+# correlation. Add more kinds here only after confirming retry is safe and useful.
+_RETRY_KINDS = frozenset({"startup"})
+
+
+def _kind_accepts_target_time(kind: str) -> bool:
+    return kind in _SCRIPT_ACCEPTS_TARGET_TIME
+
+
+@dataclass(frozen=True)
+class NormalizedVerdict:
+    """Unified verdict shape across all analysis-script outputs.
+
+    sev: "red" | "yellow" | "green" | "info" | "unknown"
+    msg: one-line conclusion
+    issues: optional list of {sev, title, detail}
+    """
+    sev: str = "unknown"
+    msg: str = ""
+    issues: list[dict[str, str]] = field(default_factory=list)
+
+
+# Tech debt — once we migrate the following skill scripts to a v2 schema
+# (verdict.{sev,msg,issues} + stdout `[OK] HTML:`/`[OK] JSON:`/`[OK] 结论:`),
+# the adapter branches below can collapse to a single direct read:
+#   - analyze_unity_startup.py: verdict={severity,message,issues}, stdout `[OK] HTML report:`/`[OK] JSON report:`
+#   - analyze_3d_stuck.py: verdict={verdict_sev,verdict_msg,issues,chain}, stdout `[OK] 报告:`/`[OK] JSON:`
+#   - analyze_perception_data_summary.py: verdict at summary.verdict={sev,msg}, stdout `[OK] HTML:`/`[OK] JSON:`
+#   - analyze_xtheme.py: verdict={sev,msg}, stdout `[OK] HTML:`/`[OK] JSON:`
+#   - extract_scene_signal_events.py: severity flat string + verdict flat string, fixed-path output
+#   - analyze_signal_chain.py: no verdict (summary string + warnings list), CLI direct-write
+class BugReportAdapter:
+    """Translate per-script output conventions into uniform structures.
+
+    All methods are static; the adapter holds no state. It centralizes
+    the per-kind branching that would otherwise spread across _run_analysis
+    and _build_summary_from_report.
+    """
+
+    @staticmethod
+    def locate_report(
+        *,
+        kind: str,
+        completed_stdout: str,
+        analysis_dir: Path,
+        html_path: Path,
+        json_path: Path,
+    ) -> tuple[Path | None, Path | None]:
+        """Return (generated_html, generated_json) paths produced by the script.
+
+        Caller is responsible for copy/move to the canonical html_path/json_path.
+        For agent-handled kinds and signal kind, the script writes directly to
+        html_path/json_path (no copy needed) — adapter returns those paths.
+        """
+        if kind == "startup":
+            return (
+                analysis_dir / "unity_startup_lifecycle_report.html",
+                analysis_dir / "unity_startup_lifecycle_report.json",
+            )
+        if kind == "scene_signal":
+            return (
+                analysis_dir / "scene_signal_events.html",
+                analysis_dir / "scene_signal_events.json",
+            )
+        if kind in {"stuck", "crash"}:
+            return (
+                BugReportAdapter._extract_stdout_path(completed_stdout, r"^\[OK\] 报告:\s*(.+)$"),
+                BugReportAdapter._extract_stdout_path(completed_stdout, r"^\[OK\] JSON:\s*(.+)$"),
+            )
+        if kind in {"perception", "xtheme"}:
+            return (
+                BugReportAdapter._extract_stdout_path(completed_stdout, r"^\[OK\] HTML:\s*(.+)$"),
+                BugReportAdapter._extract_stdout_path(completed_stdout, r"^\[OK\] JSON:\s*(.+)$"),
+            )
+        # signal & agent-handled kinds write directly to the requested paths.
+        return html_path if html_path.exists() else None, json_path if json_path.exists() else None
+
+    @staticmethod
+    def normalize_verdict(*, kind: str, payload: object) -> NormalizedVerdict:
+        """Map per-kind verdict shapes to NormalizedVerdict."""
+        if not isinstance(payload, dict):
+            return NormalizedVerdict()
+        if kind == "startup":
+            v = payload.get("verdict") or {}
+            if isinstance(v, dict):
+                return NormalizedVerdict(
+                    sev=str(v.get("severity") or "unknown"),
+                    msg=str(v.get("message") or ""),
+                    issues=BugReportAdapter._coerce_issues(v.get("issues")),
+                )
+        elif kind in {"stuck", "crash"}:
+            v = payload.get("verdict") or {}
+            if isinstance(v, dict):
+                return NormalizedVerdict(
+                    sev=str(v.get("verdict_sev") or "unknown"),
+                    msg=str(v.get("verdict_msg") or ""),
+                    issues=BugReportAdapter._coerce_issues(v.get("issues")),
+                )
+        elif kind == "perception":
+            summary = payload.get("summary") or {}
+            v = summary.get("verdict") if isinstance(summary, dict) else None
+            if isinstance(v, dict):
+                return NormalizedVerdict(
+                    sev=str(v.get("sev") or "unknown"),
+                    msg=str(v.get("msg") or ""),
+                    issues=BugReportAdapter._coerce_issues(
+                        summary.get("issues") if isinstance(summary, dict) else None
+                    ),
+                )
+        elif kind == "xtheme":
+            v = payload.get("verdict") or {}
+            if isinstance(v, dict):
+                return NormalizedVerdict(
+                    sev=str(v.get("sev") or "unknown"),
+                    msg=str(v.get("msg") or ""),
+                    issues=BugReportAdapter._coerce_issues(payload.get("issues")),
+                )
+        elif kind == "scene_signal":
+            sev_raw = str(payload.get("severity") or "").lower()
+            sev = {"success": "green", "warning": "yellow"}.get(sev_raw, "info")
+            return NormalizedVerdict(
+                sev=sev,
+                msg=str(payload.get("verdict") or ""),
+                issues=[],
+            )
+        elif kind == "signal":
+            warnings = payload.get("warnings") or []
+            issues = [
+                {"sev": "yellow", "title": "warning", "detail": str(w)}
+                for w in warnings
+                if isinstance(warnings, list)
+            ]
+            return NormalizedVerdict(
+                sev="info",
+                msg=str(payload.get("summary") or ""),
+                issues=issues,
+            )
+        else:
+            # general / custom_skill / source_stage / ld_lane_level: bug_runner constructs
+            # `{"verdict": {"sev": ..., "text": ...}}` itself.
+            v = payload.get("verdict") or {}
+            if isinstance(v, dict):
+                return NormalizedVerdict(
+                    sev=str(v.get("sev") or "unknown"),
+                    msg=str(v.get("text") or v.get("msg") or ""),
+                    issues=BugReportAdapter._coerce_issues(v.get("issues")),
+                )
+        return NormalizedVerdict()
+
+    @staticmethod
+    def _extract_stdout_path(output: str, pattern: str) -> Path | None:
+        match = re.search(pattern, output, re.MULTILINE)
+        if not match:
+            return None
+        return Path(match.group(1).strip())
+
+    @staticmethod
+    def _coerce_issues(raw: object) -> list[dict[str, str]]:
+        if not isinstance(raw, list):
+            return []
+        out: list[dict[str, str]] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            out.append({
+                "sev": str(item.get("sev") or item.get("severity") or "info"),
+                "title": str(item.get("title") or ""),
+                "detail": str(item.get("detail") or item.get("message") or ""),
+            })
+        return out
 
 
 def _run_tracked_process(*args, **kwargs):
@@ -401,7 +637,7 @@ class BugAnalysisRunner:
 
     def _domain_kind_from_plans(self, plans: list["BugAnalysisPlan"]) -> str:
         for plan in plans:
-            if plan.kind not in {"general", *SOURCE_STAGE_KINDS}:
+            if plan.kind != "general" and not _kind_spec(plan.kind).is_source_stage:
                 return plan.kind
         return "general"
 
@@ -536,7 +772,7 @@ class BugAnalysisRunner:
             return normalized
         if all(plan.kind == "general" for plan in normalized):
             return [BugAnalysisPlan(kind=SOURCE_STAGE_KIND)]
-        if any(plan.kind in SOURCE_STAGE_KINDS for plan in normalized):
+        if any(_kind_spec(plan.kind).is_source_stage for plan in normalized):
             return normalized
         return [*normalized, BugAnalysisPlan(kind=SOURCE_STAGE_KIND)]
 
@@ -598,7 +834,7 @@ class BugAnalysisRunner:
         # --- step 4: normalize skill name ---
         if (
             source_decision.requested
-            and all(plan.kind in SOURCE_STAGE_KINDS for plan in selection.plans)
+            and all(_kind_spec(plan.kind).is_source_stage for plan in selection.plans)
             and selection.skill_name.strip() in {"", "general"}
         ):
             selection.skill_name = "source_analysis"
@@ -652,7 +888,7 @@ class BugAnalysisRunner:
             )
             if (
                 source_decision.requested
-                and all(plan.kind in SOURCE_STAGE_KINDS for plan in selection.plans)
+                and all(_kind_spec(plan.kind).is_source_stage for plan in selection.plans)
                 and selection.skill_name.strip() in {"", "general"}
             ):
                 selection.skill_name = "source_analysis"
@@ -850,7 +1086,7 @@ class BugAnalysisRunner:
         return datetime.now().astimezone().isoformat(timespec="seconds")
 
     def _skill_name_for_kind(self, kind: str) -> str:
-        if kind in SOURCE_STAGE_KINDS:
+        if _kind_spec(kind).is_source_stage:
             return "source_analysis"
         for skill_name, (mapped_kind, _label, _requires_logs) in self.skill_manager.primary_skill_map().items():
             if mapped_kind == kind:
@@ -882,7 +1118,7 @@ class BugAnalysisRunner:
                 signal_resolver=self.signal_resolver,
             )
             return [BugAnalysisPlan(kind="signal", signal_code=signal_request.signal)]
-        if kind in {"startup", "stuck", "crash", "scene_signal", "perception", "xtheme", "ld_lane_level", "general", "custom_skill", SOURCE_STAGE_KIND}:
+        if kind in PLAN_KIND_REGISTRY:
             return [BugAnalysisPlan(kind=kind)]
         return [BugAnalysisPlan(kind="general")]
 
@@ -1341,7 +1577,7 @@ class BugAnalysisRunner:
         )
         target_time = (
             time_context.fault_time
-            if time_context.has_full_datetime and plan.kind in {"startup", "xtheme", "scene_signal", "perception"}
+            if time_context.has_full_datetime and _kind_accepts_target_time(plan.kind)
             else None
         )
         bug_dir = context.input_dir / f"bug_{self._bug_id(request.bug_url)}"
@@ -1613,9 +1849,9 @@ class BugAnalysisRunner:
                 )
             source_evidence_enabled = (
                 self._should_collect_source_evidence(request_text, prompt_text)
-                or any(plan.kind in SOURCE_STAGE_KINDS for plan in plans)
+                or any(_kind_spec(plan.kind).is_source_stage for plan in plans)
                 or (
-                    any(plan.kind in {"general", "custom_skill", *SOURCE_STAGE_KINDS} for plan in plans)
+                    any(_kind_spec(p.kind).needs_source_evidence for p in plans)
                     and self._has_explicit_general_scope(prompt_text)
                 )
             )
@@ -1660,7 +1896,7 @@ class BugAnalysisRunner:
                     html_path=current_html,
                     json_path=current_json,
                     analysis_dir=current_analysis_dir,
-                    target_time=fault_time if current_plan.kind in {"startup", "xtheme", "scene_signal", "perception"} else None,
+                    target_time=fault_time if _kind_accepts_target_time(current_plan.kind) else None,
                     request_text=request_text if current_plan.kind == "xtheme" else None,
                 )
                 self._emit_progress(
@@ -1688,10 +1924,10 @@ class BugAnalysisRunner:
                         classification_reason=selection.reason,
                     )
                     completed = subprocess.CompletedProcess(args=current_command, returncode=0, stdout="", stderr="")
-                elif current_plan.kind in {"custom_skill", *SOURCE_STAGE_KINDS, "ld_lane_level"}:
+                elif _kind_spec(current_plan.kind).is_custom_agent:
                     if current_plan.kind == "ld_lane_level":
                         current_skill_name = self._skill_name_for_kind(current_plan.kind)
-                    elif current_plan.kind in SOURCE_STAGE_KINDS:
+                    elif _kind_spec(current_plan.kind).is_source_stage:
                         if getattr(source_decision, "source_mode", "") == "append" and not getattr(source_decision, "context_profile", ""):
                             return self._failure(
                                 context=context,
@@ -1711,7 +1947,7 @@ class BugAnalysisRunner:
                         current_skill_name = self._resolve_source_stage_skill_name(selection.skill_name)
                     else:
                         current_skill_name = selection.skill_name or self._skill_name_for_kind(current_plan.kind)
-                    if current_plan.kind in {"custom_skill", *SOURCE_STAGE_KINDS} and current_skill_name != "source_analysis" and self.skill_manager.custom_skill_executor_for(current_skill_name) != "file_agent":
+                    if _kind_spec(current_plan.kind).needs_custom_executor_check and current_skill_name != "source_analysis" and self.skill_manager.custom_skill_executor_for(current_skill_name) != "file_agent":
                         prefix = "custom_skill" if current_plan.kind == "custom_skill" else SOURCE_STAGE_KIND
                         return self._failure(
                             context=context,
@@ -1805,7 +2041,7 @@ class BugAnalysisRunner:
                             )
                     else:
                         # Source stage: try pydantic-ai runtime first (fast path)
-                        if current_plan.kind in SOURCE_STAGE_KINDS:
+                        if _kind_spec(current_plan.kind).is_source_stage:
                             custom_result = self._run_source_stage_pydantic_ai(
                                 analysis_kind=current_plan.kind,
                                 skill_name=current_skill_name,
@@ -1883,7 +2119,7 @@ class BugAnalysisRunner:
                                 ),
                                 bridge_session_id=bridge_session_id,
                                 prior_findings=self._summarize_prior_report_jsons(report_jsons),
-                                context_profile=getattr(source_decision, "context_profile", "") if current_plan.kind in SOURCE_STAGE_KINDS else "",
+                                context_profile=getattr(source_decision, "context_profile", "") if _kind_spec(current_plan.kind).is_source_stage else "",
                             )
                     skill_file_agent_execution_result = custom_result
                     command = list(custom_result.get("command") or current_command)
@@ -1933,7 +2169,7 @@ class BugAnalysisRunner:
                         "json_path": current_json,
                         "analysis_dir": current_analysis_dir,
                         "timeout": options.timeout_seconds,
-                        "target_time": fault_time if current_plan.kind in {"startup", "xtheme", "scene_signal", "perception"} else None,
+                        "target_time": fault_time if _kind_accepts_target_time(current_plan.kind) else None,
                         "request_text": request_text if current_plan.kind == "xtheme" else None,
                     }
                     if bridge_session_id:
@@ -2049,7 +2285,7 @@ class BugAnalysisRunner:
                     options.timeout_seconds,
                     reference_seconds=max(
                         time.monotonic() - started,
-                        240.0 if any(item.kind in {"custom_skill", *SOURCE_STAGE_KINDS, "ld_lane_level"} for item in plans) else 0.0,
+                        240.0 if any(_kind_spec(i.kind).is_custom_agent for i in plans) else 0.0,
                     ),
                 ),
                 bridge_session_id=bridge_session_id,
@@ -2276,7 +2512,7 @@ class BugAnalysisRunner:
         source_decision_skill_name = classification_skill or str(details.get("analysis_skill") or "").strip()
         if (
             plans_override is None
-            and all(plan.kind in SOURCE_STAGE_KINDS for plan in plans)
+            and all(_kind_spec(plan.kind).is_source_stage for plan in plans)
             and not self._followup_explicitly_requests_source_analysis(request_text, followup_text)
         ):
             fallback_plans = self._fallback_non_source_plans_from_job_output(output_dir)
@@ -2293,7 +2529,7 @@ class BugAnalysisRunner:
             skill_name=source_decision_skill_name,
         )
         plans = self._augment_plans_for_source_analysis(plans, source_decision=source_decision)
-        if source_decision.requested and not classification_skill and all(plan.kind in SOURCE_STAGE_KINDS for plan in plans):
+        if source_decision.requested and not classification_skill and all(_kind_spec(plan.kind).is_source_stage for plan in plans):
             classification_skill = "source_analysis"
         requires_log_input = any(self._plan_requires_log_input(plan) for plan in plans)
         if requires_log_input and not time_context.has_full_datetime:
@@ -2383,9 +2619,9 @@ class BugAnalysisRunner:
             request_text=request_text,
             followup_text=followup_text,
             output_dir=output_dir,
-            enabled=any(plan.kind in {"general", "custom_skill", *SOURCE_STAGE_KINDS} for plan in plans)
+            enabled=any(_kind_spec(p.kind).needs_source_evidence for p in plans)
             or bool(force_rerun_kinds.intersection({"signal"}))
-            or any(plan.kind in SOURCE_STAGE_KINDS for plan in plans)
+            or any(_kind_spec(plan.kind).is_source_stage for plan in plans)
             or self._should_collect_source_evidence(request_text, followup_text),
         )
         self._emit_progress(
@@ -2440,7 +2676,7 @@ class BugAnalysisRunner:
                     html_path=html_path,
                     json_path=json_path,
                     analysis_dir=analysis_dir,
-                    target_time=target_time if plan.kind in {"startup", "xtheme", "scene_signal", "perception"} else None,
+                    target_time=target_time if _kind_accepts_target_time(plan.kind) else None,
                     request_text=followup_text if plan.kind == "xtheme" else None,
                 )
                 self._emit_progress(
@@ -2455,7 +2691,7 @@ class BugAnalysisRunner:
                     plan_label=self._analysis_label(plan.kind),
                     html_path=str(html_path),
                     json_path=str(json_path),
-                    target_time=target_time if plan.kind in {"startup", "xtheme", "scene_signal", "perception"} else "",
+                    target_time=target_time if _kind_accepts_target_time(plan.kind) else "",
                 )
                 if plan.kind == "general":
                     self._write_general_bug_report(
@@ -2473,10 +2709,10 @@ class BugAnalysisRunner:
                         classification_reason=classification_reason or "",
                     )
                     completed = subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
-                elif plan.kind in {"custom_skill", *SOURCE_STAGE_KINDS, "ld_lane_level"}:
+                elif _kind_spec(plan.kind).is_custom_agent:
                     if plan.kind == "ld_lane_level":
                         skill_name = self._skill_name_for_kind(plan.kind)
-                    elif plan.kind in SOURCE_STAGE_KINDS:
+                    elif _kind_spec(plan.kind).is_source_stage:
                         if getattr(source_decision, "source_mode", "") == "append" and not getattr(source_decision, "context_profile", ""):
                             return TaskResult(
                                 success=False,
@@ -2507,7 +2743,7 @@ class BugAnalysisRunner:
                             or str(details.get("analysis_skill") or "").strip()
                             or self._skill_name_for_kind(plan.kind)
                         )
-                    if plan.kind in {"custom_skill", *SOURCE_STAGE_KINDS} and skill_name != "source_analysis" and self.skill_manager.custom_skill_executor_for(skill_name) != "file_agent":
+                    if _kind_spec(plan.kind).needs_custom_executor_check and skill_name != "source_analysis" and self.skill_manager.custom_skill_executor_for(skill_name) != "file_agent":
                         prefix = "custom_skill" if plan.kind == "custom_skill" else SOURCE_STAGE_KIND
                         return TaskResult(
                             success=False,
@@ -2583,7 +2819,7 @@ class BugAnalysisRunner:
                             )
                     else:
                         # Source stage reanalysis: try pydantic-ai first (fast path)
-                        if plan.kind in SOURCE_STAGE_KINDS:
+                        if _kind_spec(plan.kind).is_source_stage:
                             custom_result = self._run_source_stage_pydantic_ai(
                                 analysis_kind=plan.kind,
                                 skill_name=skill_name,
@@ -2669,7 +2905,7 @@ class BugAnalysisRunner:
                                 ),
                                 bridge_session_id=bridge_session_id,
                                 prior_findings=self._summarize_prior_report_jsons(report_jsons),
-                                context_profile=getattr(source_decision, "context_profile", "") if plan.kind in SOURCE_STAGE_KINDS else "",
+                                context_profile=getattr(source_decision, "context_profile", "") if _kind_spec(plan.kind).is_source_stage else "",
                             )
                     skill_file_agent_execution_result = custom_result
                     command = list(custom_result.get("command") or command or [])
@@ -2720,7 +2956,7 @@ class BugAnalysisRunner:
                         "json_path": json_path,
                         "analysis_dir": analysis_dir,
                         "timeout": self.config.bug_analysis.timeout_seconds,
-                        "target_time": target_time if plan.kind in {"startup", "xtheme", "scene_signal", "perception"} else None,
+                        "target_time": target_time if _kind_accepts_target_time(plan.kind) else None,
                         "request_text": followup_text if plan.kind == "xtheme" else None,
                     }
                     if bridge_session_id:
@@ -3152,7 +3388,7 @@ class BugAnalysisRunner:
             skill_name=classification_skill,
         )
         plans = self._augment_plans_for_source_analysis(plans, source_decision=source_decision)
-        if source_decision.requested and not classification_skill and all(plan.kind in SOURCE_STAGE_KINDS for plan in plans):
+        if source_decision.requested and not classification_skill and all(_kind_spec(plan.kind).is_source_stage for plan in plans):
             classification_skill = "source_analysis"
         request_artifact.write_text(
             self._render_bug_agent_request(
@@ -3247,8 +3483,8 @@ class BugAnalysisRunner:
             followup_text=request.prompt,
             output_dir=context.output_dir,
             enabled=self._should_collect_source_evidence(request_text, request.prompt)
-            or any(plan.kind in SOURCE_STAGE_KINDS for plan in plans)
-            or any(plan.kind in {"general", "custom_skill", *SOURCE_STAGE_KINDS} for plan in plans),
+            or any(_kind_spec(plan.kind).is_source_stage for plan in plans)
+            or any(_kind_spec(p.kind).needs_source_evidence for p in plans),
         )
 
         # 【新增】智能日志分析：定位进程号、找出相关日志、反推线索
@@ -3276,7 +3512,7 @@ class BugAnalysisRunner:
                 html_path=current_html,
                 json_path=current_json,
                 analysis_dir=current_analysis_dir,
-                target_time=fault_time if current_plan.kind in {"startup", "xtheme", "scene_signal", "perception"} else None,
+                target_time=fault_time if _kind_accepts_target_time(current_plan.kind) else None,
                 request_text=request.prompt if current_plan.kind == "xtheme" else None,
                 log_analysis=log_analysis_result,  # 传入智能日志分析结果
             )
@@ -3304,10 +3540,10 @@ class BugAnalysisRunner:
                         classification_reason="直传文件分析未命中专用 skill，退回通用问题分析。",
                     )
                     completed = subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
-                elif current_plan.kind in {"custom_skill", *SOURCE_STAGE_KINDS, "ld_lane_level"}:
+                elif _kind_spec(current_plan.kind).is_custom_agent:
                     if current_plan.kind == "ld_lane_level":
                         current_skill_name = self._skill_name_for_kind(current_plan.kind)
-                    elif current_plan.kind in SOURCE_STAGE_KINDS:
+                    elif _kind_spec(current_plan.kind).is_source_stage:
                         if getattr(source_decision, "source_mode", "") == "append" and not getattr(source_decision, "context_profile", ""):
                             return TaskResult(
                                 success=False,
@@ -3329,7 +3565,7 @@ class BugAnalysisRunner:
                         current_skill_name = self._resolve_source_stage_skill_name(classification_skill)
                     else:
                         current_skill_name = classification_skill or self._skill_name_for_kind(current_plan.kind)
-                    if current_plan.kind in {"custom_skill", *SOURCE_STAGE_KINDS} and current_skill_name != "source_analysis" and self.skill_manager.custom_skill_executor_for(current_skill_name) != "file_agent":
+                    if _kind_spec(current_plan.kind).needs_custom_executor_check and current_skill_name != "source_analysis" and self.skill_manager.custom_skill_executor_for(current_skill_name) != "file_agent":
                         prefix = "custom_skill" if current_plan.kind == "custom_skill" else SOURCE_STAGE_KIND
                         return TaskResult(
                             success=False,
@@ -3353,7 +3589,7 @@ class BugAnalysisRunner:
                             },
                         )
                     # Source stage: try pydantic-ai runtime first (fast path)
-                    if current_plan.kind in SOURCE_STAGE_KINDS:
+                    if _kind_spec(current_plan.kind).is_source_stage:
                         custom_result = self._run_source_stage_pydantic_ai(
                             analysis_kind=current_plan.kind,
                             skill_name=current_skill_name,
@@ -3469,7 +3705,7 @@ class BugAnalysisRunner:
                             ),
                             bridge_session_id=bridge_session_id,
                             prior_findings=self._summarize_prior_report_jsons(report_jsons),
-                            context_profile=getattr(source_decision, "context_profile", "") if current_plan.kind in SOURCE_STAGE_KINDS else "",
+                            context_profile=getattr(source_decision, "context_profile", "") if _kind_spec(current_plan.kind).is_source_stage else "",
                         )
                     skill_file_agent_execution_result = custom_result
                     command = list(custom_result.get("command") or command or [])
@@ -3520,7 +3756,7 @@ class BugAnalysisRunner:
                         "json_path": current_json,
                         "analysis_dir": current_analysis_dir,
                         "timeout": self.config.bug_analysis.timeout_seconds,
-                        "target_time": fault_time if current_plan.kind in {"startup", "xtheme", "scene_signal", "perception"} else None,
+                        "target_time": fault_time if _kind_accepts_target_time(current_plan.kind) else None,
                         "request_text": request.prompt if current_plan.kind == "xtheme" else None,
                     }
                     if bridge_session_id:
@@ -3584,7 +3820,7 @@ class BugAnalysisRunner:
             "usage": {},
             "usage_scope": "",
         }
-        if any(plan.kind in {"general", "custom_skill", *SOURCE_STAGE_KINDS, "ld_lane_level"} for plan in plans):
+        if any(_kind_spec(plan.kind).is_agent_handled for plan in plans):
             agent_summary_path = context.output_dir / "bug_agent_summary.md"
             agent_provider_override = ""
             # source_analysis is now handled by pydantic-ai runtime; no file-agent override needed
@@ -3610,7 +3846,7 @@ class BugAnalysisRunner:
                     self.config.bug_analysis.timeout_seconds,
                     reference_seconds=max(
                         time.monotonic() - started,
-                        240.0 if any(item.kind in {"custom_skill", *SOURCE_STAGE_KINDS, "ld_lane_level"} for item in plans) else 0.0,
+                        240.0 if any(_kind_spec(i.kind).is_custom_agent for i in plans) else 0.0,
                     ),
                 ),
                 bridge_session_id=bridge_session_id,
@@ -3661,7 +3897,7 @@ class BugAnalysisRunner:
             "analysis_skill": classification_skill or self._skill_name_for_kind(plans[0].kind if plans else "general"),
             "analysis_skill_label": (
                 "源码导向文件分析"
-                if classification_skill == "source_analysis" or (plans and plans[0].kind in SOURCE_STAGE_KINDS)
+                if classification_skill == "source_analysis" or (plans and _kind_spec(plans[0].kind).is_source_stage)
                 else self._analysis_label(plans[0].kind if plans else "general")
             ),
             "classification_source": classification_source or "manual_fallback",
@@ -3732,6 +3968,8 @@ class BugAnalysisRunner:
             add_candidate(120, "perception")
         if any(term in lowered for term in LD_LANE_LEVEL_ROUTE_TERMS):
             add_candidate(117, "ld_lane_level")
+        if any(term in lowered for term in PULLOVER_CHAIN_ROUTE_TERMS):
+            add_candidate(116, "pullover_chain")
         if any(term in lowered for term in XTHEME_ROUTE_TERMS):
             add_candidate(115, "xtheme")
         if (
@@ -3789,11 +4027,14 @@ class BugAnalysisRunner:
                 command.extend(["--target-time", target_time])
             return command
         if plan.kind == "stuck":
-            return [
+            command = [
                 sys.executable,
                 str(self._stuck_script()),
                 str(input_path),
             ]
+            if target_time:
+                command.extend(["--target-time", target_time])
+            return command
         if plan.kind == "perception":
             command = [
                 sys.executable,
@@ -3835,12 +4076,15 @@ class BugAnalysisRunner:
                     command.extend(["--log-files", ",".join(str(f) for f in log_files)])
             return command
         if plan.kind == "crash":
-            return [
+            command = [
                 sys.executable,
                 str(self._stuck_script()),
                 str(input_path),
             ]
-        if plan.kind in {"general", "custom_skill", *SOURCE_STAGE_KINDS, "ld_lane_level"}:
+            if target_time:
+                command.extend(["--target-time", target_time])
+            return command
+        if _kind_spec(plan.kind).is_agent_handled:
             return []
         command = [
             sys.executable,
@@ -3861,7 +4105,7 @@ class BugAnalysisRunner:
         return options.working_dir or self.config.workspace_root
 
     def _plan_requires_log_input(self, plan: "BugAnalysisPlan") -> bool:
-        return plan.kind in {"startup", "stuck", "crash", "scene_signal", "perception", "xtheme", "ld_lane_level", "signal", "general", "custom_skill", *SOURCE_STAGE_KINDS}
+        return plan.kind in PLAN_KIND_REGISTRY
 
     def _bug_fetcher_script(self) -> Path:
         return self.config.workspace_root / ".ai/skills/feishu-bug-fetcher/scripts/bug-fetcher.sh"
@@ -3908,7 +4152,7 @@ class BugAnalysisRunner:
                 signal_code=str(details.get("signal_code") or "") or None,
             )
             for kind in kinds
-            if kind in {"startup", "stuck", "crash", "scene_signal", "signal", "perception", "xtheme", "ld_lane_level", "general", "custom_skill", *SOURCE_STAGE_KINDS}
+            if kind in PLAN_KIND_REGISTRY
         ]
         if plans:
             return plans
@@ -3995,6 +4239,7 @@ class BugAnalysisRunner:
             "signal": f"bug_signal_chain_report.{suffix}",
             "xtheme": f"bug_xtheme_analysis_report.{suffix}",
             "ld_lane_level": f"bug_ld_lane_level_report.{suffix}",
+            "pullover_chain": f"bug_pullover_chain_report.{suffix}",
             "general": f"bug_general_analysis_report.{suffix}",
             SOURCE_STAGE_KIND: f"source_stage_report.{suffix}",
             "custom_skill": f"bug_source_code_report.{suffix}",
@@ -4013,6 +4258,7 @@ class BugAnalysisRunner:
             "signal": "信号链路分析",
             "xtheme": "XTheme时光主题分析",
             "ld_lane_level": "LD车道级日志分析",
+            "pullover_chain": "靠边停车链路分析",
             "general": "通用问题分析",
             SOURCE_STAGE_KIND: "源码分析阶段",
             "custom_skill": "源码分析 (source_code_skill)",
@@ -4021,7 +4267,7 @@ class BugAnalysisRunner:
     def _effective_skill_name_for_plan(self, plan_kind: str, candidate_skill_name: str) -> str:
         normalized = candidate_skill_name.strip()
         default_skill = self._skill_name_for_kind(plan_kind)
-        if plan_kind in SOURCE_STAGE_KINDS:
+        if _kind_spec(plan_kind).is_source_stage:
             if normalized and (
                 normalized == "source_analysis"
                 or self.skill_manager.custom_skill_executor_for(normalized) == "file_agent"
@@ -4511,13 +4757,57 @@ class BugAnalysisRunner:
                     return candidate
         return None
 
+    def _ensure_decoded_in_place(self, prepared: Path) -> None:
+        """If prepared still contains raw .alog/.xlog files, decode them in-place.
+        Best-effort: failures only emit a warning, leaving _decode_raw_logs_before_analysis
+        as the per-kind safety net.
+        """
+        try:
+            if not prepared.exists():
+                return
+            if not self._has_raw_logs_needing_decode(prepared):
+                return
+        except OSError:
+            return
+        decoder = self.config.workspace_root / ".ai/skills/log-decoder/tools/alog_decoder.py"
+        if not decoder.exists():
+            logger.warning("log decoder not found: %s", decoder)
+            return
+        decoder_python = shutil.which("python3") or "python3"
+        command = [decoder_python, str(decoder), str(prepared)]
+        try:
+            result = _run_tracked_process(
+                command,
+                watchdog=self.process_watchdog,
+                name="prepare-log-decode",
+                cwd=self._working_dir(),
+                capture_output=True,
+                text=True,
+                timeout=900,
+                check=False,
+            )
+        except Exception as exc:  # subprocess startup/timeout
+            logger.warning("alog decode during prepare failed: %s", exc)
+            return
+        if result.returncode != 0:
+            logger.warning(
+                "alog decode during prepare returned %s: %s",
+                result.returncode,
+                (result.stderr or result.stdout or "").strip()[:400],
+            )
+        else:
+            logger.info("stage=prepare_log_input decoded prepared=%s", prepared)
+
     def _prepare_log_input(self, selected_input: Path) -> Path:
         lower_name = selected_input.name.lower()
         if lower_name.endswith(".xp"):
-            return self._expand_xp_file(selected_input)
-        if self._is_archive_log_attachment(selected_input) and not lower_name.endswith(".xp.zip.001"):
-            return self._extract_log_archive(selected_input)
-        return selected_input
+            prepared = self._expand_xp_file(selected_input)
+        elif self._is_archive_log_attachment(selected_input) and not lower_name.endswith(".xp.zip.001"):
+            prepared = self._extract_log_archive(selected_input)
+        else:
+            prepared = selected_input
+        self._ensure_decoded_in_place(prepared)
+        return prepared
 
     def _analyze_logs_intelligently(
         self,
@@ -4547,8 +4837,7 @@ class BugAnalysisRunner:
             return None
 
         # 只对需要日志的分析类型启用智能分析
-        log_dependent_kinds = {"scene_signal", "stuck", "crash", "perception", "xtheme", "signal", "startup"}
-        if plan.kind not in log_dependent_kinds:
+        if not _kind_spec(plan.kind).log_dependent:
             logger.info("智能日志分析: 跳过（类型 %s 不需要日志）", plan.kind)
             return None
 
@@ -4970,7 +5259,7 @@ class BugAnalysisRunner:
                 bridge_session_id=bridge_session_id,
             ),
         )
-        if completed.returncode != 0 and plan.kind == "startup":
+        if completed.returncode != 0 and plan.kind in _RETRY_KINDS:
             completed = _run_tracked_process(
                 command,
                 watchdog=self.process_watchdog,
@@ -4990,35 +5279,17 @@ class BugAnalysisRunner:
         if completed.returncode != 0:
             return completed
 
-        if plan.kind == "startup":
-            generated_html = analysis_dir / "unity_startup_lifecycle_report.html"
-            generated_json = analysis_dir / "unity_startup_lifecycle_report.json"
-            if generated_html.exists():
-                shutil.copy2(generated_html, html_path)
-            if generated_json.exists():
-                shutil.copy2(generated_json, json_path)
-            return completed
-
-        if plan.kind == "scene_signal":
-            generated_html = analysis_dir / "scene_signal_events.html"
-            generated_json = analysis_dir / "scene_signal_events.json"
-            if generated_html.exists():
-                shutil.copy2(generated_html, html_path)
-            if generated_json.exists():
-                shutil.copy2(generated_json, json_path)
-            return completed
-
-        if plan.kind in {"stuck", "crash", "perception", "xtheme"}:
-            generated_html = self._extract_report_path(completed.stdout, r"^\[OK\] 报告:\s*(.+)$")
-            generated_json = self._extract_report_path(completed.stdout, r"^\[OK\] JSON:\s*(.+)$")
-            if plan.kind == "perception":
-                generated_html = self._extract_report_path(completed.stdout, r"^\[OK\] HTML:\s*(.+)$")
-            if plan.kind == "xtheme":
-                generated_html = self._extract_report_path(completed.stdout, r"^\[OK\] HTML:\s*(.+)$")
-            if generated_html and generated_html.exists():
-                shutil.copy2(generated_html, html_path)
-            if generated_json and generated_json.exists():
-                shutil.copy2(generated_json, json_path)
+        generated_html, generated_json = BugReportAdapter.locate_report(
+            kind=plan.kind,
+            completed_stdout=completed.stdout or "",
+            analysis_dir=analysis_dir,
+            html_path=html_path,
+            json_path=json_path,
+        )
+        if generated_html and generated_html.exists() and generated_html != html_path:
+            shutil.copy2(generated_html, html_path)
+        if generated_json and generated_json.exists() and generated_json != json_path:
+            shutil.copy2(generated_json, json_path)
         return completed
 
     def _decode_raw_logs_before_analysis(
@@ -5030,8 +5301,6 @@ class BugAnalysisRunner:
         target_time: str | None,
         bridge_session_id: str = "",
     ) -> subprocess.CompletedProcess[str] | None:
-        if plan.kind not in {"scene_signal", "perception", "xtheme", "startup", "stuck"}:
-            return None
         if input_path is None or not input_path.exists():
             return None
         if not self._has_raw_logs_needing_decode(input_path):
@@ -5846,13 +6115,13 @@ class BugAnalysisRunner:
                 f"HTML: {html_path}"
             )
 
-        if plan.kind in {"general", "custom_skill", *SOURCE_STAGE_KINDS, "ld_lane_level"}:
+        if _kind_spec(plan.kind).is_agent_handled:
             verdict = payload.get("verdict", {}) if isinstance(payload, dict) else {}
             default_summary = (
                 "已生成 LD车道级日志分析报告"
                 if plan.kind == "ld_lane_level"
                 else "已生成源码分析报告"
-                if plan.kind in SOURCE_STAGE_KINDS
+                if _kind_spec(plan.kind).is_source_stage
                 else "已生成专用 Skill 源码分析入口"
                 if plan.kind == "custom_skill"
                 else "已生成通用问题分析报告"
@@ -8584,7 +8853,7 @@ class BugAnalysisRunner:
         elif record.executor != "file_agent":
             route_note = f"\n当前状态：已配置 executor=`{record.executor}`，但当前只支持 file_agent。"
         return (
-            f"已命中专用 Skill `{display_name}`，但当前没有可执行分析器，尚未执行实际日志分析。"
+            f"已命中专用 Skill `{display_name}`，但当前没有可执行源码分析器，尚未执行实际日志分析。"
             f"{route_note}{log_note}\n不会基于占位报告给出根因结论。请为该 Skill 配置文件 Agent 执行器后重试。"
         )
 
@@ -10533,7 +10802,7 @@ class BugAnalysisRunner:
             f"{prefix}_agent_provider": str(result.get("provider") or ""),
             f"{prefix}_agent_duration_seconds": result.get("duration_seconds") or 0.0,
         }
-        if analysis_kind in SOURCE_STAGE_KINDS:
+        if _kind_spec(analysis_kind).is_source_stage:
             stage_status = str(result.get(status_key) or result.get("custom_skill_analysis_status") or "completed")
             details.update(
                 {

@@ -432,9 +432,15 @@ def parse_followup_action(text: str) -> str:
 
 def build_basic_chat_reply(text: str, *, command_prefixes: list[str] | None = None) -> str | None:
     normalized_text = (text or "").strip()
-    lowered = normalized_text.casefold()
+    # Remove URLs (and the URL part of markdown links) before keyword matching so
+    # URLs/paths cannot accidentally trigger greeting/help/identity intents.
+    cleaned_text = re.sub(r"\[([^\]]*?)\]\((?:https?://|www\.)[^\s)]+\)", r"\1", normalized_text)
+    cleaned_text = re.sub(r"https?://\S+", " ", cleaned_text)
+    cleaned_text = re.sub(r"www\.\S+", " ", cleaned_text)
+    cleaned_text = cleaned_text.strip()
+    lowered = cleaned_text.casefold()
 
-    if _contains_any(normalized_text, lowered, IDENTITY_TERMS):
+    if _contains_any(cleaned_text, lowered, IDENTITY_TERMS):
         return (
             "我是本地运行的 Lark Agent Bridge。"
             "我负责在飞书里接收消息、下载日志或附件，并调用本地分析脚本回传报告；"
@@ -443,7 +449,7 @@ def build_basic_chat_reply(text: str, *, command_prefixes: list[str] | None = No
             "发送 `help` 可以查看常用触发示例。"
         )
 
-    if _contains_any(normalized_text, lowered, HELP_TERMS):
+    if _contains_any(cleaned_text, lowered, HELP_TERMS):
         return (
             "常用触发方式（常见触发方式）：\n"
             "| 模式 | 怎么发 |\n"
@@ -464,7 +470,7 @@ def build_basic_chat_reply(text: str, *, command_prefixes: list[str] | None = No
             "只有明确的 Bug 链接、日志/附件分析、信号/感知、知识库、ROM 查询等请求会进入卡片式处理；普通问答会直接文本回复。"
         )
 
-    if _contains_any(normalized_text, lowered, GREETING_TERMS):
+    if _contains_any(cleaned_text, lowered, GREETING_TERMS):
         return (
             "你好，我是 Lark Agent Bridge。"
             "你可以直接发 `Bug链接 调查3D启动时序`、"
@@ -822,8 +828,40 @@ def _has_addr2line_address(text: str) -> bool:
     return ADDR2LINE_ADDRESS_RE.search(text) is not None
 
 
+_ASCII_TERM_RE_CACHE: dict[str, "re.Pattern[str]"] = {}
+
+
+def _ascii_word_pattern(term: str) -> "re.Pattern[str]":
+    """Compile (and cache) a word-boundary regex for an ASCII term.
+
+    Word boundary matching prevents short tokens like ``hi`` / ``help``
+    from matching inside larger words such as ``vehicle`` or URLs.
+    """
+    pattern = _ASCII_TERM_RE_CACHE.get(term)
+    if pattern is None:
+        pattern = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(term)}(?![A-Za-z0-9_])", re.IGNORECASE)
+        _ASCII_TERM_RE_CACHE[term] = pattern
+    return pattern
+
+
 def _contains_any(original: str, lowered: str, terms: tuple[str, ...]) -> bool:
-    return any(term in original or term.casefold() in lowered for term in terms)
+    """Match any term in *original* / *lowered*.
+
+    For ASCII-only terms we require word boundaries to avoid false
+    positives inside URLs or longer English words. Terms containing any
+    non-ASCII character (CJK, etc.) fall back to substring matching since
+    word boundaries are not meaningful for them.
+    """
+    for term in terms:
+        if not term:
+            continue
+        if term.isascii():
+            if _ascii_word_pattern(term).search(original):
+                return True
+        else:
+            if term in original or term.casefold() in lowered:
+                return True
+    return False
 
 
 def _strip_leading_mentions(text: str) -> str:

@@ -3173,6 +3173,225 @@ class AgentTests(unittest.TestCase):
         self.assertIn("--request-text", command)
         self.assertIn("调查主题变化", command)
 
+    def test_bug_analysis_stuck_command_passes_target_time(self):
+        runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
+        plan_cls = __import__("lark_agent_bridge.agents", fromlist=["BugAnalysisPlan"]).BugAnalysisPlan
+        command = runner.build_command(
+            plan=plan_cls(kind="stuck"),
+            input_path=Path("/tmp/input"),
+            html_path=Path("/tmp/out.html"),
+            json_path=Path("/tmp/out.json"),
+            analysis_dir=Path("/tmp/stuck"),
+            target_time="2026-04-29 20:49",
+        )
+        self.assertIn("--target-time", command)
+        self.assertIn("2026-04-29 20:49", command)
+
+    def test_bug_analysis_crash_command_passes_target_time(self):
+        runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
+        plan_cls = __import__("lark_agent_bridge.agents", fromlist=["BugAnalysisPlan"]).BugAnalysisPlan
+        command = runner.build_command(
+            plan=plan_cls(kind="crash"),
+            input_path=Path("/tmp/input"),
+            html_path=Path("/tmp/out.html"),
+            json_path=Path("/tmp/out.json"),
+            analysis_dir=Path("/tmp/crash"),
+            target_time="2026-05-28 11:18",
+        )
+        self.assertIn("--target-time", command)
+        self.assertIn("2026-05-28 11:18", command)
+
+    def test_bug_analysis_signal_command_does_not_accept_target_time(self):
+        from lark_agent_bridge.agents.bug_runner import _kind_accepts_target_time
+        self.assertTrue(_kind_accepts_target_time("startup"))
+        self.assertTrue(_kind_accepts_target_time("stuck"))
+        self.assertTrue(_kind_accepts_target_time("crash"))
+        self.assertTrue(_kind_accepts_target_time("scene_signal"))
+        self.assertTrue(_kind_accepts_target_time("perception"))
+        self.assertTrue(_kind_accepts_target_time("xtheme"))
+        self.assertFalse(_kind_accepts_target_time("signal"))
+        self.assertFalse(_kind_accepts_target_time("general"))
+        self.assertFalse(_kind_accepts_target_time("source_stage"))
+
+    def test_bug_report_adapter_normalize_verdict_per_kind(self):
+        from lark_agent_bridge.agents.bug_runner import BugReportAdapter, NormalizedVerdict
+
+        # startup
+        v = BugReportAdapter.normalize_verdict(
+            kind="startup",
+            payload={"verdict": {"severity": "red", "message": "boot stuck", "issues": [{"sev": "red", "title": "t", "detail": "d"}]}},
+        )
+        self.assertEqual(v.sev, "red")
+        self.assertEqual(v.msg, "boot stuck")
+        self.assertEqual(len(v.issues), 1)
+
+        # stuck
+        v = BugReportAdapter.normalize_verdict(
+            kind="stuck",
+            payload={"verdict": {"verdict_sev": "yellow", "verdict_msg": "jank"}},
+        )
+        self.assertEqual(v.sev, "yellow")
+        self.assertEqual(v.msg, "jank")
+
+        # crash (same shape as stuck)
+        v = BugReportAdapter.normalize_verdict(
+            kind="crash",
+            payload={"verdict": {"verdict_sev": "red", "verdict_msg": "tombstone"}},
+        )
+        self.assertEqual(v.sev, "red")
+        self.assertEqual(v.msg, "tombstone")
+
+        # perception (nested under summary)
+        v = BugReportAdapter.normalize_verdict(
+            kind="perception",
+            payload={"summary": {"verdict": {"sev": "green", "msg": "ok"}, "issues": []}},
+        )
+        self.assertEqual(v.sev, "green")
+        self.assertEqual(v.msg, "ok")
+
+        # xtheme
+        v = BugReportAdapter.normalize_verdict(
+            kind="xtheme",
+            payload={"verdict": {"sev": "yellow", "msg": "theme drift"}, "issues": [{"sev": "yellow", "title": "t", "detail": "d"}]},
+        )
+        self.assertEqual(v.sev, "yellow")
+        self.assertEqual(len(v.issues), 1)
+
+        # scene_signal (flat severity + verdict string)
+        v = BugReportAdapter.normalize_verdict(
+            kind="scene_signal",
+            payload={"severity": "warning", "verdict": "pk-incomplete"},
+        )
+        self.assertEqual(v.sev, "yellow")
+        self.assertEqual(v.msg, "pk-incomplete")
+        v = BugReportAdapter.normalize_verdict(
+            kind="scene_signal",
+            payload={"severity": "success", "verdict": "ok"},
+        )
+        self.assertEqual(v.sev, "green")
+
+        # signal (summary + warnings list)
+        v = BugReportAdapter.normalize_verdict(
+            kind="signal",
+            payload={"summary": "132002 dispatched", "warnings": ["no source", "no log"]},
+        )
+        self.assertEqual(v.sev, "info")
+        self.assertEqual(v.msg, "132002 dispatched")
+        self.assertEqual(len(v.issues), 2)
+
+        # general (bug_runner-constructed verdict.text)
+        v = BugReportAdapter.normalize_verdict(
+            kind="general",
+            payload={"verdict": {"sev": "green", "text": "通用分析"}},
+        )
+        self.assertEqual(v.sev, "green")
+        self.assertEqual(v.msg, "通用分析")
+
+        # malformed payload — defaults
+        v = BugReportAdapter.normalize_verdict(kind="startup", payload="not a dict")
+        self.assertEqual(v.sev, "unknown")
+        self.assertEqual(v.msg, "")
+        self.assertEqual(v.issues, [])
+
+    def test_bug_report_adapter_locate_report_per_kind(self):
+        from lark_agent_bridge.agents.bug_runner import BugReportAdapter
+
+        analysis_dir = Path("/tmp/analysis_dir")
+        html = Path("/tmp/out.html")
+        jsn = Path("/tmp/out.json")
+
+        # startup — fixed paths in analysis_dir
+        h, j = BugReportAdapter.locate_report(
+            kind="startup", completed_stdout="", analysis_dir=analysis_dir,
+            html_path=html, json_path=jsn,
+        )
+        self.assertEqual(h, analysis_dir / "unity_startup_lifecycle_report.html")
+        self.assertEqual(j, analysis_dir / "unity_startup_lifecycle_report.json")
+
+        # scene_signal — fixed paths
+        h, j = BugReportAdapter.locate_report(
+            kind="scene_signal", completed_stdout="", analysis_dir=analysis_dir,
+            html_path=html, json_path=jsn,
+        )
+        self.assertEqual(h, analysis_dir / "scene_signal_events.html")
+        self.assertEqual(j, analysis_dir / "scene_signal_events.json")
+
+        # stuck — stdout `[OK] 报告:` / `[OK] JSON:`
+        stdout = "noise\n[OK] 报告: /a/stuck.html\n[OK] JSON: /a/stuck.json\n"
+        h, j = BugReportAdapter.locate_report(
+            kind="stuck", completed_stdout=stdout, analysis_dir=analysis_dir,
+            html_path=html, json_path=jsn,
+        )
+        self.assertEqual(h, Path("/a/stuck.html"))
+        self.assertEqual(j, Path("/a/stuck.json"))
+
+        # perception — stdout `[OK] HTML:` / `[OK] JSON:`
+        stdout = "[OK] HTML: /a/perc.html\n[OK] JSON: /a/perc.json\n"
+        h, j = BugReportAdapter.locate_report(
+            kind="perception", completed_stdout=stdout, analysis_dir=analysis_dir,
+            html_path=html, json_path=jsn,
+        )
+        self.assertEqual(h, Path("/a/perc.html"))
+        self.assertEqual(j, Path("/a/perc.json"))
+
+        # xtheme — stdout `[OK] HTML:` / `[OK] JSON:`
+        stdout = "[OK] HTML: /a/x.html\n[OK] JSON: /a/x.json\n"
+        h, j = BugReportAdapter.locate_report(
+            kind="xtheme", completed_stdout=stdout, analysis_dir=analysis_dir,
+            html_path=html, json_path=jsn,
+        )
+        self.assertEqual(h, Path("/a/x.html"))
+        self.assertEqual(j, Path("/a/x.json"))
+
+        # signal — script writes directly to html/json paths; missing files yield None
+        h, j = BugReportAdapter.locate_report(
+            kind="signal", completed_stdout="", analysis_dir=analysis_dir,
+            html_path=Path("/non/existent.html"), json_path=Path("/non/existent.json"),
+        )
+        self.assertIsNone(h)
+        self.assertIsNone(j)
+
+    def test_plan_kind_spec_slim_4_fields_with_derived(self):
+        from lark_agent_bridge.agents.bug_runner import PlanKindSpec, _kind_spec
+
+        # Declared fields are exactly 4 (no needs_decode/needs_target_time/stdout_report/has_verdict)
+        from dataclasses import fields
+        declared = {f.name for f in fields(PlanKindSpec)}
+        self.assertEqual(
+            declared,
+            {"is_agent_handled", "is_custom_agent", "is_source_stage", "needs_source_evidence"},
+        )
+
+        # Derived properties hold expected values
+        startup = _kind_spec("startup")
+        self.assertFalse(startup.is_agent_handled)
+        self.assertTrue(startup.log_dependent)  # script-driven => log dependent
+        self.assertFalse(startup.needs_custom_executor_check)
+
+        ld = _kind_spec("ld_lane_level")
+        self.assertTrue(ld.is_agent_handled)
+        self.assertTrue(ld.is_custom_agent)
+        self.assertFalse(ld.is_source_stage)
+        self.assertFalse(ld.needs_source_evidence)
+        self.assertFalse(ld.log_dependent)
+        self.assertFalse(ld.needs_custom_executor_check)  # is_custom_agent but not source-evidence
+
+        source = _kind_spec("source_stage")
+        self.assertTrue(source.is_agent_handled)
+        self.assertTrue(source.is_custom_agent)
+        self.assertTrue(source.is_source_stage)
+        self.assertTrue(source.needs_source_evidence)
+        self.assertTrue(source.needs_custom_executor_check)
+
+        # Unknown kind returns default empty spec
+        unknown = _kind_spec("not_a_real_kind")
+        self.assertFalse(unknown.is_agent_handled)
+        self.assertFalse(unknown.needs_source_evidence)
+
+    def test_retry_kinds_only_contains_startup(self):
+        from lark_agent_bridge.agents.bug_runner import _RETRY_KINDS
+        self.assertEqual(_RETRY_KINDS, frozenset({"startup"}))
+
     def test_bug_analysis_classifies_stuck_request(self):
         runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
 
@@ -4843,6 +5062,59 @@ class AgentTests(unittest.TestCase):
         )
 
         self.assertEqual([plan.kind for plan in plans], ["perception"])
+
+    def test_bug_analysis_classifies_pullover_chain_request_chinese(self):
+        runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
+        plan = runner.classify_request(
+            prompt_text="靠边停车不显示",
+            title="",
+            description="",
+        )
+        self.assertEqual(plan.kind, "pullover_chain")
+        self.assertIsNone(plan.signal_code)
+
+    def test_bug_analysis_classifies_pullover_chain_request_english(self):
+        runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
+        plan = runner.classify_request(
+            prompt_text="百度回调没有 SideParkInfo",
+            title="",
+            description="",
+        )
+        self.assertEqual(plan.kind, "pullover_chain")
+
+    def test_pullover_chain_kind_is_agent_handled_custom_agent(self):
+        from lark_agent_bridge.agents.bug_runner import _kind_spec
+        spec = _kind_spec("pullover_chain")
+        self.assertTrue(spec.is_agent_handled)
+        self.assertTrue(spec.is_custom_agent)
+        self.assertFalse(spec.is_source_stage)
+        self.assertFalse(spec.needs_source_evidence)
+        self.assertFalse(spec.log_dependent)
+        self.assertFalse(spec.needs_custom_executor_check)
+
+    def test_pullover_chain_report_name_and_label(self):
+        runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
+        self.assertEqual(runner._report_name("pullover_chain", "html"), "bug_pullover_chain_report.html")
+        self.assertEqual(runner._report_name("pullover_chain", "json"), "bug_pullover_chain_report.json")
+        self.assertEqual(runner._analysis_label("pullover_chain"), "靠边停车链路分析")
+
+    def test_pullover_chain_registered_in_primary_skill_map(self):
+        from lark_agent_bridge.skill_registry import PRIMARY_BUG_SKILL_MAP
+        entry = PRIMARY_BUG_SKILL_MAP.get("pullover-chain-analyzer")
+        self.assertIsNotNone(entry)
+        kind, label, requires_logs = entry
+        self.assertEqual(kind, "pullover_chain")
+        self.assertEqual(label, "靠边停车链路分析")
+        self.assertFalse(requires_logs)
+
+    def test_pullover_chain_in_all_plan_kinds(self):
+        from lark_agent_bridge.agents.bug_runner import ALL_PLAN_KINDS
+        self.assertIn("pullover_chain", ALL_PLAN_KINDS)
+
+    def test_pullover_chain_does_not_accept_target_time(self):
+        from lark_agent_bridge.agents.bug_runner import _kind_accepts_target_time
+        # Agent-handled kinds pass fault_time via prompt, not as a CLI flag.
+        self.assertFalse(_kind_accepts_target_time("pullover_chain"))
 
     def test_bug_analysis_dry_run_routes_to_stuck_script(self):
         with tempfile.TemporaryDirectory() as tmp:

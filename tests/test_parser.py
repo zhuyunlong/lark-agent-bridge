@@ -231,6 +231,38 @@ class ParserTests(unittest.TestCase):
         self.assertIn("个人知识库", reply)
         self.assertIn("普通聊天", reply)
 
+    def test_basic_chat_does_not_match_greeting_inside_url(self):
+        # URLs containing the word "vehicle" must NOT trigger greeting fallback
+        # because "hi" is a substring of "vehicle".
+        reply = build_basic_chat_reply(
+            "@朱云龙的飞书 CLI [05-28 15:23:11](http://test.manage.prod.xiaopeng.link/driving/oss/browser?prefix=test_vehicle_data_warehouse/) 调查靠边停车数据"
+        )
+        self.assertIsNone(reply)
+
+    def test_basic_chat_does_not_match_short_ascii_term_inside_word(self):
+        # Defend against false positives for: hi, help, hello, etc. inside other words.
+        for noisy in ("vehicle", "achievement", "https://example.com/help", "[link](https://x.com/help)"):
+            self.assertIsNone(build_basic_chat_reply(noisy), f"unexpected match for {noisy!r}")
+
+    def test_basic_chat_still_matches_legitimate_greeting(self):
+        for greet in ("hi", "Hello", "你好", "在吗", "hi there!"):
+            self.assertIsNotNone(build_basic_chat_reply(greet), f"missed match for {greet!r}")
+        self.assertIsNotNone(build_basic_chat_reply("help"))
+        self.assertIsNotNone(build_basic_chat_reply("who are you"))
+
+    def test_pullover_chain_request_with_url_routes_to_direct_analysis(self):
+        # The exact failing scenario: at-mention + Feishu-injected timestamped URL
+        # block + Chinese trigger phrase. Must not be hijacked by basic_chat.
+        from lark_agent_bridge.parser import looks_like_direct_analysis_prompt
+        text = (
+            "@朱云龙的飞书 CLI [05-28 15:23:11]"
+            "(http://test.manage.prod.xiaopeng.link/driving/oss/browser?prefix=test_vehicle_data_warehouse/) "
+            "调查靠边停车数据"
+        )
+        self.assertIsNone(build_basic_chat_reply(text))
+        # With a referenced file resource present, direct analysis should be triggered.
+        self.assertTrue(looks_like_direct_analysis_prompt(text, resources_present=True))
+
     def test_parse_claude_skill_prefix_requires_opt_in(self):
         request = parse_claude_skill_request("@bot /skill 请分析这个日志排查流程")
 

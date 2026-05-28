@@ -97,6 +97,19 @@ terms = [
     "xpd_ldtilecachemanager",
 ]
 
+[pullover_chain]
+terms = [
+    "靠边停车", "侧方停车",
+    "pullover", "pull over", "pull-over",
+    "sideparking", "side parking", "side-parking",
+    "sidepark", "side park", "side-park",
+    "靠边停车不显示", "靠边停车没反应",
+    "百度没返回靠边停车", "百度回调没有sideparkinfo",
+    "pullovermsg is null", "final status is none", "position is nullptr",
+    "side_parking_info", "side_park_info",
+    "pulloverstatus", "pull_over_status",
+]
+
 [core_scene_signals]
 values = [
     "100002", "100008", "100009", "100010",

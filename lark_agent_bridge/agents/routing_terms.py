@@ -68,6 +68,7 @@ XTHEME_ROUTE_TERMS = _get_tuple(_data, "xtheme")
 CORE_SCENE_SIGNALS = _get_set(_data, "core_scene_signals")
 STRONG_SCENE_SIGNAL_INTENT_TERMS = _get_tuple(_data, "strong_scene_signal_intent")
 LD_LANE_LEVEL_ROUTE_TERMS = _get_tuple(_data, "ld_lane_level")
+PULLOVER_CHAIN_ROUTE_TERMS = _get_tuple(_data, "pullover_chain")
 
 
 def _is_core_scene_signal(signal: str) -> bool:
