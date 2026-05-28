@@ -5440,6 +5440,21 @@ class AgentTests(unittest.TestCase):
             self.assertTrue(prepared.is_dir())
             self.assertTrue((prepared / "Log/log0/app/com.xiaopeng.montecarlo/main_2026-05-19_15-00.txt").exists())
 
+    def test_bug_analysis_prepare_log_input_extracts_archive_in_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
+            input_dir = Path(tmp) / "input"
+            input_dir.mkdir()
+            (input_dir / "browser").write_text("<html>page</html>", encoding="utf-8")
+            archive = input_dir / "Log.zip"
+            with zipfile.ZipFile(archive, "w") as zf:
+                zf.writestr("Log/log0/app/com.xiaopeng.test/main_2026-05-28_15-00.alog", "binary-log")
+
+            prepared = runner._prepare_log_input(input_dir)
+
+            self.assertTrue(prepared.is_dir())
+            self.assertTrue((prepared / "Log/log0/app/com.xiaopeng.test/main_2026-05-28_15-00.alog").exists())
+
     def test_bug_analysis_startup_uses_prepared_directory_context(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = BridgeConfig(dry_run=False, data_dir=Path(tmp), workspace_root=Path(tmp))

@@ -4804,10 +4804,26 @@ class BugAnalysisRunner:
             prepared = self._expand_xp_file(selected_input)
         elif self._is_archive_log_attachment(selected_input) and not lower_name.endswith(".xp.zip.001"):
             prepared = self._extract_log_archive(selected_input)
+        elif selected_input.is_dir():
+            archive = self._select_best_archive(selected_input)
+            prepared = self._prepare_log_input(archive) if archive else selected_input
         else:
             prepared = selected_input
         self._ensure_decoded_in_place(prepared)
         return prepared
+
+    def _select_best_archive(self, directory: Path) -> Path | None:
+        try:
+            children = sorted(directory.iterdir())
+        except OSError:
+            return None
+        for suffix in _BUG_LOG_INPUT_PRIORITY_SUFFIXES:
+            for child in children:
+                if child.is_file() and child.name.lower().endswith(suffix) and self._is_usable_log_attachment(child):
+                    if child.name.lower().endswith(".xp.zip.001"):
+                        continue
+                    return child
+        return None
 
     def _analyze_logs_intelligently(
         self,
