@@ -121,6 +121,8 @@ class AgentRuntime:
         log_metadata_path: Path | None = None,
         progress_callback: Any | None = None,
         stream: bool = False,
+        codegraph_client: Any | None = None,
+        codegraph_roots: list[Path] | None = None,
     ) -> RuntimeResult:
         """Execute the agent and return structured result.
 
@@ -133,6 +135,8 @@ class AgentRuntime:
             progress_callback: optional callback(stage, message, **kw) for real-time tool progress.
             stream: if True, use run_stream() for real-time text output (calls progress_callback
                 with stage="stream_text" for each chunk).
+            codegraph_client: optional CodeGraphClient for semantic code intelligence tools.
+            codegraph_roots: repo roots with codegraph indexes.
         """
         started = time.monotonic()
 
@@ -149,6 +153,8 @@ class AgentRuntime:
                 report_dir=report_dir,
                 log_metadata_path=log_metadata_path,
                 progress_callback=progress_callback,
+                codegraph_client=codegraph_client,
+                codegraph_roots=codegraph_roots,
             )
             if result.ok:
                 return result
@@ -182,6 +188,8 @@ class AgentRuntime:
         report_dir: Path | None = None,
         log_metadata_path: Path | None = None,
         progress_callback: Any | None = None,
+        codegraph_client: Any | None = None,
+        codegraph_roots: list[Path] | None = None,
     ) -> RuntimeResult:
         """Execute via pydantic-ai Agent."""
         try:
@@ -224,12 +232,12 @@ class AgentRuntime:
                 report_dir=report_dir,
                 log_metadata_path=log_metadata_path,
                 progress_callback=progress_callback,
+                codegraph_client=codegraph_client,
+                codegraph_roots=codegraph_roots,
             )
 
         try:
             from pydantic_ai import UsageLimits
-            # Source analysis needs many rounds of exploration;
-            # non-tool tasks can finish well under these limits.
             usage_limits = UsageLimits(
                 request_limit=50,
                 tool_calls_limit=80,
@@ -335,6 +343,8 @@ class AgentRuntime:
         report_dir: Path | None = None,
         log_metadata_path: Path | None = None,
         progress_callback: Any | None = None,
+        codegraph_client: Any | None = None,
+        codegraph_roots: list[Path] | None = None,
     ) -> RuntimeResult:
         """Execute via pydantic-ai Agent with streaming output.
 
@@ -353,6 +363,8 @@ class AgentRuntime:
                 report_dir=report_dir,
                 log_metadata_path=log_metadata_path,
                 progress_callback=progress_callback,
+                codegraph_client=codegraph_client,
+                codegraph_roots=codegraph_roots,
             ))
         except Exception as exc:
             duration = time.monotonic() - started
@@ -378,8 +390,9 @@ class AgentRuntime:
         report_dir: Path | None = None,
         log_metadata_path: Path | None = None,
         progress_callback: Any | None = None,
+        codegraph_client: Any | None = None,
+        codegraph_roots: list[Path] | None = None,
     ) -> RuntimeResult:
-        """Async implementation of streaming pydantic-ai execution."""
         from pydantic_ai import Agent
         from pydantic_ai.settings import ModelSettings
 
@@ -408,6 +421,8 @@ class AgentRuntime:
                 report_dir=report_dir,
                 log_metadata_path=log_metadata_path,
                 progress_callback=progress_callback,
+                codegraph_client=codegraph_client,
+                codegraph_roots=codegraph_roots,
             )
 
         from pydantic_ai import UsageLimits

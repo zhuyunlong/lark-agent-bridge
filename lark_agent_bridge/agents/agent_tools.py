@@ -246,6 +246,8 @@ def register_tools(
     report_dir: Path | None = None,
     log_metadata_path: Path | None = None,
     progress_callback: Any | None = None,
+    codegraph_client: Any | None = None,
+    codegraph_roots: list[Path] | None = None,
 ) -> None:
     """Register bridge-owned tools on a pydantic-ai Agent instance.
 
@@ -256,6 +258,8 @@ def register_tools(
         report_dir: job output dir for reading prior reports
         log_metadata_path: path to prepared log metadata file
         progress_callback: optional callback(stage, message, **details) for real-time progress
+        codegraph_client: optional CodeGraphClient instance for semantic code intelligence
+        codegraph_roots: repo roots that have codegraph indexes (defaults to workspace + extra_roots)
     """
     all_roots = [workspace]
     if extra_roots:
@@ -386,3 +390,78 @@ def register_tools(
             return content
         except OSError as exc:
             return f"Error reading log metadata: {exc}"
+
+    # ------------------------------------------------------------------
+    # Codegraph tools (semantic code intelligence)
+    # ------------------------------------------------------------------
+    if codegraph_client is not None:
+        _cg = codegraph_client
+        _cg_roots = codegraph_roots or ([workspace] + (extra_roots or []))
+        # Filter to roots that actually have codegraph indexes
+        _indexed_roots = [r for r in _cg_roots if _cg.is_indexed(r)]
+        if _indexed_roots:
+            logger.info("Registering codegraph tools for %d indexed repos", len(_indexed_roots))
+
+            @agent.tool_plain
+            def search_codegraph(query: str, kind: str = "") -> str:
+                """语义符号搜索。在代码库中搜索函数名、类名、变量名等符号。kind 可选: class, method, function, field。"""
+                logger.info("[tool_call] search_codegraph(query=%s, kind=%s)", query, kind)
+                _emit_tool_progress("search_codegraph", query[:50])
+                results: list[str] = []
+                for root in _indexed_roots:
+                    hits = _cg.search_symbol(query, root, limit=10, kind=kind or None)
+                    if hits:
+                        lines = [f"# {root.name}/"]
+                        for h in hits:
+                            sig = f" | {h.signature}" if h.signature else ""
+                            lines.append(f"  [{h.kind}] {h.qualified_name or h.name} @ {h.path}:{h.line}{sig}")
+                        results.append("\n".join(lines))
+                if not results:
+                    return f"No symbols found for: {query}"
+                return "\n\n".join(results)
+
+            @agent.tool_plain
+            def get_callers(symbol: str) -> str:
+                """查找调用了指定符号的所有调用者。用于追踪函数/方法的调用链。"""
+                logger.info("[tool_call] get_callers(symbol=%s)", symbol)
+                _emit_tool_progress("get_callers", symbol[:50])
+                results: list[str] = []
+                for root in _indexed_roots:
+                    callers = _cg.get_callers(symbol, root, limit=20)
+                    if callers:
+                        lines = [f"# {root.name}/ — callers of '{symbol}'"]
+                        for c in callers:
+                            lines.append(f"  [{c.kind}] {c.name} @ {c.path}:{c.line}")
+                        results.append("\n".join(lines))
+                if not results:
+                    return f"No callers found for: {symbol}"
+                return "\n\n".join(results)
+
+            @agent.tool_plain
+            def get_code_context(task: str) -> str:
+                """根据任务描述自动构建代码上下文。返回相关的入口点、调用关系和摘要。适合分析问题时快速获取全局视角。"""
+                logger.info("[tool_call] get_code_context(task=%s)", task)
+                _emit_tool_progress("get_code_context", task[:50])
+                results: list[str] = []
+                for root in _indexed_roots:
+                    ctx = _cg.get_context(task, root, max_nodes=30)
+                    if ctx.entry_points or ctx.summary:
+                        lines = [f"# {root.name}/"]
+                        if ctx.summary:
+                            lines.append(f"概要: {ctx.summary[:300]}")
+                        if ctx.entry_points:
+                            lines.append("入口点:")
+                            for ep in ctx.entry_points[:10]:
+                                name = ep.get("qualifiedName") or ep.get("name", "")
+                                kind = ep.get("kind", "")
+                                path = ep.get("filePath", "")
+                                line_no = ep.get("startLine", "")
+                                lines.append(f"  [{kind}] {name} @ {path}:{line_no}")
+                        results.append("\n".join(lines))
+                if not results:
+                    return f"No code context found for: {task}"
+                return "\n\n".join(results)
+
+            logger.info("Codegraph tools registered: search_codegraph, get_callers, get_code_context")
+        else:
+            logger.info("Codegraph client provided but no indexed repos found, skipping codegraph tools")

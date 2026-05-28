@@ -9662,6 +9662,23 @@ class BugAnalysisRunner:
         elif analysis_dir and (analysis_dir / "log_focus.md").exists():
             log_metadata_path = analysis_dir / "log_focus.md"
 
+        # Codegraph client for semantic code intelligence
+        codegraph_client = None
+        codegraph_roots = None
+        if si_opts.codegraph_enabled:
+            try:
+                from ..knowledge.codegraph_client import CodeGraphClient
+                cg = CodeGraphClient(
+                    command=si_opts.codegraph_command,
+                    timeout=si_opts.codegraph_timeout_seconds,
+                )
+                if cg.is_available():
+                    codegraph_client = cg
+                    codegraph_roots = source_roots
+                    logger.info("Codegraph client available for pydantic-ai tools")
+            except Exception as exc:
+                logger.debug("Codegraph client init failed: %s", exc)
+
         runtime = AgentRuntime(ai_opts, workspace=primary_workspace)
 
         if not runtime.is_available():
@@ -9712,15 +9729,19 @@ class BugAnalysisRunner:
             "- glob(pattern): 查找文件路径，如 '**/*.java'\n"
             "- list_dir(path): 列出目录内容\n"
             "- read_report_artifact(name): 读取前序分析报告产物\n"
-            "- read_prepared_log_metadata(): 读取日志元数据摘要\n\n"
+            "- read_prepared_log_metadata(): 读取日志元数据摘要\n"
+            "- search_codegraph(query, kind?): 语义符号搜索，按函数名/类名查找定义位置\n"
+            "- get_callers(symbol): 查找指定函数/方法的所有调用者\n"
+            "- get_code_context(task): 根据任务描述自动构建代码上下文和入口点\n\n"
             "## 工作要求\n"
             "1. 必须使用工具探索代码库，不要凭空猜测\n"
-            "2. 先用 list_dir 和 glob 了解项目结构\n"
-            "3. 用 grep 搜索与 Bug 相关的关键词、函数名、信号名\n"
-            "4. 用 read_file 阅读关键代码，确定根因\n"
-            "5. 每条 evidence 必须包含具体的 file 路径和 line 号\n"
-            "6. 证据不足时明确写待确认，不要编造\n"
-            "7. 输出中文\n"
+            "2. 优先使用 search_codegraph 和 get_code_context 快速定位关键符号\n"
+            "3. 用 get_callers 追踪调用链，理解代码执行流程\n"
+            "4. 用 grep 搜索与 Bug 相关的关键词、信号名\n"
+            "5. 用 read_file 阅读关键代码，确定根因\n"
+            "6. 每条 evidence 必须包含具体的 file 路径和 line 号\n"
+            "7. 证据不足时明确写待确认，不要编造\n"
+            "8. 输出中文\n"
         )
 
         user_prompt = (
@@ -9761,6 +9782,8 @@ class BugAnalysisRunner:
                 log_metadata_path=log_metadata_path,
                 progress_callback=_tool_progress,
                 stream=True,
+                codegraph_client=codegraph_client,
+                codegraph_roots=codegraph_roots,
             )
         except Exception as exc:
             logger.warning("pydantic-ai source analysis failed: %s", exc)
