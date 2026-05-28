@@ -7,6 +7,7 @@ Each tool call is logged for observability.
 Tool set (aligned with OpenCode / Claude Code / Codex):
   Core I/O:    read_file (with line range), get_file_outline, list_dir
   Search:      grep (with context lines), glob
+  Shell:       bash (read-only shell, pipes + rg/sed/awk/jq/git supported)
   Git:         git_log, git_blame_range, repo_overview
   Reasoning:   think (scratchpad)
   Report:      read_report_artifact, read_prepared_log_metadata
@@ -40,6 +41,97 @@ _MAX_GREP_FILE_SIZE = 256 * 1024
 _MAX_READ_BYTES = 50 * 1024
 # Max lines per paginated read_file call
 _MAX_READ_LINES = 500
+
+# ---------------------------------------------------------------------------
+# Read-only bash execution safety
+# ---------------------------------------------------------------------------
+
+# Commands whose first token is allowed in bash tool
+_BASH_ALLOWED_FIRST_TOKENS = frozenset({
+    # Search & text
+    "rg", "grep", "egrep", "fgrep", "ack", "ag",
+    "find", "fd",
+    "cat", "head", "tail", "bat",
+    "wc", "sort", "uniq", "cut", "tr", "awk", "sed",
+    "echo", "printf",
+    # File/dir
+    "ls", "la", "ll", "tree", "du", "stat", "file",
+    "diff", "colordiff",
+    # Compression / binary
+    "zcat", "gunzip", "zgrep", "strings", "od", "xxd", "hexdump",
+    # Git (subcommands checked separately)
+    "git",
+    # Data
+    "jq", "yq", "python3", "python",
+    # Pipes / chain helpers
+    "xargs", "parallel",
+    # Checksums
+    "md5sum", "sha256sum", "shasum", "md5",
+})
+
+# Dangerous git subcommands that are never allowed
+_GIT_BLOCKED_SUBCMDS = frozenset({
+    "push", "commit", "merge", "rebase", "reset", "revert",
+    "checkout", "switch", "restore", "clean", "apply", "am",
+    "tag", "remote", "submodule", "fetch", "pull",
+    "rm", "mv", "add", "stash", "bisect",
+    "config", "init", "clone",
+})
+
+# Patterns that must never appear anywhere in the command string
+_BASH_BLOCKED_RE = re.compile(
+    r"""
+    (?:^|\s)(?:rm|rmdir|mv|cp|chmod|chown|sudo|su)\s   # destructive file ops
+    | (?:^|\s)(?:curl|wget|nc|ncat|netcat|ssh|scp|sftp|ftp)\s   # network
+    | (?:^|\s)(?:pip|pip3|npm|yarn|brew|apt|yum|dnf|pacman)\s   # package mgr
+    | (?:^|\s)(?:kill|killall|pkill|reboot|shutdown|poweroff)\s # process/system
+    | (?:^|\s)(?:dd|mkfs|fdisk|format)\s                        # disk ops
+    | >\s*(?!/dev/null)                    # redirect to file (not /dev/null)
+    | >>[^\s]                              # append redirect
+    | (?:^|\s)tee\s+[^|]                  # tee to file (piped tee OK)
+    | ;\s*(?:rm|mv|cp|curl|wget|sudo)\s   # chained dangerous commands
+    | \$\(.*(?:rm|mv|curl|sudo).*\)       # command substitution with danger
+    """,
+    re.VERBOSE | re.IGNORECASE,
+)
+
+_BASH_MAX_OUTPUT = 60 * 1024   # 60 KB
+_BASH_TIMEOUT = 30              # seconds
+
+
+def _bash_check_safe(command: str) -> str | None:
+    """Return an error string if the command is unsafe, else None."""
+    cmd = command.strip()
+    if not cmd:
+        return "Empty command"
+
+    # Check blocked patterns anywhere in the command
+    if _BASH_BLOCKED_RE.search(cmd):
+        return f"Command blocked: contains disallowed operation"
+
+    # Extract first non-env token (skip VAR=val assignments)
+    tokens = cmd.lstrip().split()
+    first = tokens[0] if tokens else ""
+    # Skip env variable assignments like KEY=val cmd
+    for tok in tokens:
+        if "=" in tok and tok.split("=")[0].isidentifier():
+            continue
+        first = tok
+        break
+
+    # Strip path prefix (e.g., /usr/bin/rg → rg)
+    first_base = os.path.basename(first)
+
+    if first_base not in _BASH_ALLOWED_FIRST_TOKENS:
+        return f"Command '{first_base}' not in allowed list. Use read_file/grep/glob for file access."
+
+    # Extra check for git: block destructive subcommands
+    if first_base == "git" and len(tokens) > 1:
+        subcmd = tokens[1].lstrip("-")
+        if subcmd in _GIT_BLOCKED_SUBCMDS:
+            return f"git {subcmd} is not allowed (read-only mode)"
+
+    return None
 
 
 def _coerce_process_output(value: object) -> str:
@@ -607,8 +699,69 @@ def register_tools(
             return f"Error reading log metadata: {exc}"
 
     # ------------------------------------------------------------------
-    # New tools: get_file_outline, think, git_log, git_blame_range, repo_overview
+    # New tools: bash, get_file_outline, think, git_log, git_blame_range, repo_overview
     # ------------------------------------------------------------------
+
+    @agent.tool_plain
+    def bash(command: str, workdir: str = "") -> str:
+        """在工作区执行只读 shell 命令（支持管道、重定向到 /dev/null）。
+        允许：rg, grep, find, ls, cat, head, tail, wc, sort, uniq, awk, sed, cut, tr,
+              git log/diff/show/blame, jq, tree, stat, du, xargs, python3, fd 等。
+        禁止：rm, mv, cp, curl, wget, sudo, chmod, 以及任何写文件操作（> file）。
+        workdir: 可选子目录路径（相对于 workspace），默认为 workspace 根目录。
+
+        示例:
+          bash("rg 'OnSceneChanged' --type cs | head -30")
+          bash("git log --oneline --follow -- UnitySceneTypeService.kt | head -20")
+          bash("find . -name '*.kt' | xargs grep -l 'SIGNAL_SR_SCENE_TYPE' | head -10")
+          bash("cat SRDataManagerService.cs | sed -n '80,140p'")
+          bash("rg 'fun onHandle' --type kotlin -C 3 | head -60")
+        """
+        logger.info("[tool_call] bash(command=%s)", command[:120])
+        _emit_tool_progress("bash", f"$ {command[:70]}")
+
+        # Safety check
+        err = _bash_check_safe(command)
+        if err:
+            logger.warning("[tool_call] bash BLOCKED: %s | cmd=%s", err, command[:120])
+            return f"❌ Blocked: {err}\n\nAllowed commands: rg, grep, find, ls, cat, head, tail, wc, sort, uniq, awk, sed, git log/diff/show/blame, jq, xargs, tree, stat, python3, ..."
+
+        # Resolve working directory
+        cwd: Path = workspace
+        if workdir:
+            resolved_wd = _safe_resolve_multi(workdir, all_roots)
+            if resolved_wd and resolved_wd.is_dir():
+                cwd = resolved_wd
+
+        try:
+            proc = subprocess.run(
+                command,
+                shell=True,
+                capture_output=True,
+                timeout=_BASH_TIMEOUT,
+                cwd=str(cwd),
+            )
+            stdout = _coerce_process_output(proc.stdout)
+            stderr = _coerce_process_output(proc.stderr)
+
+            output = stdout
+            if stderr.strip() and not stdout.strip():
+                output = stderr
+            elif stderr.strip():
+                output = stdout + "\n[stderr]\n" + stderr[:1000]
+
+            if len(output.encode()) > _BASH_MAX_OUTPUT:
+                output = output[:_BASH_MAX_OUTPUT].rsplit("\n", 1)[0]
+                output += f"\n\n[... output truncated at {_BASH_MAX_OUTPUT//1024}KB. Use head/tail/grep to narrow down ...]"
+
+            if proc.returncode != 0 and not output.strip():
+                return f"[exit {proc.returncode}] {stderr.strip()[:500] or '(no output)'}"
+
+            return output if output.strip() else f"[exit {proc.returncode}] (no output)"
+        except subprocess.TimeoutExpired:
+            return f"[timeout] Command exceeded {_BASH_TIMEOUT}s limit. Try narrowing the search."
+        except OSError as exc:
+            return f"[error] {exc}"
 
     @agent.tool_plain
     def get_file_outline(path: str) -> str:
@@ -833,8 +986,8 @@ def register_tools(
             logger.info("Codegraph client provided but no indexed repos found, skipping codegraph tools")
 
     logger.info(
-        "Tools registered: read_file(+line range), get_file_outline, grep(+context), glob, list_dir, "
-        "think, git_log, git_blame_range, repo_overview, read_report_artifact, read_prepared_log_metadata"
-        "%s",
+        "Tools registered: bash(read-only shell+pipes), read_file(+line range), get_file_outline, "
+        "grep(+context), glob, list_dir, think, git_log, git_blame_range, repo_overview, "
+        "read_report_artifact, read_prepared_log_metadata%s",
         " + search_codegraph, get_callers, get_code_context" if codegraph_client else "",
     )
