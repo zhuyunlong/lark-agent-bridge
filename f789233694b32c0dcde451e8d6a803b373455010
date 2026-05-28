@@ -1,0 +1,23 @@
+docs/superpowers/plans/2026-05-29-codex-app-server-runtime.md
+  7c9b19ad3e58f5ab 1-1901
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.22",
+  "base_commit_sha": "f789233694b32c0dcde451e8d6a803b373455010",
+  "prompts": {
+    "7c9b19ad3e58f5ab": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e6f69-cf0d-7ce3-b0a8-e08ac9a54fa4",
+        "model": "gpt-5.5"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 1901,
+      "total_deletions": 0,
+      "accepted_lines": 1901,
+      "overriden_lines": 0
+    }
+  }
+}
