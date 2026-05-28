@@ -168,3 +168,39 @@ class BugAnalysisOutput(BaseModel):
         if self.suggested_fix:
             parts.append(f"## 修复建议\n\n{self.suggested_fix}")
         return "\n\n".join(parts) + "\n"
+
+
+class BugSummaryOutput(BaseModel):
+    """Structured output for bug analysis summary / final report."""
+
+    conclusion: str = Field(default="", description="核心结论（一段话）")
+    root_cause: str = Field(default="", description="根因分析")
+    impact: str = Field(default="", description="影响范围")
+    evidence_summary: list[str] = Field(
+        default_factory=list,
+        description="关键证据摘要列表",
+    )
+    action_items: list[str] = Field(
+        default_factory=list,
+        description="后续行动项",
+    )
+    full_report: str = Field(default="", description="完整 Markdown 报告正文")
+
+    def to_markdown(self) -> str:
+        """Render as Markdown summary."""
+        if self.full_report.strip():
+            return self.full_report.strip() + "\n"
+        parts = []
+        if self.conclusion:
+            parts.append(f"## 结论\n\n{self.conclusion}")
+        if self.root_cause:
+            parts.append(f"## 根因分析\n\n{self.root_cause}")
+        if self.impact:
+            parts.append(f"## 影响范围\n\n{self.impact}")
+        if self.evidence_summary:
+            items = "\n".join(f"- {e}" for e in self.evidence_summary)
+            parts.append(f"## 关键证据\n\n{items}")
+        if self.action_items:
+            items = "\n".join(f"- {a}" for a in self.action_items)
+            parts.append(f"## 后续行动\n\n{items}")
+        return "\n\n".join(parts) + "\n"

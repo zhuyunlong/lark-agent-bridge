@@ -10981,11 +10981,10 @@ class BugAnalysisRunner:
                 lightweight_provider="omlx",
                 lightweight_error=str(omlx_result.get("error") or ""),
             )
-        # --- Pydantic-AI path (structured output + tools, preferred before direct_api) ---
+        # --- Pydantic-AI path (structured output + tools, always tried first) ---
         if (
             not explicit_file_agent
             and not provider_session_id.strip()
-            and backend_decision.backend == "direct_api"
         ):
             pai_result = self._run_bug_summary_pydantic_ai(
                 request_text=request_text,
