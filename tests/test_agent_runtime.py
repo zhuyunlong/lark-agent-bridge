@@ -178,6 +178,26 @@ class TestAgentTools(unittest.TestCase):
         self.assertIn("test.txt", result)
         self.assertIn("hello world", result)
 
+    def test_grep_text_tolerates_non_utf8_rg_output(self):
+        from unittest import mock
+
+        from lark_agent_bridge.agents.agent_tools import grep_text
+
+        raw_line = (
+            f"{self.workspace}/legacy/DBCmd.csv:25:switchtheme,"
+            "ADBHelper,AdbSwitchTheme,"
+        ).encode("utf-8") + b"\xc7\xd0\xbb\xbb\xd6\xf7\xcc\xe2\n"
+
+        with mock.patch("shutil.which", return_value="/usr/bin/rg"), \
+             mock.patch("subprocess.run") as run_mock:
+            run_mock.return_value = mock.Mock(returncode=0, stdout=raw_line, stderr=b"")
+
+            result = grep_text("switchtheme", workspace=self.workspace)
+
+        self.assertIn("legacy/DBCmd.csv:25:switchtheme", result)
+        self.assertIn("AdbSwitchTheme", result)
+        self.assertIn("\ufffd", result)
+
     def test_grep_no_match(self):
         from lark_agent_bridge.agents.agent_tools import grep_text
 
@@ -189,6 +209,26 @@ class TestAgentTools(unittest.TestCase):
 
         result = glob_paths("**/*.py", workspace=self.workspace)
         self.assertIn("nested.py", result)
+
+    def test_glob_paths_tolerates_non_utf8_rg_output(self):
+        from unittest import mock
+
+        from lark_agent_bridge.agents.agent_tools import glob_paths
+
+        raw_paths = (
+            f"{self.workspace}/src/normal.py\n".encode("utf-8")
+            + f"{self.workspace}/src/".encode("utf-8")
+            + b"\xc7\xd0.py\n"
+        )
+
+        with mock.patch("shutil.which", return_value="/usr/bin/rg"), \
+             mock.patch("subprocess.run") as run_mock:
+            run_mock.return_value = mock.Mock(returncode=0, stdout=raw_paths, stderr=b"")
+
+            result = glob_paths("**/*.py", workspace=self.workspace)
+
+        self.assertIn("src/normal.py", result)
+        self.assertIn("src/\ufffd\ufffd.py", result)
 
     def test_list_dir(self):
         from lark_agent_bridge.agents.agent_tools import list_dir

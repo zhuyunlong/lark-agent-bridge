@@ -3,12 +3,23 @@
 These tools provide safe, sandboxed access to source repo workspaces.
 All tools are read-only — no file writes or command execution.
 Each tool call is logged for observability.
+
+Tool set (aligned with OpenCode / Claude Code / Codex):
+  Core I/O:    read_file (with line range), get_file_outline, list_dir
+  Search:      grep (with context lines), glob
+  Git:         git_log, git_blame_range, repo_overview
+  Reasoning:   think (scratchpad)
+  Report:      read_report_artifact, read_prepared_log_metadata
+  Codegraph:   search_codegraph, get_callers, get_code_context  (when indexed)
 """
 
 from __future__ import annotations
 
 import fnmatch
 import os
+import re
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +35,49 @@ _SKIP_DIRS = frozenset({
 })
 # Max file size to read during grep (256KB)
 _MAX_GREP_FILE_SIZE = 256 * 1024
+
+# Max bytes when reading a full file (50 KB)
+_MAX_READ_BYTES = 50 * 1024
+# Max lines per paginated read_file call
+_MAX_READ_LINES = 500
+
+
+def _coerce_process_output(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    if isinstance(value, str):
+        return value
+    return str(value)
+
+
+def _git_run(args: list[str], cwd: Path) -> str:
+    """Run a git command in cwd. Returns stdout or empty string on error."""
+    git = shutil.which("git")
+    if not git:
+        return ""
+    try:
+        proc = subprocess.run(
+            [git] + args,
+            capture_output=True, timeout=15, cwd=str(cwd),
+        )
+        return _coerce_process_output(proc.stdout)
+    except (subprocess.TimeoutExpired, OSError):
+        return ""
+
+
+def _find_git_root(path: Path) -> Path | None:
+    """Walk up from path to find the .git directory root."""
+    candidate = path if path.is_dir() else path.parent
+    for _ in range(20):
+        if (candidate / ".git").exists():
+            return candidate
+        parent = candidate.parent
+        if parent == candidate:
+            break
+        candidate = parent
+    return None
 
 
 def _safe_resolve(path_str: str, workspace: Path) -> Path | None:
@@ -67,16 +121,15 @@ def read_file(path: str, *, workspace: Path, max_chars: int = 20000) -> str:
         return f"Error reading {path}: {exc}"
 
 
-def grep_text(pattern: str, *, workspace: Path, glob_filter: str = "**/*", max_results: int = 50) -> str:
+def grep_text(pattern: str, *, workspace: Path, glob_filter: str = "**/*", max_results: int = 50, context_lines: int = 0) -> str:
     """Search for text pattern in files within workspace using ripgrep for speed."""
-    import shutil
-    import subprocess
-
     ws = workspace.resolve()
     rg = shutil.which("rg")
     if rg:
         cmd = [rg, "--no-heading", "-n", "-i", "--max-count", str(max_results),
                "--max-filesize", "256K"]
+        if context_lines > 0:
+            cmd.extend(["-C", str(min(context_lines, 15))])
         # Convert glob_filter to rg --glob
         if glob_filter and glob_filter != "**/*":
             cmd.extend(["--glob", glob_filter])
@@ -85,8 +138,11 @@ def grep_text(pattern: str, *, workspace: Path, glob_filter: str = "**/*", max_r
             cmd.extend(["--glob", f"!{d}/"])
         cmd.extend([pattern, str(ws)])
         try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-            lines = proc.stdout.strip().splitlines()[:max_results]
+            proc = subprocess.run(cmd, capture_output=True, timeout=30)
+            stdout = _coerce_process_output(proc.stdout)
+            lines = stdout.strip().splitlines()
+            if context_lines == 0:
+                lines = lines[:max_results]
             if not lines:
                 return f"No matches found for pattern: {pattern}"
             # Make paths relative
@@ -98,8 +154,7 @@ def grep_text(pattern: str, *, workspace: Path, glob_filter: str = "**/*", max_r
         except (subprocess.TimeoutExpired, OSError):
             pass  # fallback to Python
 
-    # Fallback: Python implementation
-    import re
+    # Fallback: Python implementation (no context support)
     try:
         regex = re.compile(pattern, re.IGNORECASE)
     except re.error as exc:
@@ -155,9 +210,6 @@ def grep_text(pattern: str, *, workspace: Path, glob_filter: str = "**/*", max_r
 
 def glob_paths(pattern: str, *, workspace: Path, max_results: int = 100) -> str:
     """Find files matching a glob pattern within workspace."""
-    import shutil
-    import subprocess
-
     ws = workspace.resolve()
     rg = shutil.which("rg")
     if rg:
@@ -166,8 +218,9 @@ def glob_paths(pattern: str, *, workspace: Path, max_results: int = 100) -> str:
             cmd.extend(["--glob", f"!{d}/"])
         cmd.append(str(ws))
         try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
-            lines = proc.stdout.strip().splitlines()[:max_results]
+            proc = subprocess.run(cmd, capture_output=True, timeout=15)
+            stdout = _coerce_process_output(proc.stdout)
+            lines = stdout.strip().splitlines()[:max_results]
             if not lines:
                 return f"No files matching: {pattern}"
             ws_prefix = str(ws) + "/"
@@ -194,6 +247,135 @@ def glob_paths(pattern: str, *, workspace: Path, max_results: int = 100) -> str:
     if not matches:
         return f"No files matching: {pattern}"
     return "\n".join(sorted(matches))
+
+
+# ---------------------------------------------------------------------------
+# Outline extraction — symbol map for a source file
+# ---------------------------------------------------------------------------
+
+# Language-specific regex patterns for extracting symbols.
+# Each entry: (compiled_regex, kind_label_or_None)
+# When kind_label is None, the first capture group is the kind, last is name.
+_OUTLINE_PATTERNS: dict[str, list[tuple[re.Pattern[str], str | None]]] = {
+    ".kt": [
+        (re.compile(r"^\s*(?:(?:public|private|protected|internal|open|abstract|data|sealed|enum|companion|override|suspend|inline|expect|actual|tailrec)\s+)*"
+                    r"(class|interface|object|enum class|data class|sealed class|abstract class)\s+(\w+)"), None),
+        (re.compile(r"^\s*(?:(?:public|private|protected|internal|open|override|suspend|inline|operator|infix|tailrec|external|expect|actual)\s+)*fun\s+(\w+)"), "fun"),
+    ],
+    ".java": [
+        (re.compile(r"^\s*(?:(?:public|private|protected|static|final|abstract|synchronized|native)\s+)*"
+                    r"(class|interface|enum|record)\s+(\w+)"), None),
+        (re.compile(r"^\s{1,8}(?:(?:public|private|protected|static|final|synchronized|abstract|native|default)\s+)*"
+                    r"(?:(?:<[^>]+>\s+)?[\w\[\]<>.,\s]+\s+)?(\w+)\s*\([^)]*\)\s*(?:throws\s+\w+(?:\s*,\s*\w+)*)?\s*\{"), "method"),
+    ],
+    ".cs": [
+        (re.compile(r"^\s*(?:(?:public|private|protected|internal|static|sealed|abstract|partial|virtual|override|async|new|extern)\s+)*"
+                    r"(class|interface|struct|enum|record)\s+(\w+)"), None),
+        (re.compile(r"^\s{1,8}(?:(?:public|private|protected|internal|static|abstract|virtual|override|async|sealed|extern|partial|new)\s+)*"
+                    r"(?:(?:Task|void|bool|int|string|double|float|long|object|IEnumerable|IAsyncEnumerable|IList|List|Dictionary|[\w<>\[\]?,\s]+)\s+)?(\w+)\s*\([^)]*\)"), "method"),
+    ],
+    ".py": [
+        (re.compile(r"^(\s*)(class|def|async def)\s+(\w+)"), None),
+    ],
+    ".swift": [
+        (re.compile(r"^\s*(?:(?:public|private|internal|open|fileprivate|final|override|static|class|mutating|nonmutating|lazy|weak|unowned)\s+)*"
+                    r"(class|struct|enum|protocol|extension|func)\s+(\w+)"), None),
+    ],
+    ".go": [
+        (re.compile(r"^type\s+(\w+)\s+(struct|interface)"), "type"),
+        (re.compile(r"^func\s+(?:\([^)]+\)\s+)?(\w+)\s*\("), "func"),
+    ],
+    ".ts": [
+        (re.compile(r"^\s*(?:export\s+)?(?:(?:default|abstract|declare)\s+)?"
+                    r"(class|interface|enum|type|function)\s+(\w+)"), None),
+    ],
+    ".tsx": [
+        (re.compile(r"^\s*(?:export\s+)?(?:(?:default|abstract|declare)\s+)?"
+                    r"(class|interface|type|function)\s+(\w+)"), None),
+    ],
+    ".js": [
+        (re.compile(r"^\s*(?:export\s+)?(?:default\s+)?(class|function)\s+(\w+)"), None),
+    ],
+    ".rs": [
+        (re.compile(r"^\s*(?:pub\s+(?:(?:super|crate|self|in\s+\w+)::)?)?(?:pub\s+)?"
+                    r"(fn|struct|enum|trait|impl|mod)\s+(\w+)"), None),
+    ],
+}
+
+_OUTLINE_FALLBACK = [
+    (re.compile(r"^\s*(?:public|private|protected)?\s*(class|interface|function|def|func|fn)\s+(\w+)"), None),
+]
+
+
+def extract_file_outline(path: str, *, roots: list[Path]) -> str:
+    """Extract class/function/method outline from a source file."""
+    resolved = _safe_resolve_multi(path, roots)
+    if resolved is None:
+        return f"Error: path '{path}' not found in workspace"
+    if not resolved.exists() or not resolved.is_file():
+        return f"Error: file not found: {path}"
+
+    ext = resolved.suffix.lower()
+    patterns = _OUTLINE_PATTERNS.get(ext, _OUTLINE_FALLBACK)
+
+    # Try ctags first for precise results
+    ctags = shutil.which("ctags") or shutil.which("universal-ctags")
+    if ctags:
+        try:
+            proc = subprocess.run(
+                [ctags, "--options=NONE", "--output-format=json", "--fields=+n", "-f", "-", str(resolved)],
+                capture_output=True, timeout=15, text=True,
+            )
+            if proc.returncode == 0 and proc.stdout.strip():
+                import json as _json
+                entries: list[str] = []
+                for line in proc.stdout.strip().splitlines():
+                    try:
+                        item = _json.loads(line)
+                        name = item.get("name", "")
+                        kind = item.get("kind", "")
+                        line_no = item.get("line", "?")
+                        if name:
+                            entries.append(f"  [{kind}] {name} (L{line_no})")
+                    except Exception:
+                        pass
+                if entries:
+                    return f"{path} ({len(entries)} symbols, via ctags):\n" + "\n".join(entries)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+
+    # Fallback: regex-based extraction
+    try:
+        content = resolved.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return f"Error reading {path}: {exc}"
+
+    symbols: list[tuple[int, str, str]] = []  # (line_no, kind, name)
+    for i, line in enumerate(content.splitlines(), 1):
+        for pat, kind_override in patterns:
+            m = pat.search(line)
+            if m:
+                groups = m.groups()
+                if kind_override is not None:
+                    name = groups[-1]
+                    kind = kind_override
+                elif ext == ".py":
+                    # groups: indent, "class"/"def"/"async def", name
+                    _, kind, name = groups
+                elif len(groups) >= 2:
+                    kind, name = groups[0], groups[-1]
+                else:
+                    kind, name = "", groups[0]
+                symbols.append((i, kind.strip(), name.strip()))
+                break  # one match per line
+
+    if not symbols:
+        return f"No symbols found in {path} (extension: {ext})"
+
+    lines_out: list[str] = []
+    for line_no, kind, name in symbols:
+        lines_out.append(f"  [{kind}] {name} (L{line_no})")
+    return f"{path} ({len(symbols)} symbols):\n" + "\n".join(lines_out)
 
 
 def list_dir(path: str = ".", *, workspace: Path) -> str:
@@ -283,10 +465,14 @@ def register_tools(
                 pass  # never let progress emission break tool execution
 
     @agent.tool_plain
-    def read_file(path: str) -> str:
-        """读取文件内容。提供相对路径。可读取源码文件、配置文件、日志摘要等。"""
-        logger.info("[tool_call] read_file(path=%s)", path)
-        _emit_tool_progress("read_file", path.split("/")[-1] if "/" in path else path)
+    def read_file(path: str, start_line: int = 0, end_line: int = 0) -> str:
+        """读取文件内容（支持行范围分页）。
+        - path: 相对路径
+        - start_line: 起始行号（1-indexed），0 表示从头
+        - end_line: 结束行号（含），0 表示到末尾
+        对大文件建议先用 get_file_outline 了解结构，再按需读取具体行范围。"""
+        logger.info("[tool_call] read_file(path=%s, start=%d, end=%d)", path, start_line, end_line)
+        _emit_tool_progress("read_file", f"{path.split('/')[-1]}:{start_line or ''}‥{end_line or ''}")
         resolved = _safe_resolve_multi(path, all_roots)
         if resolved is None:
             return f"Error: path '{path}' is outside workspace"
@@ -296,20 +482,49 @@ def register_tools(
             return f"Error: not a file: {path}"
         try:
             content = resolved.read_text(encoding="utf-8", errors="replace")
-            if len(content) > 50000:
-                return content[:50000] + f"\n\n[... truncated at 50000 chars ...]"
-            return content
         except OSError as exc:
             return f"Error reading {path}: {exc}"
 
+        all_lines = content.splitlines()
+        total = len(all_lines)
+
+        # Determine slice bounds
+        s = max(0, (start_line - 1) if start_line > 0 else 0)
+        e = min(total, end_line if end_line > 0 else total)
+
+        # Enforce page limit so no single call dumps an enormous file
+        if e - s > _MAX_READ_LINES:
+            e = s + _MAX_READ_LINES
+            truncated = True
+        else:
+            truncated = False
+
+        sliced = all_lines[s:e]
+        numbered = "\n".join(f"{s + i + 1}: {ln}" for i, ln in enumerate(sliced))
+
+        suffix = ""
+        if truncated:
+            suffix = (f"\n\n[... showing lines {s+1}–{e} of {total}. "
+                      f"Use start_line={e+1} to continue reading. ...]")
+        elif e < total and (start_line > 0 or end_line > 0):
+            suffix = f"\n\n(Lines {s+1}–{e} of {total} total)"
+        elif start_line == 0 and end_line == 0 and len(content.encode()) > _MAX_READ_BYTES:
+            # Full read but large: warn
+            suffix = (f"\n\n[... file has {total} lines; showing {s+1}–{e}. "
+                      f"Use start_line/end_line to read specific sections. ...]")
+        return numbered + suffix
+
     @agent.tool_plain
-    def grep(pattern: str, glob_filter: str = "**/*") -> str:
-        """在代码库中搜索正则表达式模式。返回匹配的文件:行号:内容。可用 glob_filter 缩小范围，如 '*.kt' 或 'src/**/*.java'。"""
-        logger.info("[tool_call] grep(pattern=%s, glob_filter=%s)", pattern, glob_filter)
-        _emit_tool_progress("grep", f"{pattern[:40]} ({glob_filter})")
+    def grep(pattern: str, glob_filter: str = "**/*", context_lines: int = 0) -> str:
+        """在代码库中搜索正则表达式模式。返回匹配的文件:行号:内容。
+        - glob_filter: 缩小搜索范围，如 '*.kt' 或 'src/**/*.java'
+        - context_lines: >0 时显示匹配行前后 N 行上下文（类似 grep -C）"""
+        logger.info("[tool_call] grep(pattern=%s, glob_filter=%s, context=%d)", pattern, glob_filter, context_lines)
+        _emit_tool_progress("grep", f"{pattern[:40]} ({glob_filter})" + (f" ±{context_lines}" if context_lines else ""))
         results: list[str] = []
         for root in all_roots:
-            partial = grep_text(pattern, workspace=root, glob_filter=glob_filter, max_results=30)
+            partial = grep_text(pattern, workspace=root, glob_filter=glob_filter,
+                                max_results=30, context_lines=context_lines)
             if not partial.startswith("No matches"):
                 results.append(f"# {root.name}/\n{partial}")
         if not results:
