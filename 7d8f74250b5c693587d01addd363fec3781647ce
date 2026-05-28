@@ -1,0 +1,25 @@
+tests/test_agents.py
+  4631661515140671 5443-5457
+lark_agent_bridge/agents/bug_runner.py
+  4631661515140671 4807-4809,4815-4826
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.22",
+  "base_commit_sha": "7d8f74250b5c693587d01addd363fec3781647ce",
+  "prompts": {
+    "4631661515140671": {
+      "agent_id": {
+        "tool": "qoder",
+        "id": "446cc151-5ccb-4604-b065-ed1c06bb2eb4",
+        "model": "qoder-model"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 31,
+      "total_deletions": 0,
+      "accepted_lines": 31,
+      "overriden_lines": 0
+    }
+  }
+}
