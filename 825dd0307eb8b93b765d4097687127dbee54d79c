@@ -1,0 +1,25 @@
+tests/test_agent_runtime.py
+  f0545e2337172663 181-200,213-231
+lark_agent_bridge/agents/agent_tools.py
+  f0545e2337172663 45-52,68-69,142-143,222-223
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.22",
+  "base_commit_sha": "825dd0307eb8b93b765d4097687127dbee54d79c",
+  "prompts": {
+    "f0545e2337172663": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e6f63-d954-7c42-bf76-8474a31e5fde",
+        "model": "gpt-5.5"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 56,
+      "total_deletions": 4,
+      "accepted_lines": 54,
+      "overriden_lines": 0
+    }
+  }
+}
