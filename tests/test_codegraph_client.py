@@ -46,8 +46,24 @@ class TestAvailability:
         (tmp_repo / ".codegraph").mkdir()
         assert client.is_indexed(tmp_repo) is True
 
+    def test_indexed_when_codegraph_status_accepts_worktree_without_local_dir(
+        self, client: CodeGraphClient, tmp_repo: Path
+    ) -> None:
+        worktree = tmp_repo / ".worktrees" / "os6_robotaxi"
+        worktree.mkdir(parents=True)
+        with (
+            mock.patch("shutil.which", return_value="/usr/local/bin/codegraph"),
+            mock.patch.object(client, "_run", return_value="✓ Index is up to date") as run,
+        ):
+            assert client.is_indexed(worktree) is True
+        run.assert_called_once()
+
     def test_not_indexed_when_no_dir(self, client: CodeGraphClient, tmp_repo: Path) -> None:
-        assert client.is_indexed(tmp_repo) is False
+        with (
+            mock.patch("shutil.which", return_value="/usr/local/bin/codegraph"),
+            mock.patch.object(client, "_run", return_value=None),
+        ):
+            assert client.is_indexed(tmp_repo) is False
 
 
 # ---------------------------------------------------------------------------

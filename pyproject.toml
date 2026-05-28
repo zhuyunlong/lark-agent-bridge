@@ -22,3 +22,6 @@ all = [
 [tool.setuptools.package-data]
 lark_agent_bridge = ["templates/*.html"]
 "lark_agent_bridge.knowledge.templates" = ["*.json"]
+
+[tool.setuptools.packages.find]
+include = ["lark_agent_bridge*"]

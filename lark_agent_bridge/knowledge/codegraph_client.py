@@ -71,6 +71,7 @@ class CodeGraphClient:
     ) -> None:
         self._command = command
         self._timeout = timeout
+        self._indexed_cache: dict[Path, bool] = {}
 
     # ------------------------------------------------------------------
     # Availability
@@ -80,9 +81,26 @@ class CodeGraphClient:
         """True when the codegraph CLI is on PATH."""
         return shutil.which(self._command) is not None
 
-    def is_indexed(self, repo: Path) -> bool:
-        """True when *repo* has a ``.codegraph/`` index directory."""
-        return (repo / ".codegraph").is_dir()
+    def is_indexed(self, repo: Path, *, timeout: float | None = None) -> bool:
+        """True when *repo* has a CodeGraph index.
+
+        Git worktrees can legitimately use the main checkout's ``.codegraph``
+        directory.  The CLI knows how to resolve that relationship, so fall
+        back to ``codegraph status`` when the worktree itself has no local
+        ``.codegraph`` directory.
+        """
+        repo = repo.expanduser()
+        if (repo / ".codegraph").is_dir():
+            self._indexed_cache[repo] = True
+            return True
+        if repo in self._indexed_cache:
+            return self._indexed_cache[repo]
+        if not self.is_available():
+            return False
+        indexed = self._run([self._command, "status", str(repo)], timeout=timeout) is not None
+        if indexed:
+            self._indexed_cache[repo] = True
+        return indexed
 
     # ------------------------------------------------------------------
     # Indexing
@@ -93,6 +111,7 @@ class CodeGraphClient:
 
         Returns True on success, False on failure.
         """
+        repo = repo.expanduser()
         if self.is_indexed(repo):
             return True
         if not self.is_available():
@@ -108,7 +127,15 @@ class CodeGraphClient:
         except (subprocess.TimeoutExpired, OSError) as exc:
             logger.warning("codegraph init failed for %s: %s", repo, exc)
             return False
+        self._indexed_cache.pop(repo, None)
         return self.is_indexed(repo)
+
+    def sync_index(self, repo: Path) -> bool:
+        """Incrementally sync an existing index without creating a new one."""
+        repo = repo.expanduser()
+        if not self.is_indexed(repo):
+            return False
+        return self._run([self._command, "sync", str(repo)]) is not None
 
     # ------------------------------------------------------------------
     # Symbol search
@@ -121,13 +148,14 @@ class CodeGraphClient:
         *,
         limit: int = 10,
         kind: str | None = None,
+        timeout: float | None = None,
     ) -> list[CgSymbolHit]:
         """Search for symbols matching *query* in *repo*."""
         cmd = [self._command, "query", query, "--path", str(repo), "--json",
                "--limit", str(limit)]
         if kind:
             cmd.extend(["--kind", kind])
-        raw = self._run(cmd)
+        raw = self._run(cmd, timeout=timeout)
         if raw is None:
             return []
         try:
@@ -154,23 +182,39 @@ class CodeGraphClient:
     # ------------------------------------------------------------------
 
     def get_callers(
-        self, symbol: str, repo: Path, *, limit: int = 20,
+        self,
+        symbol: str,
+        repo: Path,
+        *,
+        limit: int = 20,
+        timeout: float | None = None,
     ) -> list[CgCallerHit]:
         """Return direct callers of *symbol* in *repo*."""
-        return self._call_graph("callers", symbol, repo, limit=limit)
+        return self._call_graph("callers", symbol, repo, limit=limit, timeout=timeout)
 
     def get_callees(
-        self, symbol: str, repo: Path, *, limit: int = 20,
+        self,
+        symbol: str,
+        repo: Path,
+        *,
+        limit: int = 20,
+        timeout: float | None = None,
     ) -> list[CgCallerHit]:
         """Return direct callees of *symbol* in *repo*."""
-        return self._call_graph("callees", symbol, repo, limit=limit)
+        return self._call_graph("callees", symbol, repo, limit=limit, timeout=timeout)
 
     def _call_graph(
-        self, direction: str, symbol: str, repo: Path, *, limit: int,
+        self,
+        direction: str,
+        symbol: str,
+        repo: Path,
+        *,
+        limit: int,
+        timeout: float | None = None,
     ) -> list[CgCallerHit]:
         cmd = [self._command, direction, symbol, "--path", str(repo),
                "--json", "--limit", str(limit)]
-        raw = self._run(cmd)
+        raw = self._run(cmd, timeout=timeout)
         if raw is None:
             return []
         try:
@@ -243,14 +287,14 @@ class CodeGraphClient:
     # Internals
     # ------------------------------------------------------------------
 
-    def _run(self, cmd: list[str]) -> str | None:
+    def _run(self, cmd: list[str], *, timeout: float | None = None) -> str | None:
         """Run a codegraph CLI command, return stdout or None."""
         try:
             proc = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=self._timeout,
+                timeout=self._timeout if timeout is None else timeout,
                 check=False,
             )
         except (subprocess.TimeoutExpired, OSError) as exc:

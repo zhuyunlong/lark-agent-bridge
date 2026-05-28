@@ -7762,6 +7762,72 @@ class AgentTests(unittest.TestCase):
             self.assertIn("Napa5", content)
             self.assertIn("SceneManager", content)
 
+    def test_source_evidence_future_wait_is_capped_before_analysis_loop(self):
+        class SlowEvidenceFuture:
+            def __init__(self):
+                self.timeout = None
+
+            def result(self, timeout=None):
+                self.timeout = timeout
+                raise TimeoutError("slow source evidence")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = BugAnalysisRunner(BridgeConfig(dry_run=False, data_dir=Path(tmp), workspace_root=Path(tmp)))
+            future = SlowEvidenceFuture()
+
+            resolved = runner._resolve_source_evidence_future(future)
+
+        self.assertIsNone(resolved)
+        self.assertEqual(future.timeout, 30)
+
+    def test_source_evidence_skips_python_full_scan_when_rg_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "guideengine"
+            (repo / "module_core").mkdir(parents=True)
+            (repo / "module_core" / "ThemeManager.kt").write_text(
+                "class ThemeManager { fun applyTheme() {} }",
+                encoding="utf-8",
+            )
+            runner = BugAnalysisRunner(BridgeConfig(dry_run=False, data_dir=Path(tmp), workspace_root=Path(tmp)))
+
+            with (
+                mock.patch("shutil.which", return_value=None),
+                mock.patch.object(runner, "_collect_source_evidence_by_scan", side_effect=AssertionError("scan used")),
+            ):
+                matches = runner._collect_source_evidence(repo=repo, terms=["ThemeManager"])
+
+        self.assertEqual(matches, [])
+
+    def test_source_evidence_codegraph_uses_capped_cli_timeout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "guideengine"
+            repo.mkdir()
+            config = BridgeConfig(
+                dry_run=False,
+                data_dir=Path(tmp),
+                workspace_root=Path(tmp),
+                guideengine_repo=repo,
+                source_investigation=SourceInvestigationOptions(
+                    repo_roots=[repo],
+                    codegraph_enabled=True,
+                    codegraph_timeout_seconds=10,
+                ),
+            )
+            runner = BugAnalysisRunner(config)
+
+            with mock.patch("lark_agent_bridge.knowledge.codegraph_client.CodeGraphClient") as client_cls:
+                client = client_cls.return_value
+                client.is_available.return_value = True
+                client.is_indexed.return_value = True
+                client.search_symbol.return_value = []
+                client.get_callers.return_value = []
+
+                result = runner._collect_source_evidence_with_codegraph(repo=repo, terms=["ThemeManager"])
+
+        self.assertIsNone(result)
+        self.assertEqual(client_cls.call_args.kwargs["timeout"], 5.0)
+        self.assertLessEqual(client.search_symbol.call_args.kwargs["timeout"], 5.0)
+
     def test_write_reanalysis_source_evidence_uses_codegraph_when_indexed(self):
         """When codegraph is available and indexed, it's used instead of ripgrep."""
         with tempfile.TemporaryDirectory() as tmp:

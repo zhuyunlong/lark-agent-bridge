@@ -217,6 +217,31 @@ class TestBugLinkAnalysis:
                 )
                 assert result is None  # graceful fallback
 
+    def test_source_investigation_does_not_init_codegraph_in_request_path(self) -> None:
+        """Unindexed repos are skipped in the request path instead of running init --index."""
+        with tempfile.TemporaryDirectory() as tmp:
+            config = _make_config(tmp)
+            runner = SourceInvestigationRunner(config)
+            question = "DataCenter mock信号不触发"
+            hits = [_hit(question, signal="DataCenter.mockSignal")]
+
+            with mock.patch.object(runner, "_get_codegraph") as mock_cg:
+                from lark_agent_bridge.knowledge.codegraph_client import CodeGraphClient
+
+                client = mock.MagicMock(spec=CodeGraphClient)
+                client.is_indexed.return_value = False
+                mock_cg.return_value = client
+
+                result = runner._try_codegraph(
+                    question,
+                    hits=hits,
+                    repo_roots=[Path(tmp) / "guideengine"],
+                )
+
+            assert result is None
+            client.ensure_index.assert_not_called()
+            client.search_symbol.assert_not_called()
+
     def test_bug_analysis_low_confidence_enriches_prompt(self) -> None:
         """Low confidence codegraph result caches context for prompt enrichment."""
         with tempfile.TemporaryDirectory() as tmp:

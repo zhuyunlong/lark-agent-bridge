@@ -33,6 +33,29 @@ class ConfigTests(unittest.TestCase):
         self.assertIn(config.guideengine_repo, config.source_investigation.repo_roots)
         self.assertGreaterEqual(len(config.source_investigation.repo_roots), 1)
 
+    def test_default_napa5_repo_root_is_main_checkout_not_worktree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            bridge_dir = workspace / "tools" / "lark-agent-bridge"
+            guideengine = workspace / "xp" / "guideengine" / ".worktrees" / "os6_xpdev"
+            napa5 = workspace / "xp" / "Napa5"
+            guideengine.mkdir(parents=True)
+            napa5.mkdir(parents=True)
+            config_path = bridge_dir / "config.toml"
+            config_path.parent.mkdir(parents=True)
+            config_path.write_text("", encoding="utf-8")
+
+            config = load_config(config_path)
+
+        self.assertIn(napa5.resolve(), config.source_investigation.repo_roots)
+        self.assertNotIn(napa5 / ".worktrees" / "os6_robotaxi", config.source_investigation.repo_roots)
+
+    def test_committed_config_example_uses_napa5_main_checkout(self):
+        example = Path("config/config.example.toml").read_text(encoding="utf-8")
+
+        self.assertIn("../../xp/Napa5", example)
+        self.assertNotIn("../../xp/Napa5/.worktrees/os6_robotaxi", example)
+
     def test_omlx_api_key_empty_config_uses_local_default(self):
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "config.toml"

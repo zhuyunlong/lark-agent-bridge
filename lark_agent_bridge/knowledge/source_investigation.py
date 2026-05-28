@@ -108,11 +108,11 @@ class SourceInvestigationRunner:
         self._last_code_index_context: list[tuple[Path, Any]] | None = None
 
     def warmup_codegraph(self) -> None:
-        """Pre-index all repo_roots in background daemon threads (non-blocking).
+        """Incrementally sync indexed repo_roots in background daemon threads.
 
-        Called at startup so that the first Q&A doesn't pay the init cost.
-        Each repo gets its own thread; threads are daemons so they don't prevent
-        process exit.
+        Startup must not create new indexes for large repos.  If a repo is not
+        already indexed, the request path will fall through to lighter evidence
+        providers instead of paying an init cost.
         """
         opts = self.config.source_investigation
         if not opts.codegraph_enabled:
@@ -124,26 +124,26 @@ class SourceInvestigationRunner:
         for repo in repo_roots:
             if not repo.exists():
                 continue
-            if cg.is_indexed(repo):
-                logger.debug("codegraph: %s already indexed, skipping warmup", repo)
+            if not cg.is_indexed(repo):
+                logger.debug("codegraph: %s is not indexed; skipping warmup", repo)
                 continue
             t = threading.Thread(
                 target=self._warmup_one_repo,
                 args=(cg, repo),
-                name=f"codegraph-init-{repo.name}",
+                name=f"codegraph-sync-{repo.name}",
                 daemon=True,
             )
             t.start()
-            logger.info("codegraph: warmup started for %s (background)", repo)
+            logger.info("codegraph: sync warmup started for %s (background)", repo)
 
     def _warmup_one_repo(self, cg: Any, repo: Path) -> None:
         try:
-            logger.info("codegraph: indexing %s …", repo)
-            ok = cg.ensure_index(repo)
+            logger.info("codegraph: syncing %s …", repo)
+            ok = cg.sync_index(repo)
             if ok:
-                logger.info("codegraph: index ready for %s", repo)
+                logger.info("codegraph: sync finished for %s", repo)
             else:
-                logger.warning("codegraph: indexing failed for %s", repo)
+                logger.warning("codegraph: sync failed for %s", repo)
         except Exception as exc:  # pragma: no cover
             logger.warning("codegraph: warmup error for %s: %s", repo, exc)
 
@@ -227,9 +227,7 @@ class SourceInvestigationRunner:
 
         for repo in repo_roots:
             if not cg.is_indexed(repo):
-                cg.ensure_index(repo)
-                if not cg.is_indexed(repo):
-                    continue
+                continue
 
             for symbol in symbols[:3]:
                 cg_hits = cg.search_symbol(symbol, repo, limit=5)

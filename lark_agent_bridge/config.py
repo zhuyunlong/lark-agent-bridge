@@ -224,7 +224,7 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
     base_dir = path.parent if path else Path.cwd()
     default_workspace_root = _default_workspace_root(base_dir)
     default_guideengine_repo = default_workspace_root / "xp/guideengine/.worktrees/os6_xpdev"
-    default_napa5_repo = default_workspace_root / "xp/Napa5/.worktrees/os6_robotaxi"
+    default_napa5_repo = default_workspace_root / "xp/Napa5"
     data: dict[str, Any] = {}
     if path:
         if not path.exists():

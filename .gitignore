@@ -2,8 +2,11 @@ __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
+*.egg-info/
 
 .DS_Store
+
+.venv/
 
 /config.toml
 /config.*.toml

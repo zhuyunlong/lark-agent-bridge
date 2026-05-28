@@ -205,6 +205,10 @@ _AUX_BUG_SKILLS = AUX_BUG_SKILLS
 _extract_skill_frontmatter = extract_skill_frontmatter
 
 class BugAnalysisRunner:
+    _SOURCE_EVIDENCE_WAIT_SECONDS = 30
+    _SOURCE_EVIDENCE_TOTAL_BUDGET_SECONDS = 30.0
+    _SOURCE_EVIDENCE_CODEGRAPH_CALL_SECONDS = 5.0
+
     def __init__(
         self,
         config: BridgeConfig,
@@ -241,6 +245,21 @@ class BugAnalysisRunner:
                 max_reverse_lines=1000,
                 workspace_root=config.workspace_root,
             )
+
+    def _resolve_source_evidence_future(self, future: object) -> Path | None:
+        try:
+            return future.result(timeout=self._SOURCE_EVIDENCE_WAIT_SECONDS)  # type: ignore[attr-defined]
+        except Exception:
+            return None
+
+    def _source_evidence_call_timeout(self, deadline: float | None, configured_timeout: float) -> float:
+        timeout = min(configured_timeout, self._SOURCE_EVIDENCE_CODEGRAPH_CALL_SECONDS)
+        if deadline is None:
+            return timeout
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return 0.0
+        return min(timeout, remaining)
 
     def _available_bug_skills(self) -> list[dict[str, object]]:
         skills_dir = self.config.workspace_root / ".ai/skills"
@@ -1158,6 +1177,7 @@ class BugAnalysisRunner:
             + XTHEME_ROUTE_TERMS
             + PERCEPTION_ROUTE_TERMS
             + LD_LANE_LEVEL_ROUTE_TERMS
+            + PULLOVER_CHAIN_ROUTE_TERMS
         )
         return any(term.casefold() in lowered for term in route_terms)
 
@@ -1615,13 +1635,15 @@ class BugAnalysisRunner:
                 _source_pool.shutdown(wait=False)
             else:
                 source_evidence_future = None
-            # Resolve source evidence future before analysis loop
+            # Source evidence is optional. Do not block before file-agent plans:
+            # their progress/toolcall events should start even when source
+            # search is slow or codegraph is cold.
             source_evidence_path: Path | None = None
             if source_evidence_future is not None:
-                try:
-                    source_evidence_path = source_evidence_future.result(timeout=60)
-                except Exception:
-                    source_evidence_path = None
+                if any(item.kind == "custom_skill" for item in plans):
+                    source_evidence_path = context.output_dir / "bug_source_evidence.md"
+                else:
+                    source_evidence_path = self._resolve_source_evidence_future(source_evidence_future)
             html_paths: list[Path] = []
             report_jsons: dict[str, Path | None] = {}
             skill_file_agent_execution_result: dict[str, object] | None = None
@@ -1962,6 +1984,13 @@ class BugAnalysisRunner:
                     html_path = current_html
                     json_path = current_json
                     analysis_dir = current_analysis_dir
+
+            if source_evidence_future is not None:
+                resolved_source_evidence_path = self._resolve_source_evidence_future(source_evidence_future)
+                if resolved_source_evidence_path is not None:
+                    source_evidence_path = resolved_source_evidence_path
+                elif source_evidence_path is not None and not source_evidence_path.exists():
+                    source_evidence_path = None
 
             self._emit_progress(progress_callback, stage="bug_build_outputs", message="整理 bug 分析结果")
             metadata_text, summary = self._build_bug_outputs(
@@ -8541,9 +8570,22 @@ class BugAnalysisRunner:
     def _custom_skill_executor_not_ready_message(self, skill_name: str, *, selected_input: Path | None) -> str:
         display_name = skill_name.strip() or "custom_skill"
         log_note = f"\n日志输入已准备：`{selected_input}`" if selected_input else ""
+        route_note = ""
+        try:
+            record = self.skill_manager.get_skill(display_name, include_content=False)
+        except Exception:
+            record = None
+        if record is None:
+            route_note = "\n当前状态：未找到 Skill 目录或主路由记录。"
+        elif record.kind != "custom_skill":
+            route_note = f"\n当前状态：已配置主路由，但 kind=`{record.kind or '未配置'}`，不是 custom_skill。"
+        elif not record.executor:
+            route_note = "\n当前状态：已配置为 custom_skill，但 executor 为空；需要配置 executor=`file_agent`。"
+        elif record.executor != "file_agent":
+            route_note = f"\n当前状态：已配置 executor=`{record.executor}`，但当前只支持 file_agent。"
         return (
-            f"已命中专用 Skill `{display_name}`，但当前没有可执行源码分析器，尚未执行实际 Skill 分析。"
-            f"{log_note}\n不会基于占位报告给出根因结论。请为该 Skill 配置文件 Agent 执行器后重试。"
+            f"已命中专用 Skill `{display_name}`，但当前没有可执行分析器，尚未执行实际日志分析。"
+            f"{route_note}{log_note}\n不会基于占位报告给出根因结论。请为该 Skill 配置文件 Agent 执行器后重试。"
         )
 
     def _custom_skill_agent_tools(self) -> list[str]:
@@ -13304,6 +13346,12 @@ class BugAnalysisRunner:
         if not terms:
             return None
         evidence_path = output_dir / "bug_source_evidence.md"
+        started = time.monotonic()
+        budget_seconds = min(
+            self._SOURCE_EVIDENCE_TOTAL_BUDGET_SECONDS,
+            5.0 * max(1, min(len(terms), 5)),
+        )
+        deadline = started + budget_seconds
 
         # Use all configured repo_roots (includes Napa5 when configured), fallback to guideengine_repo
         si_opts = self.config.source_investigation
@@ -13318,6 +13366,7 @@ class BugAnalysisRunner:
             "",
             f"- 源码根目录: `{', '.join(str(r) for r in (existing_repos or repo_roots))}`",
             f"- 检索词: `{', '.join(terms)}`",
+            f"- 检索预算: `{budget_seconds:.1f}s`",
             "",
         ]
         if not existing_repos:
@@ -13326,19 +13375,34 @@ class BugAnalysisRunner:
             return evidence_path
 
         all_matches: list[tuple[str, int, str]] = []
+        trace_lines: list[str] = []
         for repo in existing_repos:
+            if time.monotonic() >= deadline:
+                trace_lines.append(f"- `{repo}`: skipped, source evidence budget exhausted")
+                break
+            repo_started = time.monotonic()
             # Try codegraph first (semantic symbol search)
-            cg_matches = self._collect_source_evidence_with_codegraph(repo=repo, terms=terms)
+            cg_matches = self._collect_source_evidence_with_codegraph(repo=repo, terms=terms, deadline=deadline)
             if cg_matches is not None:
                 repo_prefix = f"[{repo.name}] " if len(existing_repos) > 1 else ""
                 all_matches.extend((repo_prefix + path, ln, text) for path, ln, text in cg_matches)
+                trace_lines.append(
+                    f"- `{repo}`: codegraph, {len(cg_matches)} matches, {time.monotonic() - repo_started:.2f}s"
+                )
                 continue
-            # Fall back to existing ripgrep + scan
-            matches = self._collect_source_evidence(repo=repo, terms=terms)
+            # Fall back to ripgrep only; avoid pure Python full-repo scans on large trees.
+            matches = self._collect_source_evidence(repo=repo, terms=terms, deadline=deadline)
             if len(existing_repos) > 1:
                 all_matches.extend((f"[{repo.name}] {path}", ln, text) for path, ln, text in matches)
             else:
                 all_matches.extend(matches)
+            trace_lines.append(
+                f"- `{repo}`: rg fallback, {len(matches)} matches, {time.monotonic() - repo_started:.2f}s"
+            )
+
+        if trace_lines:
+            elapsed = time.monotonic() - started
+            lines.extend(["## 检索路径", "", *trace_lines, f"- 总耗时: `{elapsed:.2f}s`", ""])
 
         if not all_matches:
             lines.append("未检索到匹配源码。")
@@ -13353,7 +13417,7 @@ class BugAnalysisRunner:
         return evidence_path
 
     def _collect_source_evidence_with_codegraph(
-        self, *, repo: Path, terms: list[str]
+        self, *, repo: Path, terms: list[str], deadline: float | None = None
     ) -> list[tuple[str, int, str]] | None:
         """Try codegraph semantic search; return None to fall through to ripgrep."""
         si_opts = self.config.source_investigation
@@ -13365,21 +13429,30 @@ class BugAnalysisRunner:
             return None
         cg = CodeGraphClient(
             command=si_opts.codegraph_command,
-            timeout=si_opts.codegraph_timeout_seconds,
+            timeout=min(si_opts.codegraph_timeout_seconds, self._SOURCE_EVIDENCE_CODEGRAPH_CALL_SECONDS),
         )
-        if not cg.is_available() or not cg.is_indexed(repo):
+        if not cg.is_available():
+            return None
+        status_timeout = self._source_evidence_call_timeout(deadline, si_opts.codegraph_timeout_seconds)
+        if status_timeout <= 0 or not cg.is_indexed(repo, timeout=status_timeout):
             return None
         matches: list[tuple[str, int, str]] = []
         seen: set[tuple[str, int]] = set()
         for term in terms[:5]:
-            hits = cg.search_symbol(term, repo, limit=5)
+            call_timeout = self._source_evidence_call_timeout(deadline, si_opts.codegraph_timeout_seconds)
+            if call_timeout <= 0:
+                break
+            hits = cg.search_symbol(term, repo, limit=5, timeout=call_timeout)
             for h in hits:
                 key = (h.path, h.line)
                 if key in seen:
                     continue
                 seen.add(key)
                 matches.append((h.path, h.line, f"[{h.kind}] {h.qualified_name or h.name}"))
-            callers = cg.get_callers(term, repo, limit=5)
+            call_timeout = self._source_evidence_call_timeout(deadline, si_opts.codegraph_timeout_seconds)
+            if call_timeout <= 0:
+                break
+            callers = cg.get_callers(term, repo, limit=5, timeout=call_timeout)
             for c in callers:
                 key = (c.path, c.line)
                 if key in seen:
@@ -13543,37 +13616,108 @@ class BugAnalysisRunner:
                     self._append_unique(terms, term[-compact_len:])
         return terms
 
-    def _collect_source_evidence(self, *, repo: Path, terms: list[str]) -> list[tuple[str, int, str]]:
-        explicit_matches = self._collect_source_evidence_by_targets(repo=repo, terms=terms)
-        rg_matches = self._collect_source_evidence_with_rg(repo=repo, terms=terms)
+    def _collect_source_evidence(
+        self, *, repo: Path, terms: list[str], deadline: float | None = None
+    ) -> list[tuple[str, int, str]]:
+        if deadline is not None and time.monotonic() >= deadline:
+            return []
+        target_timeout = 5.0
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return []
+            target_timeout = min(target_timeout, remaining)
+        explicit_matches = self._collect_source_evidence_by_targets(repo=repo, terms=terms, timeout=target_timeout)
+        if deadline is not None and time.monotonic() >= deadline:
+            return explicit_matches
+        rg_timeout = 20.0
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return explicit_matches
+            rg_timeout = min(rg_timeout, remaining)
+        rg_matches = self._collect_source_evidence_with_rg(repo=repo, terms=terms, timeout=rg_timeout)
         if rg_matches is not None:
             return self._merge_source_evidence_matches(explicit_matches, rg_matches)
-        return self._merge_source_evidence_matches(
-            explicit_matches,
-            self._collect_source_evidence_by_scan(repo=repo, terms=terms),
-        )
+        return explicit_matches
 
-    def _collect_source_evidence_by_targets(self, *, repo: Path, terms: list[str]) -> list[tuple[str, int, str]]:
+    def _collect_source_evidence_by_targets(
+        self, *, repo: Path, terms: list[str], timeout: float = 5.0
+    ) -> list[tuple[str, int, str]]:
         suffixes = {".kt", ".java", ".cpp", ".cc", ".c", ".h", ".hpp", ".proto", ".xml"}
         ignored_dirs = {".git", ".gradle", ".idea", "build", "out", ".cxx", "node_modules"}
         explicit_files = [term for term in terms if re.search(r"\.(?:kt|java|cpp|cc|c|h|hpp|proto|xml)$", term, re.I)]
         if not explicit_files:
             return []
         explicit_stems = {Path(term).stem for term in explicit_files}
+        candidate_paths: list[Path] = []
+        seen_paths: set[Path] = set()
+        repo_resolved = repo.resolve()
+        for term in explicit_files:
+            candidate = (repo / term).resolve()
+            try:
+                candidate.relative_to(repo_resolved)
+            except ValueError:
+                continue
+            if candidate.is_file() and candidate.suffix in suffixes and candidate not in seen_paths:
+                seen_paths.add(candidate)
+                candidate_paths.append(candidate)
+        if timeout > 0 and shutil.which("rg") is not None:
+            command = [
+                "rg",
+                "--files",
+                "--color",
+                "never",
+                "--glob",
+                "!.git/**",
+                "--glob",
+                "!.gradle/**",
+                "--glob",
+                "!build/**",
+                "--glob",
+                "!out/**",
+                "--glob",
+                "!.cxx/**",
+            ]
+            for term in explicit_files:
+                command.extend(["--glob", f"**/{Path(term).name}"])
+            command.append(str(repo))
+            try:
+                completed = subprocess.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                completed = None
+            if completed is not None and completed.returncode in {0, 1}:
+                for path_text in completed.stdout.splitlines():
+                    path = Path(path_text)
+                    if not path.is_absolute():
+                        path = repo / path
+                    try:
+                        resolved = path.resolve()
+                        resolved.relative_to(repo_resolved)
+                    except (OSError, ValueError):
+                        continue
+                    if resolved.is_file() and resolved.suffix in suffixes and resolved not in seen_paths:
+                        seen_paths.add(resolved)
+                        candidate_paths.append(resolved)
         matches: list[tuple[str, int, str]] = []
-        for path in sorted(repo.rglob("*")):
-            if not path.is_file() or path.suffix not in suffixes:
-                continue
-            if any(part in ignored_dirs for part in path.relative_to(repo).parts):
-                continue
-            if path.name not in explicit_files and path.stem not in explicit_stems:
+        for path in sorted(candidate_paths):
+            relative_parts = path.relative_to(repo_resolved).parts
+            if any(part in ignored_dirs for part in relative_parts):
                 continue
             try:
                 lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
             except OSError:
                 continue
-            rel_path = str(path.relative_to(repo))
+            rel_path = str(path.relative_to(repo_resolved))
             stem = path.stem
+            if path.name not in explicit_files and stem not in explicit_stems:
+                continue
             for index, line in enumerate(lines, start=1):
                 if stem in line or path.name in line:
                     matches.append((rel_path, index, line.strip()[:300]))
@@ -13597,8 +13741,12 @@ class BugAnalysisRunner:
                 break
         return merged
 
-    def _collect_source_evidence_with_rg(self, *, repo: Path, terms: list[str]) -> list[tuple[str, int, str]] | None:
+    def _collect_source_evidence_with_rg(
+        self, *, repo: Path, terms: list[str], timeout: float = 20.0
+    ) -> list[tuple[str, int, str]] | None:
         if shutil.which("rg") is None:
+            return None
+        if timeout <= 0:
             return None
         command = [
             "rg",
@@ -13631,7 +13779,7 @@ class BugAnalysisRunner:
                 command,
                 capture_output=True,
                 text=True,
-                timeout=20,
+                timeout=timeout,
                 check=False,
             )
         except (OSError, subprocess.TimeoutExpired):
@@ -13656,30 +13804,8 @@ class BugAnalysisRunner:
         return matches
 
     def _collect_source_evidence_by_scan(self, *, repo: Path, terms: list[str]) -> list[tuple[str, int, str]]:
-        suffixes = {".kt", ".java", ".cpp", ".cc", ".c", ".h", ".hpp", ".proto", ".xml", ".md"}
-        ignored_dirs = {".git", ".gradle", ".idea", "build", "out", ".cxx", "node_modules"}
-        matches: list[tuple[str, int, str]] = []
-        max_matches = 80
-        for path in sorted(repo.rglob("*")):
-            if len(matches) >= max_matches:
-                break
-            if not path.is_file() or path.suffix not in suffixes:
-                continue
-            if any(part in ignored_dirs for part in path.relative_to(repo).parts):
-                continue
-            try:
-                if path.stat().st_size > 2_000_000:
-                    continue
-                lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-            except OSError:
-                continue
-            rel_path = str(path.relative_to(repo))
-            for index, line in enumerate(lines, start=1):
-                if any(term and term in line for term in terms):
-                    matches.append((rel_path, index, line.strip()[:300]))
-                    if len(matches) >= max_matches:
-                        break
-        return matches
+        """Legacy hook: pure Python full-repo scans are disabled for large repos."""
+        return []
 
     def _append_unique(self, values: list[str], value: str) -> None:
         normalized = value.strip()
