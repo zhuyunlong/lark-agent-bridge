@@ -1,0 +1,37 @@
+tests/test_knowledge.py
+  7c9b19ad3e58f5ab 17-61
+tests/test_report_server.py
+  7c9b19ad3e58f5ab 166,197,200-231
+lark_agent_bridge/cli.py
+  7c9b19ad3e58f5ab 80,119-134
+.gitignore
+  7c9b19ad3e58f5ab 24
+tests/test_cli.py
+  7c9b19ad3e58f5ab 13-28,154-179
+lark_agent_bridge/report_server.py
+  7c9b19ad3e58f5ab 13,217,1278-1281,1335-1337,1340,1344-1345,1352-1383
+lark_agent_bridge/knowledge/service.py
+  7c9b19ad3e58f5ab 50,56-57
+lark_agent_bridge/knowledge/source_investigation.py
+  7c9b19ad3e58f5ab 34-36,71-75,77,140-145,165-168
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.22",
+  "base_commit_sha": "d264efe01233db55ad908bf8389f6005a6764128",
+  "prompts": {
+    "7c9b19ad3e58f5ab": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e6f69-cf0d-7ce3-b0a8-e08ac9a54fa4",
+        "model": "gpt-5.4"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 209,
+      "total_deletions": 23,
+      "accepted_lines": 209,
+      "overriden_lines": 0
+    }
+  }
+}
