@@ -1,0 +1,73 @@
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.22",
+  "base_commit_sha": "2e86c03505f22386228d1c91fea70b9d9394dcc2",
+  "prompts": {
+    "25b10596218dd405": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e6fb1-ca50-7860-90d3-bafa6564f9ea",
+        "model": "gpt-5.4"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 82,
+      "overriden_lines": 0
+    },
+    "25b38cec254f3256": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e6f8c-a6cf-70e3-b3ed-0d48a3908cb3",
+        "model": "gpt-5.4"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 132,
+      "overriden_lines": 0
+    },
+    "7c9b19ad3e58f5ab": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e6f69-cf0d-7ce3-b0a8-e08ac9a54fa4",
+        "model": "gpt-5.4"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 10,
+      "overriden_lines": 0
+    },
+    "af9a3f0737d19b9f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e71b5-cf0e-7e31-90ea-6cfecc4e704c",
+        "model": "gpt-5.4"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 63,
+      "overriden_lines": 0
+    },
+    "c71125eb64c94ed1": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e6ffa-aab7-7681-b113-75e0071f8b90",
+        "model": "gpt-5.4"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 80,
+      "overriden_lines": 0
+    }
+  }
+}
