@@ -1095,6 +1095,50 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(decision.reason, "direct_api_policy_skip")
         self.assertFalse(decision.fallback_from)
 
+    def test_bug_summary_direct_api_ready_does_not_try_pydantic_first(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=False, data_dir=Path(tmp), workspace_root=Path(tmp))
+            config.bug_analysis.provider = "codex"
+            config.bug_analysis.command = "codex"
+            config.ai_provider.enabled = True
+            config.ai_provider.base_url = "http://127.0.0.1:8000/v1"
+            config.ai_provider.primary_model = "demo"
+            runner = BugAnalysisRunner(config)
+            output_path = Path(tmp) / "bug_agent_summary.md"
+            request_artifact = Path(tmp) / "bug_agent_request.md"
+            metadata_path = Path(tmp) / "bug_metadata.md"
+            request_artifact.write_text("request", encoding="utf-8")
+            metadata_path.write_text("metadata", encoding="utf-8")
+            api_success = {
+                "message": "direct api summary",
+                "command": None,
+                "error": "",
+                "provider": "direct_api",
+                "session_id": "",
+                "resumed": False,
+                "duration_seconds": 1.2,
+                "usage": {},
+                "usage_scope": "direct_api",
+            }
+
+            with (
+                mock.patch.object(runner, "_run_bug_summary_pydantic_ai", return_value={"message": "pydantic"}) as pai_mock,
+                mock.patch.object(runner, "_run_bug_agent_summary_via_api", return_value=api_success) as api_mock,
+            ):
+                result = runner._run_bug_agent_summary(
+                    request_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/7001730415 分析3D启动生命周期",
+                    request_artifact=request_artifact,
+                    metadata_path=metadata_path,
+                    output_path=output_path,
+                    progress_callback=None,
+                    timeout=30,
+                )
+
+        self.assertEqual(pai_mock.call_count, 0)
+        self.assertEqual(api_mock.call_count, 1)
+        self.assertEqual(result["message"], "direct api summary")
+        self.assertEqual(result["execution_backend"], "direct_api")
+
     def test_bug_summary_direct_api_failure_does_not_fallback_to_file_agent_by_default(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = BridgeConfig(dry_run=False, data_dir=Path(tmp), workspace_root=Path(tmp))

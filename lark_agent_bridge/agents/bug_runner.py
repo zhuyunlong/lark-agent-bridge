@@ -11881,32 +11881,6 @@ class BugAnalysisRunner:
                 lightweight_provider="omlx",
                 lightweight_error=str(omlx_result.get("error") or ""),
             )
-        # --- Pydantic-AI path (structured output + tools, always tried first) ---
-        if (
-            not explicit_file_agent
-            and not provider_session_id.strip()
-        ):
-            pai_result = self._run_bug_summary_pydantic_ai(
-                request_text=request_text,
-                request_artifact=request_artifact,
-                metadata_path=metadata_path,
-                output_path=output_path,
-                followup_text=followup_text,
-                previous_summary_path=previous_summary_path,
-                progress_callback=progress_callback,
-                snapshot_details=snapshot_details,
-                snapshot_plans=snapshot_plans,
-            )
-            if pai_result["message"]:
-                return self._annotate_summary_backend_result(
-                    pai_result,
-                    execution_backend="pydantic_ai",
-                    backend_reason="pydantic_ai_summary",
-                )
-            logger.info(
-                "pydantic-ai summary did not produce result (error=%s), trying direct_api",
-                pai_result.get("error", ""),
-            )
         # --- Direct API path (fast, preferred when [ai_provider] is enabled) ---
         if (
             not explicit_file_agent
