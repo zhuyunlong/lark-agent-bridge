@@ -47,13 +47,14 @@ _LOW_CONFIDENCE_GENERIC_TOPIC_TERMS = {"调试", "debug", "日志", "log"}
 
 
 class KnowledgeService:
-    def __init__(self, config: BridgeConfig) -> None:
+    def __init__(self, config: BridgeConfig, *, warmup_codegraph: bool = True) -> None:
         self.config = config
         self.store = KnowledgeStore(config.knowledge.storage)
         self._ready_lock = threading.RLock()
         self._configured_sources_checked = False
         self._source_investigation_runner = source_investigation.SourceInvestigationRunner(config)
-        self._source_investigation_runner.warmup_codegraph()
+        if warmup_codegraph:
+            self._source_investigation_runner.warmup_codegraph()
 
     def should_handle(self, text: str) -> bool:
         if not self.config.knowledge.enabled:

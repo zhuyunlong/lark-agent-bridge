@@ -31,6 +31,9 @@ from .. import prompt_snapshots
 
 logger = logging.getLogger(__name__)
 
+_CODEGRAPH_WARMUP_LOCK = threading.Lock()
+_CODEGRAPH_WARMUP_INFLIGHT: set[Path] = set()
+
 _LOW_VALUE_PATH_HINTS = (
     "src/test",
     "src/androidTest",
@@ -63,6 +66,13 @@ _SIGNAL_PRIORITY_MODULES = {
     ),
 }
 _NATIVE_HINT_TERMS = ("native", "jni", "c++", "cpp", ".so", "tombstone", "addr2line", "崩溃", "闪退")
+
+
+def _warmup_repo_key(repo: Path) -> Path:
+    try:
+        return repo.expanduser().resolve()
+    except OSError:
+        return repo.expanduser()
 
 
 @dataclass(slots=True)
@@ -127,6 +137,12 @@ class SourceInvestigationRunner:
             if not cg.is_indexed(repo):
                 logger.debug("codegraph: %s is not indexed; skipping warmup", repo)
                 continue
+            repo_key = _warmup_repo_key(repo)
+            with _CODEGRAPH_WARMUP_LOCK:
+                if repo_key in _CODEGRAPH_WARMUP_INFLIGHT:
+                    logger.debug("codegraph: warmup already in flight for %s; skipping duplicate", repo)
+                    continue
+                _CODEGRAPH_WARMUP_INFLIGHT.add(repo_key)
             t = threading.Thread(
                 target=self._warmup_one_repo,
                 args=(cg, repo),
@@ -146,7 +162,10 @@ class SourceInvestigationRunner:
                 logger.warning("codegraph: sync failed for %s", repo)
         except Exception as exc:  # pragma: no cover
             logger.warning("codegraph: warmup error for %s: %s", repo, exc)
-
+        finally:
+            repo_key = _warmup_repo_key(repo)
+            with _CODEGRAPH_WARMUP_LOCK:
+                _CODEGRAPH_WARMUP_INFLIGHT.discard(repo_key)
     def run(self, question: str, *, hits: list[SearchHit] | None = None) -> SourceInvestigationResult:
         options = self.config.source_investigation
         if not options.enabled:

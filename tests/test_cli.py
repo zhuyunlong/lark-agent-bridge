@@ -10,6 +10,22 @@ from lark_agent_bridge.cli import main
 
 
 class CliTests(unittest.TestCase):
+    def test_check_disables_codegraph_warmup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config.toml"
+            config.write_text(f'dry_run = true\ndata_dir = "{tmp}/data"\n', encoding="utf-8")
+            fake_app = mock.Mock()
+            fake_app.check.return_value = {"ok": True}
+
+            with (
+                redirect_stdout(io.StringIO()),
+                mock.patch("lark_agent_bridge.cli.BridgeApp", return_value=fake_app) as bridge_app,
+            ):
+                exit_code = main(["check", "--config", str(config), "--dry-run"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertIs(bridge_app.call_args.kwargs["warmup_codegraph"], False)
+
     def test_run_signal_dry_run(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = Path(tmp) / "config.toml"
@@ -134,6 +150,33 @@ path = "{adb_json}"
         self.assertEqual(answer_code, 0)
         self.assertIn('"total_chunks": 1', sync_output.getvalue())
         self.assertIn("打开Debug面板", answer_output.getvalue())
+
+    def test_knowledge_sync_avoids_bridge_app_and_disables_codegraph_warmup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / "config.toml"
+            config.write_text(
+                f"""
+data_dir = "{tmp}/data"
+
+[knowledge]
+enabled = true
+storage = "{tmp}/data/knowledge.sqlite"
+""",
+                encoding="utf-8",
+            )
+            fake_service = mock.Mock()
+            fake_service.sync_all.return_value = {"source_count": 0, "total_chunks": 0, "sources": []}
+
+            with (
+                redirect_stdout(io.StringIO()),
+                mock.patch("lark_agent_bridge.cli.BridgeApp") as bridge_app,
+                mock.patch("lark_agent_bridge.cli.KnowledgeService", return_value=fake_service) as knowledge_service,
+            ):
+                exit_code = main(["knowledge", "sync", "--config", str(config)])
+
+        self.assertEqual(exit_code, 0)
+        bridge_app.assert_not_called()
+        self.assertIs(knowledge_service.call_args.kwargs["warmup_codegraph"], False)
 
     def test_handle_unsupported_event_dry_run(self):
         with tempfile.TemporaryDirectory() as tmp:

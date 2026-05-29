@@ -14,6 +14,51 @@ from lark_agent_bridge.models import SourceInvestigationOptions
 
 
 class KnowledgeServiceTests(unittest.TestCase):
+    def test_constructor_can_skip_codegraph_warmup(self):
+        config = BridgeConfig(knowledge=KnowledgeOptions(enabled=True))
+
+        with patch.object(SourceInvestigationRunner, "warmup_codegraph") as warmup_codegraph:
+            KnowledgeService(config, warmup_codegraph=False)
+
+        warmup_codegraph.assert_not_called()
+
+    def test_warmup_codegraph_skips_duplicate_inflight_repo(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "guideengine"
+            (repo / ".codegraph").mkdir(parents=True)
+            config = BridgeConfig(
+                guideengine_repo=repo,
+                source_investigation=SourceInvestigationOptions(
+                    enabled=True,
+                    repo_roots=[repo],
+                    codegraph_enabled=True,
+                ),
+            )
+            runner = SourceInvestigationRunner(config)
+            fake_cg = unittest.mock.Mock()
+            fake_cg.is_indexed.return_value = True
+            started_threads: list[object] = []
+
+            class FakeThread:
+                def __init__(self, *, target, args, name, daemon):
+                    self.target = target
+                    self.args = args
+                    self.name = name
+                    self.daemon = daemon
+
+                def start(self):
+                    started_threads.append(self)
+
+            with (
+                patch.object(SourceInvestigationRunner, "_get_codegraph", return_value=fake_cg),
+                patch("lark_agent_bridge.knowledge.source_investigation.threading.Thread", FakeThread),
+            ):
+                runner.warmup_codegraph()
+                runner.warmup_codegraph()
+                started_threads[0].target(*started_threads[0].args)
+
+        self.assertEqual(len(started_threads), 1)
+
     def test_syncs_local_adb_json_and_searches_commands(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

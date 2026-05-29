@@ -163,7 +163,7 @@ class ReportServerTests(unittest.TestCase):
         self.assertIn('href="report.html"', index_html)
         self.assertIn("在新窗口打开完整报告", index_html)
         self.assertNotIn("<iframe", index_html)
-        self.assertNotIn("3D Unity 启动生命周期报告", index_html)
+        self.assertIn("3D Unity 启动生命周期报告", index_html)
 
     def test_publish_result_index_keeps_multiple_summary_lines(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -194,9 +194,41 @@ class ReportServerTests(unittest.TestCase):
             assert published is not None
             index_html = published.index_path.read_text(encoding="utf-8")
 
-        self.assertIn("**结论** 当前只能确认两点。", index_html)
+        self.assertIn("结论 当前只能确认两点。", index_html)
         self.assertIn("第一，当前日志和现场时间不一致。", index_html)
         self.assertIn("第二，源码上电量信号会影响准入判断。", index_html)
+        self.assertNotIn("**结论**", index_html)
+
+    def test_publish_result_index_uses_embedded_report_titles_for_multiple_reports(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            first_html = Path(tmp) / "scene_signal.html"
+            second_html = Path(tmp) / "source_stage.html"
+            first_html.write_text(
+                "<html><head><title>3D场景信号分析报告</title></head><body><h1>3D场景信号分析报告</h1></body></html>",
+                encoding="utf-8",
+            )
+            second_html.write_text(
+                "<html><head><title>源码分析阶段</title></head><body><h1>源码分析阶段</h1></body></html>",
+                encoding="utf-8",
+            )
+            publisher = HtmlReportPublisher(BridgeConfig(dry_run=False, data_dir=Path(tmp)))
+
+            published = publisher.publish_result(
+                TaskResult(
+                    success=True,
+                    message="结论：已生成两份报告。",
+                    job_id="evt_bug_multi",
+                    details={"mode": "bug_analysis", "files_to_send": [first_html, second_html]},
+                )
+            )
+
+            assert published is not None
+            index_html = published.index_path.read_text(encoding="utf-8")
+
+        self.assertIn("3D场景信号分析报告", index_html)
+        self.assertIn("源码分析阶段", index_html)
+        self.assertNotIn("bug_analysis 报告 1", index_html)
+        self.assertNotIn("bug_analysis 报告 2", index_html)
 
     def test_publish_result_index_skips_repeated_agent_request_lines(self):
         with tempfile.TemporaryDirectory() as tmp:

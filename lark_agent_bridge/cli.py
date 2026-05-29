@@ -76,20 +76,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         config = with_cli_overrides(load_config(args.config), dry_run=args.dry_run)
         _warn_missing_direct_api_key(config)
-        progress_callback = _print_progress if args.command == "listen" and not config.dry_run else None
-        app = BridgeApp(config, progress_callback=progress_callback)
-        if args.command == "check":
-            _print_json(app.check())
-            return 0
-        if args.command == "handle-event":
-            payload = json.loads(Path(args.event).read_text(encoding="utf-8"))
-            _print_json(app.handle_payload(payload).to_dict())
-            return 0
-        if args.command == "run-signal":
-            _print_json(app.run_signal(signal=args.signal, log_path=args.log_path, since=args.since).to_dict())
-            return 0
         if args.command == "knowledge":
-            service = KnowledgeService(config)
+            service = KnowledgeService(config, warmup_codegraph=False)
             if args.knowledge_command == "sync":
                 _print_json(service.sync_all())
                 return 0
@@ -128,6 +116,22 @@ def main(argv: list[str] | None = None) -> int:
                     }
                 )
                 return 0
+        progress_callback = _print_progress if args.command == "listen" and not config.dry_run else None
+        app = BridgeApp(
+            config,
+            progress_callback=progress_callback,
+            warmup_codegraph=args.command == "listen",
+        )
+        if args.command == "check":
+            _print_json(app.check())
+            return 0
+        if args.command == "handle-event":
+            payload = json.loads(Path(args.event).read_text(encoding="utf-8"))
+            _print_json(app.handle_payload(payload).to_dict())
+            return 0
+        if args.command == "run-signal":
+            _print_json(app.run_signal(signal=args.signal, log_path=args.log_path, since=args.since).to_dict())
+            return 0
         if args.command == "listen":
             if config.dry_run:
                 logger.info("dry-run: listen would consume im.message.receive_v1 events with lark-cli")

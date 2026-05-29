@@ -10,6 +10,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import ipaddress
 import json
 from pathlib import Path
+import re
 import shutil
 import socket
 import threading
@@ -213,7 +214,7 @@ class HtmlReportPublisher:
         report_sections = "\n".join(
             (
                 "<section class=\"report-card\">"
-                f"<h2>{escape(_report_title(mode, index, len(reports)))}</h2>"
+                f"<h2>{escape(_report_title(mode, index, len(reports), report))}</h2>"
                 "<p class=\"muted\">完整报告较长，包含详细证据、图表和运行信息；首页只保留摘要和入口，避免重复嵌套展示。请在新窗口打开完整报告。</p>"
                 f"<p><a class=\"report-link\" href=\"{quote(report.name)}\" target=\"_blank\" rel=\"noreferrer\">打开 HTML 报告</a></p>"
                 "</section>"
@@ -1274,7 +1275,10 @@ def _latest_mtime(path: Path) -> float:
     return latest
 
 
-def _report_title(mode: str, index: int, total: int) -> str:
+def _report_title(mode: str, index: int, total: int, report_path: Path | None = None) -> str:
+    extracted = _extract_report_title(report_path) if report_path is not None else ""
+    if extracted:
+        return extracted
     if total == 1:
         return "HTML 报告"
     return f"{mode or 'analysis'} 报告 {index}"
@@ -1328,18 +1332,55 @@ def _summary_preview_text(summary_text: str) -> str:
             if filtered:
                 break
             continue
-        normalized = line.lstrip("-*• \t")
+        normalized = _normalize_summary_preview_line(line)
+        if not normalized:
+            continue
         if normalized.startswith("诉求：") or normalized.startswith("诉求:"):
             continue
-        filtered.append(line)
+        filtered.append(normalized)
         if len(filtered) >= 4:
             break
     if not filtered:
-        filtered = lines[:3]
+        filtered = [_normalize_summary_preview_line(line) for line in lines[:3]]
+        filtered = [line for line in filtered if line]
     preview = "\n".join(filtered)
     if len(preview) <= 320:
         return preview
     return preview[:319].rstrip() + "…"
+
+
+def _normalize_summary_preview_line(line: str) -> str:
+    normalized = line.strip()
+    normalized = re.sub(r"^\s*#+\s*", "", normalized)
+    normalized = re.sub(r"^\s*(?:[-*•]|\d+\.)\s+", "", normalized)
+    normalized = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", normalized)
+    normalized = re.sub(r"`([^`]+)`", r"\1", normalized)
+    normalized = re.sub(r"\*\*([^*]+)\*\*", r"\1", normalized)
+    normalized = re.sub(r"\*([^*]+)\*", r"\1", normalized)
+    normalized = re.sub(r"__([^_]+)__", r"\1", normalized)
+    normalized = re.sub(r"_([^_]+)_", r"\1", normalized)
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
+def _extract_report_title(report_path: Path | None) -> str:
+    if report_path is None or not report_path.exists():
+        return ""
+    try:
+        text = report_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    for pattern in (
+        r"(?is)<title[^>]*>(.*?)</title>",
+        r"(?is)<h1[^>]*>(.*?)</h1>",
+    ):
+        match = re.search(pattern, text)
+        if not match:
+            continue
+        title = re.sub(r"(?s)<[^>]+>", " ", match.group(1))
+        title = re.sub(r"\s+", " ", title).strip()
+        if title:
+            return title
+    return ""
 
 
 def _format_token_millions(value: object) -> str:
