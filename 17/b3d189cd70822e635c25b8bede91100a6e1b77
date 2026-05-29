@@ -1,0 +1,36 @@
+.gitignore
+  7c9b19ad3e58f5ab 20
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.22",
+  "base_commit_sha": "17b3d189cd70822e635c25b8bede91100a6e1b77",
+  "prompts": {
+    "7c9b19ad3e58f5ab": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e6f69-cf0d-7ce3-b0a8-e08ac9a54fa4",
+        "model": "gpt-5.4"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 1,
+      "overriden_lines": 0
+    },
+    "d50269dbf8d0cf76": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "3b79674c-626c-4505-8a9b-f42cc2803d7d",
+        "model": "mimo-v2.5-pro"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 5,
+      "overriden_lines": 0
+    }
+  }
+}
