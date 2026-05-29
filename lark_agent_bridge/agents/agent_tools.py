@@ -6,7 +6,7 @@ Each tool call is logged for observability.
 
 Tool set (aligned with OpenCode / Claude Code / Codex):
   Core I/O:    read_file (with line range), get_file_outline, list_dir
-  Search:      grep (with context lines), glob
+  Search:      grep (with context lines), search_large_log, glob
   Shell:       bash (read-only shell, pipes + rg/sed/awk/jq/git supported)
   Git:         git_log, git_blame_range, repo_overview
   Reasoning:   think (scratchpad)
@@ -119,6 +119,12 @@ _SKIP_DIRS = frozenset({
 })
 # Max file size to read during grep (256KB)
 _MAX_GREP_FILE_SIZE = 256 * 1024
+_MAX_LARGE_LOG_RESULTS = 80
+_MAX_LARGE_LOG_LINE_CHARS = 1200
+_BINARY_SKIP_SUFFIXES = {
+    ".pyc", ".class", ".o", ".so", ".dylib", ".exe", ".jar", ".zip", ".gz",
+    ".tar", ".png", ".jpg", ".jpeg", ".ico", ".woff", ".woff2", ".ttf",
+}
 
 # Max bytes when reading a full file (50 KB)
 _MAX_READ_BYTES = 50 * 1024
@@ -383,6 +389,139 @@ def grep_text(pattern: str, *, workspace: Path, glob_filter: str = "**/*", max_r
     return "\n".join(results)
 
 
+def _display_search_line(line: str, workspace: Path) -> str:
+    ws_prefix = str(workspace.resolve()) + os.sep
+    if line.startswith(ws_prefix):
+        line = line.replace(ws_prefix, "", 1)
+    if len(line) > _MAX_LARGE_LOG_LINE_CHARS:
+        return line[:_MAX_LARGE_LOG_LINE_CHARS].rstrip() + " [... line truncated ...]"
+    return line
+
+
+def _search_large_log_python(
+    *,
+    pattern: str,
+    target: Path,
+    workspace: Path,
+    max_results: int,
+) -> str:
+    try:
+        regex = re.compile(pattern, re.IGNORECASE)
+    except re.error as exc:
+        return f"Error: invalid regex pattern: {exc}"
+
+    def _candidate_files(root: Path):
+        if root.is_file():
+            yield root
+            return
+        try:
+            iterator = root.rglob("*")
+            for entry in iterator:
+                if not entry.is_file():
+                    continue
+                try:
+                    rel_parts = entry.relative_to(workspace).parts
+                except ValueError:
+                    rel_parts = entry.parts
+                if any(part in _SKIP_DIRS or part.startswith(".") for part in rel_parts):
+                    continue
+                if entry.suffix.lower() in _BINARY_SKIP_SUFFIXES:
+                    continue
+                yield entry
+        except OSError:
+            return
+
+    results: list[str] = []
+    for entry in _candidate_files(target):
+        try:
+            rel = entry.relative_to(workspace)
+        except ValueError:
+            rel = entry
+        try:
+            with entry.open("r", encoding="utf-8", errors="replace") as handle:
+                for line_no, line in enumerate(handle, 1):
+                    if not regex.search(line):
+                        continue
+                    results.append(
+                        _display_search_line(f"{rel}:{line_no}: {line.strip()}", workspace)
+                    )
+                    if len(results) >= max_results:
+                        results.append(f"\n[... {max_results} results limit reached ...]")
+                        return "\n".join(results)
+        except OSError:
+            continue
+
+    if not results:
+        return f"No matches found for pattern: {pattern}"
+    return "\n".join(results)
+
+
+def search_large_log(
+    pattern: str,
+    *,
+    workspace: Path,
+    path: str = "",
+    max_results: int = _MAX_LARGE_LOG_RESULTS,
+    context_lines: int = 0,
+) -> str:
+    """Search large decoded logs without the small-file grep limit.
+
+    This is intended for generated Android/logcat artifacts where normal grep_text
+    deliberately skips files larger than 256 KB.
+    """
+    ws = workspace.resolve()
+    target = _safe_resolve(path, ws) if path else ws
+    if target is None:
+        return f"Error: path '{path}' is outside workspace"
+    if path and not target.exists():
+        return f"Error: file not found: {path}"
+    if not target.exists():
+        return f"Error: workspace not found: {workspace}"
+
+    effective_max = max(1, min(int(max_results or _MAX_LARGE_LOG_RESULTS), 500))
+    context = max(0, min(int(context_lines or 0), 10))
+
+    rg = shutil.which("rg")
+    if rg:
+        cmd = [
+            rg,
+            "--no-heading",
+            "--with-filename",
+            "-n",
+            "-i",
+            "--max-count",
+            str(effective_max),
+        ]
+        if context:
+            cmd.extend(["-C", str(context)])
+        if target.is_dir():
+            for d in _SKIP_DIRS:
+                cmd.extend(["--glob", f"!{d}/**"])
+        cmd.extend([pattern, str(target)])
+        try:
+            proc = subprocess.run(cmd, capture_output=True, timeout=30)
+            stdout = _coerce_process_output(proc.stdout)
+            stderr = _coerce_process_output(proc.stderr)
+            lines = [_display_search_line(line, ws) for line in stdout.strip().splitlines() if line]
+            if lines:
+                output_line_limit = effective_max if context == 0 else effective_max * (context * 2 + 2)
+                if len(lines) > output_line_limit:
+                    lines = lines[:output_line_limit]
+                    lines.append(f"\n[... {effective_max} results limit reached ...]")
+                return "\n".join(lines)
+            if proc.returncode not in (0, 1) and stderr.strip():
+                return f"[rg exit {proc.returncode}] {stderr.strip()[:1000]}"
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+
+    return _search_large_log_python(
+        pattern=pattern,
+        target=target,
+        workspace=ws,
+        max_results=effective_max,
+    )
+
+
 def glob_paths(pattern: str, *, workspace: Path, max_results: int = 100) -> str:
     """Find files matching a glob pattern within workspace."""
     ws = workspace.resolve()
@@ -623,6 +762,7 @@ def register_tools(
     all_roots = [workspace]
     if extra_roots:
         all_roots.extend(r for r in extra_roots if r not in all_roots)
+    search_large_log_fn = search_large_log
 
     # Per-run cache for deduplicating tool calls (create if not provided)
     cache = tool_cache or ToolCallCache()
@@ -715,6 +855,57 @@ def register_tools(
             return "\n\n".join(results)
 
         return cache.get_or_compute("grep", (pattern, glob_filter, context_lines), {}, _do_grep)
+
+    @agent.tool_plain
+    def search_large_log(pattern: str, path: str = "", context_lines: int = 0, max_results: int = _MAX_LARGE_LOG_RESULTS) -> str:
+        """在大日志/解码日志中搜索正则表达式，不受普通 grep 的 256KB 文件大小限制。
+        - pattern: 要搜索的正则表达式，例如 'startCheck timeout'
+        - path: 可选，指定某个日志文件或目录；留空则搜索工作区
+        - context_lines: 可选，显示匹配行前后 N 行上下文
+        - max_results: 最多返回匹配结果数
+        用法建议：先用本工具定位行号，再用 read_file(path, start_line, end_line) 精读上下文。"""
+        logger.info(
+            "[tool_call] search_large_log(pattern=%s, path=%s, context=%d, max_results=%d)",
+            pattern,
+            path,
+            context_lines,
+            max_results,
+        )
+        _emit_tool_progress("search_large_log", f"{pattern[:40]} ({path or 'workspace'})")
+
+        if path:
+            resolved = _safe_resolve_multi(path, all_roots)
+            if resolved is None:
+                return f"Error: path '{path}' is outside workspace"
+            if not resolved.exists():
+                return f"Error: file not found: {path}"
+            for root in all_roots:
+                try:
+                    rel_path = str(resolved.relative_to(root.resolve()))
+                except ValueError:
+                    continue
+                return search_large_log_fn(
+                    pattern,
+                    workspace=root,
+                    path=rel_path,
+                    max_results=max_results,
+                    context_lines=context_lines,
+                )
+            return f"Error: path '{path}' is outside workspace"
+
+        results: list[str] = []
+        for root in all_roots:
+            partial = search_large_log_fn(
+                pattern,
+                workspace=root,
+                max_results=max_results,
+                context_lines=context_lines,
+            )
+            if not partial.startswith("No matches"):
+                results.append(f"# {root.name}/\n{partial}")
+        if not results:
+            return f"No matches found for pattern: {pattern}"
+        return "\n\n".join(results)
 
     @agent.tool_plain
     def glob(pattern: str) -> str:
@@ -1119,7 +1310,7 @@ def register_tools(
 
     logger.info(
         "Tools registered: bash(read-only shell+pipes), read_file(+line range), get_file_outline, "
-        "grep(+context), glob, list_dir, think, git_log, git_blame_range, repo_overview, "
+        "grep(+context), search_large_log, glob, list_dir, think, git_log, git_blame_range, repo_overview, "
         "read_report_artifact, read_prepared_log_metadata%s",
         " + search_codegraph, get_callers, get_code_context" if codegraph_client else "",
     )

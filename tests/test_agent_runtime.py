@@ -204,6 +204,27 @@ class TestAgentTools(unittest.TestCase):
         result = grep_text("zzzznotfound", workspace=self.workspace)
         self.assertIn("No matches", result)
 
+    def test_search_large_log_finds_matches_past_small_file_limit(self):
+        from lark_agent_bridge.agents.agent_tools import search_large_log
+
+        large_log = self.workspace / "logs" / "user0_main_2026-05-28_11-00.alog.log"
+        large_log.parent.mkdir(parents=True)
+        filler = "05-28 11:00:00 100 200 I Filler: " + ("x" * 180) + "\n"
+        content = filler * 1800
+        content += "05-28 11:18:00 13379 1 I NAV_SrSM_UnityStarting: startCheck timeout, not onMainActivityCreate, so kill self\n"
+        large_log.write_text(content, encoding="utf-8")
+
+        result = search_large_log(
+            "startCheck timeout",
+            workspace=self.workspace,
+            path="logs/user0_main_2026-05-28_11-00.alog.log",
+            max_results=10,
+        )
+
+        self.assertIn("logs/user0_main_2026-05-28_11-00.alog.log", result)
+        self.assertIn("startCheck timeout", result)
+        self.assertIn("not onMainActivityCreate", result)
+
     def test_glob_paths(self):
         from lark_agent_bridge.agents.agent_tools import glob_paths
 

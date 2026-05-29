@@ -3125,12 +3125,102 @@ class AgentTests(unittest.TestCase):
                 "execution_backend": "direct_api",
                 "backend_reason": "direct_api_failed_no_fallback",
                 "fallback_from": "",
+                "tool_calls": 2,
+                "tool_trace": [{"tool": "search_large_log", "args": "{'pattern': 'startCheck timeout'}"}],
             },
         )
 
         self.assertEqual(details["agent_summary_execution_backend"], "direct_api")
         self.assertEqual(details["agent_summary_backend_reason"], "direct_api_failed_no_fallback")
         self.assertNotIn("agent_summary_fallback_from", details)
+        self.assertEqual(details["agent_summary_tool_calls"], 2)
+        self.assertEqual(
+            details["agent_summary_tool_trace"],
+            [{"tool": "search_large_log", "args": "{'pattern': 'startCheck timeout'}"}],
+        )
+
+    def test_pydantic_summary_prompt_lists_decoded_logs_and_search_guidance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            report_json = root / "bug_3d_startup_report.json"
+            decoded_log = root / "startup_analysis" / "workspace" / "collected" / "user0_main_2026-05-28_11-00.alog.log"
+            decoded_log.parent.mkdir(parents=True)
+            decoded_log.write_text("05-28 11:18:00 startCheck timeout\n", encoding="utf-8")
+            report_json.write_text(
+                json.dumps(
+                    {
+                        "decoded_logs": [str(decoded_log)],
+                        "sessions": [],
+                        "target_time": "2026-05-28T11:18:00",
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            request_artifact = root / "bug_agent_request.md"
+            metadata_path = root / "bug_metadata.md"
+            request_artifact.write_text("分析3D启动生命周期", encoding="utf-8")
+            metadata_path.write_text(f"- JSON: `{report_json}`\n", encoding="utf-8")
+
+            runner = BugAnalysisRunner(BridgeConfig(dry_run=True, data_dir=root / "data", workspace_root=root))
+            prompt = runner._build_bug_summary_prompt_for_pydantic_ai(
+                request_text="分析3D启动生命周期",
+                request_artifact=request_artifact,
+                metadata_path=metadata_path,
+            )
+
+        self.assertIn("search_large_log", prompt)
+        self.assertIn(str(decoded_log), prompt)
+        self.assertIn("startCheck timeout", prompt)
+        self.assertIn("X3DCB-DROP", prompt)
+        self.assertNotIn("grep_text", prompt)
+
+    def test_pydantic_summary_result_and_progress_include_tool_trace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            request_artifact = root / "bug_agent_request.md"
+            metadata_path = root / "bug_metadata.md"
+            output_path = root / "bug_agent_summary.md"
+            request_artifact.write_text("request", encoding="utf-8")
+            metadata_path.write_text("metadata", encoding="utf-8")
+            progress_events: list[dict[str, object]] = []
+
+            class FakeRuntimeResult:
+                ok = True
+                markdown = "## 结论摘要\n- done"
+                model = "gpt-test"
+                duration_seconds = 2.0
+                usage = {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12}
+                runtime_path = "pydantic_ai_agent"
+                tool_calls = 1
+                tool_trace = [{"tool": "search_large_log", "args": "{'pattern': 'startCheck timeout'}"}]
+
+            class FakeRuntime:
+                def __init__(self, *args, **kwargs):
+                    pass
+
+                def run(self, **kwargs):
+                    self.system_prompt = kwargs["system_prompt"]
+                    return FakeRuntimeResult()
+
+            config = BridgeConfig(dry_run=False, data_dir=root / "data", workspace_root=root)
+            runner = BugAnalysisRunner(config)
+
+            with (
+                mock.patch("lark_agent_bridge.agents.agent_runtime._check_pydantic_ai", return_value=True),
+                mock.patch("lark_agent_bridge.agents.agent_runtime.AgentRuntime", FakeRuntime),
+            ):
+                result = runner._run_bug_summary_pydantic_ai(
+                    request_text="分析3D启动生命周期",
+                    request_artifact=request_artifact,
+                    metadata_path=metadata_path,
+                    output_path=output_path,
+                    progress_callback=progress_events.append,
+                )
+
+        completed = [event for event in progress_events if event["stage"] == "bug_agent_summary_completed"]
+        self.assertEqual(result["tool_trace"], FakeRuntimeResult.tool_trace)
+        self.assertEqual(completed[-1]["details"]["tool_trace"], FakeRuntimeResult.tool_trace)
 
     def test_bug_analysis_classifies_startup_request(self):
         runner = BugAnalysisRunner(BridgeConfig(dry_run=True))

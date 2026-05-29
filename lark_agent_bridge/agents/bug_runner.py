@@ -12509,6 +12509,29 @@ class BugAnalysisRunner:
             filtered.append(item)
         return filtered
 
+    def _bug_summary_decoded_log_paths(self, context_items: list[dict[str, object]]) -> list[str]:
+        paths: list[str] = []
+        seen: set[str] = set()
+        for item in context_items:
+            path = Path(str(item.get("path") or ""))
+            if not self._is_report_json_path(path):
+                continue
+            payload = self._load_structured_report_payload(path)
+            if payload is None:
+                continue
+            decoded_logs = payload.get("decoded_logs")
+            if not isinstance(decoded_logs, list):
+                continue
+            for entry in decoded_logs:
+                candidate = str(entry or "").strip()
+                if not candidate or candidate in seen:
+                    continue
+                seen.add(candidate)
+                paths.append(candidate)
+                if len(paths) >= 8:
+                    return paths
+        return paths
+
     def _render_structured_report_guardrails(self, path: Path) -> str:
         if not self._is_report_json_path(path):
             return ""
@@ -13112,10 +13135,12 @@ class BugAnalysisRunner:
 
         system_prompt = (
             "你是一个通过飞书触发的 bug 分析总结 agent。\n"
-            "你可以使用 read_file / grep_text 工具读取分析产物文件。\n"
+            "你可以使用 read_file / grep / search_large_log / bash 工具读取分析产物文件。\n"
             "只读分析，不修改文件，不执行写入命令。\n"
+            "遇到 *.alog.log、*.xlog.log 或大日志时，必须先用 search_large_log 或 bash rg 搜索关键词定位行号，再用 read_file 精读上下文。\n"
+            "不要用连续 read_file 分页扫描大日志。\n"
             "必须完整响应用户原始请求中的所有诉求，输出中文 Markdown，结论先行。\n"
-            "所有分析数据的路径已列在用户消息中，请使用工具读取需要的文件。"
+            "所有分析数据的路径已列在用户消息中，请根据文件类型选择合适工具读取。"
         )
 
         workspace = metadata_path.parent if metadata_path.exists() else Path.cwd()
@@ -13143,6 +13168,7 @@ class BugAnalysisRunner:
                 model=result.model,
                 duration_seconds=round(duration, 1),
                 tool_calls=result.tool_calls,
+                tool_trace=result.tool_trace[:20],
             )
             return {
                 "message": message,
@@ -13156,6 +13182,7 @@ class BugAnalysisRunner:
                 "usage_scope": "summary",
                 "runtime_path": result.runtime_path,
                 "tool_calls": result.tool_calls,
+                "tool_trace": result.tool_trace,
             }
 
         logger.warning(
@@ -13188,11 +13215,11 @@ class BugAnalysisRunner:
         """Build a tool-oriented summary prompt.
 
         Unlike _build_bug_agent_summary_prompt_for_api which inlines file content,
-        this lists file paths so the pydantic-ai agent can use read_file/grep_text
+        this lists file paths so the pydantic-ai agent can use read_file/search tools
         tools to read them selectively.
         """
         prompt = "请基于以下分析材料完成 bug 会话的最终回答。\n"
-        prompt += "材料文件路径已列出，请使用 read_file 工具读取需要的文件内容。\n\n"
+        prompt += "材料文件路径已列出，请按文件类型选择工具：报告/Markdown 用 read_file，大日志先用 search_large_log 或 bash rg 定位行号。\n\n"
 
         snapshot_prefix = ""
         if followup_text.strip():
@@ -13243,7 +13270,8 @@ class BugAnalysisRunner:
             file_list.append(f"- Bug 元数据: `{metadata_path}`")
         if previous_summary_path and previous_summary_path.exists():
             file_list.append(f"- 上一轮总结: `{previous_summary_path}`")
-        for item in self._bug_summary_context_items(metadata_path, include_html_reports=False):
+        context_items = self._bug_summary_context_items(metadata_path, include_html_reports=False)
+        for item in context_items:
             path = Path(str(item["path"]))
             title = str(item["title"])
             if path.exists():
@@ -13251,9 +13279,31 @@ class BugAnalysisRunner:
 
         if file_list:
             prompt += "\n".join(file_list) + "\n\n"
-            prompt += "请使用 read_file 工具读取上述文件，然后基于内容整理回答。\n"
+            prompt += (
+                "请读取上述材料后整理回答。普通报告用 read_file；日志文件不要逐页扫描，"
+                "先用 search_large_log(pattern, path=...) 或 bash(\"rg -n ...\") 搜索定位。\n\n"
+            )
         else:
             prompt += "（无可用材料文件）\n"
+
+        decoded_logs = self._bug_summary_decoded_log_paths(context_items)
+        if decoded_logs:
+            prompt += "### 可搜索解码日志\n"
+            prompt += "\n".join(f"- `{path}`" for path in decoded_logs) + "\n\n"
+
+        prompt += (
+            "### 大日志搜索规则\n"
+            "- 对 `*.alog.log`、`*.xlog.log` 或大于 1MB 的日志，先调用 `search_large_log(pattern, path=...)` 或 `bash(\"rg -n ...\")`。\n"
+            "- 禁止用连续 `read_file` 分页扫描大日志；只有定位到行号后才用 `read_file(path, start_line, end_line)` 精读。\n"
+            "- 普通 JSON/Markdown 报告可直接用 `read_file`。\n\n"
+            "### 推荐启动排查关键词\n"
+            "- `kill self for unity start dead`\n"
+            "- `startCheck timeout`\n"
+            "- `onUnityStartDeadTraceDump`\n"
+            "- `onUnityHeartbeatSignal`\n"
+            "- `X3DCB-DROP`\n"
+            "- `没有注册回调函数`\n"
+        )
 
         return prompt
 
@@ -14240,6 +14290,12 @@ class BugAnalysisRunner:
             details["agent_summary_timeout_seconds"] = agent_summary_result["timeout_seconds"]
         if agent_summary_result.get("timed_out"):
             details["agent_summary_timed_out"] = True
+        tool_calls = agent_summary_result.get("tool_calls")
+        if isinstance(tool_calls, int):
+            details["agent_summary_tool_calls"] = tool_calls
+        tool_trace = agent_summary_result.get("tool_trace")
+        if isinstance(tool_trace, list):
+            details["agent_summary_tool_trace"] = tool_trace[:20]
         duration = agent_summary_result.get("duration_seconds")
         if isinstance(duration, (int, float)):
             details["agent_summary_duration_seconds"] = float(duration)
@@ -14295,6 +14351,20 @@ class BugAnalysisRunner:
                 )
         if isinstance(duration, (int, float)):
             lines.append(f"- Agent 耗时: `{float(duration):.1f} 秒`")
+        tool_calls = agent_summary_result.get("tool_calls")
+        if isinstance(tool_calls, int):
+            lines.append(f"- Agent 工具调用数: `{tool_calls}`")
+        tool_trace = agent_summary_result.get("tool_trace")
+        if isinstance(tool_trace, list) and tool_trace:
+            trace_items: list[str] = []
+            for item in tool_trace[:5]:
+                if not isinstance(item, dict):
+                    continue
+                tool_name = str(item.get("tool") or "?")
+                args = str(item.get("args") or "").replace("\n", " ")[:120]
+                trace_items.append(f"{tool_name}({args})")
+            if trace_items:
+                lines.append(f"- Agent 工具轨迹: `{'; '.join(trace_items)}`")
         if agent_summary_result.get("timeout_seconds"):
             lines.append(f"- Agent 总结超时: `{agent_summary_result['timeout_seconds']} 秒`")
         if agent_summary_result.get("timed_out") and agent_summary_result.get("message"):
