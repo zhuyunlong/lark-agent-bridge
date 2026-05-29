@@ -142,7 +142,10 @@ class AgentRuntime:
 
         if self._preferred_path in ("pydantic_ai_agent", "pydantic_ai_structured") and _check_pydantic_ai():
             use_tools = tools_enabled and self._preferred_path == "pydantic_ai_agent"
-            runner = self._run_pydantic_ai_stream if stream else self._run_pydantic_ai
+            # Structured outputs are more stable on the non-stream path because
+            # pydantic-ai cannot retry validation failures inside run_stream().
+            use_stream_path = bool(stream and output_type is None)
+            runner = self._run_pydantic_ai_stream if use_stream_path else self._run_pydantic_ai
             result = runner(
                 output_type=output_type,
                 system_prompt=system_prompt,
@@ -223,8 +226,11 @@ class AgentRuntime:
 
         agent = Agent(model, **agent_kwargs)
 
+        # Per-run tool cache to deduplicate calls within this agentic loop
+        tool_cache = None
         if use_tools:
-            from .agent_tools import register_tools
+            from .agent_tools import ToolCallCache, register_tools
+            tool_cache = ToolCallCache()
             register_tools(
                 agent,
                 self.workspace,
@@ -234,6 +240,7 @@ class AgentRuntime:
                 progress_callback=progress_callback,
                 codegraph_client=codegraph_client,
                 codegraph_roots=codegraph_roots,
+                tool_cache=tool_cache,
             )
 
         try:
@@ -244,12 +251,19 @@ class AgentRuntime:
             )
             # Use higher max_tokens for pydantic-ai since tool results consume context
             effective_max_tokens = max(self.options.summary_max_tokens, 8192)
+            # Build cache-friendly model settings:
+            # - seed: deterministic completions → improves prompt prefix cache hit rate
+            # - extra_body.store: explicitly request conversation storage for caching
+            model_settings: dict[str, Any] = {
+                "temperature": self.options.summary_temperature,
+                "max_tokens": effective_max_tokens,
+                "seed": 42,
+            }
+            if self.capabilities.api_format == "openai":
+                model_settings["extra_body"] = {"store": True}
             result = agent.run_sync(
                 user_prompt,
-                model_settings=ModelSettings(
-                    temperature=self.options.summary_temperature,
-                    max_tokens=effective_max_tokens,
-                ),
+                model_settings=ModelSettings(**model_settings),
                 usage_limits=usage_limits,
             )
         except Exception as exc:
@@ -311,6 +325,18 @@ class AgentRuntime:
                                 })
         except Exception:
             pass
+
+        # Log tool cache stats if available
+        cache_stats: dict[str, Any] = {}
+        if tool_cache is not None:
+            cache_stats = tool_cache.stats
+            logger.info(
+                "Tool cache stats: hits=%d misses=%d rate=%.1f%% saved_tokens≈%d",
+                cache_stats.get("hits", 0),
+                cache_stats.get("misses", 0),
+                cache_stats.get("hit_rate", 0) * 100,
+                cache_stats.get("saved_tokens_estimate", 0),
+            )
 
         runtime_path = "pydantic_ai_agent" if use_tools else "pydantic_ai_structured"
         logger.info(
@@ -413,8 +439,11 @@ class AgentRuntime:
 
         agent = Agent(model, **agent_kwargs)
 
+        # Per-run tool cache for the streaming path
+        tool_cache = None
         if use_tools:
-            from .agent_tools import register_tools
+            from .agent_tools import ToolCallCache, register_tools
+            tool_cache = ToolCallCache()
             register_tools(
                 agent, self.workspace,
                 extra_roots=extra_roots,
@@ -423,11 +452,21 @@ class AgentRuntime:
                 progress_callback=progress_callback,
                 codegraph_client=codegraph_client,
                 codegraph_roots=codegraph_roots,
+                tool_cache=tool_cache,
             )
 
         from pydantic_ai import UsageLimits
         usage_limits = UsageLimits(request_limit=50, tool_calls_limit=80)
         effective_max_tokens = max(self.options.summary_max_tokens, 8192)
+
+        # Cache-friendly model settings (same as non-stream path)
+        ms_kwargs: dict[str, Any] = {
+            "temperature": self.options.summary_temperature,
+            "max_tokens": effective_max_tokens,
+            "seed": 42,
+        }
+        if self.capabilities.api_format == "openai":
+            ms_kwargs["extra_body"] = {"store": True}
 
         accumulated_text = ""
         chunk_count = 0
@@ -436,10 +475,7 @@ class AgentRuntime:
 
         async with agent.run_stream(
             user_prompt,
-            model_settings=ModelSettings(
-                temperature=self.options.summary_temperature,
-                max_tokens=effective_max_tokens,
-            ),
+            model_settings=ModelSettings(**ms_kwargs),
             usage_limits=usage_limits,
         ) as stream_result:
             if is_structured:
@@ -501,6 +537,15 @@ class AgentRuntime:
                             })
         except Exception:
             pass
+
+        # Log tool cache stats for streaming path
+        if tool_cache is not None:
+            cs = tool_cache.stats
+            logger.info(
+                "Tool cache stats (stream): hits=%d misses=%d rate=%.1f%% saved_tokens≈%d",
+                cs.get("hits", 0), cs.get("misses", 0),
+                cs.get("hit_rate", 0) * 100, cs.get("saved_tokens_estimate", 0),
+            )
 
         runtime_path = "pydantic_ai_agent" if use_tools else "pydantic_ai_structured"
         logger.info(
