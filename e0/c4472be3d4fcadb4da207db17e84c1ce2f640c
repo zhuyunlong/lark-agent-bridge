@@ -1,0 +1,36 @@
+.gitignore
+  1b53b923b31a0aad 17
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.22",
+  "base_commit_sha": "e0c4472be3d4fcadb4da207db17e84c1ce2f640c",
+  "prompts": {
+    "1b53b923b31a0aad": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1941cac3-1fee-4f05-a136-6397f4140a9d",
+        "model": "mimo-v2.5-pro"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 1,
+      "overriden_lines": 0
+    },
+    "72deda4a4daa1bb5": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e728a-4120-76a1-ab41-6136becfcc6c",
+        "model": "gpt-5.4"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 1,
+      "overriden_lines": 0
+    }
+  }
+}
