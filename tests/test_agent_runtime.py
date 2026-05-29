@@ -296,6 +296,121 @@ class TestAgentRuntime(unittest.TestCase):
         self.assertEqual(result.tool_calls, 0)
         self.assertEqual(result.tool_trace, [])
 
+    def test_anthropic_settings_enable_prompt_cache_breakpoints(self):
+        """Anthropic path must set cache_control breakpoints (system/tools/conversation)."""
+        from lark_agent_bridge.agents.agent_runtime import AgentRuntime
+
+        runtime = AgentRuntime(_FakeAIOptions(api_format="anthropic", base_url="http://x/anthropic"))
+        settings = runtime._build_model_settings(8192)
+        d = dict(settings)
+        self.assertIn("anthropic_cache_instructions", d)
+        self.assertIn("anthropic_cache_tool_definitions", d)
+        self.assertIn("anthropic_cache", d)
+        # Static prefixes cached for 1h, moving conversation breakpoint for 5m.
+        self.assertEqual(d["anthropic_cache_instructions"], "1h")
+        self.assertEqual(d["anthropic_cache_tool_definitions"], "1h")
+        self.assertEqual(d["anthropic_cache"], "5m")
+        self.assertEqual(d["max_tokens"], 8192)
+
+    def test_openai_settings_use_seed_and_store(self):
+        """OpenAI path relies on automatic prefix caching helped by seed + store."""
+        from lark_agent_bridge.agents.agent_runtime import AgentRuntime
+
+        runtime = AgentRuntime(_FakeAIOptions(api_format="openai"))
+        settings = runtime._build_model_settings(8192)
+        d = dict(settings)
+        self.assertEqual(d.get("seed"), 42)
+        self.assertEqual(d.get("extra_body"), {"store": True})
+        self.assertNotIn("anthropic_cache", d)
+
+    def test_extract_usage_includes_cache_tokens(self):
+        from lark_agent_bridge.agents.agent_runtime import _extract_usage
+
+        class _Usage:
+            input_tokens = 1000
+            output_tokens = 50
+            request_tokens = 1000
+            response_tokens = 50
+            total_tokens = 1050
+            cache_read_tokens = 900
+            cache_write_tokens = 100
+
+        class _Result:
+            usage = _Usage()  # property-style (non-callable) access
+
+        out = _extract_usage(_Result())
+        self.assertEqual(out["cache_read_tokens"], 900)
+        self.assertEqual(out["cache_write_tokens"], 100)
+        self.assertEqual(out["request_tokens"], 1000)
+
+    def test_runtime_stream_validation_error_never_reaches_stream_path_for_structured_output(self):
+        from lark_agent_bridge.agents.agent_runtime import AgentRuntime, RuntimeResult
+        from lark_agent_bridge.agents.agent_output_models import SourceAnalysisOutput
+
+        opts = _FakeAIOptions(api_format="openai")
+        runtime = AgentRuntime(opts)
+
+        stream_error = RuntimeResult(
+            ok=False,
+            error="Output validation failed during streaming, and retries are not supported in `run_stream()`",
+            error_code="pydantic_ai_stream_error",
+            runtime_path="pydantic_ai_agent",
+        )
+        non_stream_success = RuntimeResult(
+            ok=True,
+            markdown="## 结论摘要\n\n重试成功\n",
+            runtime_path="pydantic_ai_agent",
+        )
+
+        with (
+            patch("lark_agent_bridge.agents.agent_runtime._check_pydantic_ai", return_value=True),
+            patch.object(runtime, "_run_pydantic_ai_stream", return_value=stream_error) as stream_mock,
+            patch.object(runtime, "_run_pydantic_ai", return_value=non_stream_success) as non_stream_mock,
+        ):
+            result = runtime.run(
+                output_type=SourceAnalysisOutput,
+                system_prompt="Test",
+                user_prompt="Analyze",
+                strict_tools=True,
+                stream=True,
+            )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.markdown, "## 结论摘要\n\n重试成功\n")
+        stream_mock.assert_not_called()
+        non_stream_mock.assert_called_once()
+
+    def test_runtime_structured_output_bypasses_stream_path(self):
+        from lark_agent_bridge.agents.agent_runtime import AgentRuntime, RuntimeResult
+        from lark_agent_bridge.agents.agent_output_models import SourceAnalysisOutput
+
+        opts = _FakeAIOptions(api_format="openai")
+        runtime = AgentRuntime(opts)
+        non_stream_success = RuntimeResult(
+            ok=True,
+            markdown="## 结论摘要\n\n稳定结果\n",
+            runtime_path="pydantic_ai_agent",
+        )
+
+        with (
+            patch("lark_agent_bridge.agents.agent_runtime._check_pydantic_ai", return_value=True),
+            patch.object(runtime, "_run_pydantic_ai_stream") as stream_mock,
+            patch.object(runtime, "_run_pydantic_ai", return_value=non_stream_success) as non_stream_mock,
+        ):
+            result = runtime.run(
+                output_type=SourceAnalysisOutput,
+                system_prompt="Test",
+                user_prompt="Analyze",
+                tools_enabled=True,
+                strict_tools=True,
+                stream=True,
+            )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.markdown, "## 结论摘要\n\n稳定结果\n")
+        stream_mock.assert_not_called()
+        non_stream_mock.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

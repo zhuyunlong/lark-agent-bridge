@@ -32,7 +32,38 @@ logger = get_logger("agent_runtime")
 
 T = TypeVar("T")
 
+# Anthropic prompt-cache TTLs. Instructions and tool definitions are stable for
+# the whole session (and across multiple analyses), so cache them for 1h. The
+# conversation breakpoint moves forward each turn and is refreshed on every read,
+# so a 5m window is enough and cheaper to write.
+_ANTHROPIC_STATIC_CACHE_TTL = "1h"
+_ANTHROPIC_CONVERSATION_CACHE_TTL = "5m"
+
 _PYDANTIC_AI_AVAILABLE: bool | None = None
+
+
+def _extract_usage(result: Any) -> dict[str, int]:
+    """Extract token usage (incl. prompt-cache tokens) from a pydantic-ai result.
+
+    Handles both the property form (``AgentRunResult.usage``) and the legacy
+    callable form, and normalises field names across pydantic-ai versions.
+    """
+    try:
+        u = getattr(result, "usage", None)
+        if callable(u):
+            u = u()
+        if not u:
+            return {}
+        return {
+            "request_tokens": getattr(u, "request_tokens", 0) or getattr(u, "input_tokens", 0) or 0,
+            "response_tokens": getattr(u, "response_tokens", 0) or getattr(u, "output_tokens", 0) or 0,
+            "total_tokens": getattr(u, "total_tokens", 0) or 0,
+            "cache_read_tokens": getattr(u, "cache_read_tokens", 0) or 0,
+            "cache_write_tokens": getattr(u, "cache_write_tokens", 0) or 0,
+        }
+    except Exception:
+        return {}
+
 
 
 def _check_pydantic_ai() -> bool:
@@ -197,7 +228,6 @@ class AgentRuntime:
         """Execute via pydantic-ai Agent."""
         try:
             from pydantic_ai import Agent
-            from pydantic_ai.settings import ModelSettings
         except ImportError:
             return RuntimeResult(
                 ok=False,
@@ -251,19 +281,9 @@ class AgentRuntime:
             )
             # Use higher max_tokens for pydantic-ai since tool results consume context
             effective_max_tokens = max(self.options.summary_max_tokens, 8192)
-            # Build cache-friendly model settings:
-            # - seed: deterministic completions → improves prompt prefix cache hit rate
-            # - extra_body.store: explicitly request conversation storage for caching
-            model_settings: dict[str, Any] = {
-                "temperature": self.options.summary_temperature,
-                "max_tokens": effective_max_tokens,
-                "seed": 42,
-            }
-            if self.capabilities.api_format == "openai":
-                model_settings["extra_body"] = {"store": True}
             result = agent.run_sync(
                 user_prompt,
-                model_settings=ModelSettings(**model_settings),
+                model_settings=self._build_model_settings(effective_max_tokens),
                 usage_limits=usage_limits,
             )
         except Exception as exc:
@@ -294,18 +314,7 @@ class AgentRuntime:
                 markdown = str(output)
 
         # Extract usage
-        usage: dict[str, int] = {}
-        try:
-            if hasattr(result, "usage"):
-                u = result.usage() if callable(result.usage) else result.usage
-                if u:
-                    usage = {
-                        "request_tokens": getattr(u, "request_tokens", 0) or 0,
-                        "response_tokens": getattr(u, "response_tokens", 0) or 0,
-                        "total_tokens": getattr(u, "total_tokens", 0) or 0,
-                    }
-        except Exception:
-            pass
+        usage = _extract_usage(result)
 
         # Extract tool trace
         tool_trace: list[dict[str, str]] = []
@@ -339,10 +348,16 @@ class AgentRuntime:
             )
 
         runtime_path = "pydantic_ai_agent" if use_tools else "pydantic_ai_structured"
+        cache_read = usage.get("cache_read_tokens", 0)
+        cache_write = usage.get("cache_write_tokens", 0)
+        cacheable = cache_read + cache_write
+        prompt_cache_rate = (cache_read / cacheable * 100) if cacheable else 0.0
         logger.info(
-            "pydantic-ai %s completed: %.1fs, %d tool calls, %s tokens",
+            "pydantic-ai %s completed: %.1fs, %d tool calls, %s input tokens | "
+            "prompt-cache: read=%d write=%d hit_rate=%.1f%%",
             runtime_path, duration, tool_calls,
-            usage.get("total_tokens", "?"),
+            usage.get("request_tokens", "?"),
+            cache_read, cache_write, prompt_cache_rate,
         )
 
         return RuntimeResult(
@@ -420,7 +435,6 @@ class AgentRuntime:
         codegraph_roots: list[Path] | None = None,
     ) -> RuntimeResult:
         from pydantic_ai import Agent
-        from pydantic_ai.settings import ModelSettings
 
         model = self._create_pydantic_model()
         if model is None:
@@ -459,15 +473,6 @@ class AgentRuntime:
         usage_limits = UsageLimits(request_limit=50, tool_calls_limit=80)
         effective_max_tokens = max(self.options.summary_max_tokens, 8192)
 
-        # Cache-friendly model settings (same as non-stream path)
-        ms_kwargs: dict[str, Any] = {
-            "temperature": self.options.summary_temperature,
-            "max_tokens": effective_max_tokens,
-            "seed": 42,
-        }
-        if self.capabilities.api_format == "openai":
-            ms_kwargs["extra_body"] = {"store": True}
-
         accumulated_text = ""
         chunk_count = 0
         _STREAM_PROGRESS_INTERVAL = 500  # emit progress every N chars
@@ -475,7 +480,7 @@ class AgentRuntime:
 
         async with agent.run_stream(
             user_prompt,
-            model_settings=ModelSettings(**ms_kwargs),
+            model_settings=self._build_model_settings(effective_max_tokens),
             usage_limits=usage_limits,
         ) as stream_result:
             if is_structured:
@@ -508,18 +513,8 @@ class AgentRuntime:
         else:
             markdown = accumulated_text or str(output)
 
-        # Extract usage
-        usage: dict[str, int] = {}
-        try:
-            u = stream_result.usage()
-            if u:
-                usage = {
-                    "request_tokens": getattr(u, "request_tokens", 0) or 0,
-                    "response_tokens": getattr(u, "response_tokens", 0) or 0,
-                    "total_tokens": getattr(u, "total_tokens", 0) or 0,
-                }
-        except Exception:
-            pass
+        # Extract usage (incl. prompt-cache tokens)
+        usage = _extract_usage(stream_result)
 
         # Extract tool trace from messages
         tool_trace: list[dict[str, str]] = []
@@ -548,9 +543,15 @@ class AgentRuntime:
             )
 
         runtime_path = "pydantic_ai_agent" if use_tools else "pydantic_ai_structured"
+        cache_read = usage.get("cache_read_tokens", 0)
+        cache_write = usage.get("cache_write_tokens", 0)
+        cacheable = cache_read + cache_write
+        prompt_cache_rate = (cache_read / cacheable * 100) if cacheable else 0.0
         logger.info(
-            "pydantic-ai stream %s completed: %.1fs, %d tool calls, %d chunks, %d chars",
+            "pydantic-ai stream %s completed: %.1fs, %d tool calls, %d chunks, %d chars | "
+            "prompt-cache: read=%d write=%d hit_rate=%.1f%%",
             runtime_path, duration, tool_calls, chunk_count, len(accumulated_text),
+            cache_read, cache_write, prompt_cache_rate,
         )
 
         return RuntimeResult(
@@ -629,6 +630,46 @@ class AgentRuntime:
             duration_seconds=duration,
             usage=usage,
         )
+
+    def _build_model_settings(self, effective_max_tokens: int) -> Any:
+        """Build cache-aware ModelSettings for the active provider.
+
+        For the Anthropic format (Claude / DeepSeek via cc-switch and other
+        Anthropic-compatible gateways) we enable native prompt-cache breakpoints:
+        - ``anthropic_cache_instructions``: cache the (large, stable) system prompt
+        - ``anthropic_cache_tool_definitions``: cache the tool schemas
+        - ``anthropic_cache``: an automatic breakpoint that moves forward as the
+          conversation grows, so each agentic-loop turn re-reads the cached prefix
+          (system + tools + all prior turns) instead of paying full input price.
+
+        These three are exactly how mature agents (e.g. Claude Code) reach 90%+
+        cache hit rates inside a multi-step tool loop. The OpenAI format relies on
+        automatic prefix caching, helped by a fixed ``seed`` and ``store``.
+        """
+        base: dict[str, Any] = {
+            "temperature": self.options.summary_temperature,
+            "max_tokens": effective_max_tokens,
+        }
+        if self.capabilities.api_format == "anthropic":
+            try:
+                from pydantic_ai.models.anthropic import AnthropicModelSettings
+
+                return AnthropicModelSettings(
+                    **base,
+                    anthropic_cache_instructions=_ANTHROPIC_STATIC_CACHE_TTL,
+                    anthropic_cache_tool_definitions=_ANTHROPIC_STATIC_CACHE_TTL,
+                    anthropic_cache=_ANTHROPIC_CONVERSATION_CACHE_TTL,
+                )
+            except ImportError:
+                from pydantic_ai.settings import ModelSettings
+
+                return ModelSettings(**base)
+
+        from pydantic_ai.settings import ModelSettings
+
+        base["seed"] = 42
+        base["extra_body"] = {"store": True}
+        return ModelSettings(**base)
 
     def _create_pydantic_model(self) -> Any:
         """Create the appropriate pydantic-ai model."""
