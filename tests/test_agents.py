@@ -25,8 +25,9 @@ from lark_agent_bridge.agents.bug_summary_policy import (
     choose_summary_backend,
 )
 from lark_agent_bridge.agents.codex_app_server_runtime import CodexAppServerResult
-from lark_agent_bridge.agents.llm_client import LLMClientError
+from lark_agent_bridge.agents.llm_client import LLMClientError, LLMResponse
 from lark_agent_bridge.models import (
+    AIProviderOptions,
     BridgeConfig,
     BugRequest,
     CodexAppServerOptions,
@@ -907,6 +908,190 @@ class AgentTests(unittest.TestCase):
         self.assertIn("createUnityPlayerOnMainThread", prompt)
         self.assertNotIn("### 上一轮 Agent 总结", prompt)
         self.assertNotIn("HTML_ONLY_MISLEADING_TEXT", prompt)
+
+    def test_bug_direct_api_prompt_compacts_skill_reference_evidence_and_report_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=True, data_dir=Path(tmp), workspace_root=Path(tmp))
+            runner = BugAnalysisRunner(config)
+            output_dir = Path(tmp) / "jobs" / "job_1" / "output"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            skill_dir = Path(tmp) / ".ai" / "skills" / "demo-startup-skill"
+            skill_dir.mkdir(parents=True, exist_ok=True)
+            skill_path = skill_dir / "SKILL.md"
+            ref_dir = skill_dir / "references"
+            ref_dir.mkdir(parents=True, exist_ok=True)
+            ref_path = ref_dir / "NODES.md"
+            request_artifact = output_dir / "bug_agent_request.md"
+            metadata_path = output_dir / "bug_metadata.md"
+            evidence_md = output_dir / "bug_summary_evidence.md"
+            evidence_json = output_dir / "bug_summary_evidence.json"
+            report_json = output_dir / "bug_3d_startup_report.json"
+            request_artifact.write_text("request body", encoding="utf-8")
+            skill_path.write_text(
+                "---\n"
+                "name: demo-startup-skill\n"
+                "description: demo skill summary description\n"
+                "---\n\n"
+                "# Demo Skill\n\n"
+                "## 目标\n\n"
+                "- 保留 focus session\n"
+                "- 不要把未命中关键节点改写成日志截止\n\n"
+                "## 工作边界\n\n"
+                "- 只能围绕同一次启动会话分析\n"
+                "- SKILL_NOISE should not survive in full\n\n"
+                + ("SKILL_NOISE " * 300),
+                encoding="utf-8",
+            )
+            ref_path.write_text(
+                "# 节点定义\n\n"
+                "## Activity\n\n"
+                "| 节点 | 代码落点 |\n"
+                "|---|---|\n"
+                "| NodeA | CodeA |\n"
+                "| NodeB | CodeB |\n"
+                "| REF_NOISE | SHOULD_NOT_SURVIVE |\n"
+                + ("REF_NOISE " * 200),
+                encoding="utf-8",
+            )
+            evidence_md.write_text(
+                "# Bug Summary Evidence\n\n"
+                "## Missing critical nodes\n\n"
+                "- createUnityPlayerOnMainThread\n"
+                "- UnityReady\n\n"
+                "## Last matched lifecycle event\n\n"
+                "- 2026-05-19 13:48:48.207\n"
+                "- AnalyseNode current version\n\n"
+                "## Same PID trailing logs\n\n"
+                "- TRAILING_NOISE_1\n"
+                "- TRAILING_NOISE_2\n"
+                + ("TRAILING_NOISE " * 200),
+                encoding="utf-8",
+            )
+            evidence_json.write_text(
+                json.dumps(
+                    {
+                        "analysis_kind": "startup",
+                        "focus_status": "partial",
+                        "focus_session_index": 2,
+                        "focus_session_pid": 10058,
+                        "missing_critical": ["createUnityPlayerOnMainThread", "UnityReady"],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            report_json.write_text(
+                json.dumps(
+                    {
+                        "target_time": "2026-05-19T13:47:01",
+                        "focus_reason": "问题时间命中 focus session",
+                        "focus_session_index": 2,
+                        "focus_session_pid": 10058,
+                        "verdict": {
+                            "message": "启动链路异常，需要围绕 focus session 总结。",
+                            "issues": [
+                                {"title": "目标时间主会话", "detail": "锁定 Session 2 / PID 10058"},
+                                {"title": "异常链", "detail": "BaseCamera prefab 加载失败"},
+                            ],
+                        },
+                        "warnings": ["REPORT_NOISE should not survive in full" * 50],
+                        "sessions": [
+                            {
+                                "index": 2,
+                                "status": "partial",
+                                "diagnosis": "启动链路未闭环",
+                                "missing_critical": ["createUnityPlayerOnMainThread", "UnityReady"],
+                                "events": [
+                                    {
+                                        "title": "AnalyseNode current version",
+                                        "timestamp_text": "2026-05-19 13:48:48.207",
+                                        "file_path": "/tmp/main.alog.log",
+                                        "line_no": 59044,
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            metadata_path.write_text(
+                "# Bug Metadata\n"
+                f"- Skill 规范:\n  - `{skill_path}`\n  - `{ref_path}`\n"
+                f"- 结构化证据 Markdown: `{evidence_md}`\n"
+                f"- 结构化证据 JSON: `{evidence_json}`\n"
+                f"- JSON `3D启动时序分析`: `{report_json}`\n",
+                encoding="utf-8",
+            )
+
+            prompt = runner._build_bug_agent_summary_prompt_for_api(
+                request_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6994901014 调查3D启动生命周期",
+                request_artifact=request_artifact,
+                metadata_path=metadata_path,
+            )
+
+        self.assertIn("demo skill summary description", prompt)
+        self.assertIn("## 工作边界", prompt)
+        self.assertNotIn("SKILLNOISE SKILLNOISE", prompt)
+        self.assertIn("NodeA: CodeA", prompt)
+        self.assertNotIn("REF_NOISE: SHOULDNOTSURVIVE", prompt)
+        self.assertIn("## Missing critical nodes", prompt)
+        self.assertNotIn("TRAILING_NOISE_1", prompt)
+        self.assertIn("focus_status: partial", prompt)
+        self.assertIn("BaseCamera prefab 加载失败", prompt)
+        self.assertNotIn("REPORT_NOISE", prompt)
+
+    def test_bug_direct_api_summary_writes_prompt_audit_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ai_provider = AIProviderOptions(
+                enabled=True,
+                base_url="https://example.invalid/v1",
+                primary_model="demo-model",
+            )
+            config = BridgeConfig(
+                dry_run=False,
+                data_dir=Path(tmp),
+                workspace_root=Path(tmp),
+                ai_provider=ai_provider,
+            )
+            runner = BugAnalysisRunner(config)
+            output_dir = Path(tmp) / "jobs" / "job_1" / "output"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            request_artifact = output_dir / "bug_agent_request.md"
+            metadata_path = output_dir / "bug_metadata.md"
+            output_path = output_dir / "bug_agent_summary_compact.md"
+            request_artifact.write_text("request body", encoding="utf-8")
+            metadata_path.write_text("- 分析类型: `startup`\n", encoding="utf-8")
+
+            with mock.patch("lark_agent_bridge.agents.llm_client.LLMClient") as client_cls:
+                client = client_cls.return_value
+                client.is_available.return_value = True
+                client.generate_summary.return_value = LLMResponse(
+                    content="summary via direct api",
+                    model="demo-model",
+                    usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+                )
+
+                result = runner._run_bug_agent_summary_via_api(
+                    request_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6994901014 调查3D启动生命周期",
+                    request_artifact=request_artifact,
+                    metadata_path=metadata_path,
+                    output_path=output_path,
+                    progress_callback=None,
+                )
+
+                prompt_file = Path(result["prompt_file"])
+                context_file = Path(result["context_file"])
+                prompt_text = prompt_file.read_text(encoding="utf-8")
+                context = json.loads(context_file.read_text(encoding="utf-8"))
+                self.assertTrue(prompt_file.exists())
+                self.assertTrue(context_file.exists())
+
+            self.assertEqual(result["message"], "summary via direct api")
+            self.assertIn("request body", prompt_text)
+            self.assertEqual(context["provider"], "direct_api")
+            self.assertEqual(context["embedded_files"][0]["title"], "Bug Agent Request")
 
     def test_write_bug_summary_evidence_for_startup_includes_conflicts_and_trailing_logs(self):
         with tempfile.TemporaryDirectory() as tmp:

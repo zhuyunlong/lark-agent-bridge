@@ -13164,6 +13164,251 @@ class BugAnalysisRunner:
             text = text[: max_chars - 1].rstrip() + "…"
         return text
 
+    def _compact_markdown_outline_excerpt(
+        self,
+        path: Path,
+        *,
+        max_chars: int,
+        max_headings: int = 6,
+        max_entries_per_heading: int = 3,
+        max_table_rows: int = 6,
+    ) -> str:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return ""
+        body = text.strip()
+        if not body:
+            return ""
+        lines = body.splitlines()
+        summary: list[str] = []
+        if path.name.casefold() == "skill.md":
+            frontmatter_name, frontmatter_desc = _extract_skill_frontmatter(body)
+            if frontmatter_name:
+                summary.append(f"skill: {frontmatter_name}")
+            if frontmatter_desc:
+                summary.append(f"description: {frontmatter_desc}")
+        title_line = next(
+            (
+                self._clean_markdown_inline_text(line.lstrip("#").strip())
+                for line in lines
+                if re.match(r"^\s*#\s+", line)
+            ),
+            "",
+        )
+        if title_line and all(not item.endswith(title_line) for item in summary):
+            summary.append(title_line)
+
+        # Skip YAML frontmatter if present.
+        start_index = 0
+        if lines and lines[0].strip() == "---":
+            for index in range(1, len(lines)):
+                if lines[index].strip() == "---":
+                    start_index = index + 1
+                    break
+
+        heading_count = 0
+        index = start_index
+        while index < len(lines) and heading_count < max_headings:
+            raw = lines[index]
+            heading_match = re.match(r"^\s*#{2,3}\s+(.+?)\s*$", raw)
+            if not heading_match:
+                index += 1
+                continue
+            heading = self._clean_markdown_inline_text(heading_match.group(1))
+            if heading:
+                summary.append(f"## {heading}")
+                heading_count += 1
+            entries: list[str] = []
+            table_rows = 0
+            index += 1
+            while index < len(lines) and not re.match(r"^\s*#{2,3}\s+", lines[index]):
+                stripped = lines[index].strip()
+                if not stripped or stripped.startswith("```"):
+                    index += 1
+                    continue
+                if re.match(r"^[-*]\s+", stripped):
+                    entry = self._clean_markdown_inline_text(re.sub(r"^[-*]\s+", "", stripped))
+                    if entry:
+                        entries.append(entry)
+                elif "|" in stripped and max_table_rows > 0:
+                    cells = [self._clean_markdown_inline_text(cell) for cell in stripped.strip("|").split("|")]
+                    if len(cells) >= 2 and not re.fullmatch(r"[-:\s|]+", stripped):
+                        head = cells[0]
+                        detail = cells[1]
+                        entry = f"{head}: {detail}" if detail else head
+                        if entry:
+                            entries.append(entry)
+                            table_rows += 1
+                            if table_rows >= max_table_rows:
+                                break
+                elif len(entries) < max_entries_per_heading:
+                    paragraph = self._clean_markdown_inline_text(stripped)
+                    if paragraph:
+                        entries.append(paragraph)
+                if len(entries) >= max_entries_per_heading:
+                    # Still advance to the next heading to keep parser aligned.
+                    index += 1
+                    while index < len(lines) and not re.match(r"^\s*#{2,3}\s+", lines[index]):
+                        index += 1
+                    break
+                index += 1
+            for entry in entries[:max_entries_per_heading]:
+                summary.append(f"- {entry}")
+
+        rendered = "\n".join(item for item in summary if item.strip()).strip()
+        if not rendered:
+            return self._read_bug_summary_context_excerpt(path, max_chars)
+        if len(rendered) > max_chars:
+            rendered = rendered[: max_chars - 1].rstrip() + "…"
+        return rendered
+
+    def _compact_structured_report_excerpt(self, path: Path, *, max_chars: int) -> str:
+        payload = self._load_structured_report_payload(path)
+        if payload is None:
+            return self._read_bug_summary_context_excerpt(path, max_chars)
+        lines: list[str] = []
+        verdict = payload.get("verdict")
+        if isinstance(verdict, dict):
+            verdict_message = str(verdict.get("message") or "").strip()
+            if verdict_message:
+                lines.append(f"- verdict: {verdict_message}")
+            issues = verdict.get("issues")
+            if isinstance(issues, list) and issues:
+                lines.append("- top_issues:")
+                for item in issues[:4]:
+                    if not isinstance(item, dict):
+                        continue
+                    title = self._clean_markdown_inline_text(str(item.get("title") or ""))
+                    detail = self._clean_markdown_inline_text(str(item.get("detail") or ""))
+                    if title or detail:
+                        lines.append(f"  - {title}: {detail}".rstrip(": "))
+        target_time = str(payload.get("target_time") or "").strip()
+        if target_time:
+            lines.append(f"- target_time: {target_time}")
+        focus_session_index = payload.get("focus_session_index")
+        focus_session_pid = payload.get("focus_session_pid")
+        if focus_session_index not in (None, "") or focus_session_pid not in (None, ""):
+            lines.append(f"- focus_session: Session {focus_session_index or '?'} / PID {focus_session_pid or '?'}")
+        focus_reason = str(payload.get("focus_reason") or "").strip()
+        if focus_reason:
+            lines.append(f"- focus_reason: {focus_reason}")
+        focus_session = self._structured_report_focus_session(payload)
+        if isinstance(focus_session, dict):
+            status = str(focus_session.get("status") or "").strip()
+            if status:
+                lines.append(f"- focus_status: {status}")
+            diagnosis = str(focus_session.get("diagnosis") or "").strip()
+            if diagnosis:
+                lines.append(f"- focus_diagnosis: {diagnosis}")
+            missing_critical = [
+                self._clean_markdown_inline_text(str(item))
+                for item in focus_session.get("missing_critical") or []
+                if self._clean_markdown_inline_text(str(item))
+            ]
+            if missing_critical:
+                lines.append("- missing_critical: " + "、".join(missing_critical[:7]))
+            events = focus_session.get("events")
+            last_event = events[-1] if isinstance(events, list) and events and isinstance(events[-1], dict) else None
+            if isinstance(last_event, dict):
+                detail = " ".join(
+                    part
+                    for part in [
+                        str(last_event.get("timestamp_text") or last_event.get("timestamp") or "").strip(),
+                        self._clean_markdown_inline_text(str(last_event.get("title") or "")),
+                        f"{last_event.get('file_path') or ''}:{last_event.get('line_no') or ''}".rstrip(":"),
+                    ]
+                    if part
+                )
+                if detail:
+                    lines.append(f"- last_event: {detail}")
+        rendered = "\n".join(lines).strip()
+        if len(rendered) > max_chars:
+            rendered = rendered[: max_chars - 1].rstrip() + "…"
+        return rendered
+
+    def _compact_bug_summary_evidence_markdown_excerpt(self, path: Path, *, max_chars: int) -> str:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return ""
+        sections = self._parse_markdown_sections(text)
+        lines = ["# Bug Summary Evidence"]
+        preferred_sections = [
+            "Report conflicts",
+            "Missing critical nodes",
+            "Last matched lifecycle event",
+            "Safe assertions",
+            "Forbidden assertions",
+        ]
+        for title in preferred_sections:
+            section_text = sections.get(title, "")
+            if not section_text:
+                continue
+            lines.append("")
+            lines.append(f"## {title}")
+            for entry in self._markdown_section_entries(section_text)[:3]:
+                lines.append(f"- {self._truncate_report_text(entry, 220)}")
+        rendered = "\n".join(lines).strip()
+        if len(rendered) > max_chars:
+            rendered = rendered[: max_chars - 1].rstrip() + "…"
+        return rendered
+
+    def _direct_api_bug_summary_context_excerpt(
+        self,
+        *,
+        title: str,
+        path: Path,
+        max_chars: int,
+    ) -> str:
+        if self._is_report_json_path(path):
+            return self._compact_structured_report_excerpt(path, max_chars=min(max_chars, 2200))
+        if title == "Bug Summary Evidence":
+            return self._compact_bug_summary_evidence_markdown_excerpt(path, max_chars=min(max_chars, 1600))
+        if title.startswith("Matched Skill:"):
+            return self._compact_markdown_outline_excerpt(
+                path,
+                max_chars=min(max_chars, 2200),
+                max_headings=6,
+                max_entries_per_heading=2,
+                max_table_rows=4,
+            )
+        if title.startswith("Matched Skill Reference:"):
+            return self._compact_markdown_outline_excerpt(
+                path,
+                max_chars=min(max_chars, 1600),
+                max_headings=6,
+                max_entries_per_heading=4,
+                max_table_rows=2,
+            )
+        return self._read_bug_summary_context_excerpt(path, max_chars)
+
+    def _direct_api_bug_summary_embedded_files(
+        self,
+        *,
+        request_artifact: Path,
+        metadata_path: Path,
+        followup_text: str = "",
+        previous_summary_path: Path | None = None,
+    ) -> list[dict[str, object]]:
+        files: list[dict[str, object]] = []
+        if previous_summary_path is not None and (
+            not followup_text.strip()
+            or self._should_include_previous_summary_for_followup(
+                followup_text=followup_text,
+                request_artifact=request_artifact,
+                metadata_path=metadata_path,
+            )
+        ):
+            files.append({"title": "上一轮 Agent 总结", "path": str(previous_summary_path), "max_chars": 12000})
+        title_request = "Bug Agent Follow-up Request" if followup_text.strip() else "Bug Agent Request"
+        title_metadata = "Bug Follow-up Metadata" if followup_text.strip() else "Bug Metadata"
+        files.append({"title": title_request, "path": str(request_artifact), "max_chars": 12000})
+        files.append({"title": title_metadata, "path": str(metadata_path), "max_chars": 12000})
+        for item in self._bug_summary_context_items(metadata_path, include_html_reports=False):
+            files.append(item)
+        return files
+
     def _omlx_prompt_section(self, title: str, text: str, max_chars: int) -> str:
         body = (text or "").strip()
         if not body:
@@ -13515,6 +13760,22 @@ class BugAnalysisRunner:
                 "usage": {},
                 "usage_scope": "",
             }
+        embedded_files = self._direct_api_bug_summary_embedded_files(
+            request_artifact=request_artifact,
+            metadata_path=metadata_path,
+            followup_text=followup_text,
+            previous_summary_path=previous_summary_path,
+        )
+        prompt_file, context_file = self._write_bug_agent_summary_audit(
+            {
+                "provider": provider_tag,
+                "session_id": "",
+                "resumed": False,
+                "prompt": prompt,
+                "embedded_files": embedded_files,
+            },
+            output_path,
+        )
         self._emit_progress(
             progress_callback,
             stage="bug_agent_summary_direct_api",
@@ -13545,6 +13806,8 @@ class BugAnalysisRunner:
                 "duration_seconds": time.monotonic() - started,
                 "usage": {},
                 "usage_scope": "",
+                "prompt_file": str(prompt_file) if prompt_file is not None else "",
+                "context_file": str(context_file) if context_file is not None else "",
             }
         except Exception as exc:  # noqa: BLE001
             logger.warning("Direct API bug summary unexpected error: %s", exc)
@@ -13558,6 +13821,8 @@ class BugAnalysisRunner:
                 "duration_seconds": time.monotonic() - started,
                 "usage": {},
                 "usage_scope": "",
+                "prompt_file": str(prompt_file) if prompt_file is not None else "",
+                "context_file": str(context_file) if context_file is not None else "",
             }
         message = (response.content or "").strip()
         if not message:
@@ -13571,6 +13836,8 @@ class BugAnalysisRunner:
                 "duration_seconds": time.monotonic() - started,
                 "usage": {},
                 "usage_scope": "",
+                "prompt_file": str(prompt_file) if prompt_file is not None else "",
+                "context_file": str(context_file) if context_file is not None else "",
             }
         try:
             output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -13597,6 +13864,8 @@ class BugAnalysisRunner:
             "duration_seconds": duration,
             "usage": response.usage,
             "usage_scope": "direct_api",
+            "prompt_file": str(prompt_file) if prompt_file is not None else "",
+            "context_file": str(context_file) if context_file is not None else "",
         }
 
     def _build_bug_agent_summary_prompt_for_api(
@@ -13616,6 +13885,12 @@ class BugAnalysisRunner:
         the direct API path must embed all relevant context inline.
         """
         max_file_chars = 12000
+        embedded_files = self._direct_api_bug_summary_embedded_files(
+            request_artifact=request_artifact,
+            metadata_path=metadata_path,
+            followup_text=followup_text,
+            previous_summary_path=previous_summary_path,
+        )
         prompt = "请基于以下已内嵌的分析材料完成同一个 bug 会话的最终回答。\n"
         prompt += "注意：所有相关文件内容已内嵌在本消息中，无需读取本地文件。\n\n要求：\n"
         snapshot_prefix = ""
@@ -13690,7 +13965,11 @@ class BugAnalysisRunner:
             guardrails = self._render_structured_report_guardrails(path)
             if guardrails:
                 prompt += f"{guardrails}\n\n"
-            content = self._read_bug_summary_context_excerpt(path, max_file_chars)
+            content = self._direct_api_bug_summary_context_excerpt(
+                title=title,
+                path=path,
+                max_chars=max_file_chars,
+            )
             if content:
                 prompt += f"### {title}\n来源: {path}\n{content}\n\n"
         return prompt
