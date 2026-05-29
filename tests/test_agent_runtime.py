@@ -29,7 +29,7 @@ class _FakeAIOptions:
     intent_max_retries: int = 2
     summary_temperature: float = 0.3
     summary_max_tokens: int = 4096
-    summary_timeout_seconds: float = 120
+    summary_timeout_seconds: float = 300
 
 
 class TestProviderCapabilities(unittest.TestCase):
@@ -105,13 +105,13 @@ class TestLLMClient(unittest.TestCase):
             base_url="https://api.example.com/v1",
             api_key="test-key",
             intent_timeout_seconds=30,
-            summary_timeout_seconds=120,
+            summary_timeout_seconds=300,
         )
         with patch("openai.OpenAI") as openai_cls:
             LLMClient(opts)._get_openai_client(opts.base_url, opts.api_key)
 
         self.assertEqual(openai_cls.call_args.kwargs["max_retries"], 0)
-        self.assertEqual(openai_cls.call_args.kwargs["timeout"], 130)
+        self.assertEqual(openai_cls.call_args.kwargs["timeout"], 310)
 
 
 class TestAgentOutputModels(unittest.TestCase):

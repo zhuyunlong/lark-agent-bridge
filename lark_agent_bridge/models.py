@@ -348,7 +348,7 @@ class AIProviderOptions:
     # Summary generation settings
     summary_temperature: float = 0.3
     summary_max_tokens: int = 4096
-    summary_timeout_seconds: float = 120
+    summary_timeout_seconds: float = 300
 
 
 @dataclass(slots=True)

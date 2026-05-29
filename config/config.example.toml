@@ -71,7 +71,7 @@ enabled = true
 preset = "cc-switch-deepseek-claude"
 api_key = ""
 intent_timeout_seconds = 30
-summary_timeout_seconds = 120
+summary_timeout_seconds = 300
 summary_max_tokens = 4096
 
 [bug_analysis]

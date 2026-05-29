@@ -300,7 +300,7 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
             intent_max_retries=int(ai_provider_data.get("intent_max_retries", 2)),
             summary_temperature=float(ai_provider_data.get("summary_temperature", 0.3)),
             summary_max_tokens=int(ai_provider_data.get("summary_max_tokens", 4096)),
-            summary_timeout_seconds=float(ai_provider_data.get("summary_timeout_seconds", 120)),
+            summary_timeout_seconds=float(ai_provider_data.get("summary_timeout_seconds", 300)),
         ),
         presets=provider_presets,
         apply_enabled=ai_enabled_env is None,
