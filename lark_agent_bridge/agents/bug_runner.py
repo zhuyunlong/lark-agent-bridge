@@ -3722,7 +3722,7 @@ class BugAnalysisRunner:
             if first_plan:
                 log_analysis_result = self._analyze_logs_intelligently(
                     log_dir=prepared_input,
-                    problem_time=fault_time if isinstance(fault_time, datetime) else None,
+                    problem_time=self._fault_time_to_datetime(fault_time),
                     plan=first_plan,
                 )
 
@@ -5077,6 +5077,9 @@ class BugAnalysisRunner:
             prepared = selected_input
         self._ensure_decoded_in_place(prepared)
         return prepared
+
+    def _fault_time_to_datetime(self, fault_time: str) -> datetime | None:
+        return self._parse_bug_datetime(fault_time)
 
     def _select_best_archive(self, directory: Path) -> Path | None:
         try:
@@ -10549,6 +10552,78 @@ class BugAnalysisRunner:
         normalized = self._normalize_log_locator(value)
         return normalized.rsplit("/", 1)[-1]
 
+    def _ld_prepared_log_metadata_path(
+        self,
+        *,
+        prepared_input: Path | None,
+        analysis_dir: Path,
+        fault_time: str,
+    ) -> Path | None:
+        if prepared_input is None:
+            return None
+        analysis_dir.mkdir(parents=True, exist_ok=True)
+        metadata_path = analysis_dir / "prepared_log_metadata.md"
+        candidates: list[Path] = []
+        seen: set[Path] = set()
+
+        def _append(path: Path) -> None:
+            if path in seen or not path.exists():
+                return
+            seen.add(path)
+            candidates.append(path)
+
+        _append(prepared_input)
+        if prepared_input.is_file():
+            lower_name = prepared_input.name.lower()
+            if lower_name.endswith((".alog", ".xlog")):
+                _append(prepared_input.with_name(prepared_input.name + ".log"))
+            elif lower_name.endswith((".alog.log", ".xlog.log")):
+                _append(prepared_input.with_suffix(""))
+            fault_dt = self._parse_bug_datetime(fault_time)
+            try:
+                siblings = sorted(prepared_input.parent.iterdir())
+            except OSError:
+                siblings = []
+            for sibling in siblings:
+                if len(candidates) >= 8:
+                    break
+                if not sibling.is_file():
+                    continue
+                normalized = self._normalize_log_locator(sibling.name).lower()
+                if not normalized.endswith((".alog", ".alog.log", ".xlog", ".xlog.log", ".log")):
+                    continue
+                if fault_dt is None:
+                    _append(sibling)
+                    continue
+                basename = self._log_basename_from_locator(sibling.name)
+                file_dt = self._parse_log_file_datetime(basename)
+                if file_dt is None:
+                    continue
+                candidate_dt = datetime.fromtimestamp(time.mktime(file_dt))
+                if abs((candidate_dt - fault_dt).total_seconds()) <= 7200:
+                    _append(sibling)
+        else:
+            for path in self._iter_log_coverage_files(prepared_input)[:8]:
+                _append(path)
+
+        lines = [
+            "# Prepared Log Metadata",
+            "",
+            f"- 故障时间: `{fault_time or '未识别'}`",
+            f"- 主输入: `{prepared_input}`",
+            f"- 主工作目录: `{prepared_input.parent if prepared_input.is_file() else prepared_input}`",
+            "- 使用规则: 先调用 `read_prepared_log_metadata()`，首轮只允许围绕下面列出的路径检索。",
+            "- 限制: 不要扫描 `tools/lark-agent-bridge/data/bug_cache`、历史 job 输出或整个工作区；只有当这些候选文件明确不覆盖问题时间时，才允许扩到同目录相邻小时日志。",
+            "",
+            "## 候选日志",
+        ]
+        if candidates:
+            lines.extend(f"- `{path}`" for path in candidates)
+        else:
+            lines.append("- 无可用候选文件")
+        metadata_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+        return metadata_path
+
     def _ld_executor_should_include_log_file(
         self,
         path: Path,
@@ -11064,10 +11139,22 @@ class BugAnalysisRunner:
         analysis_kind = "ld_lane_level"
         analysis_dir.mkdir(parents=True, exist_ok=True)
         analysis_markdown_path = analysis_dir / self._skill_agent_analysis_markdown_name(analysis_kind)
+        primary_workspace = prepared_input.parent if prepared_input is not None and prepared_input.is_file() else (prepared_input or Path(self._working_dir()))
+        extra_roots: list[Path] = []
+        working_root = Path(self._working_dir())
+        if working_root != primary_workspace:
+            extra_roots.append(working_root)
+        if analysis_dir != primary_workspace:
+            extra_roots.append(analysis_dir)
+        report_dir = analysis_dir.parent if analysis_dir.exists() else None
+        log_metadata_path = self._ld_prepared_log_metadata_path(
+            prepared_input=prepared_input,
+            analysis_dir=analysis_dir,
+            fault_time=fault_time,
+        )
 
         ai_opts = self.config.ai_provider
-        workspace = Path(self._working_dir())
-        runtime = AgentRuntime(ai_opts, workspace=workspace)
+        runtime = AgentRuntime(ai_opts, workspace=primary_workspace)
 
         if not runtime.is_available():
             return {
@@ -11125,16 +11212,30 @@ class BugAnalysisRunner:
         if prior_context:
             user_prompt += f"## 前序分析结果\n{prior_context[:10000]}\n\n"
         user_prompt += (
-            "请使用工具探索日志文件，找到与此 LD 车道级 Bug 相关的蒙特卡洛日志和瓦片渲染日志，分析根因。\n"
+            "## 检索边界\n"
+            f"- 本次直传主工作目录: `{primary_workspace}`\n"
+            f"- 主输入日志: `{prepared_input}`\n"
+            "- 必须先调用 read_prepared_log_metadata()，按元数据里的主日志和同目录候选文件开始检索。\n"
+            "- 禁止扫描 `tools/lark-agent-bridge/data/bug_cache`、历史 job 目录、无关仓库目录；只有当元数据明确说明主日志不覆盖问题时间时，才允许扩到同目录相邻小时日志。\n\n"
+            "请使用工具探索这次直传日志附近的文件，找到与此 LD 车道级 Bug 相关的蒙特卡洛日志和瓦片渲染日志，分析根因。\n"
             "必须提供具体的日志证据（文件路径 + 行号 + 日志内容）。"
         )
 
         try:
+            def _tool_progress(*, stage: str, message: str, **kw: object) -> None:
+                self._emit_progress(progress_callback, stage=stage, message=message, **kw)
+
             result = runtime.run(
                 output_type=LDLaneLevelOutput,
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 tools_enabled=True,
+                strict_tools=True,
+                extra_roots=extra_roots,
+                report_dir=report_dir,
+                log_metadata_path=log_metadata_path,
+                progress_callback=_tool_progress,
+                stream=True,
             )
         except Exception as exc:
             logger.warning("pydantic-ai LD analysis failed: %s", exc)

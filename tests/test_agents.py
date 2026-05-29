@@ -1,4 +1,5 @@
 import os
+from datetime import datetime
 from pathlib import Path
 import json
 import subprocess
@@ -4612,6 +4613,93 @@ class AgentTests(unittest.TestCase):
             "LD 车道级分析 API 调用失败：upstream forbidden",
         )
 
+    def test_ld_pydantic_ai_analysis_is_bounded_to_prepared_log_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "workspace"
+            skill_name = "ld-lane-level-log-analysis-portable"
+            skill_dir = root / ".ai" / "skills" / skill_name
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "---\nname: LD Lane Level Log Analysis\ndescription: 分析车道级、退无图和 LD 状态日志。\n---\n",
+                encoding="utf-8",
+            )
+            config = BridgeConfig(dry_run=False, data_dir=Path(tmp) / "data", workspace_root=root)
+            runner = BugAnalysisRunner(config)
+            prepared_dir = Path(tmp) / "job_input"
+            prepared_dir.mkdir()
+            prepared_input = prepared_dir / "main_2026-05-29_17-00.alog"
+            decoded_input = prepared_dir / "main_2026-05-29_17-00.alog.log"
+            sibling_input = prepared_dir / "main_2026-05-29_18-00.alog.log"
+            prepared_input.write_bytes(b"raw")
+            decoded_input.write_text("decoded", encoding="utf-8")
+            sibling_input.write_text("later", encoding="utf-8")
+            analysis_dir = Path(tmp) / "analysis"
+            html_path = Path(tmp) / "report.html"
+            json_path = Path(tmp) / "report.json"
+
+            class FakeRuntimeResult:
+                ok = True
+                markdown = (
+                    "## 结论摘要\n\n已收敛。\n\n"
+                    "## 最可能原因\n\n主日志命中 LDConf。\n\n"
+                    "## 关键证据\n\n"
+                    f"- **{decoded_input}:12**: LDConf: False\n\n"
+                    "## 待确认项\n\n- 无\n\n"
+                    "## 建议动作\n\n- 继续确认。\n"
+                )
+                model = "mimo-v2.5-pro"
+                duration_seconds = 1.2
+                usage = {"total_tokens": 12}
+                runtime_path = "pydantic_ai_agent"
+                tool_calls = 1
+                tool_trace = [{"tool": "read_prepared_log_metadata", "args": "{}"}]
+                error = ""
+                error_code = ""
+
+            class FakeRuntime:
+                init_kwargs: dict[str, object] = {}
+                last_kwargs: dict[str, object] = {}
+
+                def __init__(self, options, *, workspace=None, max_retries=2):
+                    type(self).init_kwargs = {"workspace": workspace, "max_retries": max_retries}
+
+                def is_available(self):
+                    return True
+
+                def run(self, **kwargs):
+                    type(self).last_kwargs = kwargs
+                    return FakeRuntimeResult()
+
+            with mock.patch("lark_agent_bridge.agents.agent_runtime.AgentRuntime", FakeRuntime):
+                result = runner._run_ld_pydantic_ai_analysis(
+                    skill_name=skill_name,
+                    request_text="问题时间 2026-05-29 17:16，分析车道级",
+                    prompt_text="问题时间 2026-05-29 17:16，分析车道级",
+                    title="车道级不进",
+                    description="",
+                    fault_time="2026-05-29 17:16",
+                    selected_input=prepared_input,
+                    prepared_input=prepared_input,
+                    html_path=html_path,
+                    json_path=json_path,
+                    analysis_dir=analysis_dir,
+                    progress_callback=None,
+                )
+                metadata_path = FakeRuntime.last_kwargs["log_metadata_path"]
+                metadata_text = metadata_path.read_text(encoding="utf-8")
+                user_prompt = FakeRuntime.last_kwargs["user_prompt"]
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(FakeRuntime.init_kwargs["workspace"], prepared_dir)
+        self.assertTrue(FakeRuntime.last_kwargs["strict_tools"])
+        self.assertEqual(FakeRuntime.last_kwargs["report_dir"], analysis_dir.parent)
+        self.assertIn(str(prepared_input), metadata_text)
+        self.assertIn(str(decoded_input), metadata_text)
+        self.assertIn("必须先调用 read_prepared_log_metadata()", user_prompt)
+        self.assertIn(str(prepared_input), user_prompt)
+        self.assertIn("禁止扫描 `tools/lark-agent-bridge/data/bug_cache`", user_prompt)
+        self.assertIn(root, FakeRuntime.last_kwargs["extra_roots"])
+
     def test_custom_skill_file_agent_uses_configured_internal_network_env(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "workspace"
@@ -7475,6 +7563,63 @@ class AgentTests(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertEqual(result.details["mode"], "direct_analysis")
         self.assertEqual(result.details["fault_time"], "2026-05-22 07:46")
+
+    def test_direct_analysis_passes_parsed_fault_time_to_log_intelligence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=False, data_dir=Path(tmp), workspace_root=Path(tmp))
+            runner = BugAnalysisRunner(config)
+            log_root = Path(tmp) / "direct_logs"
+            self._write_matching_log(log_root, "2026-05-29 17:16:00")
+            resource = DownloadResource(kind="file", value="log.zip")
+            seen_problem_times: list[datetime | None] = []
+
+            class FakeDownloader:
+                def download_all(self, resources, *, context, message_id):
+                    return [DownloadedResource(resource=resource, path=log_root)]
+
+            runner._direct_downloader = FakeDownloader()
+
+            def fake_run_analysis(
+                *,
+                plan,
+                input_path,
+                html_path,
+                json_path,
+                analysis_dir,
+                timeout,
+                target_time,
+                request_text=None,
+                bridge_session_id=None,
+            ):
+                html_path.write_text("<html>ok</html>", encoding="utf-8")
+                json_path.write_text("{}", encoding="utf-8")
+                return subprocess.CompletedProcess(args=["python3"], returncode=0, stdout="", stderr="")
+
+            def fake_analyze_logs_intelligently(*, log_dir, problem_time, plan):
+                seen_problem_times.append(problem_time)
+                return None
+
+            with (
+                mock.patch.object(runner, "_prepare_log_input", return_value=log_root),
+                mock.patch.object(runner, "classify_requests", return_value=[BugAnalysisPlan(kind="startup")]),
+                mock.patch.object(runner, "_write_reanalysis_source_evidence", return_value=None),
+                mock.patch.object(runner, "_analyze_logs_intelligently", side_effect=fake_analyze_logs_intelligently),
+                mock.patch.object(runner, "_run_analysis", side_effect=fake_run_analysis),
+                mock.patch.object(runner, "_build_combined_report_artifacts", return_value=None),
+            ):
+                result = runner.run_direct_analysis(
+                    DirectAnalysisRequest(
+                        prompt="问题时间 2026-05-29 17:16，分析启动",
+                        resources=[resource],
+                        raw_text="问题时间 2026-05-29 17:16，分析启动",
+                        triggered=True,
+                    )
+                )
+
+        self.assertTrue(result.success)
+        self.assertEqual(len(seen_problem_times), 1)
+        self.assertIsInstance(seen_problem_times[0], datetime)
+        self.assertEqual(seen_problem_times[0].strftime("%Y-%m-%d %H:%M"), "2026-05-29 17:16")
 
     def test_direct_analysis_respects_plans_override(self):
         with tempfile.TemporaryDirectory() as tmp:
