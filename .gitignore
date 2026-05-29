@@ -17,3 +17,7 @@ data/
 
 .pytest_cache/
 .mypy_cache/
+generated/
+.codegraph/
+.worktrees/
+secrets.toml
