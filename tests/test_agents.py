@@ -822,7 +822,7 @@ class AgentTests(unittest.TestCase):
             self.assertIn("### 会话事实快照\n- stable_fact: startup", prompt)
             self.assertIn("### 本次追问/修正\n重新源码分析 重点看 displaychange", prompt)
             self.assertLess(prompt.index("### 会话事实快照"), prompt.index("### 本次追问/修正"))
-            self.assertIn("### 上一轮 Agent 总结", prompt)
+            self.assertNotIn("### 上一轮 Agent 总结", prompt)
             write_snapshot_mock.assert_called_once()
             render_snapshot_mock.assert_called_once()
             persisted_snapshot = write_snapshot_mock.call_args.args[1]
@@ -905,7 +905,7 @@ class AgentTests(unittest.TestCase):
         self.assertIn("### 结构化证据护栏", prompt)
         self.assertIn("status=partial", prompt)
         self.assertIn("createUnityPlayerOnMainThread", prompt)
-        self.assertIn("### 上一轮 Agent 总结", prompt)
+        self.assertNotIn("### 上一轮 Agent 总结", prompt)
         self.assertNotIn("HTML_ONLY_MISLEADING_TEXT", prompt)
 
     def test_write_bug_summary_evidence_for_startup_includes_conflicts_and_trailing_logs(self):
@@ -2178,8 +2178,9 @@ class AgentTests(unittest.TestCase):
                         "resumed": False,
                         "duration_seconds": 12.5,
                         "usage": {
-                            "input_tokens": 321,
-                            "output_tokens": 54,
+                            "prompt_tokens": 321,
+                            "cached_input_tokens": 280,
+                            "completion_tokens": 54,
                             "total_tokens": 375,
                         },
                     },
@@ -2200,7 +2201,7 @@ class AgentTests(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertIn("Agent 类型: `codex`", metadata_text)
         self.assertIn("Agent 模型: `gpt-5.4`", metadata_text)
-        self.assertIn("Agent Token: `321 / 54 / 375`", metadata_text)
+        self.assertIn("Agent Token: `321 / 280 / 54 / 375`", metadata_text)
         self.assertIn("Agent 耗时: `12.5 秒`", metadata_text)
         self.assertIn("总耗时:", metadata_text)
 
@@ -3183,6 +3184,36 @@ class AgentTests(unittest.TestCase):
             details["agent_summary_tool_trace"],
             [{"tool": "search_large_log", "args": "{'pattern': 'startCheck timeout'}"}],
         )
+
+    def test_agent_runtime_details_normalize_prompt_completion_and_cached_usage(self):
+        runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
+        details: dict[str, object] = {}
+
+        runner._apply_agent_runtime_details(
+            details,
+            {
+                "message": "summary",
+                "command": None,
+                "error": "",
+                "provider": "direct_api",
+                "model": "demo",
+                "session_id": "",
+                "resumed": False,
+                "duration_seconds": 1.2,
+                "usage": {
+                    "prompt_tokens": 321,
+                    "cached_input_tokens": 280,
+                    "completion_tokens": 54,
+                    "total_tokens": 375,
+                },
+                "usage_scope": "direct_api",
+            },
+        )
+
+        self.assertEqual(details["agent_summary_input_tokens"], 321)
+        self.assertEqual(details["agent_summary_cached_input_tokens"], 280)
+        self.assertEqual(details["agent_summary_output_tokens"], 54)
+        self.assertEqual(details["agent_summary_total_tokens"], 375)
 
     def test_pydantic_summary_prompt_lists_decoded_logs_and_search_guidance(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -8922,7 +8953,10 @@ class AgentTests(unittest.TestCase):
                 },
             }
             previous_context = mock.Mock(
-                request_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722 问题时间 2026-05-11 23:10 分析启动和卡顿",
+                request_text=(
+                    "https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722 "
+                    "问题时间 2026-05-11 23:10 分析启动和卡顿\n\n追问/修正：先按旧时间重跑"
+                ),
                 summary_text="上一轮摘要",
                 report_excerpt="上一轮摘录",
                 history=[{"role": "user", "content": "第一次分析"}, {"role": "assistant", "content": long_assistant_history}],
@@ -8966,10 +9000,14 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(analysis_inputs[0][1], prepared_input)
         self.assertEqual(analysis_inputs[0][2], "2026-05-11 23:12")
         self.assertEqual(summary_mock.call_args.kwargs["provider_session_id"], "")
-        self.assertEqual(summary_mock.call_args.kwargs["previous_summary_path"], previous_summary)
+        self.assertEqual(
+            summary_mock.call_args.kwargs["request_text"],
+            previous_session["details"]["user_request_text"],
+        )
+        self.assertIsNone(summary_mock.call_args.kwargs["previous_summary_path"])
         self.assertEqual(summary_mock.call_args.kwargs["timeout"], 500)
         self.assertNotIn(long_assistant_history, request_text)
-        self.assertIn("上一轮长回答已省略", request_text)
+        self.assertNotIn("上一轮长回答已省略", request_text)
         self.assertNotIn(long_assistant_history, prompt_text)
 
     def test_bug_reanalysis_recovers_original_request_time_and_cached_bug_logs(self):

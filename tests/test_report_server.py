@@ -103,6 +103,9 @@ class ReportServerTests(unittest.TestCase):
                         "files_to_send": [html_path],
                         "agent_summary_provider": "codex",
                         "agent_summary_duration_seconds": 12.5,
+                        "agent_summary_prompt_tokens": 321,
+                        "agent_summary_cached_input_tokens": 280,
+                        "agent_summary_completion_tokens": 54,
                         "agent_summary_total_tokens": 375,
                         "agent_summary_usage_scope": "cumulative",
                     },
@@ -115,7 +118,7 @@ class ReportServerTests(unittest.TestCase):
         self.assertIn("Agent 类型", index_html)
         self.assertIn("codex", index_html)
         self.assertIn("累计 Agent Token", index_html)
-        self.assertIn("- / - / 375", index_html)
+        self.assertIn("321 / 280 / 54 / 375", index_html)
         self.assertIn("总耗时", index_html)
         self.assertIn("45.6", index_html)
 

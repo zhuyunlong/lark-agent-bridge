@@ -56,6 +56,7 @@ from ..reporting import (
 from ..signal_resolver import SignalResolver
 from ..skill_registry import AUX_BUG_SKILLS, PRIMARY_BUG_SKILL_MAP, extract_skill_frontmatter
 from ..skill_manager import SkillManager
+from ..token_usage import TOKEN_USAGE_ALIASES, normalize_token_usage
 from .. import prompt_snapshots
 from ._helpers import (
     _default_command_for_provider,
@@ -407,11 +408,7 @@ _BUG_LOG_INPUT_PRIORITY_SUFFIXES = (
     ".log",
     ".txt",
 )
-_TOKEN_USAGE_KEYS = {
-    "input_tokens": ("input_tokens", "inputTokens", "prompt_tokens", "promptTokens"),
-    "output_tokens": ("output_tokens", "outputTokens", "completion_tokens", "completionTokens"),
-    "total_tokens": ("total_tokens", "totalTokens"),
-}
+_TOKEN_USAGE_KEYS = TOKEN_USAGE_ALIASES
 _RUNTIME_HTML_MARKER_START = "<!-- LARK_AGENT_RUNTIME_START -->"
 _RUNTIME_HTML_MARKER_END = "<!-- LARK_AGENT_RUNTIME_END -->"
 _BUG_LOG_COVERAGE_WINDOW_MINUTES = 10
@@ -1135,6 +1132,21 @@ class BugAnalysisRunner:
             return route[1]
         return self._analysis_label(fallback_kind)
 
+    def _strip_bug_followup_suffix(self, request_text: str) -> str:
+        text = request_text.strip()
+        for marker in ("\n\n追问/修正：", "\n追问/修正："):
+            idx = text.find(marker)
+            if idx != -1:
+                return text[:idx].rstrip()
+        return text
+
+    def _original_bug_request_text(self, previous_context: object, details: dict[str, object]) -> str:
+        original = str(details.get("user_request_text") or "").strip()
+        if original:
+            return original
+        request_text = str(getattr(previous_context, "request_text", "") or "").strip()
+        return self._strip_bug_followup_suffix(request_text)
+
     def _resolve_bug_plans(self, *, analysis_kind: str, signal_hint: str, combined_text: str) -> list["BugAnalysisPlan"]:
         kind = (analysis_kind or "").strip()
         if kind == "signal":
@@ -1225,7 +1237,7 @@ class BugAnalysisRunner:
         details = previous_session.get("details", {}) if isinstance(previous_session, dict) else {}
         if not isinstance(details, dict):
             details = {}
-        request_text = str(getattr(previous_context, "request_text", "") or details.get("user_request_text") or "")
+        request_text = self._original_bug_request_text(previous_context, details)
         summary_text = str(getattr(previous_context, "summary_text", "") or "")
         report_excerpt = str(getattr(previous_context, "report_excerpt", "") or "")
         prepared_log_input = str(details.get("prepared_log_input") or "")
@@ -2537,7 +2549,7 @@ class BugAnalysisRunner:
         output_dir = job_dir / "output"
         output_dir.mkdir(parents=True, exist_ok=True)
         download_retry_result: dict[str, object] | None = None
-        request_text = str(getattr(previous_context, "request_text", "") or details.get("user_request_text") or "")
+        request_text = self._original_bug_request_text(previous_context, details)
         local_log_resources = local_log_resources or []
         local_selected_input: Path | None = None
         local_prepared_input: Path | None = None
@@ -2575,8 +2587,6 @@ class BugAnalysisRunner:
         reference_text = "\n".join(
             [
                 request_text,
-                str(getattr(previous_context, "summary_text", "")),
-                str(getattr(previous_context, "report_excerpt", "")),
                 f"故障时间: {str(details.get('target_time') or details.get('fault_time') or '').strip()}",
             ]
         ).strip()
@@ -3203,12 +3213,12 @@ class BugAnalysisRunner:
                 followup_text=followup_text,
                 target_time=target_time,
                 plans=plans,
-                history=getattr(previous_context, "history", None),
+                history=None,
             ),
             encoding="utf-8",
         )
         agent_metadata_path = output_dir / "bug_reanalysis_metadata.md"
-        previous_summary_path = self._path_from_details(details, "agent_summary_file")
+        previous_summary_path = None
         bug_summary_evidence_path = self._write_bug_summary_evidence(
             output_dir=output_dir,
             analysis_kind=plans[0].kind if plans else "general",
@@ -3238,7 +3248,7 @@ class BugAnalysisRunner:
             encoding="utf-8",
         )
         self._append_bug_summary_evidence_metadata(agent_metadata_path, bug_summary_evidence_path)
-        agent_summary_path = previous_summary_path or (output_dir / "bug_agent_summary.md")
+        agent_summary_path = output_dir / "bug_agent_summary.md"
         snapshot_details = self._structured_bug_prompt_snapshot_details(
             base_details=details,
             request_text=request_text,
@@ -11845,10 +11855,7 @@ class BugAnalysisRunner:
         usage = result.get("usage") or {}
         total_tokens = 0
         if isinstance(usage, dict):
-            if isinstance(usage.get("totalTokens"), int):
-                total_tokens = int(usage.get("totalTokens") or 0)
-            elif isinstance(usage.get("total_tokens"), int):
-                total_tokens = int(usage.get("total_tokens") or 0)
+            total_tokens = normalize_token_usage(usage).get("total_tokens", 0)
         details = {
             f"{prefix}_executor": executor,
             status_key: str(result.get(status_key) or result.get("custom_skill_analysis_status") or "completed"),
@@ -12553,7 +12560,7 @@ class BugAnalysisRunner:
             return False
         names = {request_artifact.name.casefold(), metadata_path.name.casefold()}
         if any("reanalysis" in name for name in names):
-            return True
+            return self._followup_needs_previous_summary_text(followup_text)
         return self._followup_needs_previous_summary_text(followup_text)
 
     def _is_postmortem_or_conflict_followup(self, text: str) -> bool:
@@ -14342,20 +14349,15 @@ class BugAnalysisRunner:
     def _parse_usage_object(self, value: object) -> dict[str, int]:
         if not isinstance(value, dict):
             return {}
-        usage: dict[str, int] = {}
-        for target_key, aliases in _TOKEN_USAGE_KEYS.items():
-            for alias in aliases:
-                parsed = self._coerce_token_count(value.get(alias))
-                if parsed is not None:
-                    usage[target_key] = parsed
-                    break
-        if "total_tokens" not in usage and {"input_tokens", "output_tokens"}.issubset(usage):
-            usage["total_tokens"] = usage["input_tokens"] + usage["output_tokens"]
-        return usage
+        return normalize_token_usage(value)
 
     def _extract_usage_from_text(self, text: str) -> dict[str, int]:
         patterns = {
             "input_tokens": (r"input[_ ]tokens?\s*[:=]\s*(\d+)", r"prompt[_ ]tokens?\s*[:=]\s*(\d+)"),
+            "cached_input_tokens": (
+                r"cached[_ ]input[_ ]tokens?\s*[:=]\s*(\d+)",
+                r"cached[_ ]prompt[_ ]tokens?\s*[:=]\s*(\d+)",
+            ),
             "output_tokens": (r"output[_ ]tokens?\s*[:=]\s*(\d+)", r"completion[_ ]tokens?\s*[:=]\s*(\d+)"),
             "total_tokens": (r"total[_ ]tokens?\s*[:=]\s*(\d+)",),
         }
@@ -14369,17 +14371,6 @@ class BugAnalysisRunner:
         if "total_tokens" not in usage and {"input_tokens", "output_tokens"}.issubset(usage):
             usage["total_tokens"] = usage["input_tokens"] + usage["output_tokens"]
         return usage
-
-    def _coerce_token_count(self, value: object) -> int | None:
-        if isinstance(value, bool):
-            return None
-        if isinstance(value, int):
-            return value
-        if isinstance(value, float):
-            return int(value)
-        if isinstance(value, str) and value.isdigit():
-            return int(value)
-        return None
 
     def _emit_progress(
         self,
@@ -14449,8 +14440,9 @@ class BugAnalysisRunner:
             details["agent_summary_duration_seconds"] = float(duration)
         usage = agent_summary_result.get("usage")
         if isinstance(usage, dict):
-            for key in ("input_tokens", "output_tokens", "total_tokens"):
-                value = usage.get(key)
+            normalized_usage = normalize_token_usage(usage)
+            for key in ("input_tokens", "cached_input_tokens", "output_tokens", "total_tokens"):
+                value = normalized_usage.get(key)
                 if isinstance(value, int):
                     details[f"agent_summary_{key}"] = value
 
@@ -14487,15 +14479,27 @@ class BugAnalysisRunner:
             lines.append(f"- Agent 会话ID: `{session_id}`")
         lines.append(f"- 续会话: `{'是' if resumed else '否'}`")
         if isinstance(usage, dict):
-            input_tokens = usage.get("input_tokens")
-            output_tokens = usage.get("output_tokens")
-            total_tokens = usage.get("total_tokens")
-            if any(isinstance(value, int) for value in (input_tokens, output_tokens, total_tokens)):
+            normalized_usage = normalize_token_usage(usage)
+            input_tokens = normalized_usage.get("input_tokens")
+            cached_input_tokens = normalized_usage.get("cached_input_tokens")
+            output_tokens = normalized_usage.get("output_tokens")
+            total_tokens = normalized_usage.get("total_tokens")
+            if any(
+                isinstance(value, int)
+                for value in (input_tokens, cached_input_tokens, output_tokens, total_tokens)
+            ):
                 token_label = "本轮 Agent Token" if usage_scope == "delta" else "累计 Agent Token"
+                parts = [self._format_token_millions(input_tokens)]
+                if isinstance(cached_input_tokens, int):
+                    parts.append(self._format_token_millions(cached_input_tokens))
+                parts.extend(
+                    [
+                        self._format_token_millions(output_tokens),
+                        self._format_token_millions(total_tokens),
+                    ]
+                )
                 lines.append(
-                    f"- {token_label}: `{self._format_token_millions(input_tokens)} / "
-                    f"{self._format_token_millions(output_tokens)} / "
-                    f"{self._format_token_millions(total_tokens)}`"
+                    f"- {token_label}: `{' / '.join(parts)}`"
                 )
         if isinstance(duration, (int, float)):
             lines.append(f"- Agent 耗时: `{float(duration):.1f} 秒`")
@@ -14645,13 +14649,22 @@ class BugAnalysisRunner:
             rows.append(("Agent 模型", model))
         if session_id:
             rows.append(("Agent 会话ID", session_id))
-        if isinstance(usage, dict) and any(isinstance(usage.get(key), int) for key in ("input_tokens", "output_tokens", "total_tokens")):
+        normalized_usage = normalize_token_usage(usage) if isinstance(usage, dict) else {}
+        if normalized_usage:
+            parts = [self._format_token_millions(normalized_usage.get("input_tokens"))]
+            cached_input_tokens = normalized_usage.get("cached_input_tokens")
+            if isinstance(cached_input_tokens, int):
+                parts.append(self._format_token_millions(cached_input_tokens))
+            parts.extend(
+                [
+                    self._format_token_millions(normalized_usage.get("output_tokens")),
+                    self._format_token_millions(normalized_usage.get("total_tokens")),
+                ]
+            )
             rows.append(
                 (
                     "本轮 Agent Token" if usage_scope == "delta" else "累计 Agent Token",
-                    f"{self._format_token_millions(usage.get('input_tokens'))} / "
-                    f"{self._format_token_millions(usage.get('output_tokens'))} / "
-                    f"{self._format_token_millions(usage.get('total_tokens'))}",
+                    " / ".join(parts),
                 )
             )
         if isinstance(duration, (int, float)):

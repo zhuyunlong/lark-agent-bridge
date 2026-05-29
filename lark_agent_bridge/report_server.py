@@ -29,6 +29,7 @@ from .models import BridgeConfig, TaskResult
 from .report_version import ReportVersionStore
 from .state import AgentActivityStore, ConversationContextStore
 from .skill_manager import SkillManager, SkillManagerError
+from .token_usage import extract_prefixed_token_usage
 
 
 _KNOWLEDGE_EXPORT_REPORT_ROUTES = {"/knowledge/export-report", "/knowledge/export-report.html"}
@@ -1299,17 +1300,26 @@ def _runtime_summary_items(result: TaskResult) -> list[tuple[str, str]]:
     provider = str(details.get("agent_summary_provider") or details.get("provider") or "").strip()
     if provider:
         items.append(("Agent 类型", provider))
-    input_tokens = details.get("agent_summary_input_tokens")
-    output_tokens = details.get("agent_summary_output_tokens")
-    total_tokens = details.get("agent_summary_total_tokens")
+    usage = extract_prefixed_token_usage(details, "agent_summary_")
+    input_tokens = usage.get("input_tokens")
+    cached_input_tokens = usage.get("cached_input_tokens")
+    output_tokens = usage.get("output_tokens")
+    total_tokens = usage.get("total_tokens")
     usage_scope = str(details.get("agent_summary_usage_scope") or "").strip()
-    if any(isinstance(value, int) for value in (input_tokens, output_tokens, total_tokens)):
+    if any(isinstance(value, int) for value in (input_tokens, cached_input_tokens, output_tokens, total_tokens)):
+        parts = [_format_token_millions(input_tokens)]
+        if isinstance(cached_input_tokens, int):
+            parts.append(_format_token_millions(cached_input_tokens))
+        parts.extend(
+            [
+                _format_token_millions(output_tokens),
+                _format_token_millions(total_tokens),
+            ]
+        )
         items.append(
             (
                 "本轮 Agent Token" if usage_scope == "delta" else "累计 Agent Token",
-                f"{_format_token_millions(input_tokens)} / "
-                f"{_format_token_millions(output_tokens)} / "
-                f"{_format_token_millions(total_tokens)}",
+                " / ".join(parts),
             )
         )
     agent_duration = details.get("agent_summary_duration_seconds")

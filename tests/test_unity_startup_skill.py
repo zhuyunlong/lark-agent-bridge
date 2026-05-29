@@ -96,9 +96,9 @@ class UnityStartupSkillTests(unittest.TestCase):
         self.assertEqual(focus.index, 2)
         self.assertIn("之后最近", reason)
 
-    def test_select_target_logs_falls_back_to_main_logs_without_package_path(self):
+    def test_select_target_logs_falls_back_to_variable_prefix_main_logs_without_package_path(self):
         with tempfile.TemporaryDirectory() as tmp:
-            decoded_log = Path(tmp) / "main_2026-05-11_23-00.alog.log"
+            decoded_log = Path(tmp) / "user0_main_2026-05-11_23-00.alog.log"
             decoded_log.write_text("", encoding="utf-8")
             support_log = Path(tmp) / "main.txt"
             support_log.write_text("", encoding="utf-8")
@@ -107,7 +107,24 @@ class UnityStartupSkillTests(unittest.TestCase):
 
         self.assertEqual(selected, [decoded_log])
         self.assertTrue(warnings)
-        self.assertIn("main_*.log", warnings[0])
+        self.assertIn("主日志文件", warnings[0])
+
+    def test_collect_single_decoded_log_preserves_package_context_for_target_selection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "logs" / "app" / "com.xiaopeng.montecarlo"
+            root.mkdir(parents=True)
+            decoded_log = root / "user0_main_2026-05-28_11-00.alog.log"
+            decoded_log.write_text("decoded text log\n", encoding="utf-8")
+            workspace = Path(tmp) / "workspace"
+
+            copied, warnings = self.mod.collect_and_materialize_inputs(decoded_log, workspace)
+
+        rel_paths = {path.relative_to(workspace / "collected").as_posix() for path in copied}
+        self.assertFalse(warnings)
+        self.assertEqual(
+            rel_paths,
+            {"app/com.xiaopeng.montecarlo/user0_main_2026-05-28_11-00.alog.log"},
+        )
 
     def test_collect_inputs_skips_raw_alog_when_decoded_companion_exists(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -268,6 +285,28 @@ class UnityStartupSkillTests(unittest.TestCase):
         self.assertEqual(markers[0].pid, 7412)
         self.assertEqual(markers[0].timestamp.strftime("%Y-%m-%d %H:%M:%S"), "2026-05-11 23:11:29")
 
+    def test_extract_unity_runtime_context_parses_bundle_cfg_and_current_version(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "main_2026-05-28_11-00.alog.log"
+            log_path.write_text(
+                "\n".join(
+                    [
+                        '05-28 11:00:59.821 30414 30810 1919746 I Unity: [Napa6][I]FC:[0][HIMIApp]streamingAssets BundleBuildCfg : {"timeVer":"2026-05-26 05:05:06","buildType":2,"buildParam":"{\\"carType\\":\\"XOS5.0\\",\\"Branch\\":\\"6.2.3_release\\",\\"buildTime\\":\\"2026-05-26 04:52:10\\",\\"PlatformVer\\":\\"NapaV5\\",\\"ResourceType\\":\\"outer\\",\\"TargetResource\\":\\"\\"}"}',
+                        "05-28 11:01:32.341 30414 30810 1952266 I Unity: [Napa6][I]FC:[894][AnalyseNode] current version:6.2.3_release.2026-05-26 04:52:10 kernel version:v2.5.7 isDebug:False carType:G02S loglev:1 lanType:zh Model:eNone framerate:30 vSyncCount:0 useForceSyncRender:False EnableProfiler:False TargetFrameRate:30 ProtoType:1 dockerInfo:",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            context = self.mod.extract_unity_runtime_context(log_path)
+
+        self.assertEqual(context.resource_type, "outer")
+        self.assertEqual(context.proto_type, "1")
+        self.assertEqual(context.car_type, "G02S")
+        self.assertEqual(context.branch, "6.2.3_release")
+        self.assertEqual(context.build_time, "2026-05-26 04:52:10")
+        self.assertEqual(context.platform_ver, "NapaV5")
+
     def test_scan_text_log_parses_line_without_sequence_number(self):
         """LOG_LINE_RE must match standard logcat format (no sequence field)."""
         with tempfile.TemporaryDirectory() as tmp:
@@ -339,6 +378,88 @@ class UnityStartupSkillTests(unittest.TestCase):
         self.assertEqual(severity, "red")
         self.assertNotIn("启动链路完整", message)
         self.assertIn("未闭环", message)
+
+    def test_diagnose_text_prefers_napa_resource_failure_chain(self):
+        def fake(node_id: str, message: str = "msg"):
+            event = self._fake_event(self.mod, "2026-05-28 11:16:35.769", 13379)
+            event.node_id = node_id
+            event.message = message
+            event.excerpt = message
+            return event
+
+        diagnosis = self.mod.diagnose_text(
+            {
+                "app_attach_base_context": fake("app_attach_base_context"),
+                "activity_on_create": fake("activity_on_create"),
+                "activity_on_resume": fake("activity_on_resume"),
+                "xpe_surface_created": fake("xpe_surface_created"),
+                "unity_preload_start": fake("unity_preload_start"),
+                "unity_preload_success": fake("unity_preload_success"),
+                "unity_internal_bundle_cfg": fake("unity_internal_bundle_cfg"),
+                "unity_internal_version": fake("unity_internal_version"),
+                "unity_internal_asset_dependency_fail": fake(
+                    "unity_internal_asset_dependency_fail",
+                    "[AddressModel]load fail ... Dependency Exception ... Invalid path in AssetBundleProvider",
+                ),
+                "unity_internal_display_loader_exception": fake(
+                    "unity_internal_display_loader_exception",
+                    "[NapaDisplayManager]DisplayLoaderNode Exception at OnAttach:System.NullReferenceException",
+                ),
+            }
+        )
+
+        self.assertIn("资源", diagnosis)
+        self.assertIn("BaseCamera", diagnosis)
+        self.assertNotIn("SET_READY_PREPARE 没有到达", diagnosis)
+
+    def test_find_nearest_system_load_prefers_exact_pid(self):
+        when = self.mod.dt.datetime.strptime("2026-05-28 11:16:24.487", "%Y-%m-%d %H:%M:%S.%f")
+        exact_pid = self.mod.SystemLoadSnapshot(
+            timestamp=self.mod.dt.datetime.strptime("2026-05-28 11:16:25.000", "%Y-%m-%d %H:%M:%S.%f"),
+            total_cpu=30,
+            user_cpu=10,
+            system_cpu=15,
+            iow_cpu=1,
+            irq_cpu=2,
+            sirq_cpu=2,
+            file_path="/tmp/main.txt",
+            line_no=10,
+            excerpt="exact",
+            process_name="com.xiaopeng.montecarlo",
+            process_pid=13379,
+            process_cpu=5.0,
+            process_mem_rss_kb=1,
+            process_mem_vss_kb=2,
+            process_io_read_kb=3,
+            process_io_write_kb=4,
+            process_threads=5,
+            process_fds=6,
+        )
+        stale_name_only = self.mod.SystemLoadSnapshot(
+            timestamp=self.mod.dt.datetime.strptime("2026-05-28 11:16:20.000", "%Y-%m-%d %H:%M:%S.%f"),
+            total_cpu=20,
+            user_cpu=5,
+            system_cpu=10,
+            iow_cpu=0,
+            irq_cpu=2,
+            sirq_cpu=3,
+            file_path="/tmp/main.txt",
+            line_no=20,
+            excerpt="stale",
+            process_name="com.xiaopeng.montecarlo",
+            process_pid=10776,
+            process_cpu=4.0,
+            process_mem_rss_kb=1,
+            process_mem_vss_kb=2,
+            process_io_read_kb=3,
+            process_io_write_kb=4,
+            process_threads=5,
+            process_fds=6,
+        )
+
+        selected = self.mod.find_nearest_system_load([stale_name_only, exact_pid], when=when, pid=13379)
+
+        self.assertIs(selected, exact_pid)
 
     @staticmethod
     def _fake_event(mod, timestamp_text: str, pid: int):

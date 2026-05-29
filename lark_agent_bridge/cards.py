@@ -880,11 +880,14 @@ def _progress_time_prefix(value: Any) -> str:
 
 def _format_token_usage(token_usage: dict[str, int]) -> str:
     input_tokens = token_usage.get("input_tokens")
+    cached_input_tokens = token_usage.get("cached_input_tokens")
     output_tokens = token_usage.get("output_tokens")
     total_tokens = token_usage.get("total_tokens")
     parts: list[str] = []
     if isinstance(input_tokens, int):
         parts.append(f"输入 {input_tokens}")
+    if isinstance(cached_input_tokens, int):
+        parts.append(f"缓存命中输入 {cached_input_tokens}")
     if isinstance(output_tokens, int):
         parts.append(f"输出 {output_tokens}")
     if isinstance(total_tokens, int):

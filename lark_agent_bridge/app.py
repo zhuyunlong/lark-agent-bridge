@@ -90,6 +90,7 @@ from .runner import SignalChainRunner
 from .signal_resolver import SignalResolver
 from .skill_manager import SkillManager
 from .state import AgentActivityStore, ConversationContext, ConversationContextStore, EventStateStore
+from .token_usage import extract_prefixed_token_usage
 from .handlers.signal_lifecycle import SignalLifecycleHandler
 from .workflow_archive import WorkflowArchiver
 
@@ -1173,7 +1174,7 @@ class BridgeApp:
         model = str(result.details.get("agent_summary_model") or "").strip()
         if model:
             metadata["Agent 模型"] = model
-        total_tokens = result.details.get("agent_summary_total_tokens")
+        total_tokens = extract_prefixed_token_usage(result.details, "agent_summary_").get("total_tokens")
         if isinstance(total_tokens, int):
             metadata["Agent Token"] = str(total_tokens)
         skill_label = str(result.details.get("analysis_skill_label") or "").strip()
@@ -2142,15 +2143,7 @@ class BridgeApp:
     def _progress_token_usage(self, result: TaskResult | None) -> dict[str, int] | None:
         if result is None:
             return None
-        usage: dict[str, int] = {}
-        for detail_key, usage_key in (
-            ("agent_summary_input_tokens", "input_tokens"),
-            ("agent_summary_output_tokens", "output_tokens"),
-            ("agent_summary_total_tokens", "total_tokens"),
-        ):
-            value = result.details.get(detail_key)
-            if isinstance(value, int):
-                usage[usage_key] = value
+        usage = extract_prefixed_token_usage(result.details, "agent_summary_")
         return usage or None
 
     def _progress_mode_label(self, mode: str) -> str:
@@ -2660,7 +2653,10 @@ class BridgeApp:
         return self._deliver_result(
             event,
             result,
-            request_text=f"{followup_context.request_text}\n\n追问/修正：{route_content}",
+            request_text=self._bug_request_text_for_followup_context(
+                followup_context,
+                previous_session=previous_session,
+            ),
             root_message_id=followup_context.root_message_id,
         )
 
@@ -4675,7 +4671,10 @@ class BridgeApp:
             finalized = self._deliver_result(
                 event,
                 result,
-                request_text=f"{followup_context.request_text}\n\n追问/修正：{route_content}",
+                request_text=self._bug_request_text_for_followup_context(
+                    followup_context,
+                    previous_session=previous_session,
+                ),
                 root_message_id=followup_context.root_message_id,
             )
             if finalized.success:
@@ -4708,8 +4707,19 @@ class BridgeApp:
         )
         return self._finalize_followup_reply(event, result, followup_context, route_content)
 
+    def _bug_request_text_for_followup_context(self, followup_context, *, previous_session: dict[str, object] | None = None) -> str:
+        details = previous_session.get("details", {}) if isinstance(previous_session, dict) else {}
+        if not isinstance(details, dict):
+            details = {}
+        request_text = str(details.get("user_request_text") or getattr(followup_context, "request_text", "") or "").strip()
+        for marker in ("\n\n追问/修正：", "\n追问/修正："):
+            idx = request_text.find(marker)
+            if idx != -1:
+                return request_text[:idx].rstrip()
+        return request_text
+
     def _fresh_bug_request_from_followup_context(self, followup_context, *, followup_text: str):
-        request_text = str(getattr(followup_context, "request_text", "") or "").strip()
+        request_text = self._bug_request_text_for_followup_context(followup_context)
         if not request_text:
             return None
         bug_request = parse_bug_request(request_text, bug_url_re=self.bug_url_re)
@@ -4741,7 +4751,7 @@ class BridgeApp:
             details = {}
         else:
             details = dict(details)
-        request_text = str(getattr(followup_context, "request_text", "") or "").strip()
+        request_text = self._bug_request_text_for_followup_context(followup_context, previous_session=session)
         bug_url = str(details.get("bug_url") or self._bug_url_from_request_text(request_text)).strip()
         if bug_url:
             details["bug_url"] = bug_url

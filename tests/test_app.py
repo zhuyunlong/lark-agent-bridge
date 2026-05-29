@@ -572,6 +572,32 @@ def event(**overrides):
 
 
 class AppTests(unittest.TestCase):
+    def test_progress_token_usage_normalizes_prompt_completion_aliases(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = BridgeApp(BridgeConfig(data_dir=Path(tmp)))
+            result = TaskResult(
+                success=True,
+                message="ok",
+                details={
+                    "agent_summary_prompt_tokens": 321,
+                    "agent_summary_cached_input_tokens": 280,
+                    "agent_summary_completion_tokens": 54,
+                    "agent_summary_total_tokens": 375,
+                },
+            )
+
+            usage = app._progress_token_usage(result)
+
+        self.assertEqual(
+            usage,
+            {
+                "input_tokens": 321,
+                "cached_input_tokens": 280,
+                "output_tokens": 54,
+                "total_tokens": 375,
+            },
+        )
+
     def test_record_daemon_status_updates_health_monitor_pid(self):
         with tempfile.TemporaryDirectory() as tmp:
             app = BridgeApp(BridgeConfig(data_dir=Path(tmp)))
@@ -5463,6 +5489,52 @@ class AppTests(unittest.TestCase):
         agent_progress = [item for item in session["progress"] if item["stage"] == "bug_agent_summary"]
         self.assertTrue(agent_progress)
         self.assertEqual(agent_progress[-1]["details"]["provider_session_id"], "sess_123")
+
+    def test_bug_reanalysis_keeps_original_request_text_in_conversation_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = Path(tmp) / "bug_metadata.md"
+            html = Path(tmp) / "bug_report.html"
+            metadata.write_text("bug", encoding="utf-8")
+            html.write_text("<html><body>根因是首帧超时</body></html>", encoding="utf-8")
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    allowed_chats=["oc_denied"],
+                ),
+                lark_client=FakeLarkClient(),
+                bug_runner=FakeBugRunner(metadata, html),
+            )
+
+            original = app.handle_event(
+                event(
+                    event_id="evt_bug_original",
+                    message_id="om_bug_original",
+                    content="@bot https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722 调查3D启动生命周期",
+                )
+            )
+            self.assertTrue(original.success)
+            initial_context = app.conversation_store.lookup("om_bug_original")
+            self.assertIsNotNone(initial_context)
+            assert initial_context is not None
+            original_request_text = initial_context.request_text
+
+            followup = app.handle_event(
+                event(
+                    event_id="evt_bug_reanalysis",
+                    message_id="om_bug_reanalysis",
+                    reply_to="om_bug_original",
+                    root_id="om_bug_original",
+                    content="@bot 重新分析",
+                )
+            )
+            updated_context = app.conversation_store.lookup("om_bug_original")
+
+        self.assertTrue(followup.success)
+        self.assertIsNotNone(updated_context)
+        assert updated_context is not None
+        self.assertEqual(updated_context.request_text, original_request_text)
+        self.assertNotIn("追问/修正：", updated_context.request_text)
 
     def test_followup_reanalysis_fetches_current_message_reply_to_after_restart(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -1,13 +1,16 @@
+from contextlib import contextmanager
 from pathlib import Path
 import json
 import os
 import subprocess
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
 from lark_agent_bridge.knowledge import KnowledgeService
 from lark_agent_bridge.knowledge.models import KnowledgeChunk, SearchHit
+from lark_agent_bridge.knowledge import source_investigation as source_investigation_module
 from lark_agent_bridge.knowledge.source_investigation import SourceInvestigationRunner
 from lark_agent_bridge.models import BridgeConfig, KnowledgeOptions, KnowledgeSourceOptions
 from lark_agent_bridge.models import SourceInvestigationOptions
@@ -58,6 +61,189 @@ class KnowledgeServiceTests(unittest.TestCase):
                 started_threads[0].target(*started_threads[0].args)
 
         self.assertEqual(len(started_threads), 1)
+
+    def test_warmup_codegraph_skips_recent_successful_repo_sync(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "guideengine"
+            (repo / ".codegraph").mkdir(parents=True)
+            config = BridgeConfig(
+                data_dir=root / "data",
+                guideengine_repo=repo,
+                source_investigation=SourceInvestigationOptions(
+                    enabled=True,
+                    repo_roots=[repo],
+                    codegraph_enabled=True,
+                ),
+            )
+            runner = SourceInvestigationRunner(config)
+            state_path = source_investigation_module._codegraph_repo_state_path(config, repo)
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            now = time.time()
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "repo": str(repo),
+                        "started_at": now - 30,
+                        "finished_at": now - 5,
+                        "success": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            fake_cg = unittest.mock.Mock()
+            fake_cg.is_indexed.return_value = True
+            started_threads: list[object] = []
+
+            class FakeThread:
+                def __init__(self, *, target, args, name, daemon):
+                    self.target = target
+                    self.args = args
+                    self.name = name
+                    self.daemon = daemon
+
+                def start(self):
+                    started_threads.append(self)
+
+            with (
+                patch.object(SourceInvestigationRunner, "_get_codegraph", return_value=fake_cg),
+                patch("lark_agent_bridge.knowledge.source_investigation.threading.Thread", FakeThread),
+            ):
+                runner.warmup_codegraph()
+
+        self.assertEqual(len(started_threads), 0)
+
+    def test_warmup_codegraph_skips_recent_running_repo_sync_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "guideengine"
+            (repo / ".codegraph").mkdir(parents=True)
+            config = BridgeConfig(
+                data_dir=root / "data",
+                guideengine_repo=repo,
+                source_investigation=SourceInvestigationOptions(
+                    enabled=True,
+                    repo_roots=[repo],
+                    codegraph_enabled=True,
+                ),
+            )
+            runner = SourceInvestigationRunner(config)
+            state_path = source_investigation_module._codegraph_repo_state_path(config, repo)
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            now = time.time()
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "repo": str(repo),
+                        "started_at": now - 10,
+                        "finished_at": None,
+                        "success": False,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            fake_cg = unittest.mock.Mock()
+            fake_cg.is_indexed.return_value = True
+            started_threads: list[object] = []
+
+            class FakeThread:
+                def __init__(self, *, target, args, name, daemon):
+                    self.target = target
+                    self.args = args
+                    self.name = name
+                    self.daemon = daemon
+
+                def start(self):
+                    started_threads.append(self)
+
+            with (
+                patch.object(SourceInvestigationRunner, "_get_codegraph", return_value=fake_cg),
+                patch("lark_agent_bridge.knowledge.source_investigation.threading.Thread", FakeThread),
+            ):
+                runner.warmup_codegraph()
+
+        self.assertEqual(len(started_threads), 0)
+
+    def test_warmup_codegraph_skips_when_repo_lock_unavailable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "guideengine"
+            (repo / ".codegraph").mkdir(parents=True)
+            config = BridgeConfig(
+                data_dir=Path(tmp) / "data",
+                guideengine_repo=repo,
+                source_investigation=SourceInvestigationOptions(
+                    enabled=True,
+                    repo_roots=[repo],
+                    codegraph_enabled=True,
+                ),
+            )
+            runner = SourceInvestigationRunner(config)
+            fake_cg = unittest.mock.Mock()
+            fake_cg.is_indexed.return_value = True
+            started_threads: list[object] = []
+
+            class FakeThread:
+                def __init__(self, *, target, args, name, daemon):
+                    self.target = target
+                    self.args = args
+                    self.name = name
+                    self.daemon = daemon
+
+                def start(self):
+                    started_threads.append(self)
+
+            @contextmanager
+            def fake_lock(_config, _repo):
+                yield None
+
+            with (
+                patch.object(SourceInvestigationRunner, "_get_codegraph", return_value=fake_cg),
+                patch("lark_agent_bridge.knowledge.source_investigation.threading.Thread", FakeThread),
+                patch("lark_agent_bridge.knowledge.source_investigation._try_repo_warmup_lock", fake_lock),
+            ):
+                runner.warmup_codegraph()
+
+        self.assertEqual(len(started_threads), 0)
+
+    def test_warmup_codegraph_limits_startup_to_first_indexed_repo(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo1 = root / "guideengine"
+            repo2 = root / "Napa5"
+            (repo1 / ".codegraph").mkdir(parents=True)
+            (repo2 / ".codegraph").mkdir(parents=True)
+            config = BridgeConfig(
+                data_dir=root / "data",
+                guideengine_repo=repo1,
+                source_investigation=SourceInvestigationOptions(
+                    enabled=True,
+                    repo_roots=[repo1, repo2],
+                    codegraph_enabled=True,
+                ),
+            )
+            runner = SourceInvestigationRunner(config)
+            fake_cg = unittest.mock.Mock()
+            fake_cg.is_indexed.return_value = True
+            started_threads: list[object] = []
+
+            class FakeThread:
+                def __init__(self, *, target, args, name, daemon):
+                    self.target = target
+                    self.args = args
+                    self.name = name
+                    self.daemon = daemon
+
+                def start(self):
+                    started_threads.append(self)
+
+            with (
+                patch.object(SourceInvestigationRunner, "_get_codegraph", return_value=fake_cg),
+                patch("lark_agent_bridge.knowledge.source_investigation.threading.Thread", FakeThread),
+            ):
+                runner.warmup_codegraph()
+
+        self.assertEqual(len(started_threads), 1)
+        self.assertEqual(started_threads[0].args[1], repo1)
 
     def test_syncs_local_adb_json_and_searches_commands(self):
         with tempfile.TemporaryDirectory() as tmp:

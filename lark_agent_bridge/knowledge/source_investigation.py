@@ -10,9 +10,13 @@ enabled. The CLI path is kept as a fallback.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+import fcntl
+import hashlib
 import logging
 from dataclasses import dataclass, field
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -33,6 +37,8 @@ logger = logging.getLogger(__name__)
 
 _CODEGRAPH_WARMUP_LOCK = threading.Lock()
 _CODEGRAPH_WARMUP_INFLIGHT: set[Path] = set()
+_CODEGRAPH_WARMUP_COOLDOWN_SECONDS = 1800.0
+_CODEGRAPH_WARMUP_RUNNING_STALE_SECONDS = 900.0
 
 _LOW_VALUE_PATH_HINTS = (
     "src/test",
@@ -73,6 +79,67 @@ def _warmup_repo_key(repo: Path) -> Path:
         return repo.expanduser().resolve()
     except OSError:
         return repo.expanduser()
+
+
+def _codegraph_warmup_state_dir(config: BridgeConfig) -> Path:
+    return config.data_dir / "state" / "codegraph_warmup"
+
+
+def _codegraph_repo_slug(repo: Path) -> str:
+    return hashlib.sha1(str(_warmup_repo_key(repo)).encode("utf-8")).hexdigest()[:16]
+
+
+def _codegraph_repo_state_path(config: BridgeConfig, repo: Path) -> Path:
+    return _codegraph_warmup_state_dir(config) / f"{_codegraph_repo_slug(repo)}.json"
+
+
+def _codegraph_repo_lock_path(config: BridgeConfig, repo: Path) -> Path:
+    return _codegraph_warmup_state_dir(config) / f"{_codegraph_repo_slug(repo)}.lock"
+
+
+def _read_codegraph_repo_state(config: BridgeConfig, repo: Path) -> dict[str, Any]:
+    path = _codegraph_repo_state_path(config, repo)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _write_codegraph_repo_state(config: BridgeConfig, repo: Path, payload: dict[str, Any]) -> None:
+    path = _codegraph_repo_state_path(config, repo)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _as_float(value: object) -> float | None:
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _should_skip_codegraph_warmup_state(state: dict[str, Any], *, now: float) -> bool:
+    finished_at = _as_float(state.get("finished_at"))
+    if bool(state.get("success")) and finished_at is not None and now - finished_at < _CODEGRAPH_WARMUP_COOLDOWN_SECONDS:
+        return True
+    started_at = _as_float(state.get("started_at"))
+    if started_at is not None and finished_at is None and now - started_at < _CODEGRAPH_WARMUP_RUNNING_STALE_SECONDS:
+        return True
+    return False
+
+
+@contextmanager
+def _try_repo_warmup_lock(config: BridgeConfig, repo: Path):
+    lock_path = _codegraph_repo_lock_path(config, repo)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as handle:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            yield None
+            return
+        yield handle
 
 
 @dataclass(slots=True)
@@ -138,24 +205,46 @@ class SourceInvestigationRunner:
                 logger.debug("codegraph: %s is not indexed; skipping warmup", repo)
                 continue
             repo_key = _warmup_repo_key(repo)
-            with _CODEGRAPH_WARMUP_LOCK:
-                if repo_key in _CODEGRAPH_WARMUP_INFLIGHT:
-                    logger.debug("codegraph: warmup already in flight for %s; skipping duplicate", repo)
-                    continue
-                _CODEGRAPH_WARMUP_INFLIGHT.add(repo_key)
+            now = time.time()
+            with _try_repo_warmup_lock(self.config, repo) as lock_handle:
+                if lock_handle is None:
+                    logger.debug("codegraph: warmup lock unavailable for %s; skipping duplicate", repo)
+                    break
+                state = _read_codegraph_repo_state(self.config, repo)
+                if _should_skip_codegraph_warmup_state(state, now=now):
+                    logger.debug("codegraph: recent warmup state for %s; skipping startup sync", repo)
+                    break
+                with _CODEGRAPH_WARMUP_LOCK:
+                    if repo_key in _CODEGRAPH_WARMUP_INFLIGHT:
+                        logger.debug("codegraph: warmup already in flight for %s; skipping duplicate", repo)
+                        break
+                    _CODEGRAPH_WARMUP_INFLIGHT.add(repo_key)
+                _write_codegraph_repo_state(
+                    self.config,
+                    repo,
+                    {
+                        "repo": str(repo),
+                        "started_at": now,
+                        "finished_at": None,
+                        "success": False,
+                        "owner_pid": os.getpid(),
+                    },
+                )
             t = threading.Thread(
                 target=self._warmup_one_repo,
-                args=(cg, repo),
+                args=(cg, repo, now),
                 name=f"codegraph-sync-{repo.name}",
                 daemon=True,
             )
             t.start()
             logger.info("codegraph: sync warmup started for %s (background)", repo)
+            break
 
-    def _warmup_one_repo(self, cg: Any, repo: Path) -> None:
+    def _warmup_one_repo(self, cg: Any, repo: Path, started_at: float) -> None:
+        ok = False
         try:
             logger.info("codegraph: syncing %s …", repo)
-            ok = cg.sync_index(repo)
+            ok = bool(cg.sync_index(repo))
             if ok:
                 logger.info("codegraph: sync finished for %s", repo)
             else:
@@ -163,6 +252,17 @@ class SourceInvestigationRunner:
         except Exception as exc:  # pragma: no cover
             logger.warning("codegraph: warmup error for %s: %s", repo, exc)
         finally:
+            _write_codegraph_repo_state(
+                self.config,
+                repo,
+                {
+                    "repo": str(repo),
+                    "started_at": started_at,
+                    "finished_at": time.time(),
+                    "success": ok,
+                    "owner_pid": os.getpid(),
+                },
+            )
             repo_key = _warmup_repo_key(repo)
             with _CODEGRAPH_WARMUP_LOCK:
                 _CODEGRAPH_WARMUP_INFLIGHT.discard(repo_key)
