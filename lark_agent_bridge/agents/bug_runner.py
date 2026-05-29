@@ -121,6 +121,15 @@ class PlanKindSpec:
         return self.is_custom_agent and self.needs_source_evidence
 
 
+@dataclass(frozen=True)
+class DirectApiCompactionProfileSpec:
+    name: str
+    analysis_kind: str
+    skill_name: str
+    handler: str
+    metadata_markers: tuple[str, ...] = ()
+
+
 # Single source of truth for all plan-kind policy decisions.
 # Adding a new kind: insert one entry here — all call sites pick it up automatically.
 PLAN_KIND_REGISTRY: dict[str, PlanKindSpec] = {
@@ -147,6 +156,16 @@ PLAN_KIND_REGISTRY: dict[str, PlanKindSpec] = {
 
 # Canonical set for "custom_skill or source_code_skill" checks.
 _SOURCE_SKILL_KINDS = {"custom_skill", SOURCE_CODE_SKILL_KIND}
+
+_DIRECT_API_COMPACTION_PROFILES: tuple[DirectApiCompactionProfileSpec, ...] = (
+    DirectApiCompactionProfileSpec(
+        name="startup_unity_lifecycle",
+        analysis_kind="startup",
+        skill_name="unity-startup-lifecycle-check",
+        handler="_direct_api_context_excerpt_for_startup_unity_lifecycle",
+        metadata_markers=("bug_3d_startup_report",),
+    ),
+)
 
 # Derived sets — kept for call sites that need a set (e.g. set membership tests
 # on lists of plans, or unpacking into other sets).
@@ -13395,27 +13414,25 @@ class BugAnalysisRunner:
         if not analysis_kind:
             analysis_kind = self._snapshot_field_from_text(metadata_text, "分析类型")
         skill_name = self._snapshot_field_from_text(metadata_text, "命中 Skill")
-        if skill_name != "unity-startup-lifecycle-check":
-            return ""
-        if analysis_kind == "startup":
-            return "startup_unity_lifecycle"
-        route = self.skill_manager.primary_skill_map().get(skill_name)
-        if route is not None and str(route[0] or "").strip() == "startup":
-            return "startup_unity_lifecycle"
-        if "bug_3d_startup_report" in metadata_text:
-            return "startup_unity_lifecycle"
+        for profile in _DIRECT_API_COMPACTION_PROFILES:
+            if skill_name != profile.skill_name:
+                continue
+            if analysis_kind == profile.analysis_kind:
+                return profile.name
+            route = self.skill_manager.primary_skill_map().get(skill_name)
+            if route is not None and str(route[0] or "").strip() == profile.analysis_kind:
+                return profile.name
+            if any(marker in metadata_text for marker in profile.metadata_markers):
+                return profile.name
         return ""
 
-    def _direct_api_bug_summary_context_excerpt(
+    def _direct_api_context_excerpt_for_startup_unity_lifecycle(
         self,
         *,
         title: str,
         path: Path,
         max_chars: int,
-        compaction_profile: str,
     ) -> str:
-        if compaction_profile != "startup_unity_lifecycle":
-            return self._read_bug_summary_context_excerpt(path, max_chars)
         if self._is_report_json_path(path):
             return self._compact_structured_report_excerpt(path, max_chars=min(max_chars, 2200))
         if title == "Bug Summary Evidence":
@@ -13436,6 +13453,23 @@ class BugAnalysisRunner:
                 max_entries_per_heading=4,
                 max_table_rows=2,
             )
+        return self._read_bug_summary_context_excerpt(path, max_chars)
+
+    def _direct_api_bug_summary_context_excerpt(
+        self,
+        *,
+        title: str,
+        path: Path,
+        max_chars: int,
+        compaction_profile: str,
+    ) -> str:
+        if not compaction_profile:
+            return self._read_bug_summary_context_excerpt(path, max_chars)
+        for profile in _DIRECT_API_COMPACTION_PROFILES:
+            if profile.name != compaction_profile:
+                continue
+            handler = getattr(self, profile.handler)
+            return handler(title=title, path=path, max_chars=max_chars)
         return self._read_bug_summary_context_excerpt(path, max_chars)
 
     def _direct_api_bug_summary_embedded_files(
