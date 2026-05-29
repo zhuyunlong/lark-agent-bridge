@@ -225,6 +225,22 @@ class TestAgentTools(unittest.TestCase):
         self.assertIn("startCheck timeout", result)
         self.assertIn("not onMainActivityCreate", result)
 
+    def test_register_tools_registers_search_large_log(self):
+        from lark_agent_bridge.agents.agent_tools import register_tools
+
+        class FakeAgent:
+            def __init__(self):
+                self.tools = {}
+
+            def tool_plain(self, func):
+                self.tools[func.__name__] = func
+                return func
+
+        agent = FakeAgent()
+        register_tools(agent, self.workspace)
+
+        self.assertIn("search_large_log", agent.tools)
+
     def test_glob_paths(self):
         from lark_agent_bridge.agents.agent_tools import glob_paths
 

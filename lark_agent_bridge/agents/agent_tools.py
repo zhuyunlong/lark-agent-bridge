@@ -522,6 +522,9 @@ def search_large_log(
     )
 
 
+_search_large_log_impl = search_large_log
+
+
 def glob_paths(pattern: str, *, workspace: Path, max_results: int = 100) -> str:
     """Find files matching a glob pattern within workspace."""
     ws = workspace.resolve()
@@ -762,7 +765,7 @@ def register_tools(
     all_roots = [workspace]
     if extra_roots:
         all_roots.extend(r for r in extra_roots if r not in all_roots)
-    search_large_log_fn = search_large_log
+    search_large_log_fn = _search_large_log_impl
 
     # Per-run cache for deduplicating tool calls (create if not provided)
     cache = tool_cache or ToolCallCache()
