@@ -14,6 +14,7 @@ from .models import (
     BridgeConfig,
     ApprovalOptions,
     ClaudeAgentOptions,
+    CodexAppServerOptions,
     DownloadConfig,
     DualAgentOptions,
     EventConsumerOptions,
@@ -249,6 +250,7 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
     omlx_data = data.get("omlx_chat") or {}
     report_server_data = data.get("report_server") or {}
     approval_data = data.get("approval") or {}
+    codex_app_server_data = data.get("codex_app_server") or {}
     workflow_archive_data = data.get("workflow_archive") or {}
     notifications_data = data.get("notifications") or {}
     dual_agent_data = data.get("dual_agent") or {}
@@ -333,6 +335,7 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
             or _default_agent_command_for_provider(source_provider)
             or SourceInvestigationOptions().command
         )
+    codex_app_server_defaults = CodexAppServerOptions()
     guideengine_repo = _resolve_path(
         os.environ.get("LARK_AGENT_BRIDGE_GUIDEENGINE_REPO")
         or data.get("guideengine_repo", default_guideengine_repo),
@@ -542,6 +545,119 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
         ),
         approval=ApprovalOptions(
             enabled=bool(approval_data.get("enabled", ApprovalOptions().enabled)),
+        ),
+        codex_app_server=CodexAppServerOptions(
+            enabled=bool(codex_app_server_data.get("enabled", codex_app_server_defaults.enabled)),
+            command=str(codex_app_server_data.get("command", codex_app_server_defaults.command)),
+            min_version=str(codex_app_server_data.get("min_version", codex_app_server_defaults.min_version)),
+            use_for_file_agent=bool(
+                codex_app_server_data.get(
+                    "use_for_file_agent",
+                    codex_app_server_defaults.use_for_file_agent,
+                )
+            ),
+            use_for_bug_summary=bool(
+                codex_app_server_data.get(
+                    "use_for_bug_summary",
+                    codex_app_server_defaults.use_for_bug_summary,
+                )
+            ),
+            fallback_to_exec=bool(
+                codex_app_server_data.get(
+                    "fallback_to_exec",
+                    codex_app_server_defaults.fallback_to_exec,
+                )
+            ),
+            startup_timeout_seconds=float(
+                codex_app_server_data.get(
+                    "startup_timeout_seconds",
+                    codex_app_server_defaults.startup_timeout_seconds,
+                )
+            ),
+            turn_timeout_seconds=float(
+                codex_app_server_data.get(
+                    "turn_timeout_seconds",
+                    codex_app_server_defaults.turn_timeout_seconds,
+                )
+            ),
+            post_tool_quiet_timeout_seconds=float(
+                codex_app_server_data.get(
+                    "post_tool_quiet_timeout_seconds",
+                    codex_app_server_defaults.post_tool_quiet_timeout_seconds,
+                )
+            ),
+            notification_poll_seconds=float(
+                codex_app_server_data.get(
+                    "notification_poll_seconds",
+                    codex_app_server_defaults.notification_poll_seconds,
+                )
+            ),
+            max_event_audit=int(
+                codex_app_server_data.get(
+                    "max_event_audit",
+                    codex_app_server_defaults.max_event_audit,
+                )
+            ),
+            sandbox_mode=str(
+                codex_app_server_data.get(
+                    "sandbox_mode",
+                    codex_app_server_defaults.sandbox_mode,
+                )
+            ),
+            disable_node_repl=bool(
+                codex_app_server_data.get(
+                    "disable_node_repl",
+                    codex_app_server_defaults.disable_node_repl,
+                )
+            ),
+            disable_analytics=bool(
+                codex_app_server_data.get(
+                    "disable_analytics",
+                    codex_app_server_defaults.disable_analytics,
+                )
+            ),
+            disable_memories=bool(
+                codex_app_server_data.get(
+                    "disable_memories",
+                    codex_app_server_defaults.disable_memories,
+                )
+            ),
+            disable_apps_feature=bool(
+                codex_app_server_data.get(
+                    "disable_apps_feature",
+                    codex_app_server_defaults.disable_apps_feature,
+                )
+            ),
+            disable_plugins_feature=bool(
+                codex_app_server_data.get(
+                    "disable_plugins_feature",
+                    codex_app_server_defaults.disable_plugins_feature,
+                )
+            ),
+            disable_computer_use_feature=bool(
+                codex_app_server_data.get(
+                    "disable_computer_use_feature",
+                    codex_app_server_defaults.disable_computer_use_feature,
+                )
+            ),
+            preserve_proxy_env=bool(
+                codex_app_server_data.get(
+                    "preserve_proxy_env",
+                    codex_app_server_defaults.preserve_proxy_env,
+                )
+            ),
+            reasoning_effort=str(
+                codex_app_server_data.get(
+                    "reasoning_effort",
+                    codex_app_server_defaults.reasoning_effort,
+                )
+            ),
+            use_minimal_home=bool(
+                codex_app_server_data.get(
+                    "use_minimal_home",
+                    codex_app_server_defaults.use_minimal_home,
+                )
+            ),
         ),
         workflow_archive=WorkflowArchiveOptions(
             enabled=bool(workflow_archive_data.get("enabled", WorkflowArchiveOptions().enabled)),

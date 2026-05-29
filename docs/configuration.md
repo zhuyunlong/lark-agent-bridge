@@ -235,6 +235,42 @@ add_dirs = ["/path/to/Napa5"]
 
 The runner invokes `codex exec --json --output-last-message -s read-only -m gpt-5.4`, sets `-C` to the primary repo root, and appends `--add-dir` for optional cross-repo lookups. The prompt tells Codex to use `rg` anchors first, read only key snippets, avoid whole-repo context dumps, and return a fixed JSON schema: `answer`, `canonical_key`, `confidence`, `commands`, `source_evidence`, `coverage_boundary`, `writeback_allowed`. Write-back is allowed only when confidence is high enough, a canonical key exists, and source evidence is present. This path is for short source investigations only; big logs, long reports, and bug-analysis summaries stay on the existing analysis runners.
 
+`[codex_app_server]` enables an optional long-lived Codex runtime for file-agent style source analysis:
+
+```toml
+[codex_app_server]
+enabled = false
+command = "codex"
+min_version = "0.125.0"
+use_for_file_agent = false
+use_for_bug_summary = false
+fallback_to_exec = true
+startup_timeout_seconds = 15
+turn_timeout_seconds = 600
+post_tool_quiet_timeout_seconds = 90
+notification_poll_seconds = 0.25
+max_event_audit = 200
+sandbox_mode = "read-only"
+disable_node_repl = true
+disable_analytics = true
+disable_memories = true
+disable_apps_feature = true
+disable_plugins_feature = true
+disable_computer_use_feature = true
+preserve_proxy_env = true
+reasoning_effort = "medium"
+use_minimal_home = true
+```
+
+This does **not** replace `codex exec`. When `enabled=true` and `use_for_file_agent=true`, the bridge tries `codex app-server` only for Codex-backed file-agent analysis, writes an event audit JSONL beside the analysis artifacts, and falls back to the existing `codex exec --json --output-last-message` path when the app-server run fails and `fallback_to_exec=true`.
+
+The extra `disable_*`, `reasoning_effort`, and `use_minimal_home` knobs are there because this bridge uses app-server for bounded source-analysis turns, not for a full desktop-style Codex session. In practice:
+
+- disabling `apps`, `plugins`, `computer_use`, `node_repl`, analytics, and memories reduces unrelated startup and network noise
+- `preserve_proxy_env=true` re-injects the current shell's proxy variables into the app-server subprocess, even if the bridge's general `internal_network_env` policy would otherwise unset them; this matters on hosts where Codex backend access only works through a proxy
+- `reasoning_effort="medium"` avoids carrying the user's global `xhigh` desktop default into these benchmark-sensitive file-agent runs
+- `use_minimal_home=true` makes the bridge prepare a stripped-down `CODEX_HOME` under its own `data/` directory, copying only the auth/model cache files it needs, so app-server does not inherit the user's full desktop hooks/plugin state
+
 Repeat source investigations now use a two-stage cache-friendly flow:
 
 - the first non-local investigation of a question family does **not** write any reusable snapshot to disk

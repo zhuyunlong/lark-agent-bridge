@@ -177,6 +177,31 @@ class ApprovalOptions:
 
 
 @dataclass(slots=True)
+class CodexAppServerOptions:
+    enabled: bool = False
+    command: str = "codex"
+    min_version: str = "0.125.0"
+    use_for_file_agent: bool = False
+    use_for_bug_summary: bool = False
+    fallback_to_exec: bool = True
+    startup_timeout_seconds: float = 15.0
+    turn_timeout_seconds: float = 600.0
+    post_tool_quiet_timeout_seconds: float = 90.0
+    notification_poll_seconds: float = 0.25
+    max_event_audit: int = 200
+    sandbox_mode: str = "read-only"
+    disable_node_repl: bool = True
+    disable_analytics: bool = True
+    disable_memories: bool = True
+    disable_apps_feature: bool = True
+    disable_plugins_feature: bool = True
+    disable_computer_use_feature: bool = True
+    preserve_proxy_env: bool = True
+    reasoning_effort: str = "medium"
+    use_minimal_home: bool = True
+
+
+@dataclass(slots=True)
 class WorkflowArchiveOptions:
     enabled: bool = False
     base_token: str = ""
@@ -350,6 +375,7 @@ class BridgeConfig:
     omlx_chat: OmlxChatOptions = field(default_factory=OmlxChatOptions)
     report_server: ReportServerOptions = field(default_factory=ReportServerOptions)
     approval: ApprovalOptions = field(default_factory=ApprovalOptions)
+    codex_app_server: CodexAppServerOptions = field(default_factory=CodexAppServerOptions)
     workflow_archive: WorkflowArchiveOptions = field(default_factory=WorkflowArchiveOptions)
     notifications: NotificationOptions = field(default_factory=NotificationOptions)
     dual_agent: DualAgentOptions = field(default_factory=DualAgentOptions)

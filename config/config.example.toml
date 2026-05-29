@@ -112,6 +112,29 @@ codegraph_command = "codegraph"
 codegraph_timeout_seconds = 10
 codegraph_min_confidence = 0.6
 
+[codex_app_server]
+enabled = false
+command = "codex"
+min_version = "0.125.0"
+use_for_file_agent = false
+use_for_bug_summary = false
+fallback_to_exec = true
+startup_timeout_seconds = 15
+turn_timeout_seconds = 600
+post_tool_quiet_timeout_seconds = 90
+notification_poll_seconds = 0.25
+max_event_audit = 200
+sandbox_mode = "read-only"
+disable_node_repl = true
+disable_analytics = true
+disable_memories = true
+disable_apps_feature = true
+disable_plugins_feature = true
+disable_computer_use_feature = true
+preserve_proxy_env = true
+reasoning_effort = "medium"
+use_minimal_home = true
+
 [claude_agent]
 enabled = false
 command = "claude"

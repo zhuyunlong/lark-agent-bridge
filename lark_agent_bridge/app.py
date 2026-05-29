@@ -298,6 +298,7 @@ class BridgeApp:
         conversation_store: ConversationContextStore | None = None,
         activity_store: AgentActivityStore | None = None,
         progress_callback: Callable[[dict[str, object]], None] | None = None,
+        warmup_codegraph: bool = True,
     ) -> None:
         self.config = config
         self.lark_client = lark_client or LarkClient(config)
@@ -310,6 +311,7 @@ class BridgeApp:
         self.progress_callback = progress_callback
         self._progress_cards: dict[str, dict[str, object]] = {}
         self._progress_cards_max_age_seconds = 7200  # 2 hour TTL (must exceed bug_analysis timeout)
+        self._progress_card_stream_update_interval_seconds = 5.0
         self.process_watchdog = ProcessWatchdog()
         self.health_monitor = HealthMonitor(data_dir=config.data_dir, process_watchdog=self.process_watchdog)
         self._restore_daemon_health_pid()
@@ -330,7 +332,10 @@ class BridgeApp:
         self.notification_history = NotificationHistory(config.data_dir / "state" / "notification_history.json")
         self.lifecycle_store = LifecycleStore()
         self.report_publisher = report_publisher or HtmlReportPublisher(config)
-        self.knowledge_service = knowledge_service or KnowledgeService(config)
+        self.knowledge_service = knowledge_service or KnowledgeService(
+            config,
+            warmup_codegraph=warmup_codegraph,
+        )
         self.report_http_server = report_http_server or ReportHttpServer(
             config,
             activity_store=self.activity_store,
@@ -1618,6 +1623,27 @@ class BridgeApp:
         card_state = self._progress_cards.get(key)
         return bool(card_state and card_state.get("message_id"))
 
+    def _should_update_progress_card_from_progress(
+        self,
+        event: LarkEvent,
+        *,
+        stage: str,
+        session_id: str | None = None,
+    ) -> bool:
+        key = self._progress_card_state_key(event, session_id=session_id)
+        card_state = self._progress_cards.get(key)
+        if not card_state or not card_state.get("message_id"):
+            return False
+        now = datetime.now(timezone.utc)
+        card_state["last_active_at"] = now
+        if not stage.endswith("_stream"):
+            return True
+        last_update = card_state.get("last_card_update_at")
+        if isinstance(last_update, datetime):
+            if (now - last_update).total_seconds() < self._progress_card_stream_update_interval_seconds:
+                return False
+        return True
+
     def _update_progress_card(
         self,
         event: LarkEvent,
@@ -1636,6 +1662,10 @@ class BridgeApp:
             return False
         card = self._build_progress_card(event, key=key, status=status, result=result, note=note)
         send_result = self.lark_client.update_card(message_id, card_to_json(card))
+        if send_result.returncode == 0:
+            now = datetime.now(timezone.utc)
+            card_state["last_card_update_at"] = now
+            card_state["last_active_at"] = now
         return send_result.returncode == 0
 
     def _finish_progress_card(self, event: LarkEvent, result: TaskResult, *, session_id: str | None = None) -> bool:
@@ -3192,7 +3222,11 @@ class BridgeApp:
         progress_details.setdefault("executor", self._progress_executor(stage, progress_details))
         payload["details"] = progress_details
         self.activity_store.record_progress(payload)
-        if event is not None and event.chat_type in {"group", "p2p"}:
+        if (
+            event is not None
+            and event.chat_type in {"group", "p2p"}
+            and self._should_update_progress_card_from_progress(event, stage=stage, session_id=session_id)
+        ):
             self._update_progress_card(event, session_id=session_id)
         if self.progress_callback is None:
             return

@@ -1367,6 +1367,48 @@ class AppTests(unittest.TestCase):
         self.assertTrue(any(reply["message_id"] == "om_1" for reply in fake_lark.replies))
         self.assertTrue(any("bug 分析完成" in reply["text"] for reply in fake_lark.replies))
 
+    def test_stream_progress_card_updates_are_throttled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_lark = FakeLarkClient()
+            app = BridgeApp(
+                BridgeConfig(dry_run=False, data_dir=Path(tmp), allowed_chats=["oc_denied"]),
+                lark_client=fake_lark,
+            )
+            app._progress_card_stream_update_interval_seconds = 60.0
+            evt = event(message_id="om_stream_progress", content="@bot 继续分析")
+
+            app.send_status_card(
+                evt,
+                title="Bug 重新分析",
+                status="analyzing",
+                session_id="om_stream_progress",
+            )
+            self.assertEqual(len(fake_lark.card_replies), 1)
+
+            app._notify_progress(
+                "source_stage_agent_analysis_stream",
+                "Codex app-server: Codex delta A",
+                event=evt,
+                session_id="om_stream_progress",
+                provider="codex",
+            )
+            app._notify_progress(
+                "source_stage_agent_analysis_stream",
+                "Codex app-server: Codex delta B",
+                event=evt,
+                session_id="om_stream_progress",
+                provider="codex",
+            )
+            self.assertEqual(len(fake_lark.updated_cards), 1)
+
+            app._notify_progress(
+                "bug_reanalysis_run_analysis",
+                "基于已准备日志重新执行源码分析阶段",
+                event=evt,
+                session_id="om_stream_progress",
+            )
+            self.assertEqual(len(fake_lark.updated_cards), 2)
+
     def test_progress_card_send_failure_falls_back_to_received_text(self):
         class FailingCardLarkClient(FakeLarkClient):
             def reply_card(self, message_id, card_json):

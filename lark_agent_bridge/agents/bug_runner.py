@@ -10,6 +10,7 @@ import html as html_lib
 import importlib
 import json
 import math
+import os
 import re
 import select
 import shlex
@@ -1378,15 +1379,34 @@ class BugAnalysisRunner:
         followup_text: str,
         request_text: str,
     ) -> "BugAnalysisSelection | None":
-        if not self._followup_has_explicit_bug_route(followup_text):
+        lowered_followup = (followup_text or "").casefold()
+        combined_lowered = f"{request_text}\n{followup_text}".casefold()
+
+        def _scene_signal_source_followup_selection() -> "BugAnalysisSelection | None":
+            if (
+                self._followup_explicitly_requests_source_analysis(request_text, followup_text)
+                and ("信号" in followup_text or "signal" in lowered_followup)
+                and (
+                    _has_strong_scene_signal_intent(combined_lowered)
+                    or looks_like_scene_signal_request(request_text)
+                )
+            ):
+                return self.selection_for_skill_name(
+                    "scene-signal-diagnosis",
+                    source="deterministic_fallback",
+                    reason="源码追问命中场景信号上下文。",
+                )
             return None
+
+        if not self._followup_has_explicit_bug_route(followup_text):
+            return _scene_signal_source_followup_selection()
         selection = self._manual_bug_selection(
             prompt_text=followup_text,
-            title=request_text,
+            title="",
             description="",
         )
         if selection.skill_name == "general" and all(plan.kind == "general" for plan in selection.plans):
-            return None
+            return _scene_signal_source_followup_selection()
         return selection
 
     def _build_bug_followup_selection(
@@ -2066,41 +2086,47 @@ class BugAnalysisRunner:
                                 prior_findings=self._summarize_prior_report_jsons(report_jsons),
                             )
                     else:
-                        # Source stage: try pydantic-ai runtime first (fast path)
+                        # Source stage: if app-server-backed file-agent is enabled, prefer it
+                        # directly and leave the later summary stage on the configured AI path.
                         if _kind_spec(current_plan.kind).is_source_stage:
-                            custom_result = self._run_source_stage_pydantic_ai(
-                                analysis_kind=current_plan.kind,
-                                skill_name=current_skill_name,
-                                request_text=request_text,
-                                prompt_text=prompt_text,
-                                title=title,
-                                description=description,
-                                fault_time=fault_time,
-                                selected_input=selected_input,
-                                prepared_input=prepared_input,
-                                source_evidence_path=source_evidence_path,
-                                html_path=current_html,
-                                json_path=current_json,
-                                analysis_dir=current_analysis_dir,
-                                progress_callback=progress_callback,
-                                context_profile=getattr(source_decision, "context_profile", ""),
-                                prior_findings=self._summarize_prior_report_jsons(report_jsons),
-                            )
-                            if custom_result.get("ok"):
-                                logger.info("source_stage pydantic-ai succeeded, skipping file_agent")
-                            else:
-                                logger.warning(
-                                    "source_stage pydantic-ai failed (error=%s), falling back to file_agent",
-                                    custom_result.get("error_code", "unknown"),
-                                )
+                            if self._prefer_source_stage_file_agent():
                                 self._emit_progress(
                                     progress_callback,
-                                    stage="source_stage_pydantic_ai_fallback",
-                                    message=f"pydantic-ai 失败（{custom_result.get('error_code')}），切换 file_agent",
+                                    stage="source_stage_app_server_preferred",
+                                    message="已启用 codex app-server，源码阶段直接走 file-agent 路径",
+                                )
+                                execution_skill_name = (
+                                    getattr(source_decision, "context_profile", "").strip()
+                                    or current_skill_name
                                 )
                                 custom_result = self._run_custom_skill_agent_analysis(
                                     analysis_kind=current_plan.kind,
                                     analysis_label=self._analysis_label(current_plan.kind),
+                                    skill_name=execution_skill_name,
+                                    request_text=request_text,
+                                    prompt_text=prompt_text,
+                                    title=title,
+                                    description=description,
+                                    fault_time=fault_time,
+                                    selected_input=selected_input,
+                                    prepared_input=prepared_input,
+                                    source_evidence_path=source_evidence_path,
+                                    html_path=current_html,
+                                    json_path=current_json,
+                                    analysis_dir=current_analysis_dir,
+                                    progress_callback=progress_callback,
+                                    timeout=self._source_stage_file_agent_timeout(
+                                        reference_seconds=max(time.monotonic() - started, 240.0),
+                                    ),
+                                    bridge_session_id=bridge_session_id,
+                                    prior_findings=self._summarize_prior_report_jsons(report_jsons),
+                                    context_profile=execution_skill_name,
+                                    provider_override="codex",
+                                    command_override=self.config.codex_app_server.command,
+                                )
+                            else:
+                                custom_result = self._run_source_stage_pydantic_ai(
+                                    analysis_kind=current_plan.kind,
                                     skill_name=current_skill_name,
                                     request_text=request_text,
                                     prompt_text=prompt_text,
@@ -2114,14 +2140,44 @@ class BugAnalysisRunner:
                                     json_path=current_json,
                                     analysis_dir=current_analysis_dir,
                                     progress_callback=progress_callback,
-                                    timeout=min(180.0, self._agent_summary_timeout(
-                                        options.timeout_seconds,
-                                        reference_seconds=max(time.monotonic() - started, 240.0),
-                                    )),
-                                    bridge_session_id=bridge_session_id,
-                                    prior_findings=self._summarize_prior_report_jsons(report_jsons),
                                     context_profile=getattr(source_decision, "context_profile", ""),
+                                    prior_findings=self._summarize_prior_report_jsons(report_jsons),
                                 )
+                                if custom_result.get("ok"):
+                                    logger.info("source_stage pydantic-ai succeeded, skipping file_agent")
+                                else:
+                                    logger.warning(
+                                        "source_stage pydantic-ai failed (error=%s), falling back to file_agent",
+                                        custom_result.get("error_code", "unknown"),
+                                    )
+                                    self._emit_progress(
+                                        progress_callback,
+                                        stage="source_stage_pydantic_ai_fallback",
+                                        message=f"pydantic-ai 失败（{custom_result.get('error_code')}），切换 file_agent",
+                                    )
+                                    custom_result = self._run_custom_skill_agent_analysis(
+                                        analysis_kind=current_plan.kind,
+                                        analysis_label=self._analysis_label(current_plan.kind),
+                                        skill_name=current_skill_name,
+                                        request_text=request_text,
+                                        prompt_text=prompt_text,
+                                        title=title,
+                                        description=description,
+                                        fault_time=fault_time,
+                                        selected_input=selected_input,
+                                        prepared_input=prepared_input,
+                                        source_evidence_path=source_evidence_path,
+                                        html_path=current_html,
+                                        json_path=current_json,
+                                        analysis_dir=current_analysis_dir,
+                                        progress_callback=progress_callback,
+                                        timeout=self._source_stage_file_agent_timeout(
+                                            reference_seconds=max(time.monotonic() - started, 240.0),
+                                        ),
+                                        bridge_session_id=bridge_session_id,
+                                        prior_findings=self._summarize_prior_report_jsons(report_jsons),
+                                        context_profile=getattr(source_decision, "context_profile", ""),
+                                    )
                         else:
                             custom_result = self._run_custom_skill_agent_analysis(
                                 analysis_kind=current_plan.kind,
@@ -2522,6 +2578,7 @@ class BugAnalysisRunner:
                 f"故障时间: {str(details.get('target_time') or details.get('fault_time') or '').strip()}",
             ]
         ).strip()
+        concise_reference_text = self._trim_reanalysis_reference_text(reference_text)
         # Recover bug title from metadata so follow-ups like
         # "请根据BUG问题实际时间继续分析" can extract the correct time.
         recovered_bug_title = self._recover_bug_title_from_metadata(output_dir)
@@ -2534,12 +2591,36 @@ class BugAnalysisRunner:
         target_time = time_context.fault_time
         prepared_input = local_prepared_input or self._path_from_details(details, "prepared_log_input")
         selected_input = local_selected_input or self._path_from_details(details, "selected_log_input") or prepared_input
-        plans = plans_override or self._plans_for_reanalysis(details, request_text=request_text, followup_text=followup_text)
+        explicit_source_followup = self._followup_explicitly_requests_source_analysis(
+            request_text,
+            followup_text,
+        )
+        reanalysis_selection: BugAnalysisSelection | None = None
+        if plans_override is None and explicit_source_followup:
+            candidate_selection = self._manual_followup_selection_if_explicit(
+                followup_text=followup_text,
+                request_text=request_text,
+            )
+            if candidate_selection is not None and any(plan.kind != "general" for plan in candidate_selection.plans):
+                reanalysis_selection = candidate_selection
+                if not classification_skill:
+                    classification_skill = candidate_selection.skill_name
+                if not classification_source:
+                    classification_source = candidate_selection.source
+                if not classification_reason:
+                    classification_reason = "源码追问按原始 bug 请求重建领域上下文。"
+                if not classification_provider:
+                    classification_provider = candidate_selection.provider
+        plans = plans_override or (
+            [BugAnalysisPlan(kind=plan.kind, signal_code=plan.signal_code) for plan in reanalysis_selection.plans]
+            if reanalysis_selection is not None
+            else self._plans_for_reanalysis(details, request_text=request_text, followup_text=followup_text)
+        )
         source_decision_skill_name = classification_skill or str(details.get("analysis_skill") or "").strip()
         if (
             plans_override is None
             and all(_kind_spec(plan.kind).is_source_stage for plan in plans)
-            and not self._followup_explicitly_requests_source_analysis(request_text, followup_text)
+            and not explicit_source_followup
         ):
             fallback_plans = self._fallback_non_source_plans_from_job_output(output_dir)
             if fallback_plans:
@@ -2550,7 +2631,7 @@ class BugAnalysisRunner:
             request_text=request_text,
             prompt_text=followup_text,
             title="",
-            description=reference_text,
+            description=concise_reference_text,
             plans=plans,
             skill_name=source_decision_skill_name,
         )
@@ -2640,6 +2721,14 @@ class BugAnalysisRunner:
             force_rerun=force_rerun,
         )
         prompt_text = f"{request_text}\n追问/修正：{followup_text}".strip()
+        source_stage_prompt_text = self._source_stage_followup_prompt_text(
+            request_text=request_text,
+            followup_text=followup_text,
+        )
+        source_stage_request_text = self._source_stage_followup_request_text(
+            request_text=request_text,
+            followup_text=followup_text,
+        )
         source_evidence_path = self._write_reanalysis_source_evidence(
             plans=plans,
             request_text=request_text,
@@ -2823,7 +2912,7 @@ class BugAnalysisRunner:
                                 request_text=request_text,
                                 prompt_text=prompt_text,
                                 title="",
-                                description=reference_text,
+                                description=concise_reference_text,
                                 fault_time=target_time,
                                 selected_input=selected_input,
                                 prepared_input=prepared_input,
@@ -2844,46 +2933,27 @@ class BugAnalysisRunner:
                                 prior_findings=self._summarize_prior_report_jsons(report_jsons),
                             )
                     else:
-                        # Source stage reanalysis: try pydantic-ai first (fast path)
+                        # Source stage reanalysis: prefer app-server-backed file-agent when enabled,
+                        # while leaving the later summary stage on the configured AI path.
                         if _kind_spec(plan.kind).is_source_stage:
-                            custom_result = self._run_source_stage_pydantic_ai(
-                                analysis_kind=plan.kind,
-                                skill_name=skill_name,
-                                request_text=request_text,
-                                prompt_text=prompt_text,
-                                title="",
-                                description=reference_text,
-                                fault_time=target_time,
-                                selected_input=selected_input,
-                                prepared_input=prepared_input,
-                                source_evidence_path=source_evidence_path,
-                                html_path=html_path,
-                                json_path=json_path,
-                                analysis_dir=analysis_dir,
-                                progress_callback=progress_callback,
-                                context_profile=getattr(source_decision, "context_profile", ""),
-                                prior_findings=self._summarize_prior_report_jsons(report_jsons),
-                            )
-                            if custom_result.get("ok"):
-                                logger.info("source_stage reanalysis pydantic-ai succeeded, skipping file_agent")
-                            else:
-                                logger.warning(
-                                   "source_stage reanalysis pydantic-ai failed (error=%s), falling back to file_agent",
-                                   custom_result.get("error_code", "unknown"),
-                                )
+                            if self._prefer_source_stage_file_agent():
                                 self._emit_progress(
-                                   progress_callback,
-                                   stage="source_stage_pydantic_ai_fallback",
-                                   message=f"pydantic-ai 失败（{custom_result.get('error_code')}），切换 file_agent",
+                                    progress_callback,
+                                    stage="source_stage_app_server_preferred",
+                                    message="已启用 codex app-server，源码阶段直接走 file-agent 路径",
+                                )
+                                execution_skill_name = (
+                                    getattr(source_decision, "context_profile", "").strip()
+                                    or skill_name
                                 )
                                 custom_result = self._run_custom_skill_agent_analysis(
                                    analysis_kind=plan.kind,
                                    analysis_label=self._analysis_label(plan.kind),
-                                   skill_name=skill_name,
-                                   request_text=request_text,
-                                   prompt_text=prompt_text,
+                                   skill_name=execution_skill_name,
+                                   request_text=source_stage_request_text,
+                                   prompt_text=source_stage_prompt_text,
                                    title="",
-                                   description=reference_text,
+                                   description=concise_reference_text,
                                    fault_time=target_time,
                                    selected_input=selected_input,
                                    prepared_input=prepared_input,
@@ -2892,27 +2962,86 @@ class BugAnalysisRunner:
                                    json_path=json_path,
                                    analysis_dir=analysis_dir,
                                    progress_callback=progress_callback,
-                                   timeout=min(180.0, self._agent_summary_timeout(
-                                       self.config.bug_analysis.timeout_seconds,
+                                   timeout=self._source_stage_file_agent_timeout(
                                        reference_seconds=max(
                                            self._agent_summary_timeout_reference(previous_session) or 0.0,
                                            time.monotonic() - started,
                                            240.0,
                                        ),
-                                   )),
+                                   ),
                                    bridge_session_id=bridge_session_id,
                                    prior_findings=self._summarize_prior_report_jsons(report_jsons),
-                                   context_profile=getattr(source_decision, "context_profile", ""),
+                                   context_profile=execution_skill_name,
+                                   provider_override="codex",
+                                   command_override=self.config.codex_app_server.command,
                                 )
+                            else:
+                                custom_result = self._run_source_stage_pydantic_ai(
+                                    analysis_kind=plan.kind,
+                                    skill_name=skill_name,
+                                    request_text=source_stage_request_text,
+                                    prompt_text=source_stage_prompt_text,
+                                    title="",
+                                    description=concise_reference_text,
+                                    fault_time=target_time,
+                                    selected_input=selected_input,
+                                    prepared_input=prepared_input,
+                                    source_evidence_path=source_evidence_path,
+                                    html_path=html_path,
+                                    json_path=json_path,
+                                    analysis_dir=analysis_dir,
+                                    progress_callback=progress_callback,
+                                    context_profile=getattr(source_decision, "context_profile", ""),
+                                    prior_findings=self._summarize_prior_report_jsons(report_jsons),
+                                )
+                                if custom_result.get("ok"):
+                                    logger.info("source_stage reanalysis pydantic-ai succeeded, skipping file_agent")
+                                else:
+                                    logger.warning(
+                                       "source_stage reanalysis pydantic-ai failed (error=%s), falling back to file_agent",
+                                       custom_result.get("error_code", "unknown"),
+                                    )
+                                    self._emit_progress(
+                                       progress_callback,
+                                       stage="source_stage_pydantic_ai_fallback",
+                                       message=f"pydantic-ai 失败（{custom_result.get('error_code')}），切换 file_agent",
+                                    )
+                                    custom_result = self._run_custom_skill_agent_analysis(
+                                       analysis_kind=plan.kind,
+                                       analysis_label=self._analysis_label(plan.kind),
+                                       skill_name=skill_name,
+                                       request_text=source_stage_request_text,
+                                       prompt_text=source_stage_prompt_text,
+                                       title="",
+                                       description=concise_reference_text,
+                                       fault_time=target_time,
+                                       selected_input=selected_input,
+                                       prepared_input=prepared_input,
+                                       source_evidence_path=source_evidence_path,
+                                       html_path=html_path,
+                                       json_path=json_path,
+                                       analysis_dir=analysis_dir,
+                                       progress_callback=progress_callback,
+                                       timeout=self._source_stage_file_agent_timeout(
+                                           reference_seconds=max(
+                                               self._agent_summary_timeout_reference(previous_session) or 0.0,
+                                               time.monotonic() - started,
+                                               240.0,
+                                           ),
+                                       ),
+                                       bridge_session_id=bridge_session_id,
+                                       prior_findings=self._summarize_prior_report_jsons(report_jsons),
+                                       context_profile=getattr(source_decision, "context_profile", ""),
+                                    )
                         else:
                             custom_result = self._run_custom_skill_agent_analysis(
                                 analysis_kind=plan.kind,
                                 analysis_label=self._analysis_label(plan.kind),
                                 skill_name=skill_name,
                                 request_text=request_text,
-                                prompt_text=prompt_text,
+                                        prompt_text=source_stage_prompt_text,
                                 title="",
-                                description=reference_text,
+                                description=concise_reference_text,
                                 fault_time=target_time,
                                 selected_input=selected_input,
                                 prepared_input=prepared_input,
@@ -2936,6 +3065,44 @@ class BugAnalysisRunner:
                     skill_file_agent_execution_result = custom_result
                     command = list(custom_result.get("command") or command or [])
                     if not custom_result.get("ok"):
+                        partial_markdown = str(custom_result.get("partial_markdown") or "").strip()
+                        if partial_markdown and _kind_spec(plan.kind).is_source_stage:
+                            self._emit_progress(
+                                progress_callback,
+                                stage="source_stage_partial_timeout",
+                                message="源码阶段超时，但已提取到阶段性结论，直接降级回复",
+                            )
+                            partial_details = {
+                                "mode": "bug_reanalysis",
+                                "analysis_kind": plan.kind,
+                                "analysis_kinds": [plan.kind],
+                                "analysis_skill": skill_name,
+                                "source_stage_analysis_status": "partial_timeout",
+                                "agent_summary_execution_backend": "source_stage_partial",
+                                "target_time": target_time,
+                                "selected_log_input": str(selected_input or ""),
+                                "prepared_log_input": str(prepared_input or ""),
+                                "stdout_path": str(custom_result.get("stdout_path") or ""),
+                                "stderr_path": str(custom_result.get("stderr_path") or ""),
+                                "command_path": str(custom_result.get("command_path") or ""),
+                                "context_path": str(custom_result.get("context_path") or ""),
+                                "log_focus_manifest_path": str(custom_result.get("log_focus_manifest_path") or ""),
+                                "focused_log_input": str(custom_result.get("focused_log_input") or ""),
+                                "debug_log_path": str(custom_result.get("debug_log_path") or ""),
+                                "analysis_artifact_path": str(custom_result.get("analysis_markdown_path") or ""),
+                                "partial_analysis_available": True,
+                            }
+                            return TaskResult(
+                                success=True,
+                                message=partial_markdown,
+                                job_id=job_id,
+                                job_dir=job_dir,
+                                command=command,
+                                duration_seconds=time.monotonic() - started,
+                                details=partial_details,
+                                stdout=str(custom_result.get("stdout") or ""),
+                                stderr=str(custom_result.get("stderr") or ""),
+                            )
                         return TaskResult(
                             success=False,
                             message=str(custom_result.get("message") or "Bug 续聊专用 Skill 文件 Agent 执行失败。"),
@@ -3078,32 +3245,64 @@ class BugAnalysisRunner:
             prepared_input=prepared_input,
             selected_input=selected_input,
         )
-        agent_summary_result = self._run_bug_agent_summary(
-            request_text=request_text,
-            request_artifact=agent_request_path,
-            metadata_path=agent_metadata_path,
-            output_path=agent_summary_path,
-            progress_callback=progress_callback,
-            timeout=self._agent_summary_timeout(
-                self.config.bug_analysis.timeout_seconds,
-                reference_seconds=max(
-                    self._agent_summary_timeout_reference(previous_session) or 0.0,
-                    time.monotonic() - started,
-                ),
-            ),
-            provider_session_id="",
-            followup_text=followup_text,
-            previous_summary_path=previous_summary_path,
-            snapshot_details=snapshot_details,
-            snapshot_plans=plans,
-            prefer_lightweight=self._should_prefer_lightweight_bug_summary(
-                request_text=request_text,
-                followup_text=followup_text,
-                provider_session_id="",
-            ),
-            provider_override=agent_provider_override,
-            bridge_session_id=bridge_session_id,
+        use_source_stage_direct_reply = (
+            explicit_source_followup
+            and skill_file_agent_execution_result is not None
+            and bool(skill_file_agent_execution_result.get("ok"))
+            and str(skill_file_agent_execution_result.get("executor") or "") == "codex_app_server"
+            and any(_kind_spec(plan.kind).is_source_stage for plan in plans)
         )
+        if use_source_stage_direct_reply:
+            analysis_path = skill_file_agent_execution_result.get("analysis_markdown_path")
+            analysis_message = ""
+            if isinstance(analysis_path, Path) and analysis_path.exists():
+                analysis_message = analysis_path.read_text(encoding="utf-8", errors="replace").strip()
+            agent_summary_result = {
+                "message": analysis_message,
+                "command": None,
+                "error": "",
+                "provider": "codex",
+                "session_id": "",
+                "resumed": False,
+                "duration_seconds": 0.0,
+                "usage": skill_file_agent_execution_result.get("usage") or {},
+                "usage_scope": "source_stage_direct",
+                "execution_backend": "source_stage_direct",
+                "backend_reason": "explicit_source_stage_output",
+            }
+            self._emit_progress(
+                progress_callback,
+                stage="bug_agent_summary_completed",
+                message="源码阶段已产出完整 Markdown，直接作为最终回答",
+                provider="codex",
+            )
+        else:
+            agent_summary_result = self._run_bug_agent_summary(
+                request_text=request_text,
+                request_artifact=agent_request_path,
+                metadata_path=agent_metadata_path,
+                output_path=agent_summary_path,
+                progress_callback=progress_callback,
+                timeout=self._agent_summary_timeout(
+                    self.config.bug_analysis.timeout_seconds,
+                    reference_seconds=max(
+                        self._agent_summary_timeout_reference(previous_session) or 0.0,
+                        time.monotonic() - started,
+                    ),
+                ),
+                provider_session_id="",
+                followup_text=followup_text,
+                previous_summary_path=previous_summary_path,
+                snapshot_details=snapshot_details,
+                snapshot_plans=plans,
+                prefer_lightweight=self._should_prefer_lightweight_bug_summary(
+                    request_text=request_text,
+                    followup_text=followup_text,
+                    provider_session_id="",
+                ),
+                provider_override=agent_provider_override,
+                bridge_session_id=bridge_session_id,
+            )
         self._append_agent_runtime_metadata(
             agent_metadata_path,
             agent_summary_result=agent_summary_result,
@@ -3614,34 +3813,47 @@ class BugAnalysisRunner:
                                 "prepared_log_input": str(prepared_input),
                             },
                         )
-                    # Source stage: try pydantic-ai runtime first (fast path)
+                    # Source stage: prefer app-server-backed file-agent when enabled,
+                    # while keeping the later summary stage independent.
                     if _kind_spec(current_plan.kind).is_source_stage:
-                        custom_result = self._run_source_stage_pydantic_ai(
-                            analysis_kind=current_plan.kind,
-                            skill_name=current_skill_name,
-                            request_text=request_text,
-                            prompt_text=request.prompt,
-                            title="",
-                            description="",
-                            fault_time=fault_time,
-                            selected_input=selected_input,
-                            prepared_input=prepared_input,
-                            source_evidence_path=source_evidence_path,
-                            html_path=current_html,
-                            json_path=current_json,
-                            analysis_dir=current_analysis_dir,
-                            progress_callback=progress_callback,
-                            context_profile=getattr(source_decision, "context_profile", ""),
-                            prior_findings=self._summarize_prior_report_jsons(report_jsons),
-                        )
-                        if not custom_result.get("ok"):
-                            logger.warning(
-                                "direct_analysis source_stage pydantic-ai failed (error=%s), falling back to file_agent",
-                                custom_result.get("error_code", "unknown"),
+                        if self._prefer_source_stage_file_agent():
+                            self._emit_progress(
+                                progress_callback,
+                                stage="source_stage_app_server_preferred",
+                                message="已启用 codex app-server，源码阶段直接走 file-agent 路径",
+                            )
+                            execution_skill_name = (
+                                getattr(source_decision, "context_profile", "").strip()
+                                or current_skill_name
                             )
                             custom_result = self._run_custom_skill_agent_analysis(
                                 analysis_kind=current_plan.kind,
                                 analysis_label=self._analysis_label(current_plan.kind),
+                                skill_name=execution_skill_name,
+                                request_text=request_text,
+                                prompt_text=request.prompt,
+                                title="",
+                                description="",
+                                fault_time=fault_time,
+                                selected_input=selected_input,
+                                prepared_input=prepared_input,
+                                source_evidence_path=source_evidence_path,
+                                html_path=current_html,
+                                json_path=current_json,
+                                analysis_dir=current_analysis_dir,
+                                progress_callback=progress_callback,
+                                timeout=self._source_stage_file_agent_timeout(
+                                    reference_seconds=max(time.monotonic() - started, 240.0),
+                                ),
+                                bridge_session_id=bridge_session_id,
+                                prior_findings=self._summarize_prior_report_jsons(report_jsons),
+                                context_profile=execution_skill_name,
+                                provider_override="codex",
+                                command_override=self.config.codex_app_server.command,
+                            )
+                        else:
+                            custom_result = self._run_source_stage_pydantic_ai(
+                                analysis_kind=current_plan.kind,
                                 skill_name=current_skill_name,
                                 request_text=request_text,
                                 prompt_text=request.prompt,
@@ -3655,14 +3867,37 @@ class BugAnalysisRunner:
                                 json_path=current_json,
                                 analysis_dir=current_analysis_dir,
                                 progress_callback=progress_callback,
-                                timeout=self._agent_summary_timeout(
-                                    self.config.bug_analysis.timeout_seconds,
-                                    reference_seconds=max(time.monotonic() - started, 240.0),
-                                ),
-                                bridge_session_id=bridge_session_id,
-                                prior_findings=self._summarize_prior_report_jsons(report_jsons),
                                 context_profile=getattr(source_decision, "context_profile", ""),
+                                prior_findings=self._summarize_prior_report_jsons(report_jsons),
                             )
+                            if not custom_result.get("ok"):
+                                logger.warning(
+                                    "direct_analysis source_stage pydantic-ai failed (error=%s), falling back to file_agent",
+                                    custom_result.get("error_code", "unknown"),
+                                )
+                                custom_result = self._run_custom_skill_agent_analysis(
+                                    analysis_kind=current_plan.kind,
+                                    analysis_label=self._analysis_label(current_plan.kind),
+                                    skill_name=current_skill_name,
+                                    request_text=request_text,
+                                    prompt_text=request.prompt,
+                                    title="",
+                                    description="",
+                                    fault_time=fault_time,
+                                    selected_input=selected_input,
+                                    prepared_input=prepared_input,
+                                    source_evidence_path=source_evidence_path,
+                                    html_path=current_html,
+                                    json_path=current_json,
+                                    analysis_dir=current_analysis_dir,
+                                    progress_callback=progress_callback,
+                                    timeout=self._source_stage_file_agent_timeout(
+                                        reference_seconds=max(time.monotonic() - started, 240.0),
+                                    ),
+                                    bridge_session_id=bridge_session_id,
+                                    prior_findings=self._summarize_prior_report_jsons(report_jsons),
+                                    context_profile=getattr(source_decision, "context_profile", ""),
+                                )
                     # LD lane-level: try pydantic-ai runtime first (fast path)
                     elif current_plan.kind == "ld_lane_level":
                         custom_result = self._run_ld_pydantic_ai_analysis(
@@ -5635,7 +5870,13 @@ class BugAnalysisRunner:
             )
 
         reference_date = self._select_reference_date(candidates) or fallback_reference_date
-        for preferred_source in ("user", "title", "description", "llm"):
+        override_source = self._preferred_bug_time_override_source(
+            candidates,
+            authoritative_date=self._authoritative_bug_time_date(candidates, fallback_reference_date),
+        )
+        preferred_sources = [override_source] if override_source else []
+        preferred_sources.extend(source for source in ("user", "title", "description", "llm") if source != override_source)
+        for preferred_source in preferred_sources:
             for candidate in candidates:
                 if candidate["source"] != preferred_source:
                     continue
@@ -5645,6 +5886,9 @@ class BugAnalysisRunner:
                     fault_time = f"{reference_date} {candidate['time']}"
                     has_full_datetime = True
                 note = self._bug_time_context_note(candidate, reference_date=reference_date, completed=has_full_datetime)
+                if override_source and preferred_source == override_source:
+                    label = {"title": "标题", "description": "缺陷描述", "llm": "AI识别"}.get(preferred_source, preferred_source)
+                    note = f"用户输入时间与 bug 标题/创建时间明显冲突，优先采用{label}中的完整问题时间。"
                 return BugTimeContext(
                     fault_time=fault_time,
                     source=preferred_source,
@@ -5660,6 +5904,47 @@ class BugAnalysisRunner:
             has_full_datetime=False,
             candidates=candidates,
         )
+
+    def _authoritative_bug_time_date(
+        self,
+        candidates: list[dict[str, str]],
+        fallback_reference_date: str,
+    ) -> str:
+        if fallback_reference_date:
+            return fallback_reference_date
+        for source in ("title", "description", "llm"):
+            for candidate in candidates:
+                if candidate.get("source") == source and candidate.get("date"):
+                    return str(candidate["date"])
+        return ""
+
+    def _preferred_bug_time_override_source(
+        self,
+        candidates: list[dict[str, str]],
+        *,
+        authoritative_date: str,
+    ) -> str:
+        user_candidate = next(
+            (
+                candidate
+                for candidate in candidates
+                if candidate.get("source") == "user" and candidate.get("date")
+            ),
+            None,
+        )
+        if user_candidate is None or not authoritative_date or user_candidate.get("date") == authoritative_date:
+            return ""
+        user_dt = self._parse_bug_datetime(str(user_candidate.get("value") or ""))
+        authoritative_dt = self._parse_bug_datetime(f"{authoritative_date} 00:00")
+        if user_dt is None or authoritative_dt is None:
+            return ""
+        if user_dt.year == authoritative_dt.year and abs((user_dt - authoritative_dt).days) < 30:
+            return ""
+        for source in ("title", "description", "llm"):
+            for candidate in candidates:
+                if candidate.get("source") == source and candidate.get("date") == authoritative_date:
+                    return source
+        return ""
 
     def _strip_urls_for_time_parse(self, text: str) -> str:
         return re.sub(r"https?://\S+", " ", text or "")
@@ -8985,6 +9270,46 @@ class BugAnalysisRunner:
             return text
         return ""
 
+    def _extract_partial_markdown_from_agent_stream(self, raw_stdout: str, *, skill_name: str) -> str:
+        if not raw_stdout.strip():
+            return ""
+        messages: list[str] = []
+        seen: set[str] = set()
+        for line in raw_stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            item = payload.get("item")
+            if not isinstance(item, dict) or item.get("type") != "agent_message":
+                continue
+            text = str(item.get("text") or "").strip()
+            if len(text) < 20 or text in seen:
+                continue
+            seen.add(text)
+            messages.append(text)
+        if not messages:
+            return ""
+        bullets = messages[-3:]
+        lines = ["## 阶段性结论（超时前）"]
+        lines.extend(f"- {text}" for text in bullets)
+        lines.extend(
+            [
+                "",
+                "## 当前缺口",
+                f"- 专用 Skill `{skill_name}` 文件 Agent 在整理最终关键证据前超时，未生成完整的 `source_stage_analysis.md`。",
+                "",
+                "## 建议动作",
+                "- 优先复用以上阶段性结论继续追问，或放宽/替换当前文件 Agent 路径后重跑源码阶段。",
+            ]
+        )
+        return "\n".join(lines).strip()
+
     def _file_agent_log_rules(self, analysis_kind: str) -> list[str]:
         rules = [
             "App 主日志通常位于 `data/Log/log*/app/<package>/<prefix>_YYYY-MM-DD_HH-MM.alog(.log)`，如 `main_...` 或 `user0_main_...`；前缀不固定，时间段格式固定。",
@@ -9144,6 +9469,16 @@ class BugAnalysisRunner:
             lines.extend(f"- `{path}`" for path in skill_paths)
         else:
             lines.append("- 未找到 Skill 上下文文件。")
+        priority_files = self._domain_priority_files(skill_name)
+        if priority_files:
+            lines.extend(
+                [
+                    "",
+                    "## 3.1 领域优先源码文件",
+                    "- 先读这些文件，再决定是否扩展搜索；不要先从整个源码根做全仓扫描。",
+                ]
+            )
+            lines.extend(f"- `{path}`" for path in priority_files)
         lines.extend(
             [
                 "",
@@ -9243,6 +9578,7 @@ class BugAnalysisRunner:
             return {"command": [], "provider": provider, "prompt": prompt, "output_path": analysis_markdown_path}
         if provider == "codex":
             model = (self.config.bug_analysis.model or "").strip()
+            working_dir = self._custom_skill_agent_cwd()
             command = [
                 command_name,
                 "exec",
@@ -9250,7 +9586,7 @@ class BugAnalysisRunner:
                 "-s",
                 "read-only",
                 "-C",
-                str(self._working_dir()),
+                str(working_dir),
             ]
             if model:
                 command.extend(["-m", model])
@@ -9262,7 +9598,7 @@ class BugAnalysisRunner:
                 "prompt": prompt,
                 "output_path": analysis_markdown_path,
                 "output_mode": "tool_written_file",
-                "cwd": self._working_dir(),
+                "cwd": working_dir,
             }
         if provider in {"claude", "claude-code", "claude_code"}:
             model = (self.config.claude_agent.model or "").strip()
@@ -9343,6 +9679,12 @@ class BugAnalysisRunner:
             f"- 命中 Skill: `{skill_name}`（分析类型：`{analysis_kind}`）。",
             "",
         ]
+        priority_files = self._domain_priority_files(skill_name)
+        if priority_files:
+            lines.append("优先源码文件：")
+            for path in priority_files:
+                lines.append(f"- `{path}`")
+            lines.extend(["- 先读取这些文件，不要先对整个源码仓做无边界搜索。", ""])
         if prior_findings:
             lines.append("前序分析结论（已完成的其他 Skill 分析，供参考）：")
             for label, kind, verdict in prior_findings:
@@ -9419,6 +9761,131 @@ class BugAnalysisRunner:
                 dirs.append(resolved)
         return dirs
 
+    def _custom_skill_agent_cwd(self) -> Path:
+        source_roots = self._custom_skill_agent_source_roots()
+        if source_roots:
+            return source_roots[0]
+        return self._working_dir()
+
+    def _trim_reanalysis_reference_text(self, text: str, *, max_chars: int = 600) -> str:
+        normalized = self._sanitize_file_agent_text(text)
+        if not normalized:
+            return ""
+        if len(normalized) <= max_chars:
+            return normalized
+        return normalized[: max_chars - 1].rstrip() + "…"
+
+    def _source_stage_file_agent_timeout(self, *, reference_seconds: float) -> float:
+        if self._should_use_codex_app_server_for_file_agent("codex"):
+            return max(
+                180.0,
+                min(
+                    float(self.config.codex_app_server.turn_timeout_seconds),
+                    float(self.config.bug_analysis.timeout_seconds),
+                ),
+            )
+        return min(
+            180.0,
+            self._agent_summary_timeout(
+                self.config.bug_analysis.timeout_seconds,
+                reference_seconds=reference_seconds,
+            ),
+        )
+
+    def _prefer_source_stage_file_agent(self) -> bool:
+        return self._should_use_codex_app_server_for_file_agent("codex")
+
+    def _source_stage_followup_prompt_text(self, *, request_text: str, followup_text: str) -> str:
+        normalized_followup = followup_text.strip()
+        if normalized_followup:
+            return normalized_followup
+        return request_text.strip()
+
+    def _source_stage_followup_request_text(self, *, request_text: str, followup_text: str) -> str:
+        if self._followup_explicitly_requests_source_analysis(request_text, followup_text):
+            normalized_followup = followup_text.strip()
+            if normalized_followup:
+                return normalized_followup
+        return request_text.strip()
+
+    def _prepare_codex_app_server_minimal_home(self) -> Path | None:
+        source_home = Path.home() / ".codex"
+        auth_path = source_home / "auth.json"
+        if not auth_path.exists():
+            return None
+        target_home = self.config.data_dir / "codex_app_server_home"
+        target_home.mkdir(parents=True, exist_ok=True)
+        for name in ("auth.json", "installation_id", "models_cache.json"):
+            source = source_home / name
+            if not source.exists():
+                continue
+            target = target_home / name
+            try:
+                shutil.copy2(source, target)
+            except OSError:
+                continue
+        minimal_config = [
+            f'model = "{(self.config.bug_analysis.model or "gpt-5.4").strip() or "gpt-5.4"}"',
+            "",
+            "[analytics]",
+            "enabled = false",
+            "",
+        ]
+        try:
+            (target_home / "config.toml").write_text("\n".join(minimal_config), encoding="utf-8")
+        except OSError:
+            return None
+        return target_home
+
+    def _merge_codex_app_server_proxy_env(self, env: dict[str, str]) -> dict[str, str]:
+        merged = dict(env)
+        for key in (
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "NO_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+            "no_proxy",
+        ):
+            value = os.environ.get(key)
+            if value:
+                merged[key] = value
+        return merged
+
+    def _domain_priority_files(self, context_profile: str) -> list[Path]:
+        normalized = context_profile.strip()
+        if normalized != "scene-signal-diagnosis":
+            return []
+        guideengine_root: Path | None = None
+        napa5_root: Path | None = None
+        for root in self._custom_skill_agent_source_roots():
+            name = root.name.casefold()
+            if name == "napa5":
+                napa5_root = root
+            elif "guideengine" in name or root == self.config.guideengine_repo:
+                guideengine_root = root
+        candidates: list[Path] = []
+        if guideengine_root is not None:
+            candidates.extend(
+                [
+                    guideengine_root / "module_display/launcher_subreality_service/src/main/java/com/xiaopeng/ainavi/scene/UnitySceneTypeService.kt",
+                    guideengine_root / "module_display/launcher_subreality_service/src/main/java/com/xiaopeng/ainavi/scene/UnitySceneTypeRepository.kt",
+                    guideengine_root / "module_display/launcher_subreality_service/src/main/java/com/xiaopeng/ainavi/unity/UnityAdapter.kt",
+                    guideengine_root / "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/helper/xuimanager/XuiConditionHelper.kt",
+                ]
+            )
+        if napa5_root is not None:
+            candidates.extend(
+                [
+                    napa5_root / "Assets/LocalModules/module-napa5-hmi/Runtime/Scripts/Common/Service/Proxy/SystemServiceProxy.cs",
+                    napa5_root / "Assets/LocalModules/module-napa5-hmi/Runtime/Scripts/App/Displays/Nodes/HUSceneNode.cs",
+                    napa5_root / "Assets/LocalModules/module-napa5-hmi/Runtime/Scripts/XSRSceneManager/Logic/XSRSceneStateMachine.cs",
+                ]
+            )
+        return [path for path in candidates if path.exists()]
+
     def _should_use_codex_app_server_for_file_agent(self, provider: str) -> bool:
         options = self.config.codex_app_server
         return (
@@ -9437,6 +9904,7 @@ class BugAnalysisRunner:
         analysis_kind: str,
         skill_name: str,
         prompt_text: str,
+        cwd: Path,
         command_path: Path,
         stdout_path: Path,
         stderr_path: Path,
@@ -9467,15 +9935,30 @@ class BugAnalysisRunner:
             }
 
         subprocess_env = build_internal_network_env(self.config.internal_network_env)
+        if options.preserve_proxy_env:
+            subprocess_env = self._merge_codex_app_server_proxy_env(subprocess_env)
+        disable_node_repl = options.disable_node_repl
+        if options.use_minimal_home:
+            minimal_home = self._prepare_codex_app_server_minimal_home()
+            if minimal_home is not None:
+                subprocess_env["CODEX_HOME"] = str(minimal_home)
+                disable_node_repl = False
         runtime = CodexAppServerRuntime(
             command=options.command,
-            cwd=self._working_dir(),
+            cwd=cwd,
             startup_timeout_seconds=options.startup_timeout_seconds,
             turn_timeout_seconds=min(float(timeout), options.turn_timeout_seconds),
             post_tool_quiet_timeout_seconds=options.post_tool_quiet_timeout_seconds,
             notification_poll_seconds=options.notification_poll_seconds,
             max_event_audit=options.max_event_audit,
             sandbox_mode=options.sandbox_mode,
+            disable_node_repl=disable_node_repl,
+            disable_analytics=options.disable_analytics,
+            disable_memories=options.disable_memories,
+            disable_apps_feature=options.disable_apps_feature,
+            disable_plugins_feature=options.disable_plugins_feature,
+            disable_computer_use_feature=options.disable_computer_use_feature,
+            reasoning_effort=options.reasoning_effort,
             env=subprocess_env,
         )
 
@@ -9547,6 +10030,8 @@ class BugAnalysisRunner:
         bridge_session_id: str = "",
         prior_findings: list[tuple[str, str, str]] | None = None,
         context_profile: str = "",
+        provider_override: str = "",
+        command_override: str = "",
     ) -> dict[str, object]:
         started = time.monotonic()
         effective_label = analysis_label or self._analysis_label(analysis_kind)
@@ -9620,6 +10105,8 @@ class BugAnalysisRunner:
             analysis_markdown_path=analysis_markdown_path,
             context_path=context_path,
             debug_log_path=debug_log_path,
+            provider_override=provider_override,
+            command_override=command_override,
             prior_findings=prior_findings,
         )
         command = list(invocation.get("command") or [])
@@ -9677,6 +10164,7 @@ class BugAnalysisRunner:
                     analysis_kind=analysis_kind,
                     skill_name=skill_name,
                     prompt_text=str(invocation.get("prompt") or ""),
+                    cwd=process_cwd,
                     command_path=command_path,
                     stdout_path=stdout_path,
                     stderr_path=stderr_path,
@@ -9802,6 +10290,7 @@ class BugAnalysisRunner:
             stderr = _coerce_process_text(exc.stderr)
             stdout_path.write_text(stdout, encoding="utf-8")
             stderr_path.write_text(stderr, encoding="utf-8")
+            partial_markdown = self._extract_partial_markdown_from_agent_stream(stdout, skill_name=skill_name)
             return {
                 "ok": False,
                 "error_code": "custom_skill_agent_timeout",
@@ -9822,6 +10311,8 @@ class BugAnalysisRunner:
                 "stderr": stderr,
                 "duration_seconds": time.monotonic() - started,
                 "timeout_seconds": timeout,
+                "partial_markdown": partial_markdown,
+                "partial_analysis_available": bool(partial_markdown),
             }
         except OSError as exc:
             stdout_path.write_text("", encoding="utf-8")
@@ -10456,6 +10947,7 @@ class BugAnalysisRunner:
             source_evidence_path=source_evidence_path,
             evidence_count=evidence_count,
             duration_seconds=result.duration_seconds,
+            executor=provider_tag,
         )
 
         self._emit_progress(
@@ -10476,7 +10968,10 @@ class BugAnalysisRunner:
             "command": [],
             "analysis_kind": analysis_kind,
             "provider": provider_tag,
+            "executor": provider_tag,
             "analysis_markdown_path": analysis_markdown_path,
+            "html_path": html_path,
+            "json_path": json_path,
             "stdout": markdown,
             "stderr": "",
             "duration_seconds": result.duration_seconds,
@@ -10485,6 +10980,7 @@ class BugAnalysisRunner:
             "tool_calls": result.tool_calls,
             "tool_trace": result.tool_trace,
             "usage": result.usage,
+            "custom_skill_analysis_status": "completed",
         }
 
     def _run_ld_pydantic_ai_analysis(
@@ -10650,6 +11146,7 @@ class BugAnalysisRunner:
             source_evidence_path=None,
             evidence_count=evidence_count,
             duration_seconds=result.duration_seconds,
+            executor=provider_tag,
         )
 
         self._emit_progress(
@@ -10670,7 +11167,10 @@ class BugAnalysisRunner:
             "command": [],
             "analysis_kind": analysis_kind,
             "provider": provider_tag,
+            "executor": provider_tag,
             "analysis_markdown_path": analysis_markdown_path,
+            "html_path": html_path,
+            "json_path": json_path,
             "stdout": markdown,
             "stderr": "",
             "duration_seconds": result.duration_seconds,
@@ -10679,6 +11179,7 @@ class BugAnalysisRunner:
             "tool_calls": result.tool_calls,
             "tool_trace": result.tool_trace,
             "usage": result.usage,
+            "custom_skill_analysis_status": "completed",
         }
 
     def _run_ld_direct_api_analysis(
@@ -10949,6 +11450,126 @@ class BugAnalysisRunner:
             return False, "empty_key_evidence_section", 0
         return True, "", len(evidence_lines)
 
+    def _parse_markdown_sections(self, markdown_text: str) -> dict[str, str]:
+        sections: dict[str, str] = {}
+        current_title = ""
+        current_lines: list[str] = []
+        for raw_line in markdown_text.splitlines():
+            match = re.match(r"^\s*##\s+(.+?)\s*$", raw_line)
+            if match:
+                if current_title:
+                    sections[current_title] = "\n".join(current_lines).strip()
+                current_title = match.group(1).strip()
+                current_lines = []
+                continue
+            if current_title:
+                current_lines.append(raw_line.rstrip())
+        if current_title:
+            sections[current_title] = "\n".join(current_lines).strip()
+        return sections
+
+    def _markdown_section_entries(self, section_text: str) -> list[str]:
+        entries: list[str] = []
+        current: list[str] = []
+        for raw_line in section_text.splitlines():
+            stripped = raw_line.strip()
+            if not stripped:
+                if current:
+                    entries.append(" ".join(current).strip())
+                    current = []
+                continue
+            if re.match(r"^[-*]\s+", stripped):
+                if current:
+                    entries.append(" ".join(current).strip())
+                current = [re.sub(r"^[-*]\s+", "", stripped)]
+            else:
+                if current:
+                    current.append(stripped)
+                else:
+                    current = [stripped]
+        if current:
+            entries.append(" ".join(current).strip())
+        return [entry for entry in entries if entry]
+
+    def _clean_markdown_inline_text(self, text: str) -> str:
+        cleaned = text.strip()
+        cleaned = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", cleaned)
+        cleaned = re.sub(r"`([^`]+)`", r"\1", cleaned)
+        cleaned = re.sub(r"\*\*([^*]+)\*\*", r"\1", cleaned)
+        cleaned = re.sub(r"\*([^*]+)\*", r"\1", cleaned)
+        cleaned = re.sub(r"__([^_]+)__", r"\1", cleaned)
+        cleaned = re.sub(r"_([^_]+)_", r"\1", cleaned)
+        return re.sub(r"\s+", " ", cleaned).strip()
+
+    def _truncate_report_text(self, text: str, limit: int = 180) -> str:
+        normalized = self._clean_markdown_inline_text(text)
+        if len(normalized) <= limit:
+            return normalized
+        return normalized[: limit - 1].rstrip() + "…"
+
+    def _source_stage_highlight_items(self, section_text: str, *, sev: str, limit: int = 4) -> list[dict[str, str]]:
+        items: list[dict[str, str]] = []
+        for entry in self._markdown_section_entries(section_text)[:limit]:
+            items.append({
+                "sev": sev,
+                "title": self._truncate_report_text(entry, 160),
+                "detail": "",
+            })
+        return items
+
+    def _source_stage_evidence_rows(self, section_text: str, *, limit: int = 6) -> list[tuple[str, str]]:
+        rows: list[tuple[str, str]] = []
+        for entry in self._markdown_section_entries(section_text)[:limit]:
+            location = "证据"
+            detail = entry
+            match = re.match(r"^\*\*(.+?)\*\*:\s*(.+)$", entry)
+            if match:
+                location = self._clean_markdown_inline_text(match.group(1))
+                detail = match.group(2)
+            rows.append((location, self._truncate_report_text(detail, 160)))
+        return rows
+
+    def _source_stage_report_sections(self, analysis_text: str) -> list[ReportSection]:
+        sections = self._parse_markdown_sections(analysis_text)
+        rendered: list[ReportSection] = []
+
+        summary_items = self._source_stage_highlight_items(sections.get("结论摘要", ""), sev="green", limit=5)
+        if summary_items:
+            rendered.append(ReportSection(kind="issues", title="结论摘要", items=summary_items))
+
+        cause_entries = self._markdown_section_entries(sections.get("最可能原因", ""))
+        if cause_entries:
+            rendered.append(
+                ReportSection(
+                    kind="text",
+                    title="最可能原因",
+                    text=self._truncate_report_text("\n\n".join(cause_entries[:2]), 320),
+                    class_name="insight",
+                )
+            )
+
+        evidence_rows = self._source_stage_evidence_rows(sections.get("关键证据", ""))
+        if evidence_rows:
+            rendered.append(
+                ReportSection(
+                    kind="table",
+                    title="关键证据",
+                    cols=["位置", "关键点"],
+                    rows=evidence_rows,
+                    empty_text="未提取到关键证据摘要",
+                )
+            )
+
+        pending_items = self._source_stage_highlight_items(sections.get("待确认项", ""), sev="yellow", limit=5)
+        if pending_items:
+            rendered.append(ReportSection(kind="issues", title="待确认项", items=pending_items))
+
+        action_items = self._source_stage_highlight_items(sections.get("建议动作", ""), sev="green", limit=5)
+        if action_items:
+            rendered.append(ReportSection(kind="issues", title="建议动作", items=action_items))
+
+        return rendered
+
     def _write_custom_skill_agent_report(
         self,
         *,
@@ -10975,9 +11596,10 @@ class BugAnalysisRunner:
         analysis_text = analysis_markdown_path.read_text(encoding="utf-8", errors="replace")
         analysis_file_name = analysis_markdown_path.name
         skill_paths = self._skill_context_paths(skill_name)
-        verdict_text = f"{analysis_label} `{skill_name}` 已通过文件 Agent 产出执行证据，允许进入最终总结。"
+        executor_label = executor or "file_agent"
+        verdict_text = f"{analysis_label} `{skill_name}` 已通过 {executor_label} 执行器产出执行证据，允许进入最终总结。"
         cards = [
-            ("执行器", "file_agent", "green", provider or "未记录 provider"),
+            ("执行器", executor_label, "green", provider or "未记录 provider"),
             ("命中 Skill", skill_name or "未记录", "green" if skill_name else "yellow", ""),
             ("关键证据", str(evidence_count), "green" if evidence_count > 0 else "red", f"来自 {analysis_file_name} 的 ## 关键证据"),
             ("故障时间", fault_time or "未识别", "green" if fault_time else "yellow", ""),
@@ -11006,13 +11628,16 @@ class BugAnalysisRunner:
             f"{combined_bug_html.render_table([('缺陷描述', description.strip() or '(无描述)')], ('字段', '内容'))}"
             "</div>"
         )
+        summary_sections = self._source_stage_report_sections(analysis_text) if _kind_spec(analysis_kind).is_source_stage else []
         composition = ReportComposition(
             title=analysis_label,
             heading=analysis_label,
             subtitle=f"Bug 标题：{title or '未返回 / 未设置'}",
             verdict=ReportVerdict(sev="green", text=verdict_text),
             cards=cards,
-            sections=[
+            sections=
+            summary_sections
+            + [
                 ReportSection(
                     kind="issues",
                     title="执行状态",
@@ -11026,7 +11651,7 @@ class BugAnalysisRunner:
                 ),
                 ReportSection(kind="table", title="Skill 上下文", cols=["文件", "路径"], rows=skill_rows, empty_text="未找到 Skill 文件"),
                 ReportSection(kind="table", title="分析上下文", cols=["字段", "内容"], rows=context_rows),
-                ReportSection(kind="details", title="执行证据 Markdown", summary=f"展开查看 {analysis_file_name}", body_html=detail_body),
+                ReportSection(kind="details", title="完整分析", summary="展开查看完整分析 Markdown", body_html=detail_body),
                 ReportSection(kind="details", title="原始输入", summary="展开查看请求与缺陷描述", body_html=raw_body),
             ],
         )
@@ -14036,7 +14661,9 @@ class BugAnalysisRunner:
         extra_texts: tuple[str, ...] = (),
     ) -> list[str]:
         terms: list[str] = []
-        for text in (request_text, followup_text, *extra_texts):
+        title_text = extra_texts[0] if extra_texts else ""
+        description_texts = extra_texts[1:] if len(extra_texts) > 1 else ()
+        for text in (request_text, followup_text, title_text):
             for term in self._explicit_source_terms_from_text(text):
                 self._append_unique(terms, term)
         for plan in plans:
@@ -14051,7 +14678,7 @@ class BugAnalysisRunner:
                 self._append_unique(terms, signal)
                 if signal.startswith("SIGNAL_"):
                     self._append_unique(terms, signal.removeprefix("SIGNAL_"))
-        for text in (*extra_texts, request_text, followup_text):
+        for text in (request_text, followup_text, title_text, *description_texts):
             for term in self._business_source_terms_from_text(text):
                 self._append_unique(terms, term)
         return terms[:8]

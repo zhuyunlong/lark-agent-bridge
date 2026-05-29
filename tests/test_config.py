@@ -661,6 +661,86 @@ allowed_dirs = ["{downloads}"]
         self.assertTrue(config.local_resources.require_allowed_user)
         self.assertEqual(config.local_resources.allowed_dirs, [downloads.resolve()])
 
+    def test_codex_app_server_options_default_disabled(self):
+        config = load_config()
+
+        self.assertFalse(config.codex_app_server.enabled)
+        self.assertEqual(config.codex_app_server.command, "codex")
+        self.assertEqual(config.codex_app_server.min_version, "0.125.0")
+        self.assertFalse(config.codex_app_server.use_for_file_agent)
+        self.assertFalse(config.codex_app_server.use_for_bug_summary)
+        self.assertTrue(config.codex_app_server.fallback_to_exec)
+        self.assertEqual(config.codex_app_server.startup_timeout_seconds, 15.0)
+        self.assertEqual(config.codex_app_server.turn_timeout_seconds, 600.0)
+        self.assertEqual(config.codex_app_server.post_tool_quiet_timeout_seconds, 90.0)
+        self.assertEqual(config.codex_app_server.notification_poll_seconds, 0.25)
+        self.assertEqual(config.codex_app_server.max_event_audit, 200)
+        self.assertEqual(config.codex_app_server.sandbox_mode, "read-only")
+        self.assertTrue(config.codex_app_server.disable_node_repl)
+        self.assertTrue(config.codex_app_server.disable_analytics)
+        self.assertTrue(config.codex_app_server.disable_memories)
+        self.assertTrue(config.codex_app_server.disable_apps_feature)
+        self.assertTrue(config.codex_app_server.disable_plugins_feature)
+        self.assertTrue(config.codex_app_server.disable_computer_use_feature)
+        self.assertTrue(config.codex_app_server.preserve_proxy_env)
+        self.assertEqual(config.codex_app_server.reasoning_effort, "medium")
+        self.assertTrue(config.codex_app_server.use_minimal_home)
+
+    def test_load_codex_app_server_options(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text(
+                """
+[codex_app_server]
+enabled = true
+command = "codex-dev"
+min_version = "0.134.0"
+use_for_file_agent = true
+use_for_bug_summary = true
+fallback_to_exec = false
+startup_timeout_seconds = 21
+turn_timeout_seconds = 901
+post_tool_quiet_timeout_seconds = 33
+notification_poll_seconds = 0.5
+max_event_audit = 321
+sandbox_mode = "workspace-write"
+disable_node_repl = false
+disable_analytics = false
+disable_memories = false
+disable_apps_feature = false
+disable_plugins_feature = false
+disable_computer_use_feature = false
+preserve_proxy_env = false
+reasoning_effort = "high"
+use_minimal_home = false
+""",
+                encoding="utf-8",
+            )
+
+            config = load_config(config_path)
+
+        self.assertTrue(config.codex_app_server.enabled)
+        self.assertEqual(config.codex_app_server.command, "codex-dev")
+        self.assertEqual(config.codex_app_server.min_version, "0.134.0")
+        self.assertTrue(config.codex_app_server.use_for_file_agent)
+        self.assertTrue(config.codex_app_server.use_for_bug_summary)
+        self.assertFalse(config.codex_app_server.fallback_to_exec)
+        self.assertEqual(config.codex_app_server.startup_timeout_seconds, 21.0)
+        self.assertEqual(config.codex_app_server.turn_timeout_seconds, 901.0)
+        self.assertEqual(config.codex_app_server.post_tool_quiet_timeout_seconds, 33.0)
+        self.assertEqual(config.codex_app_server.notification_poll_seconds, 0.5)
+        self.assertEqual(config.codex_app_server.max_event_audit, 321)
+        self.assertEqual(config.codex_app_server.sandbox_mode, "workspace-write")
+        self.assertFalse(config.codex_app_server.disable_node_repl)
+        self.assertFalse(config.codex_app_server.disable_analytics)
+        self.assertFalse(config.codex_app_server.disable_memories)
+        self.assertFalse(config.codex_app_server.disable_apps_feature)
+        self.assertFalse(config.codex_app_server.disable_plugins_feature)
+        self.assertFalse(config.codex_app_server.disable_computer_use_feature)
+        self.assertFalse(config.codex_app_server.preserve_proxy_env)
+        self.assertEqual(config.codex_app_server.reasoning_effort, "high")
+        self.assertFalse(config.codex_app_server.use_minimal_home)
+
 
 if __name__ == "__main__":
     unittest.main()

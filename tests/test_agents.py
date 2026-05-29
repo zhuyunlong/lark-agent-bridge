@@ -3613,6 +3613,35 @@ class AgentTests(unittest.TestCase):
         self.assertNotIn("ICCID", terms)
         self.assertNotIn("VIN", terms)
 
+    def test_source_evidence_terms_prioritize_request_and_title_business_terms_over_description_noise(self):
+        runner = BugAnalysisRunner(BridgeConfig(dry_run=False))
+
+        terms = runner._source_evidence_terms(
+            plans=[BugAnalysisPlan(kind="scene_signal"), BugAnalysisPlan(kind="source_stage")],
+            request_text=(
+                "问题时间 2025-05-10 14:30:00 源码分析 3D场景信号分析 "
+                "[ [缺陷] 2026-05-25 16:50:41 "
+                "【d03】6.2.3】拾光主题切换成天玑主题，进入场景模式没有展示3D场景]"
+            ),
+            followup_text="问题时间 2025-05-10 14:30:00 源码分析 3D场景信号分析",
+            extra_texts=(
+                "2026-05-25 16:50:41 【d03】6.2.3】拾光主题切换成天玑主题，进入场景模式没有展示3D场景",
+                (
+                    "环境信息：\n"
+                    "UUID 000000UIQEOB3ZIZ0RJLNIETRT7Q625X\n"
+                    "ROM Version XMARTM3ZHD03E1_V6.2.3.1821_20260525034947.0_REV01_USER_DEV\n"
+                    "SDK_VERSION(android.9.810.27.0.346)\n"
+                    "ENGINE_VERSION(AutoEngine_13.16.40.3795_8694_LVJ17902)\n"
+                ),
+            ),
+        )
+
+        self.assertIn("进入场景模式", terms)
+        self.assertIn("场景模式", terms)
+        self.assertIn("场景信号", terms)
+        self.assertNotIn("Number", terms)
+        self.assertNotIn("SDK_VERSION", terms)
+
     def test_source_stage_context_uses_domain_context_profile(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "workspace"
@@ -3704,6 +3733,37 @@ class AgentTests(unittest.TestCase):
         self.assertIn("不要在整个源码根目录直接执行无边界 `rg`", prompt)
         self.assertIn("--max-count", prompt)
         self.assertIn("head -80", prompt)
+
+    def test_custom_skill_agent_command_for_codex_uses_source_root_as_cwd(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            source_root = Path(tmp) / "guideengine"
+            source_root.mkdir(parents=True)
+            config = BridgeConfig(dry_run=False, workspace_root=workspace, data_dir=Path(tmp) / "data")
+            config.bug_analysis.provider = "codex"
+            config.bug_analysis.command = "codex"
+            config.source_investigation.repo_roots = [source_root]
+            runner = BugAnalysisRunner(config)
+            analysis_path = Path(tmp) / "analysis" / "source_stage_analysis.md"
+
+            invocation = runner._build_custom_skill_agent_command(
+                analysis_kind="source_stage",
+                skill_name="source_analysis",
+                request_text="基于源码重新分析",
+                prompt_text="基于源码重新分析",
+                title="进入场景模式没有展示3D场景",
+                description="",
+                fault_time="2026-05-25 16:50:41",
+                selected_input=Path(tmp) / "focus",
+                prepared_input=Path(tmp) / "focus",
+                source_evidence_path=Path(tmp) / "bug_source_evidence.md",
+                analysis_markdown_path=analysis_path,
+                context_path=Path(tmp) / "analysis" / "source_stage.context.md",
+            )
+
+        self.assertEqual(Path(invocation["cwd"]), source_root.resolve())
+        command = invocation["command"]
+        self.assertEqual(command[command.index("-C") + 1], str(source_root.resolve()))
 
     def test_custom_skill_route_can_enter_bug_primary_selection(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -4357,6 +4417,7 @@ class AgentTests(unittest.TestCase):
             )
             config.bug_analysis.provider = "codex"
             config.bug_analysis.command = "codex"
+            config.source_investigation.repo_roots = [root]
             runner = BugAnalysisRunner(config)
             log_root = Path(tmp) / "logs"
             self._write_matching_log(log_root, "2026-05-25 16:50:41")
@@ -4391,7 +4452,7 @@ class AgentTests(unittest.TestCase):
                 mock.patch(
                     "lark_agent_bridge.agents.bug_runner.CodexAppServerRuntime",
                     return_value=runtime,
-                ),
+                ) as runtime_cls,
                 mock.patch("lark_agent_bridge.agents.run_tracked_process") as run_mock,
             ):
                 result = runner._run_custom_skill_agent_analysis(
@@ -4420,7 +4481,95 @@ class AgentTests(unittest.TestCase):
         self.assertIn("app-server 已完成", analysis_text)
         self.assertIn("\"method\": \"turn/completed\"", event_audit_text)
         self.assertTrue(any("Codex" in str(event.get("message") or "") for event in progress_events))
+        self.assertEqual(Path(runtime_cls.call_args.kwargs["cwd"]), root.resolve())
+        self.assertFalse(runtime_cls.call_args.kwargs["disable_node_repl"])
+        self.assertTrue(runtime_cls.call_args.kwargs["disable_analytics"])
+        self.assertTrue(runtime_cls.call_args.kwargs["disable_memories"])
+        self.assertTrue(runtime_cls.call_args.kwargs["disable_apps_feature"])
+        self.assertTrue(runtime_cls.call_args.kwargs["disable_plugins_feature"])
+        self.assertTrue(runtime_cls.call_args.kwargs["disable_computer_use_feature"])
+        self.assertEqual(runtime_cls.call_args.kwargs["reasoning_effort"], "medium")
         run_mock.assert_not_called()
+
+    def test_codex_app_server_reinjects_proxy_env(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "workspace"
+            skill_name = "app-server-proxy-skill"
+            skill_dir = root / ".ai" / "skills" / skill_name
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "---\nname: App Server Proxy Skill\ndescription: proxy env test.\n---\n\n# Proxy\n",
+                encoding="utf-8",
+            )
+            config = BridgeConfig(
+                dry_run=False,
+                data_dir=Path(tmp) / "data",
+                workspace_root=root,
+                internal_network_env=InternalNetworkEnvOptions(
+                    inherit_env=["PATH", "HOME"],
+                    unset_env=["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"],
+                ),
+                codex_app_server=CodexAppServerOptions(
+                    enabled=True,
+                    use_for_file_agent=True,
+                    fallback_to_exec=True,
+                    preserve_proxy_env=True,
+                ),
+            )
+            config.bug_analysis.provider = "codex"
+            config.bug_analysis.command = "codex"
+            config.source_investigation.repo_roots = [root]
+            runner = BugAnalysisRunner(config)
+            log_root = Path(tmp) / "logs"
+            self._write_matching_log(log_root, "2026-05-25 16:50:41")
+            runtime = mock.Mock()
+            runtime.run_turn.return_value = CodexAppServerResult(
+                ok=True,
+                final_text="## 结论摘要\n- ok\n\n## 关键证据\n- L1\n",
+            )
+
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {
+                        "PATH": "/usr/bin:/bin",
+                        "HOME": "/Users/tester",
+                        "HTTP_PROXY": "http://127.0.0.1:7897",
+                        "HTTPS_PROXY": "http://127.0.0.1:7897",
+                        "NO_PROXY": "localhost",
+                    },
+                    clear=True,
+                ),
+                mock.patch(
+                    "lark_agent_bridge.agents.bug_runner.check_codex_app_server_available",
+                    return_value=(True, "0.134.0"),
+                ),
+                mock.patch(
+                    "lark_agent_bridge.agents.bug_runner.CodexAppServerRuntime",
+                    return_value=runtime,
+                ) as runtime_cls,
+            ):
+                runner._run_custom_skill_agent_analysis(
+                    skill_name=skill_name,
+                    request_text="2026-05-25 16:50:41 3D场景模式",
+                    prompt_text="2026-05-25 16:50:41 3D场景模式",
+                    title="3D 场景模式",
+                    description="",
+                    fault_time="2026-05-25 16:50:41",
+                    selected_input=log_root,
+                    prepared_input=log_root,
+                    source_evidence_path=None,
+                    html_path=Path(tmp) / "bug_custom_skill_report.html",
+                    json_path=Path(tmp) / "bug_custom_skill_report.json",
+                    analysis_dir=Path(tmp) / "custom_skill_analysis",
+                    progress_callback=None,
+                    timeout=30,
+                )
+
+        env = runtime_cls.call_args.kwargs["env"]
+        self.assertEqual(env.get("HTTP_PROXY"), "http://127.0.0.1:7897")
+        self.assertEqual(env.get("HTTPS_PROXY"), "http://127.0.0.1:7897")
+        self.assertEqual(env.get("NO_PROXY"), "localhost")
 
     def test_custom_skill_file_agent_app_server_falls_back_to_exec(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -4942,6 +5091,23 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(context.fault_time, "2026-05-22 16:17")
         self.assertEqual(context.source, "description")
         self.assertTrue(context.has_full_datetime)
+
+    def test_bug_time_context_prefers_title_when_user_full_date_conflicts_with_bug_reference(self):
+        runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
+
+        context = runner._resolve_bug_time_context(
+            request_text=(
+                "问题时间 2025-05-10 14:30:00 源码分析 3D场景信号分析 "
+                "https://project.feishu.cn/xpfailuremgmt/buglo/detail/6998811703"
+            ),
+            title="2026-05-25 16:50:41 【d03】6.2.3】拾光主题切换成天玑主题，进入场景模式没有展示3D场景",
+            description="问题描述：进入场景模式后没有展示3D场景",
+            reference_time="2026-05-25T16:52:33+08:00",
+        )
+
+        self.assertEqual(context.fault_time, "2026-05-25 16:50:41")
+        self.assertEqual(context.source, "title")
+        self.assertIn("冲突", context.note)
 
     def test_bug_reference_time_uses_full_workitem_create_time_when_fetch_data_missing(self):
         runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
@@ -7371,6 +7537,527 @@ class AgentTests(unittest.TestCase):
 
         self.assertFalse(result.success)
         self.assertEqual(seen_skill_names, ["source_analysis"])
+
+    def test_bug_followup_generic_source_reanalysis_does_not_leak_old_title_into_xtheme(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=False, data_dir=Path(tmp), workspace_root=Path(tmp))
+            runner = BugAnalysisRunner(config)
+            previous_session = {
+                "details": {
+                    "analysis_kind": "scene_signal",
+                    "analysis_kinds": ["scene_signal", "source_stage"],
+                    "analysis_skill": "scene-signal-diagnosis",
+                    "user_request_text": "问题时间 2025-05-10 14:30:00 源码分析 3D场景信号分析 https://project.feishu.cn/xpfailuremgmt/buglo/detail/6998811703",
+                }
+            }
+            previous_context = mock.Mock(
+                request_text=previous_session["details"]["user_request_text"],
+                summary_text="上一轮摘要",
+                report_excerpt="上一轮报告摘录",
+                history=[],
+            )
+
+            selection = runner.decide_bug_followup(
+                followup_text="基于源码重新分析，检查信号处理相关的代码逻辑",
+                previous_context=previous_context,
+                previous_session=previous_session,
+            )
+
+        self.assertIsNotNone(selection)
+        assert selection is not None
+        self.assertTrue(selection.should_reanalyze)
+        self.assertEqual([plan.kind for plan in selection.plans], ["scene_signal"])
+        self.assertEqual(selection.skill_name, "scene-signal-diagnosis")
+
+    def test_bug_reanalysis_explicit_source_followup_rebuilds_domain_context_from_request(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(
+                dry_run=False,
+                data_dir=Path(tmp),
+                workspace_root=Path(tmp),
+                codex_app_server=CodexAppServerOptions(enabled=True, use_for_file_agent=True),
+            )
+            config.bug_analysis.provider = "codex"
+            config.bug_analysis.command = "codex"
+            runner = BugAnalysisRunner(config)
+            job_dir = Path(tmp) / "jobs" / "job_scene_signal_source_context_rebuild"
+            output_dir = job_dir / "output"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            prepared_input = Path(tmp) / "logs"
+            self._write_matching_log(prepared_input, "2026-05-25 16:50:41")
+            previous_session = {
+                "job_id": "job_scene_signal_source_context_rebuild",
+                "job_dir": str(job_dir),
+                "details": {
+                    "analysis_kind": "xtheme",
+                    "analysis_kinds": ["xtheme", "source_stage"],
+                    "analysis_skill": "xtheme-analyzer",
+                    "prepared_log_input": str(prepared_input),
+                    "selected_log_input": str(prepared_input),
+                    "target_time": "2026-05-25 16:50",
+                    "user_request_text": "问题时间 2026-05-25 16:50:41 源码分析 3D场景信号分析 https://project.feishu.cn/xpfailuremgmt/buglo/detail/6998811703",
+                },
+            }
+            previous_context = mock.Mock(
+                request_text=previous_session["details"]["user_request_text"],
+                summary_text="上一轮摘要",
+                report_excerpt="上一轮报告摘录",
+                history=[],
+            )
+            executed_plans: list[str] = []
+            seen_skill_names: list[str] = []
+            seen_context_profiles: list[str] = []
+            seen_request_texts: list[str] = []
+
+            def fake_run_analysis(*, plan, input_path, html_path, json_path, analysis_dir, timeout, target_time=None, request_text=None, **kwargs):
+                executed_plans.append(plan.kind)
+                html_path.write_text("<html>scene signal</html>", encoding="utf-8")
+                json_path.write_text("{}", encoding="utf-8")
+                return subprocess.CompletedProcess(args=["scene_signal"], returncode=0, stdout="", stderr="")
+
+            def fake_file_agent(**kwargs):
+                seen_skill_names.append(kwargs["skill_name"])
+                seen_context_profiles.append(kwargs.get("context_profile", ""))
+                seen_request_texts.append(kwargs.get("request_text", ""))
+                analysis_dir = kwargs["analysis_dir"]
+                analysis_dir.mkdir(parents=True, exist_ok=True)
+                analysis_path = analysis_dir / "source_stage_analysis.md"
+                analysis_path.write_text(
+                    "## 结论摘要\n- app-server 源码分析正文。\n\n## 关键证据\n- L1\n\n## 最可能原因\n- R1\n\n## 待确认项\n- 无\n\n## 建议动作\n- 无\n",
+                    encoding="utf-8",
+                )
+                kwargs["html_path"].write_text("<html>source stage</html>", encoding="utf-8")
+                kwargs["json_path"].write_text("{}", encoding="utf-8")
+                context_path = analysis_dir / "source_stage.context.md"
+                context_path.write_text("ctx", encoding="utf-8")
+                log_focus_path = analysis_dir / "log_focus.md"
+                log_focus_path.write_text("focus", encoding="utf-8")
+                debug_log_path = analysis_dir / "source_stage.debug.log"
+                debug_log_path.write_text("", encoding="utf-8")
+                events_path = analysis_dir / "source_stage.app_server_events.jsonl"
+                events_path.write_text("{\"method\":\"turn/completed\"}\n", encoding="utf-8")
+                return {
+                    "ok": True,
+                    "analysis_kind": "source_stage",
+                    "provider": "codex",
+                    "executor": "codex_app_server",
+                    "analysis_markdown_path": analysis_path,
+                    "html_path": kwargs["html_path"],
+                    "json_path": kwargs["json_path"],
+                    "context_path": context_path,
+                    "log_focus_manifest_path": log_focus_path,
+                    "focused_log_input": prepared_input,
+                    "debug_log_path": debug_log_path,
+                    "events_path": events_path,
+                    "evidence_count": 1,
+                    "duration_seconds": 42.0,
+                    "usage": {"totalTokens": 123},
+                    "custom_skill_analysis_status": "completed",
+                    "command": ["codex", "app-server"],
+                    "stdout": "",
+                    "stderr": "",
+                    "thread_id": "thread-app-server",
+                    "turn_id": "turn-app-server",
+                }
+
+            with (
+                mock.patch.object(runner, "_write_reanalysis_source_evidence", return_value=None),
+                mock.patch.object(runner, "_build_combined_report_artifacts", return_value=None),
+                mock.patch.object(runner, "_run_analysis", side_effect=fake_run_analysis),
+                mock.patch.object(runner, "_run_custom_skill_agent_analysis", side_effect=fake_file_agent),
+                mock.patch.object(runner, "_run_bug_agent_summary") as summary_mock,
+            ):
+                result = runner.run_bug_reanalysis(
+                    followup_text="基于源码重新分析，检查信号处理相关的代码逻辑",
+                    previous_context=previous_context,
+                    previous_session=previous_session,
+                    force_rerun=True,
+                    bridge_session_id="test-reanalysis-source-context-rebuild",
+                )
+
+        self.assertTrue(result.success)
+        self.assertEqual(executed_plans, ["scene_signal"])
+        self.assertEqual(seen_skill_names, ["scene-signal-diagnosis"])
+        self.assertEqual(seen_context_profiles, ["scene-signal-diagnosis"])
+        self.assertEqual(seen_request_texts, ["基于源码重新分析，检查信号处理相关的代码逻辑"])
+        self.assertEqual(result.details["analysis_kinds"], ["scene_signal", "source_stage"])
+        self.assertEqual(result.details["analysis_skill"], "scene-signal-diagnosis")
+        self.assertEqual(result.details["context_profile"], "scene-signal-diagnosis")
+        self.assertEqual(result.details["agent_summary_execution_backend"], "source_stage_direct")
+        summary_mock.assert_not_called()
+
+    def test_bug_reanalysis_source_stage_prefers_app_server_file_agent_over_pydantic_ai(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(
+                dry_run=False,
+                data_dir=Path(tmp),
+                workspace_root=Path(tmp),
+                codex_app_server=CodexAppServerOptions(enabled=True, use_for_file_agent=True),
+            )
+            config.bug_analysis.provider = "codex"
+            config.bug_analysis.command = "codex"
+            runner = BugAnalysisRunner(config)
+            job_dir = Path(tmp) / "jobs" / "job_scene_signal_source_appserver"
+            output_dir = job_dir / "output"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            prepared_input = Path(tmp) / "logs"
+            self._write_matching_log(prepared_input, "2026-05-25 16:50:41")
+            previous_session = {
+                "job_id": "job_scene_signal_source_appserver",
+                "job_dir": str(job_dir),
+                "details": {
+                    "analysis_kind": "scene_signal",
+                    "analysis_kinds": ["scene_signal", "source_stage"],
+                    "analysis_skill": "scene-signal-diagnosis",
+                    "prepared_log_input": str(prepared_input),
+                    "selected_log_input": str(prepared_input),
+                    "target_time": "2026-05-25 16:50",
+                    "user_request_text": "2026-05-25 16:50:41 场景模式异常",
+                },
+            }
+            previous_context = mock.Mock(
+                request_text=previous_session["details"]["user_request_text"],
+                summary_text="上一轮摘要",
+                report_excerpt="上一轮报告摘录",
+                history=[],
+            )
+            counts = {"pai": 0, "file": 0}
+
+            def fake_file_agent(**kwargs):
+                counts["file"] += 1
+                return {
+                    "ok": False,
+                    "error_code": "custom_skill_agent_failed",
+                    "message": "stop after preferred file-agent path",
+                    "command": ["codex"],
+                    "provider": "codex",
+                    "stdout": "",
+                    "stderr": "",
+                    "stdout_path": Path(tmp) / "stdout.txt",
+                    "stderr_path": Path(tmp) / "stderr.txt",
+                    "command_path": Path(tmp) / "command.txt",
+                    "analysis_markdown_path": Path(tmp) / "analysis.md",
+                }
+
+            def fake_pai(**kwargs):
+                counts["pai"] += 1
+                return {"ok": True}
+
+            with (
+                mock.patch.object(runner, "_write_reanalysis_source_evidence", return_value=None),
+                mock.patch.object(runner, "_build_combined_report_artifacts", return_value=None),
+                mock.patch.object(runner, "_run_custom_skill_agent_analysis", side_effect=fake_file_agent),
+                mock.patch.object(runner, "_run_source_stage_pydantic_ai", side_effect=fake_pai),
+            ):
+                result = runner.run_bug_reanalysis(
+                    followup_text="基于源码重新分析 3D场景模式",
+                    previous_context=previous_context,
+                    previous_session=previous_session,
+                    plans_override=[BugAnalysisPlan(kind="source_stage")],
+                    classification_skill="scene-signal-diagnosis",
+                    classification_source="agent",
+                    classification_reason="prefer app-server",
+                )
+
+        self.assertFalse(result.success)
+        self.assertEqual(counts["file"], 1)
+        self.assertEqual(counts["pai"], 0)
+
+    def test_bug_reanalysis_source_stage_timeout_uses_partial_stream_markdown(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=False, data_dir=Path(tmp), workspace_root=Path(tmp))
+            config.bug_analysis.provider = "codex"
+            config.bug_analysis.command = "codex"
+            runner = BugAnalysisRunner(config)
+            job_dir = Path(tmp) / "jobs" / "job_scene_signal_source_partial"
+            output_dir = job_dir / "output"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            prepared_input = Path(tmp) / "logs"
+            self._write_matching_log(prepared_input, "2026-05-25 16:50:41")
+            previous_session = {
+                "job_id": "job_scene_signal_source_partial",
+                "job_dir": str(job_dir),
+                "details": {
+                    "analysis_kind": "scene_signal",
+                    "analysis_kinds": ["scene_signal", "source_stage"],
+                    "analysis_skill": "scene-signal-diagnosis",
+                    "prepared_log_input": str(prepared_input),
+                    "selected_log_input": str(prepared_input),
+                    "target_time": "2026-05-25 16:50",
+                    "user_request_text": "2026-05-25 16:50:41 场景模式异常",
+                },
+            }
+            previous_context = mock.Mock(
+                request_text=previous_session["details"]["user_request_text"],
+                summary_text="上一轮摘要",
+                report_excerpt="上一轮报告摘录",
+                history=[],
+            )
+
+            def fake_pai(**kwargs):
+                return {
+                    "ok": False,
+                    "error_code": "pydantic_ai_stream_error",
+                    "message": "stream failed",
+                    "analysis_kind": "source_stage",
+                }
+
+            def fake_file_agent(**kwargs):
+                return {
+                    "ok": False,
+                    "error_code": "custom_skill_agent_timeout",
+                    "message": "专用 Skill `source_analysis` 文件 Agent 执行超时，未生成可验证证据。",
+                    "analysis_kind": "source_stage",
+                    "provider": "codex",
+                    "partial_markdown": (
+                        "## 阶段性结论（超时前）\n"
+                        "- `SIGNAL_SR_SCENE_TYPE=14` 已闭环，卡点不在 Android->Unity 输入链路。\n"
+                        "- 更可能是 Unity 收到 scene=14 后的主题/显示消费逻辑未展示 3D。\n"
+                        "## 当前缺口\n"
+                        "- 文件 Agent 在整理最终关键证据前超时。\n"
+                    ),
+                    "command": ["codex", "exec"],
+                }
+
+            with (
+                mock.patch.object(runner, "_write_reanalysis_source_evidence", return_value=None),
+                mock.patch.object(runner, "_build_combined_report_artifacts", return_value=None),
+                mock.patch.object(runner, "_run_source_stage_pydantic_ai", side_effect=fake_pai),
+                mock.patch.object(runner, "_run_custom_skill_agent_analysis", side_effect=fake_file_agent),
+            ):
+                result = runner.run_bug_reanalysis(
+                    followup_text="基于源码重新分析",
+                    previous_context=previous_context,
+                    previous_session=previous_session,
+                    plans_override=[BugAnalysisPlan(kind="source_stage")],
+                    classification_skill="scene-signal-diagnosis",
+                    classification_source="agent",
+                    classification_reason="用户明确要求源码重分析",
+                )
+
+        self.assertTrue(result.success)
+        self.assertIn("阶段性结论", result.message)
+        self.assertIn("scene=14", result.message)
+        self.assertEqual(result.details["source_stage_analysis_status"], "partial_timeout")
+        self.assertEqual(result.details["agent_summary_execution_backend"], "source_stage_partial")
+
+    def test_run_source_stage_pydantic_ai_returns_executor_and_report_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=False, data_dir=Path(tmp), workspace_root=Path(tmp))
+            runner = BugAnalysisRunner(config)
+            html_path = Path(tmp) / "source_stage_report.html"
+            json_path = Path(tmp) / "source_stage_report.json"
+            analysis_dir = Path(tmp) / "source_stage_analysis"
+
+            fake_result = mock.Mock(
+                ok=True,
+                markdown=(
+                    "## 结论摘要\n- pydantic-ai 输出。\n\n"
+                    "## 关键证据\n- L1\n\n"
+                    "## 最可能原因\n- R1\n\n"
+                    "## 待确认项\n- 无\n\n"
+                    "## 建议动作\n- 无\n"
+                ),
+                output="",
+                duration_seconds=1.5,
+                tool_calls=1,
+                tool_trace=[{"tool": "read_file", "args": "{}"}],
+                usage={"totalTokens": 12},
+                runtime_path="pydantic_ai_agent",
+                model="mimo-v2.5-pro",
+            )
+
+            with mock.patch("lark_agent_bridge.agents.agent_runtime.AgentRuntime") as runtime_cls:
+                runtime = runtime_cls.return_value
+                runtime.is_available.return_value = True
+                runtime.run.return_value = fake_result
+                skill_record = mock.Mock(content="", skill_md_path="")
+                with mock.patch.object(runner.skill_manager, "get_skill", return_value=skill_record):
+                    result = runner._run_source_stage_pydantic_ai(
+                        analysis_kind="source_stage",
+                        skill_name="source_analysis",
+                        request_text="基于源码分析 3D场景模式",
+                        prompt_text="基于源码分析 3D场景模式",
+                        title="进入场景模式没有展示3D场景",
+                        description="问题时间: 2026-05-25 16:50:41",
+                        fault_time="2026-05-25 16:50:41",
+                        selected_input=Path(tmp) / "logs",
+                        prepared_input=Path(tmp) / "logs",
+                        source_evidence_path=None,
+                        html_path=html_path,
+                        json_path=json_path,
+                        analysis_dir=analysis_dir,
+                        progress_callback=None,
+                    )
+
+                payload = json.loads(json_path.read_text(encoding="utf-8"))
+                html = html_path.read_text(encoding="utf-8")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["executor"], "pydantic_ai")
+        self.assertEqual(result["html_path"], html_path)
+        self.assertEqual(result["json_path"], json_path)
+        self.assertEqual(payload["executor"], "pydantic_ai")
+        self.assertIn(">pydantic_ai<", html)
+        self.assertNotIn(">file_agent<", html)
+
+    def test_write_custom_skill_agent_report_surfaces_source_stage_highlights(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=False, data_dir=Path(tmp), workspace_root=Path(tmp))
+            runner = BugAnalysisRunner(config)
+            html_path = Path(tmp) / "source_stage_report.html"
+            json_path = Path(tmp) / "source_stage_report.json"
+            analysis_path = Path(tmp) / "source_stage_analysis.md"
+            analysis_path.write_text(
+                "\n".join(
+                    [
+                        "## 结论摘要",
+                        "",
+                        "- 高置信：主题皮肤被回退成 Basic。",
+                        "- 中置信：场景模式信号链路本身完整。",
+                        "",
+                        "## 最可能原因",
+                        "",
+                        "GuideEngine 在 SR ThemeElement 为空时回退 Basic，并继续把该主题下发给 Unity。",
+                        "",
+                        "## 关键证据",
+                        "",
+                        "- **foo.kt:12**: `if (srThemeElement == null || srThemeElement.isEmpty()) { ... }` 说明空列表会回退 Basic。",
+                        "- **bar.cs:34**: `current_theme = data.SRThemeSkin.Name` 说明 Unity 侧会直接采用回退后的主题名。",
+                        "",
+                        "## 待确认项",
+                        "",
+                        "- 缺少故障时刻的 Unity 运行日志。",
+                        "",
+                        "## 建议动作",
+                        "",
+                        "- 补抓故障时刻附近的 Unity 日志。",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            skill_md = Path(tmp) / "SKILL.md"
+            skill_md.write_text("# Source Analysis\n", encoding="utf-8")
+
+            with mock.patch.object(runner, "_skill_context_paths", return_value=[skill_md]):
+                runner._write_custom_skill_agent_report(
+                    analysis_kind="source_stage",
+                    analysis_label="源码分析阶段",
+                    html_path=html_path,
+                    json_path=json_path,
+                    analysis_markdown_path=analysis_path,
+                    skill_name="source_analysis",
+                    provider="pydantic_ai",
+                    request_text="源码分析 3D场景信号分析",
+                    prompt_text="源码分析 3D场景信号分析",
+                    title="进入场景模式没有展示3D场景",
+                    description="问题描述",
+                    fault_time="2026-05-25 16:50:41",
+                    selected_input=Path(tmp) / "logs",
+                    prepared_input=Path(tmp) / "logs",
+                    source_evidence_path=Path(tmp) / "bug_source_evidence.md",
+                    evidence_count=2,
+                    duration_seconds=12.5,
+                    executor="pydantic_ai",
+                )
+
+            html = html_path.read_text(encoding="utf-8")
+
+        self.assertIn("<h2>结论摘要</h2>", html)
+        self.assertIn("高置信：主题皮肤被回退成 Basic。", html)
+        self.assertIn("<h2>最可能原因</h2>", html)
+        self.assertIn("GuideEngine 在 SR ThemeElement 为空时回退 Basic", html)
+        self.assertIn("<h2>关键证据</h2>", html)
+        self.assertIn("foo.kt:12", html)
+        self.assertIn("bar.cs:34", html)
+        self.assertIn("展开查看完整分析 Markdown", html)
+
+    def test_bug_reanalysis_source_stage_app_server_can_skip_separate_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(
+                dry_run=False,
+                data_dir=Path(tmp),
+                workspace_root=Path(tmp),
+                codex_app_server=CodexAppServerOptions(enabled=True, use_for_file_agent=True),
+            )
+            config.bug_analysis.provider = "codex"
+            config.bug_analysis.command = "codex"
+            runner = BugAnalysisRunner(config)
+            job_dir = Path(tmp) / "jobs" / "job_scene_signal_source_direct_reply"
+            output_dir = job_dir / "output"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            prepared_input = Path(tmp) / "logs"
+            self._write_matching_log(prepared_input, "2026-05-25 16:50:41")
+            previous_session = {
+                "job_id": "job_scene_signal_source_direct_reply",
+                "job_dir": str(job_dir),
+                "details": {
+                    "analysis_kind": "scene_signal",
+                    "analysis_kinds": ["scene_signal", "source_stage"],
+                    "analysis_skill": "scene-signal-diagnosis",
+                    "prepared_log_input": str(prepared_input),
+                    "selected_log_input": str(prepared_input),
+                    "target_time": "2026-05-25 16:50",
+                    "user_request_text": "2026-05-25 16:50:41 场景模式异常",
+                },
+            }
+            previous_context = mock.Mock(
+                request_text=previous_session["details"]["user_request_text"],
+                summary_text="上一轮摘要",
+                report_excerpt="上一轮报告摘录",
+                history=[],
+            )
+            analysis_dir = output_dir / "source_stage_analysis"
+            analysis_dir.mkdir(parents=True, exist_ok=True)
+            analysis_path = analysis_dir / "source_stage_analysis.md"
+            analysis_path.write_text(
+                "## 结论摘要\n- app-server 源码分析正文。\n\n## 关键证据\n- L1\n\n## 最可能原因\n- R1\n\n## 待确认项\n- 无\n\n## 建议动作\n- 无\n",
+                encoding="utf-8",
+            )
+
+            def fake_file_agent(**kwargs):
+                return {
+                    "ok": True,
+                    "analysis_kind": "source_stage",
+                    "provider": "codex",
+                    "executor": "codex_app_server",
+                    "analysis_markdown_path": analysis_path,
+                    "html_path": output_dir / "source_stage_report.html",
+                    "json_path": output_dir / "source_stage_report.json",
+                    "context_path": analysis_dir / "source_stage.context.md",
+                    "log_focus_manifest_path": analysis_dir / "log_focus.md",
+                    "focused_log_input": prepared_input,
+                    "debug_log_path": analysis_dir / "source_stage.debug.log",
+                    "events_path": analysis_dir / "source_stage.app_server_events.jsonl",
+                    "evidence_count": 1,
+                    "duration_seconds": 42.0,
+                    "usage": {"totalTokens": 123},
+                    "custom_skill_analysis_status": "completed",
+                    "command": ["codex", "app-server"],
+                    "stdout": "",
+                    "stderr": "",
+                }
+
+            with (
+                mock.patch.object(runner, "_write_reanalysis_source_evidence", return_value=None),
+                mock.patch.object(runner, "_build_combined_report_artifacts", return_value=None),
+                mock.patch.object(runner, "_run_custom_skill_agent_analysis", side_effect=fake_file_agent),
+                mock.patch.object(runner, "_run_bug_agent_summary") as summary_mock,
+            ):
+                result = runner.run_bug_reanalysis(
+                    followup_text="基于源码重新分析 3D场景模式",
+                    previous_context=previous_context,
+                    previous_session=previous_session,
+                    plans_override=[BugAnalysisPlan(kind="source_stage")],
+                    classification_skill="scene-signal-diagnosis",
+                    classification_source="agent",
+                    classification_reason="direct source reply",
+                )
+
+        self.assertTrue(result.success)
+        self.assertIn("app-server 源码分析正文", result.message)
+        self.assertEqual(result.details["agent_summary_execution_backend"], "source_stage_direct")
+        summary_mock.assert_not_called()
 
     def test_bug_reanalysis_ld_lane_level_builtin_runs_before_summary(self):
         with tempfile.TemporaryDirectory() as tmp:
