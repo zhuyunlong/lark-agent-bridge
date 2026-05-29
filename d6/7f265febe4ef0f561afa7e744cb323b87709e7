@@ -1,0 +1,36 @@
+docs/superpowers/plans/2026-05-29-codegraph-warmup-node-storm.md
+  72deda4a4daa1bb5 1-321
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.22",
+  "base_commit_sha": "d67f265febe4ef0f561afa7e744cb323b87709e7",
+  "prompts": {
+    "426f97d51e520ca3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5e3e419a-724b-4bec-85fb-c8e62f0aedf8",
+        "model": "mimo-v2.5-pro"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 161,
+      "total_deletions": 0,
+      "accepted_lines": 0,
+      "overriden_lines": 0
+    },
+    "72deda4a4daa1bb5": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e728a-4120-76a1-ab41-6136becfcc6c",
+        "model": "gpt-5.4"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 321,
+      "total_deletions": 0,
+      "accepted_lines": 321,
+      "overriden_lines": 0
+    }
+  }
+}
