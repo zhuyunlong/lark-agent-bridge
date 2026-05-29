@@ -96,6 +96,24 @@ class TestProviderCapabilities(unittest.TestCase):
         self.assertEqual(select_runtime_path(nothing), "subprocess")
 
 
+class TestLLMClient(unittest.TestCase):
+    def test_openai_client_disables_sdk_retries_for_bridge_timeouts(self):
+        from lark_agent_bridge.agents.llm_client import LLMClient
+
+        opts = _FakeAIOptions(
+            api_format="openai",
+            base_url="https://api.example.com/v1",
+            api_key="test-key",
+            intent_timeout_seconds=30,
+            summary_timeout_seconds=120,
+        )
+        with patch("openai.OpenAI") as openai_cls:
+            LLMClient(opts)._get_openai_client(opts.base_url, opts.api_key)
+
+        self.assertEqual(openai_cls.call_args.kwargs["max_retries"], 0)
+        self.assertEqual(openai_cls.call_args.kwargs["timeout"], 130)
+
+
 class TestAgentOutputModels(unittest.TestCase):
     def test_source_analysis_output_to_markdown(self):
         from lark_agent_bridge.agents.agent_output_models import SourceAnalysisOutput

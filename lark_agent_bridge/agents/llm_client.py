@@ -108,6 +108,7 @@ class LLMClient:
                 base_url=base_url or "https://api.openai.com/v1",
                 api_key=api_key or "not-set",
                 timeout=max(self.options.intent_timeout_seconds, self.options.summary_timeout_seconds) + 10,
+                max_retries=0,
             )
         return self._openai_clients[cache_key]
 
