@@ -3222,6 +3222,56 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(result["tool_trace"], FakeRuntimeResult.tool_trace)
         self.assertEqual(completed[-1]["details"]["tool_trace"], FakeRuntimeResult.tool_trace)
 
+    def test_pydantic_summary_rejects_runtime_without_tools(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            request_artifact = root / "bug_agent_request.md"
+            metadata_path = root / "bug_metadata.md"
+            output_path = root / "bug_agent_summary.md"
+            request_artifact.write_text("request", encoding="utf-8")
+            metadata_path.write_text("metadata", encoding="utf-8")
+
+            class FakeRuntimeResult:
+                ok = True
+                markdown = "tools unavailable"
+                model = "gpt-test"
+                duration_seconds = 2.0
+                usage = {"total_tokens": 12}
+                runtime_path = "direct_api"
+                tool_calls = 0
+                tool_trace = []
+                error = ""
+                error_code = ""
+
+            class FakeRuntime:
+                last_kwargs = {}
+
+                def __init__(self, *args, **kwargs):
+                    pass
+
+                def run(self, **kwargs):
+                    type(self).last_kwargs = kwargs
+                    return FakeRuntimeResult()
+
+            runner = BugAnalysisRunner(BridgeConfig(dry_run=False, data_dir=root / "data", workspace_root=root))
+
+            with (
+                mock.patch("lark_agent_bridge.agents.agent_runtime._check_pydantic_ai", return_value=True),
+                mock.patch("lark_agent_bridge.agents.agent_runtime.AgentRuntime", FakeRuntime),
+            ):
+                result = runner._run_bug_summary_pydantic_ai(
+                    request_text="分析3D启动生命周期",
+                    request_artifact=request_artifact,
+                    metadata_path=metadata_path,
+                    output_path=output_path,
+                    progress_callback=None,
+                )
+
+        self.assertTrue(FakeRuntime.last_kwargs["strict_tools"])
+        self.assertEqual(result["message"], "")
+        self.assertEqual(result["error"], "pydantic_ai_summary_requires_tools")
+        self.assertFalse(output_path.exists())
+
     def test_bug_analysis_classifies_startup_request(self):
         runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
 

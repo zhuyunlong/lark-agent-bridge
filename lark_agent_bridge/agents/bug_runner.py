@@ -13149,9 +13149,31 @@ class BugAnalysisRunner:
             system_prompt=system_prompt,
             user_prompt=prompt,
             tools_enabled=True,
+            strict_tools=True,
         )
 
         duration = time.monotonic() - started
+        if result.ok and (result.runtime_path != "pydantic_ai_agent" or result.tool_calls == 0):
+            logger.warning(
+                "pydantic-ai summary returned without tool-backed runtime "
+                "(runtime_path=%s, tool_calls=%d); rejecting so caller can fallback",
+                result.runtime_path,
+                result.tool_calls,
+            )
+            return {
+                "message": "",
+                "command": None,
+                "error": "pydantic_ai_summary_requires_tools",
+                "provider": "pydantic_ai",
+                "session_id": "",
+                "resumed": False,
+                "duration_seconds": duration,
+                "usage": result.usage,
+                "usage_scope": "",
+                "runtime_path": result.runtime_path,
+                "tool_calls": result.tool_calls,
+                "tool_trace": result.tool_trace,
+            }
         if result.ok and result.markdown.strip():
             message = result.markdown.strip()
             # Write to output_path for downstream consumers
