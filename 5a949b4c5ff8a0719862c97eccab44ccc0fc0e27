@@ -1,0 +1,21 @@
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.22",
+  "base_commit_sha": "5a949b4c5ff8a0719862c97eccab44ccc0fc0e27",
+  "prompts": {
+    "1b53b923b31a0aad": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "1941cac3-1fee-4f05-a136-6397f4140a9d",
+        "model": "mimo-v2.5-pro"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 1,
+      "total_deletions": 0,
+      "accepted_lines": 1,
+      "overriden_lines": 0
+    }
+  }
+}
