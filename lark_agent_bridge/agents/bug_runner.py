@@ -2061,6 +2061,8 @@ class BugAnalysisRunner:
                                 progress_callback,
                                 stage="ld_direct_api_fallback",
                                 message=f"LD direct_api 失败（{custom_result.get('error_code')}），切换 file_agent",
+                                error_code=str(custom_result.get("error_code") or ""),
+                                error_message=str(custom_result.get("message") or ""),
                             )
                             custom_result = self._run_custom_skill_agent_analysis(
                                 analysis_kind=current_plan.kind,
@@ -10050,6 +10052,21 @@ class BugAnalysisRunner:
             if self.config.bug_analysis.file_agent_debug_logs
             else None
         )
+
+        def _fail(result: dict[str, object], *, provider_name: str = "") -> dict[str, object]:
+            self._emit_progress(
+                progress_callback,
+                stage=f"{analysis_kind}_agent_failed",
+                message=str(result.get("message") or f"{effective_label}文件 Agent 分析失败"),
+                error_code=str(result.get("error_code") or ""),
+                provider=provider_name,
+                output_path=str(analysis_markdown_path),
+                stdout_path=str(result.get("stdout_path") or stdout_path),
+                stderr_path=str(result.get("stderr_path") or stderr_path),
+                debug_log_path=str(result.get("debug_log_path") or debug_log_path or ""),
+            )
+            return result
+
         stale_paths = [
             analysis_markdown_path,
             html_path,
@@ -10118,7 +10135,7 @@ class BugAnalysisRunner:
         if command:
             command_path.write_text(json.dumps(command, ensure_ascii=False, indent=2), encoding="utf-8")
         if not command:
-            return {
+            return _fail({
                 "ok": False,
                 "error_code": "custom_skill_agent_not_configured",
                 "message": f"专用 Skill `{skill_name}` 已配置 file_agent，但未配置可用 Agent 命令。",
@@ -10137,7 +10154,7 @@ class BugAnalysisRunner:
                 "stdout": "",
                 "stderr": "",
                 "duration_seconds": time.monotonic() - started,
-            }
+            }, provider_name=provider)
         self._emit_progress(
             progress_callback,
             stage=f"{analysis_kind}_agent_analysis",
@@ -10291,7 +10308,7 @@ class BugAnalysisRunner:
             stdout_path.write_text(stdout, encoding="utf-8")
             stderr_path.write_text(stderr, encoding="utf-8")
             partial_markdown = self._extract_partial_markdown_from_agent_stream(stdout, skill_name=skill_name)
-            return {
+            return _fail({
                 "ok": False,
                 "error_code": "custom_skill_agent_timeout",
                 "message": f"专用 Skill `{skill_name}` 文件 Agent 执行超时，未生成可验证证据。",
@@ -10313,11 +10330,11 @@ class BugAnalysisRunner:
                 "timeout_seconds": timeout,
                 "partial_markdown": partial_markdown,
                 "partial_analysis_available": bool(partial_markdown),
-            }
+            }, provider_name=provider)
         except OSError as exc:
             stdout_path.write_text("", encoding="utf-8")
             stderr_path.write_text(str(exc), encoding="utf-8")
-            return {
+            return _fail({
                 "ok": False,
                 "error_code": "custom_skill_agent_failed_to_start",
                 "message": f"专用 Skill `{skill_name}` 文件 Agent 启动失败：{exc}",
@@ -10336,13 +10353,13 @@ class BugAnalysisRunner:
                 "stdout": "",
                 "stderr": str(exc),
                 "duration_seconds": time.monotonic() - started,
-            }
+            }, provider_name=provider)
         stdout_path.write_text(stdout, encoding="utf-8")
         stderr_path.write_text(stderr, encoding="utf-8")
         if output_mode != "stdout_redirect" and not analysis_markdown_path.exists() and stdout.strip():
             analysis_markdown_path.write_text(stdout.strip() + "\n", encoding="utf-8")
         if completed.returncode != 0:
-            return {
+            return _fail({
                 "ok": False,
                 "error_code": "custom_skill_agent_failed",
                 "message": f"专用 Skill `{skill_name}` 文件 Agent 执行失败，未允许进入最终总结。",
@@ -10362,9 +10379,9 @@ class BugAnalysisRunner:
                 "stdout": stdout,
                 "stderr": stderr,
                 "duration_seconds": time.monotonic() - started,
-            }
+            }, provider_name=provider)
         if not analysis_markdown_path.exists():
-            return {
+            return _fail({
                 "ok": False,
                 "error_code": "custom_skill_agent_missing_output",
                 "message": (
@@ -10387,13 +10404,13 @@ class BugAnalysisRunner:
                 "stdout": stdout,
                 "stderr": stderr,
                 "duration_seconds": time.monotonic() - started,
-            }
+            }, provider_name=provider)
         analysis_text = analysis_markdown_path.read_text(encoding="utf-8", errors="replace")
         if not analysis_text.strip():
             debug_hint = (
                 f" 调试日志: `{debug_log_path.name}`。" if debug_log_path is not None else ""
             )
-            return {
+            return _fail({
                 "ok": False,
                 "error_code": "custom_skill_agent_empty_output",
                 "message": (
@@ -10415,10 +10432,10 @@ class BugAnalysisRunner:
                 "stdout": stdout,
                 "stderr": stderr,
                 "duration_seconds": time.monotonic() - started,
-            }
+            }, provider_name=provider)
         valid, reason, evidence_count = self._validate_custom_skill_analysis(analysis_markdown_path)
         if not valid:
-            return {
+            return _fail({
                 "ok": False,
                 "error_code": "custom_skill_agent_invalid_evidence",
                 "message": f"专用 Skill `{skill_name}` 文件 Agent 输出缺少有效 `## 关键证据`：{reason}。不会进入最终总结。",
@@ -10440,7 +10457,7 @@ class BugAnalysisRunner:
                 "duration_seconds": time.monotonic() - started,
                 "evidence_count": evidence_count,
                 "validation_error": reason,
-            }
+            }, provider_name=provider)
         self._write_custom_skill_agent_report(
             analysis_kind=analysis_kind,
             analysis_label=effective_label,
@@ -10525,6 +10542,32 @@ class BugAnalysisRunner:
     def _ld_executor_grep_pattern(self) -> str:
         return "|".join(self._LD_GREP_PATTERNS)
 
+    def _normalize_log_locator(self, value: str | Path) -> str:
+        return str(value).replace("\\", "/")
+
+    def _log_basename_from_locator(self, value: str | Path) -> str:
+        normalized = self._normalize_log_locator(value)
+        return normalized.rsplit("/", 1)[-1]
+
+    def _ld_executor_should_include_log_file(
+        self,
+        path: Path,
+        *,
+        locator: str | Path,
+        fault_dt: "time.struct_time | None",
+    ) -> bool:
+        normalized = self._normalize_log_locator(locator).lower()
+        if not normalized.endswith((".alog", ".alog.log", ".xlog", ".xlog.log", ".log")):
+            return False
+        if path.suffix == ".alog" and path.with_suffix(".alog.log").exists():
+            return False
+        basename = self._log_basename_from_locator(locator)
+        file_dt = self._parse_log_file_datetime(basename)
+        if fault_dt is None or file_dt is None:
+            return True
+        candidate_dt = datetime.fromtimestamp(time.mktime(file_dt))
+        return abs((candidate_dt - fault_dt).total_seconds()) <= 7200
+
     def _ld_executor_find_log_files(
         self,
         *,
@@ -10534,21 +10577,29 @@ class BugAnalysisRunner:
         """Find montecarlo/LD-relevant log files near fault time."""
         fault_dt = self._parse_bug_datetime(fault_time)
         results: list[Path] = []
+        seen: set[Path] = set()
         logs_dir = cache_dir / "logs"
+
+        def _append_candidate(path: Path, *, locator: str | Path) -> None:
+            if path in seen or not path.is_file():
+                return
+            if not self._ld_executor_should_include_log_file(path, locator=locator, fault_dt=fault_dt):
+                return
+            seen.add(path)
+            results.append(path)
+
         if logs_dir.exists():
             for pkg in self._LD_LOG_PACKAGES:
                 for log_root in sorted(logs_dir.glob(f"data/Log/log*/app/{pkg}")):
                     for alog in sorted(log_root.glob("*.alog*")):
-                        # Prefer decoded .alog.log over raw .alog
-                        if alog.suffix == ".alog" and alog.with_suffix(".alog.log").exists():
-                            continue
-                        file_dt = self._parse_log_file_datetime(alog.name)
-                        if fault_dt is None or file_dt is None:
-                            results.append(alog)
-                            continue
-                        candidate_dt = datetime.fromtimestamp(time.mktime(file_dt))
-                        if abs((candidate_dt - fault_dt).total_seconds()) <= 7200:
-                            results.append(alog)
+                        _append_candidate(alog, locator=alog.name)
+            for path in sorted(logs_dir.rglob("*")):
+                if not path.is_file():
+                    continue
+                normalized = self._normalize_log_locator(path.relative_to(logs_dir)).lower()
+                if not any(pkg in normalized for pkg in self._LD_LOG_PACKAGES):
+                    continue
+                _append_candidate(path, locator=normalized)
         # Also check ZIP for montecarlo logs near fault time
         for zip_path in sorted((cache_dir / "attachments").glob("*.zip")) if (cache_dir / "attachments").exists() else []:
             try:
@@ -10561,7 +10612,7 @@ class BugAnalysisRunner:
                             continue
                         if not name_lower.endswith((".alog", ".alog.log", ".xlog", ".xlog.log", ".log")):
                             continue
-                        basename = Path(info.filename).name
+                        basename = self._log_basename_from_locator(info.filename)
                         file_dt = self._parse_log_file_datetime(basename)
                         if fault_dt is not None and file_dt is not None:
                             candidate_dt = datetime.fromtimestamp(time.mktime(file_dt))

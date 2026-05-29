@@ -4430,6 +4430,28 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(stdout_text, "partial")
         self.assertEqual(stderr_text, "hung")
 
+    def test_ld_executor_find_log_files_supports_flat_backslash_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = BugAnalysisRunner(
+                BridgeConfig(dry_run=False, data_dir=Path(tmp) / "data", workspace_root=Path(tmp))
+            )
+            cache_dir = Path(tmp) / "bug_cache"
+            logs_dir = cache_dir / "logs"
+            logs_dir.mkdir(parents=True)
+            flat_raw = logs_dir / r"ALLlog\log0\app\com.xiaopeng.montecarlo\main_2026-05-29_11-00.alog"
+            flat_decoded = logs_dir / r"ALLlog\log0\app\com.xiaopeng.montecarlo\main_2026-05-29_11-00.alog.log"
+            outside_window = logs_dir / r"ALLlog\log0\app\com.xiaopeng.montecarlo\main_2026-05-29_14-00.alog"
+            flat_raw.write_bytes(b"raw")
+            flat_decoded.write_text("decoded", encoding="utf-8")
+            outside_window.write_bytes(b"later")
+
+            files = runner._ld_executor_find_log_files(
+                cache_dir=cache_dir,
+                fault_time="2026-05-29 11:12",
+            )
+
+        self.assertEqual(files, [flat_decoded])
+
     def test_custom_skill_file_agent_missing_output_keeps_diagnostics_and_clears_stale_reports(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "workspace"
@@ -4448,6 +4470,7 @@ class AgentTests(unittest.TestCase):
             self._write_matching_log(log_root, "2026-05-22 19:46:00")
             html_path = Path(tmp) / "bug_custom_skill_report.html"
             json_path = Path(tmp) / "bug_custom_skill_report.json"
+            progress_events = []
             html_path.write_text("stale html", encoding="utf-8")
             json_path.write_text('{"mode":"custom_skill_overview"}', encoding="utf-8")
 
@@ -4468,7 +4491,7 @@ class AgentTests(unittest.TestCase):
                     html_path=html_path,
                     json_path=json_path,
                     analysis_dir=Path(tmp) / "custom_skill_analysis",
-                    progress_callback=None,
+                    progress_callback=progress_events.append,
                     timeout=30,
                 )
                 self.assertFalse(result["ok"])
@@ -4479,6 +4502,115 @@ class AgentTests(unittest.TestCase):
                 self.assertTrue(Path(result["command_path"]).exists())
                 self.assertFalse(html_path.exists())
                 self.assertFalse(json_path.exists())
+                self.assertEqual(progress_events[-1]["stage"], "source_code_skill_agent_failed")
+                self.assertEqual(
+                    progress_events[-1]["details"]["error_code"],
+                    "custom_skill_agent_missing_output",
+                )
+
+    def test_bug_ld_direct_api_fallback_progress_includes_error_details(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "workspace"
+            data_dir = Path(tmp) / "data"
+            skill_name = "ld-lane-level-log-analysis-portable"
+            skill_dir = root / ".ai" / "skills" / skill_name
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "---\nname: LD Lane Level Log Analysis\ndescription: 分析车道级、退无图和 LD 状态日志。\n---\n",
+                encoding="utf-8",
+            )
+            config = BridgeConfig(dry_run=False, data_dir=data_dir, workspace_root=root)
+            config.bug_analysis.provider = "codex"
+            config.bug_analysis.command = "codex"
+            runner = BugAnalysisRunner(config)
+            log_root = Path(tmp) / "logs"
+            self._write_matching_log(log_root, "2026-05-29 11:12:00")
+            selection = runner.selection_for_skill_name(
+                skill_name,
+                source="agent",
+                reason="LD 退无图命中车道级内建 Skill",
+                provider="codex",
+            )
+            assert selection is not None
+            progress_events = []
+
+            def fake_run_json_command(command, timeout):
+                if "check-env" in command:
+                    return {"meegle_installed": True, "auth_ok": True}
+                if "resolve-url" in command:
+                    return {"project_key": "xpfailuremgmt", "work_item_id": "7003428840"}
+                if "fetch-data" in command:
+                    return {
+                        "title": "车道级导航不进",
+                        "status": "处理中",
+                        "create_time": "2026-05-29 11:00",
+                        "create_by": "tester",
+                        "fields": {},
+                        "attachments": [{"name": "Log.zip", "size": "12MB"}],
+                        "description": "问题时间: 2026-05-29 11:12\n未进车道级。",
+                    }
+                if command[:3] == ["meegle", "workitem", "get"]:
+                    return {"data": {}}
+                raise AssertionError(f"unexpected command: {command}")
+
+            with (
+                mock.patch.object(runner, "_run_json_command", side_effect=fake_run_json_command),
+                mock.patch.object(runner, "_load_option_map", return_value={}),
+                mock.patch.object(
+                    runner,
+                    "_download_bug_attachments",
+                    return_value={"downloaded": ["Log.zip"], "unzipped": [], "errors": [], "skipped": [], "ok": True},
+                ),
+                mock.patch.object(runner, "_select_log_input", return_value=log_root),
+                mock.patch.object(runner, "_prepare_log_input", return_value=log_root),
+                mock.patch.object(runner, "_classify_bug_request_with_agent", return_value=selection),
+                mock.patch.object(
+                    runner,
+                    "_run_ld_pydantic_ai_analysis",
+                    return_value={
+                        "ok": False,
+                        "error_code": "pydantic_ai_invalid_evidence",
+                        "message": "pydantic-ai 输出缺少关键证据",
+                    },
+                ),
+                mock.patch.object(
+                    runner,
+                    "_run_ld_direct_api_analysis",
+                    return_value={
+                        "ok": False,
+                        "error_code": "ld_direct_api_error",
+                        "message": "LD 车道级分析 API 调用失败：upstream forbidden",
+                    },
+                ),
+                mock.patch.object(
+                    runner,
+                    "_run_custom_skill_agent_analysis",
+                    return_value={
+                        "ok": False,
+                        "error_code": "custom_skill_agent_missing_output",
+                        "message": "专用 Skill 文件 Agent 未生成结果",
+                        "stdout": "",
+                        "stderr": "",
+                    },
+                ),
+            ):
+                result = runner.run_bug_analysis(
+                    BugRequest(
+                        bug_url="https://project.feishu.cn/xpfailuremgmt/buglo/detail/7003428840",
+                        prompt="未进车道级",
+                        raw_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/7003428840 未进车道级",
+                        triggered=True,
+                    ),
+                    progress_callback=progress_events.append,
+                )
+
+        self.assertFalse(result.success)
+        fallback_event = next(item for item in progress_events if item["stage"] == "ld_direct_api_fallback")
+        self.assertEqual(fallback_event["details"]["error_code"], "ld_direct_api_error")
+        self.assertEqual(
+            fallback_event["details"]["error_message"],
+            "LD 车道级分析 API 调用失败：upstream forbidden",
+        )
 
     def test_custom_skill_file_agent_uses_configured_internal_network_env(self):
         with tempfile.TemporaryDirectory() as tmp:
