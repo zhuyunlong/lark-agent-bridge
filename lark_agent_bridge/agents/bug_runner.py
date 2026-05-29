@@ -13293,6 +13293,30 @@ class BugAnalysisRunner:
         focus_reason = str(payload.get("focus_reason") or "").strip()
         if focus_reason:
             lines.append(f"- focus_reason: {focus_reason}")
+        runtime_context = payload.get("runtime_context")
+        if isinstance(runtime_context, dict):
+            context_parts: list[str] = []
+            for key in ("resource_type", "proto_type", "car_type", "branch", "build_time"):
+                value = self._clean_markdown_inline_text(str(runtime_context.get(key) or ""))
+                if value:
+                    context_parts.append(f"{key}={value}")
+            if context_parts:
+                lines.append("- runtime_context: " + "; ".join(context_parts))
+        exception_chain = payload.get("internal_exception_chain")
+        if isinstance(exception_chain, dict):
+            summary = self._clean_markdown_inline_text(str(exception_chain.get("summary") or ""))
+            if summary:
+                lines.append(f"- internal_exception_chain: {summary}")
+            hits = exception_chain.get("hits")
+            if isinstance(hits, list) and hits:
+                lines.append("- exception_hits:")
+                for item in hits[:3]:
+                    if not isinstance(item, dict):
+                        continue
+                    label = self._clean_markdown_inline_text(str(item.get("label") or ""))
+                    evidence = self._clean_markdown_inline_text(str(item.get("evidence") or ""))
+                    if label or evidence:
+                        lines.append(f"  - {label}: {evidence}".rstrip(": "))
         focus_session = self._structured_report_focus_session(payload)
         if isinstance(focus_session, dict):
             status = str(focus_session.get("status") or "").strip()

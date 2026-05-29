@@ -987,6 +987,20 @@ class AgentTests(unittest.TestCase):
                         "focus_reason": "问题时间命中 focus session",
                         "focus_session_index": 2,
                         "focus_session_pid": 10058,
+                        "runtime_context": {
+                            "resource_type": "outer",
+                            "proto_type": "1",
+                            "car_type": "D03S",
+                        },
+                        "internal_exception_chain": {
+                            "summary": "AddressModel 依赖异常 -> BaseCamera prefab 初始化失败",
+                            "hits": [
+                                {
+                                    "label": "AddressModel 依赖异常",
+                                    "evidence": "RemoteProviderException: Invalid path in AssetBundleProvider",
+                                }
+                            ],
+                        },
                         "verdict": {
                             "message": "启动链路异常，需要围绕 focus session 总结。",
                             "issues": [
@@ -1039,6 +1053,8 @@ class AgentTests(unittest.TestCase):
         self.assertIn("## Missing critical nodes", prompt)
         self.assertNotIn("TRAILING_NOISE_1", prompt)
         self.assertIn("focus_status: partial", prompt)
+        self.assertIn("resource_type=outer", prompt)
+        self.assertIn("Invalid path in AssetBundleProvider", prompt)
         self.assertIn("BaseCamera prefab 加载失败", prompt)
         self.assertNotIn("REPORT_NOISE", prompt)
 
