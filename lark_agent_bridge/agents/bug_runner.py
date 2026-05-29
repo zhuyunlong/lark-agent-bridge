@@ -13378,13 +13378,44 @@ class BugAnalysisRunner:
             rendered = rendered[: max_chars - 1].rstrip() + "…"
         return rendered
 
+    def _direct_api_compaction_profile(
+        self,
+        *,
+        metadata_path: Path,
+        snapshot_details: dict[str, object] | None = None,
+    ) -> str:
+        try:
+            metadata_text = metadata_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            metadata_text = ""
+        details = dict(snapshot_details or {})
+        if not details:
+            details = self._bug_prompt_snapshot_details_from_metadata(request_text="", metadata_path=metadata_path)
+        analysis_kind = str(details.get("analysis_kind") or "").strip()
+        if not analysis_kind:
+            analysis_kind = self._snapshot_field_from_text(metadata_text, "分析类型")
+        skill_name = self._snapshot_field_from_text(metadata_text, "命中 Skill")
+        if skill_name != "unity-startup-lifecycle-check":
+            return ""
+        if analysis_kind == "startup":
+            return "startup_unity_lifecycle"
+        route = self.skill_manager.primary_skill_map().get(skill_name)
+        if route is not None and str(route[0] or "").strip() == "startup":
+            return "startup_unity_lifecycle"
+        if "bug_3d_startup_report" in metadata_text:
+            return "startup_unity_lifecycle"
+        return ""
+
     def _direct_api_bug_summary_context_excerpt(
         self,
         *,
         title: str,
         path: Path,
         max_chars: int,
+        compaction_profile: str,
     ) -> str:
+        if compaction_profile != "startup_unity_lifecycle":
+            return self._read_bug_summary_context_excerpt(path, max_chars)
         if self._is_report_json_path(path):
             return self._compact_structured_report_excerpt(path, max_chars=min(max_chars, 2200))
         if title == "Bug Summary Evidence":
@@ -13909,11 +13940,9 @@ class BugAnalysisRunner:
         the direct API path must embed all relevant context inline.
         """
         max_file_chars = 12000
-        embedded_files = self._direct_api_bug_summary_embedded_files(
-            request_artifact=request_artifact,
+        compaction_profile = self._direct_api_compaction_profile(
             metadata_path=metadata_path,
-            followup_text=followup_text,
-            previous_summary_path=previous_summary_path,
+            snapshot_details=snapshot_details,
         )
         prompt = "请基于以下已内嵌的分析材料完成同一个 bug 会话的最终回答。\n"
         prompt += "注意：所有相关文件内容已内嵌在本消息中，无需读取本地文件。\n\n要求：\n"
@@ -13993,6 +14022,7 @@ class BugAnalysisRunner:
                 title=title,
                 path=path,
                 max_chars=max_file_chars,
+                compaction_profile=compaction_profile,
             )
             if content:
                 prompt += f"### {title}\n来源: {path}\n{content}\n\n"

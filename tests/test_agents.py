@@ -909,13 +909,13 @@ class AgentTests(unittest.TestCase):
         self.assertNotIn("### 上一轮 Agent 总结", prompt)
         self.assertNotIn("HTML_ONLY_MISLEADING_TEXT", prompt)
 
-    def test_bug_direct_api_prompt_compacts_skill_reference_evidence_and_report_context(self):
+    def test_bug_direct_api_prompt_compacts_context_only_for_startup_unity_lifecycle_skill(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = BridgeConfig(dry_run=True, data_dir=Path(tmp), workspace_root=Path(tmp))
             runner = BugAnalysisRunner(config)
             output_dir = Path(tmp) / "jobs" / "job_1" / "output"
             output_dir.mkdir(parents=True, exist_ok=True)
-            skill_dir = Path(tmp) / ".ai" / "skills" / "demo-startup-skill"
+            skill_dir = Path(tmp) / ".ai" / "skills" / "unity-startup-lifecycle-check"
             skill_dir.mkdir(parents=True, exist_ok=True)
             skill_path = skill_dir / "SKILL.md"
             ref_dir = skill_dir / "references"
@@ -929,7 +929,7 @@ class AgentTests(unittest.TestCase):
             request_artifact.write_text("request body", encoding="utf-8")
             skill_path.write_text(
                 "---\n"
-                "name: demo-startup-skill\n"
+                "name: unity-startup-lifecycle-check\n"
                 "description: demo skill summary description\n"
                 "---\n\n"
                 "# Demo Skill\n\n"
@@ -1032,6 +1032,9 @@ class AgentTests(unittest.TestCase):
             )
             metadata_path.write_text(
                 "# Bug Metadata\n"
+                "- 分析类型:\n"
+                "  - `3D启动时序分析` -> `bug_3d_startup_report.html`\n"
+                "- 命中 Skill: `unity-startup-lifecycle-check`\n"
                 f"- Skill 规范:\n  - `{skill_path}`\n  - `{ref_path}`\n"
                 f"- 结构化证据 Markdown: `{evidence_md}`\n"
                 f"- 结构化证据 JSON: `{evidence_json}`\n"
@@ -1057,6 +1060,58 @@ class AgentTests(unittest.TestCase):
         self.assertIn("Invalid path in AssetBundleProvider", prompt)
         self.assertIn("BaseCamera prefab 加载失败", prompt)
         self.assertNotIn("REPORT_NOISE", prompt)
+
+    def test_bug_direct_api_prompt_falls_back_to_raw_excerpt_for_other_skills(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=True, data_dir=Path(tmp), workspace_root=Path(tmp))
+            runner = BugAnalysisRunner(config)
+            output_dir = Path(tmp) / "jobs" / "job_1" / "output"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            skill_dir = Path(tmp) / ".ai" / "skills" / "demo-startup-skill"
+            skill_dir.mkdir(parents=True, exist_ok=True)
+            skill_path = skill_dir / "SKILL.md"
+            request_artifact = output_dir / "bug_agent_request.md"
+            metadata_path = output_dir / "bug_metadata.md"
+            report_json = output_dir / "bug_3d_startup_report.json"
+            request_artifact.write_text("request body", encoding="utf-8")
+            skill_path.write_text(
+                "---\n"
+                "name: demo-startup-skill\n"
+                "description: demo skill summary description\n"
+                "---\n\n"
+                "# Demo Skill\n\n"
+                "## 工作边界\n\n"
+                "- SKILL_NOISE should survive when profile is off\n\n"
+                + ("SKILL_NOISE " * 80),
+                encoding="utf-8",
+            )
+            report_json.write_text(
+                json.dumps(
+                    {
+                        "target_time": "2026-05-19T13:47:01",
+                        "warnings": ["REPORT_NOISE should survive when profile is off" * 20],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            metadata_path.write_text(
+                "# Bug Metadata\n"
+                "- 分析类型: `startup`\n"
+                "- 命中 Skill: `demo-startup-skill`\n"
+                f"- Skill 规范:\n  - `{skill_path}`\n"
+                f"- JSON `3D启动时序分析`: `{report_json}`\n",
+                encoding="utf-8",
+            )
+
+            prompt = runner._build_bug_agent_summary_prompt_for_api(
+                request_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6994901014 调查3D启动生命周期",
+                request_artifact=request_artifact,
+                metadata_path=metadata_path,
+            )
+
+        self.assertIn("SKILL_NOISE", prompt)
+        self.assertIn("REPORT_NOISE", prompt)
 
     def test_bug_direct_api_summary_writes_prompt_audit_files(self):
         with tempfile.TemporaryDirectory() as tmp:
