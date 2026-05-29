@@ -894,6 +894,16 @@ class BridgeApp:
     def _route_followup_intent(self, ctx: _RouteContext) -> TaskResult | None:
         if not self._is_followup_intent(ctx.route_content):
             return None
+        # When a message still carries file/folder resources but the prompt looks
+        # like a correction/follow-up ("问题时间", "重新分析"), let the intent
+        # router decide first instead of forcing the generic followup guard.
+        if (
+            ctx.followup_context is None
+            and self.intent_runner.is_enabled()
+            and ctx.direct_analysis_request is not None
+            and bool(ctx.direct_analysis_request.resources)
+        ):
+            return None
         if ctx.followup_context is not None:
             return self._handle_followup(ctx.event, ctx.route_content, ctx.followup_context)
         if not self.state_store.mark_seen(ctx.event):
@@ -3516,6 +3526,16 @@ class BridgeApp:
         if route == "analysis_followup":
             if (
                 explicit_followup_context is None
+                and referenced_resources
+                and self._looks_like_direct_analysis_prompt(route_content)
+            ):
+                return self._handle_direct_analysis_intent(
+                    event,
+                    route_content,
+                    referenced_resources=referenced_resources,
+                )
+            if (
+                explicit_followup_context is None
                 and decision.context_source == "latest_chat"
                 and looks_like_scene_signal_request(route_content)
                 and not self._is_followup_intent(route_content)
@@ -3565,6 +3585,15 @@ class BridgeApp:
                 latest_chat_context=latest_chat_context,
             )
         if route == "bug":
+            if (
+                not parse_bug_request(route_content, bug_url_re=self.bug_url_re).triggered
+                and referenced_resources
+            ):
+                return self._handle_direct_analysis_intent(
+                    event,
+                    route_content,
+                    referenced_resources=referenced_resources,
+                )
             return self._handle_bug_intent(event, route_content)
         if route == "direct_analysis":
             return self._handle_direct_analysis_intent(event, route_content, referenced_resources=referenced_resources)

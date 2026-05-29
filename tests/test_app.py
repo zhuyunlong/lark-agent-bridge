@@ -4221,6 +4221,231 @@ class AppTests(unittest.TestCase):
         self.assertEqual(len(fake_bug.requests), 1)
         self.assertEqual(fake_bug.requests[0].prompt, route_content)
 
+    def test_reply_to_file_intent_followup_misroute_falls_back_to_direct_analysis(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = Path(tmp) / "analysis.md"
+            html = Path(tmp) / "analysis.html"
+            metadata.write_text("analysis", encoding="utf-8")
+            html.write_text("<html></html>", encoding="utf-8")
+            route_content = "问题时间 2026-05-29 17:16，分析启动和卡顿"
+            fake_lark = FakeLarkClient()
+            fake_bug = FakeBugRunner(metadata, html)
+            fake_lark.fetched_messages["om_file_msg"] = json.dumps(
+                {
+                    "ok": True,
+                    "data": {
+                        "messages": [
+                            {
+                                "message_id": "om_file_msg",
+                                "content": '{"file_key":"file_lane_level_log"}',
+                            }
+                        ]
+                    },
+                },
+                ensure_ascii=False,
+            )
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    allowed_chats=["oc_denied"],
+                ),
+                lark_client=fake_lark,
+                bug_runner=fake_bug,
+                intent_runner=FakeIntentRunner(
+                    {
+                        route_content: IntentDecision(
+                            route="analysis_followup",
+                            reason="误把回复文件当成续聊",
+                            confidence="high",
+                            followup_action="context_chat",
+                            context_source="none",
+                        )
+                    }
+                ),
+            )
+
+            result = app.handle_event(
+                event(
+                    event_id="evt_direct_analysis_reply_file",
+                    message_id="om_direct_analysis_reply_file",
+                    reply_to="om_file_msg",
+                    content=f"@bot {route_content}",
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.details["mode"], "direct_analysis")
+        self.assertNotEqual(result.error_code, "missing_followup_reply")
+        self.assertEqual(len(fake_bug.requests), 1)
+        self.assertEqual(fake_bug.requests[0].prompt, route_content)
+        self.assertEqual(fake_bug.requests[0].resources[0].kind, "file")
+        self.assertEqual(fake_bug.requests[0].resources[0].value, "file_lane_level_log")
+
+    def test_followup_keywords_with_reply_file_still_reach_intent_router_direct_analysis(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = Path(tmp) / "analysis.md"
+            html = Path(tmp) / "analysis.html"
+            metadata.write_text("analysis", encoding="utf-8")
+            html.write_text("<html></html>", encoding="utf-8")
+            route_content = "问题时间 2026-05-29 17:16，分析车道级 @朱云龙的飞书 CLI"
+            fake_lark = FakeLarkClient()
+            fake_bug = FakeBugRunner(metadata, html)
+            fake_lark.fetched_messages["om_current"] = json.dumps(
+                {
+                    "ok": True,
+                    "data": {
+                        "messages": [
+                            {
+                                "message_id": "om_current",
+                                "content": route_content,
+                                "reply_to": "om_file_msg",
+                                "mentions": [
+                                    {
+                                        "id": "cli_a976baa2cdfadcc7",
+                                        "key": "@_user_1",
+                                        "name": "朱云龙的飞书 CLI",
+                                    }
+                                ],
+                            }
+                        ]
+                    },
+                },
+                ensure_ascii=False,
+            )
+            fake_lark.fetched_messages["om_file_msg"] = json.dumps(
+                {
+                    "ok": True,
+                    "data": {
+                        "messages": [
+                            {
+                                "message_id": "om_file_msg",
+                                "content": '<file key="file_v3_00125_xxx" name="main_2026-05-29_17-00.alog"/>',
+                            }
+                        ]
+                    },
+                },
+                ensure_ascii=False,
+            )
+            config = BridgeConfig(
+                dry_run=False,
+                data_dir=Path(tmp),
+                allowed_chats=["oc_denied"],
+            )
+            config.lark.bot_name = "朱云龙的飞书 CLI"
+            app = BridgeApp(
+                config,
+                lark_client=fake_lark,
+                bug_runner=fake_bug,
+                intent_runner=FakeIntentRunner(
+                    {
+                        "问题时间 2026-05-29 17:16，分析车道级": IntentDecision(
+                            route="analysis_followup",
+                            reason="误把回复文件当成续聊",
+                            confidence="high",
+                            followup_action="context_chat",
+                            context_source="none",
+                        )
+                    }
+                ),
+            )
+
+            result = app.handle_event(
+                event(
+                    event_id="evt_reply_file_followup_keywords",
+                    message_id="om_current",
+                    content=route_content,
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.details["mode"], "direct_analysis")
+        self.assertNotEqual(result.error_code, "missing_followup_reply")
+        self.assertEqual(len(fake_bug.requests), 1)
+        self.assertEqual(fake_bug.requests[0].resources[0].value, "file_v3_00125_xxx")
+
+    def test_intent_bug_misroute_with_reply_file_falls_back_to_direct_analysis(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = Path(tmp) / "analysis.md"
+            html = Path(tmp) / "analysis.html"
+            metadata.write_text("analysis", encoding="utf-8")
+            html.write_text("<html></html>", encoding="utf-8")
+            route_content = "@朱云龙的飞书 CLI 问题时间 2026-05-29 17:16，分析车道级"
+            fake_lark = FakeLarkClient()
+            fake_bug = FakeBugRunner(metadata, html)
+            fake_lark.fetched_messages["om_current"] = json.dumps(
+                {
+                    "ok": True,
+                    "data": {
+                        "messages": [
+                            {
+                                "message_id": "om_current",
+                                "content": route_content,
+                                "reply_to": "om_file_msg",
+                                "mentions": [
+                                    {
+                                        "id": "cli_a976baa2cdfadcc7",
+                                        "key": "@_user_1",
+                                        "name": "朱云龙的飞书 CLI",
+                                    }
+                                ],
+                            }
+                        ]
+                    },
+                },
+                ensure_ascii=False,
+            )
+            fake_lark.fetched_messages["om_file_msg"] = json.dumps(
+                {
+                    "ok": True,
+                    "data": {
+                        "messages": [
+                            {
+                                "message_id": "om_file_msg",
+                                "content": '<file key="file_v3_00125_bug_misroute" name="main_2026-05-29_17-00.alog"/>',
+                            }
+                        ]
+                    },
+                },
+                ensure_ascii=False,
+            )
+            config = BridgeConfig(
+                dry_run=False,
+                data_dir=Path(tmp),
+                allowed_chats=["oc_denied"],
+            )
+            config.lark.bot_name = "朱云龙的飞书 CLI"
+            app = BridgeApp(
+                config,
+                lark_client=fake_lark,
+                bug_runner=fake_bug,
+                intent_runner=FakeIntentRunner(
+                    {
+                        "问题时间 2026-05-29 17:16，分析车道级": IntentDecision(
+                            route="bug",
+                            reason="误判成 bug 重分析",
+                            confidence="high",
+                            followup_action="reanalysis",
+                            context_source="explicit",
+                        )
+                    }
+                ),
+            )
+
+            result = app.handle_event(
+                event(
+                    event_id="evt_reply_file_bug_misroute",
+                    message_id="om_current",
+                    content=route_content,
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.details["mode"], "direct_analysis")
+        self.assertNotEqual(result.error_code, "missing_bug_url")
+        self.assertEqual(len(fake_bug.requests), 1)
+        self.assertEqual(fake_bug.requests[0].resources[0].value, "file_v3_00125_bug_misroute")
+
     def test_signal_followup_fetches_current_message_when_event_omits_reply_chain(self):
         with tempfile.TemporaryDirectory() as tmp:
             log_dir = Path(tmp) / "logs"
