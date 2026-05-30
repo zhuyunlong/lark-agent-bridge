@@ -7883,6 +7883,119 @@ class AppTests(unittest.TestCase):
         self.assertFalse(accepted.skipped)
         self.assertEqual(fake_chat.prompts, ["讲个笑话"])
 
+    def test_signal_followup_retry_reruns_signal_analysis(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_lark = FakeLarkClient()
+            fake_handler = FakeSignalHandler()
+            app = BridgeApp(
+                BridgeConfig(dry_run=False, data_dir=Path(tmp), allowed_chats=["oc_denied"]),
+                lark_client=fake_lark,
+                handler=fake_handler,
+            )
+            app.conversation_store.remember(
+                root_message_id="om_signal_root",
+                chat_id="oc_denied",
+                mode="signal_lifecycle",
+                request_text="132002 https://example.com/log.zip",
+                summary_text="信号分析完成",
+                report_url="http://report",
+                report_excerpt="",
+            )
+            app.conversation_store.remember_alias(
+                alias_message_id="om_signal_reply",
+                root_message_id="om_signal_root",
+            )
+
+            result = app.handle_event(
+                event(
+                    event_id="evt_signal_retry",
+                    message_id="om_signal_retry",
+                    reply_to="om_signal_reply",
+                    content="重新分析",
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.details["mode"], "signal_lifecycle")
+        self.assertEqual(len(fake_handler.requests), 1)
+        self.assertEqual(fake_handler.requests[0].signal, "132002")
+
+    def test_perception_followup_retry_reruns_perception_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            html = Path(tmp) / "report.html"
+            html.write_text("<html></html>", encoding="utf-8")
+            fake_lark = FakeLarkClient()
+            fake_runner = FakePerceptionRunner(html)
+            app = BridgeApp(
+                BridgeConfig(dry_run=False, data_dir=Path(tmp), allowed_chats=["oc_denied"]),
+                lark_client=fake_lark,
+                perception_runner=fake_runner,
+            )
+            app.conversation_store.remember(
+                root_message_id="om_perception_root",
+                chat_id="oc_denied",
+                mode="perception_summary",
+                request_text="感知数据总结",
+                summary_text="感知数据总结完成",
+                report_url="http://report",
+                report_excerpt="",
+            )
+            app.conversation_store.remember_alias(
+                alias_message_id="om_perception_reply",
+                root_message_id="om_perception_root",
+            )
+
+            result = app.handle_event(
+                event(
+                    event_id="evt_perception_retry",
+                    message_id="om_perception_retry",
+                    reply_to="om_perception_reply",
+                    content="重新分析",
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.details["mode"], "perception_summary")
+        self.assertEqual(len(fake_runner.requests), 1)
+
+    def test_signal_followup_non_retry_falls_through_to_chat(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_lark = FakeLarkClient()
+            fake_handler = FakeSignalHandler()
+            fake_chat = FakeOmlxChatClient()
+            app = BridgeApp(
+                BridgeConfig(dry_run=False, data_dir=Path(tmp), allowed_chats=["oc_denied"]),
+                lark_client=fake_lark,
+                handler=fake_handler,
+                chat_client=fake_chat,
+            )
+            app.conversation_store.remember(
+                root_message_id="om_signal_chat_root",
+                chat_id="oc_denied",
+                mode="signal_lifecycle",
+                request_text="132002 https://example.com/log.zip",
+                summary_text="信号分析完成",
+                report_url="http://report",
+                report_excerpt="这个信号在16:06到达Unity",
+            )
+            app.conversation_store.remember_alias(
+                alias_message_id="om_signal_chat_reply",
+                root_message_id="om_signal_chat_root",
+            )
+
+            result = app.handle_event(
+                event(
+                    event_id="evt_signal_chat",
+                    message_id="om_signal_chat",
+                    reply_to="om_signal_chat_reply",
+                    content="这个结论什么意思",
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(len(fake_handler.requests), 0)
+        self.assertEqual(len(fake_chat.context_calls), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

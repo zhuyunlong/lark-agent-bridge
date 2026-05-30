@@ -4550,6 +4550,9 @@ class BridgeApp:
         direct_followup_result = self._maybe_handle_direct_analysis_followup(event, followup_context, route_content)
         if direct_followup_result is not None:
             return direct_followup_result
+        signal_replay = self._maybe_handle_signal_perception_replay(event, followup_context, route_content)
+        if signal_replay is not None:
+            return signal_replay
         if "bug" in str(followup_context.mode).casefold():
             existing_answer = self._answer_bug_followup_from_existing(route_content, followup_context)
             if existing_answer is not None:
@@ -4834,6 +4837,48 @@ class BridgeApp:
             classification_source=classification_source,
             classification_reason=classification_reason,
         )
+
+    def _maybe_handle_signal_perception_replay(
+        self, event: LarkEvent, followup_context, route_content: str
+    ) -> TaskResult | None:
+        mode = str(getattr(followup_context, "mode", "") or "")
+        is_signal = "signal_lifecycle" in mode
+        is_perception = "perception_summary" in mode
+        if not is_signal and not is_perception:
+            return None
+        action = parse_followup_action(route_content)
+        if action != "retry":
+            return None
+        request_text = str(getattr(followup_context, "request_text", "") or "").strip()
+        if not request_text:
+            return None
+        if is_signal:
+            request = parse_signal_request(
+                request_text,
+                signal_aliases=self.config.signal_aliases,
+                command_prefixes=self.config.command_prefixes,
+                signal_resolver=self.signal_resolver,
+            )
+            if not request.triggered:
+                return None
+            self._notify_progress(
+                "signal_followup_replay",
+                "重新执行信号生命周期分析",
+                event=event,
+                session_id=followup_context.root_message_id,
+            )
+            return self._run_signal_request(event, request, request_text)
+        # perception
+        perception_request = parse_perception_summary_request(request_text)
+        if not perception_request.triggered:
+            return None
+        self._notify_progress(
+            "perception_followup_replay",
+            "重新执行感知数据总结",
+            event=event,
+            session_id=followup_context.root_message_id,
+        )
+        return self._run_perception_request(event, perception_request, request_text)
 
     def _maybe_handle_direct_analysis_followup(self, event: LarkEvent, followup_context, route_content: str) -> TaskResult | None:
         request_text = str(getattr(followup_context, "request_text", "") or "").strip()
