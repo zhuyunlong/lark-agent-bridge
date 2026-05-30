@@ -5145,6 +5145,11 @@ class AgentTests(unittest.TestCase):
                     return_value=runtime,
                 ) as runtime_cls,
                 mock.patch("lark_agent_bridge.agents.run_tracked_process") as run_mock,
+                mock.patch.object(
+                    runner,
+                    "_prepare_codex_app_server_minimal_home",
+                    return_value=Path(tmp) / "codex_home",
+                ),
             ):
                 result = runner._run_custom_skill_agent_analysis(
                     skill_name=skill_name,
@@ -5173,7 +5178,8 @@ class AgentTests(unittest.TestCase):
         self.assertIn("\"method\": \"turn/completed\"", event_audit_text)
         self.assertTrue(any("Codex" in str(event.get("message") or "") for event in progress_events))
         self.assertEqual(Path(runtime_cls.call_args.kwargs["cwd"]), root.resolve())
-        self.assertFalse(runtime_cls.call_args.kwargs["disable_node_repl"])
+        self.assertTrue(runtime_cls.call_args.kwargs["disable_node_repl"])
+        self.assertFalse(runtime_cls.call_args.kwargs["emit_node_repl_flag"])
         self.assertTrue(runtime_cls.call_args.kwargs["disable_analytics"])
         self.assertTrue(runtime_cls.call_args.kwargs["disable_memories"])
         self.assertTrue(runtime_cls.call_args.kwargs["disable_apps_feature"])
@@ -5181,6 +5187,29 @@ class AgentTests(unittest.TestCase):
         self.assertTrue(runtime_cls.call_args.kwargs["disable_computer_use_feature"])
         self.assertEqual(runtime_cls.call_args.kwargs["reasoning_effort"], "medium")
         run_mock.assert_not_called()
+
+    def test_app_server_policy_honors_disable_node_repl_under_minimal_home(self):
+        # Regression: 1219603 flipped disable_node_repl to False whenever
+        # use_minimal_home prepared a home, silently overriding user config.
+        # Root cause: minimal home config.toml has no node_repl section, so the
+        # disable FLAG is meaningless there; the user's value must still be honored.
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(data_dir=Path(tmp), workspace_root=Path(tmp))
+            config.codex_app_server = CodexAppServerOptions(
+                enabled=True, use_for_file_agent=True,
+                disable_node_repl=True, use_minimal_home=True,
+            )
+            runner = BugAnalysisRunner(config)
+            with mock.patch.object(
+                runner, "_prepare_codex_app_server_minimal_home",
+                return_value=Path(tmp) / "codex_home",
+            ):
+                policy = runner.build_codex_app_server_execution_policy(cwd=Path(tmp), timeout=300)
+        self.assertTrue(policy.disable_node_repl)       # config honored
+        self.assertFalse(policy.emit_node_repl_flag)     # flag not emitted under minimal home
+        self.assertIsInstance(policy.env, dict)
+        self.assertNotEqual(policy.env, {})              # never falls back to inherit-all
+        self.assertEqual(policy.env.get("CODEX_HOME"), str(Path(tmp) / "codex_home"))
 
     def test_codex_app_server_reinjects_proxy_env(self):
         with tempfile.TemporaryDirectory() as tmp:

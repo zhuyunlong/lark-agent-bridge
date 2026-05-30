@@ -191,6 +191,7 @@ class CodexAppServerClient:
         command: str,
         sandbox_mode: str,
         disable_node_repl: bool = True,
+        emit_node_repl_flag: bool = True,
         disable_analytics: bool = True,
         disable_memories: bool = True,
         disable_apps_feature: bool = True,
@@ -206,6 +207,7 @@ class CodexAppServerClient:
             command=command,
             sandbox_mode=sandbox_mode,
             disable_node_repl=disable_node_repl,
+            emit_node_repl_flag=emit_node_repl_flag,
             disable_analytics=disable_analytics,
             disable_memories=disable_memories,
             disable_apps_feature=disable_apps_feature,
@@ -220,7 +222,7 @@ class CodexAppServerClient:
             stderr=subprocess.PIPE,
             bufsize=0,
             cwd=str(cwd) if cwd is not None else None,
-            env=spawn_env or None,
+            env=spawn_env,
         )
         self._next_id = 1
         self._pending: dict[int, _PendingRequest] = {}
@@ -412,6 +414,7 @@ class CodexAppServerRuntime:
         max_event_audit: int,
         sandbox_mode: str,
         disable_node_repl: bool = True,
+        emit_node_repl_flag: bool = True,
         disable_analytics: bool = True,
         disable_memories: bool = True,
         disable_apps_feature: bool = True,
@@ -430,6 +433,7 @@ class CodexAppServerRuntime:
         self.max_event_audit = max_event_audit
         self.sandbox_mode = sandbox_mode
         self.disable_node_repl = disable_node_repl
+        self.emit_node_repl_flag = emit_node_repl_flag
         self.disable_analytics = disable_analytics
         self.disable_memories = disable_memories
         self.disable_apps_feature = disable_apps_feature
@@ -450,6 +454,7 @@ class CodexAppServerRuntime:
             command=self.command,
             sandbox_mode=self.sandbox_mode,
             disable_node_repl=self.disable_node_repl,
+            emit_node_repl_flag=self.emit_node_repl_flag,
             disable_analytics=self.disable_analytics,
             disable_memories=self.disable_memories,
             disable_apps_feature=self.disable_apps_feature,
@@ -710,6 +715,7 @@ def _build_app_server_command(
     disable_plugins_feature: bool,
     disable_computer_use_feature: bool,
     reasoning_effort: str,
+    emit_node_repl_flag: bool = True,
 ) -> list[str]:
     cli = [command, "app-server", "-c", f'sandbox_mode="{sandbox_mode}"']
     if disable_analytics:
@@ -723,7 +729,7 @@ def _build_app_server_command(
     normalized_effort = reasoning_effort.strip()
     if normalized_effort:
         cli.extend(["-c", f'model_reasoning_effort="{normalized_effort}"'])
-    if disable_node_repl:
+    if disable_node_repl and emit_node_repl_flag:
         cli.extend(["-c", "mcp_servers.node_repl.enabled=false"])
     if disable_memories:
         cli.extend(["--disable", "memories"])

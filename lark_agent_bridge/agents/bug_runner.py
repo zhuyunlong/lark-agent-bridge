@@ -472,6 +472,23 @@ _PRIMARY_BUG_SKILL_MAP = PRIMARY_BUG_SKILL_MAP
 _AUX_BUG_SKILLS = AUX_BUG_SKILLS
 _extract_skill_frontmatter = extract_skill_frontmatter
 
+
+@dataclass(slots=True)
+class CodexAppServerExecutionPolicy:
+    """Single source of truth for codex app-server process inputs.
+
+    User config is authoritative: ``disable_node_repl`` is never flipped behind
+    the user's back. Minimal-home mode only decides whether the disable FLAG is
+    emitted, because the minimal home config has no node_repl section.
+    """
+
+    env: dict[str, str]
+    codex_home: Path | None
+    cwd: Path
+    disable_node_repl: bool
+    emit_node_repl_flag: bool
+
+
 class BugAnalysisRunner:
     _SOURCE_EVIDENCE_WAIT_SECONDS = 30
     _SOURCE_EVIDENCE_TOTAL_BUDGET_SECONDS = 30.0
@@ -9842,6 +9859,30 @@ class BugAnalysisRunner:
                 return normalized_followup
         return request_text.strip()
 
+    def build_codex_app_server_execution_policy(
+        self, *, cwd: Path, timeout: int,
+    ) -> CodexAppServerExecutionPolicy:
+        options = self.config.codex_app_server
+        env = build_internal_network_env(self.config.internal_network_env)
+        if options.preserve_proxy_env:
+            env = self._merge_codex_app_server_proxy_env(env)
+        env.setdefault("RUST_LOG", "warn")
+        codex_home: Path | None = None
+        if options.use_minimal_home:
+            codex_home = self._prepare_codex_app_server_minimal_home()
+            if codex_home is not None:
+                env["CODEX_HOME"] = str(codex_home)
+        # Minimal home has no node_repl section, so the disable flag is only
+        # meaningful (and only emitted) when running against the real home.
+        emit_node_repl_flag = options.disable_node_repl and codex_home is None
+        return CodexAppServerExecutionPolicy(
+            env=env,
+            codex_home=codex_home,
+            cwd=Path(cwd),
+            disable_node_repl=options.disable_node_repl,
+            emit_node_repl_flag=emit_node_repl_flag,
+        )
+
     def _prepare_codex_app_server_minimal_home(self) -> Path | None:
         source_home = Path.home() / ".codex"
         auth_path = source_home / "auth.json"
@@ -9968,25 +10009,19 @@ class BugAnalysisRunner:
                 "bridge_session_id": bridge_session_id,
             }
 
-        subprocess_env = build_internal_network_env(self.config.internal_network_env)
-        if options.preserve_proxy_env:
-            subprocess_env = self._merge_codex_app_server_proxy_env(subprocess_env)
-        disable_node_repl = options.disable_node_repl
-        if options.use_minimal_home:
-            minimal_home = self._prepare_codex_app_server_minimal_home()
-            if minimal_home is not None:
-                subprocess_env["CODEX_HOME"] = str(minimal_home)
-                disable_node_repl = False
+        policy = self.build_codex_app_server_execution_policy(cwd=cwd, timeout=timeout)
+        subprocess_env = policy.env
         runtime = CodexAppServerRuntime(
             command=options.command,
-            cwd=cwd,
+            cwd=policy.cwd,
             startup_timeout_seconds=options.startup_timeout_seconds,
             turn_timeout_seconds=min(float(timeout), options.turn_timeout_seconds),
             post_tool_quiet_timeout_seconds=options.post_tool_quiet_timeout_seconds,
             notification_poll_seconds=options.notification_poll_seconds,
             max_event_audit=options.max_event_audit,
             sandbox_mode=options.sandbox_mode,
-            disable_node_repl=disable_node_repl,
+            disable_node_repl=policy.disable_node_repl,
+            emit_node_repl_flag=policy.emit_node_repl_flag,
             disable_analytics=options.disable_analytics,
             disable_memories=options.disable_memories,
             disable_apps_feature=options.disable_apps_feature,
