@@ -11227,13 +11227,16 @@ class BugAnalysisRunner:
         analysis_kind = "ld_lane_level"
         analysis_dir.mkdir(parents=True, exist_ok=True)
         analysis_markdown_path = analysis_dir / self._skill_agent_analysis_markdown_name(analysis_kind)
-        primary_workspace = prepared_input.parent if prepared_input is not None and prepared_input.is_file() else (prepared_input or Path(self._working_dir()))
+        log_workspace = prepared_input.parent if prepared_input is not None and prepared_input.is_file() else (prepared_input or Path(self._working_dir()))
+        source_roots = self._custom_skill_agent_source_roots()
+        # Lane-level root cause lives in the guideengine/Napa5 source, so run the
+        # agent with the source repo as the working directory and keep the logs
+        # reachable as extra roots (logs are referenced by absolute path anyway).
+        primary_workspace = source_roots[0] if source_roots else log_workspace
         extra_roots: list[Path] = []
-        working_root = Path(self._working_dir())
-        if working_root != primary_workspace:
-            extra_roots.append(working_root)
-        if analysis_dir != primary_workspace:
-            extra_roots.append(analysis_dir)
+        for root in [log_workspace, *source_roots[1:], Path(self._working_dir()), analysis_dir]:
+            if root and root != primary_workspace and root not in extra_roots:
+                extra_roots.append(root)
         report_dir = analysis_dir.parent if analysis_dir.exists() else None
         log_metadata_path = self._ld_prepared_log_metadata_path(
             prepared_input=prepared_input,
@@ -11299,14 +11302,17 @@ class BugAnalysisRunner:
             user_prompt += f"## 分析方法论\n{skill_content[:6000]}\n\n"
         if prior_context:
             user_prompt += f"## 前序分析结果\n{prior_context[:10000]}\n\n"
+        source_roots_text = "\n".join(f"  - `{r}`" for r in source_roots) or "  - （未配置源码根）"
         user_prompt += (
             "## 检索边界\n"
-            f"- 本次直传主工作目录: `{primary_workspace}`\n"
-            f"- 主输入日志: `{prepared_input}`\n"
-            "- 必须先调用 read_prepared_log_metadata()，按元数据里的主日志和同目录候选文件开始检索。\n"
-            "- 禁止扫描 `tools/lark-agent-bridge/data/bug_cache`、历史 job 目录、无关仓库目录；只有当元数据明确说明主日志不覆盖问题时间时，才允许扩到同目录相邻小时日志。\n\n"
-            "请使用工具探索这次直传日志附近的文件，找到与此 LD 车道级 Bug 相关的蒙特卡洛日志和瓦片渲染日志，分析根因。\n"
-            "必须提供具体的日志证据（文件路径 + 行号 + 日志内容）。"
+            f"- 工作目录（源码根）: `{primary_workspace}`，可直接阅读 guideengine/Napa5 源码定位 LD 车道级状态机与 Android→Unity 信号桥实现。\n"
+            "- 其他可读源码根:\n"
+            f"{source_roots_text}\n"
+            f"- 主输入日志: `{prepared_input}`，通过 read_prepared_log_metadata() 返回的绝对路径访问（日志目录已在可读根内）。\n"
+            "- 必须先调用 read_prepared_log_metadata()，按元数据里的主日志和同目录候选文件检索日志证据。\n"
+            "- 源码检索先收敛到 LD/车道级相关模块（如 LdActionProcess、LDDataModel.CheckLDState、tile 加载/信号桥），再按需扩展；禁止扫描 bug_cache 以外的历史 job 目录。\n\n"
+            "请结合源码与日志：在源码中定位 LD 车道级关键实现（文件+行号），并用蒙特卡洛/瓦片日志证据印证根因。\n"
+            "必须提供具体证据（源码文件+行号 或 日志文件+行号+内容）。"
         )
 
         try:

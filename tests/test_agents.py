@@ -4911,6 +4911,7 @@ class AgentTests(unittest.TestCase):
                 encoding="utf-8",
             )
             config = BridgeConfig(dry_run=False, data_dir=Path(tmp) / "data", workspace_root=root)
+            config.source_investigation.repo_roots = [root]
             runner = BugAnalysisRunner(config)
             prepared_dir = Path(tmp) / "job_input"
             prepared_dir.mkdir()
@@ -4977,15 +4978,15 @@ class AgentTests(unittest.TestCase):
                 user_prompt = FakeRuntime.last_kwargs["user_prompt"]
 
         self.assertTrue(result["ok"])
-        self.assertEqual(FakeRuntime.init_kwargs["workspace"], prepared_dir)
+        self.assertEqual(FakeRuntime.init_kwargs["workspace"], root.resolve())
         self.assertTrue(FakeRuntime.last_kwargs["strict_tools"])
         self.assertEqual(FakeRuntime.last_kwargs["report_dir"], analysis_dir.parent)
         self.assertIn(str(prepared_input), metadata_text)
         self.assertIn(str(decoded_input), metadata_text)
         self.assertIn("必须先调用 read_prepared_log_metadata()", user_prompt)
         self.assertIn(str(prepared_input), user_prompt)
-        self.assertIn("禁止扫描 `tools/lark-agent-bridge/data/bug_cache`", user_prompt)
-        self.assertIn(root, FakeRuntime.last_kwargs["extra_roots"])
+        self.assertIn("禁止扫描 bug_cache 以外的历史 job 目录", user_prompt)
+        self.assertIn(prepared_dir, FakeRuntime.last_kwargs["extra_roots"])
 
     def test_custom_skill_file_agent_uses_configured_internal_network_env(self):
         with tempfile.TemporaryDirectory() as tmp:
