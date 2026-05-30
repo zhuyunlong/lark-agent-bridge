@@ -1,0 +1,23 @@
+lark_agent_bridge/agents/bug_runner.py
+  97f9c17770bdcb89 9887,9889,9891-9893,9899,9902-9906,9908,9911-9933,10068-10069
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.22",
+  "base_commit_sha": "41b57770c16ccd5bdcd4e5390edae29f55f03fad",
+  "prompts": {
+    "97f9c17770bdcb89": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e76a1-ef52-7ba0-b7f5-b9a65b914f18",
+        "model": "gpt-5.4"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 37,
+      "total_deletions": 16,
+      "accepted_lines": 37,
+      "overriden_lines": 0
+    }
+  }
+}
