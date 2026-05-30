@@ -101,6 +101,8 @@ CARD_ACTION_EVENT_KEY = "card.action.trigger"
 # Truncation limits for error previews and card notes
 MAX_ERROR_PREVIEW = 500
 MAX_STDERR_PREVIEW = 300
+# Progress stages whose updates are throttled to one card refresh per interval.
+_THROTTLED_PROGRESS_STAGE_SUFFIXES = ("_agent_analysis_stream", "_summary_stream")
 MAX_CARD_NOTE = 700
 LOCAL_DOWNLOAD_AUTH_TERMS = (
     "下载目录",
@@ -1647,7 +1649,9 @@ class BridgeApp:
             return False
         now = datetime.now(timezone.utc)
         card_state["last_active_at"] = now
-        if not stage.endswith("_stream"):
+        # Throttle only the known high-frequency streaming families (Codex
+        # app-server deltas + agent summary stream), not every "*_stream" stage.
+        if not stage.endswith(_THROTTLED_PROGRESS_STAGE_SUFFIXES):
             return True
         last_update = card_state.get("last_card_update_at")
         if isinstance(last_update, datetime):
