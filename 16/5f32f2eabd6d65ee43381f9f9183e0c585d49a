@@ -1,0 +1,38 @@
+lark_agent_bridge/app.py
+  b5f5887dbf371269 4553-4555,4841-4882
+tests/test_app.py
+  b5f5887dbf371269 7886-7998
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.22",
+  "base_commit_sha": "165f32f2eabd6d65ee43381f9f9183e0c585d49a",
+  "prompts": {
+    "462bd152a3e603e6": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "45b74730-6d4b-488b-b279-6f4ffd9e465f",
+        "model": "mimo-v2.5-pro"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 2,
+      "overriden_lines": 0
+    },
+    "b5f5887dbf371269": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "839a14d3-ebe9-4367-9f60-89da1f910d9a",
+        "model": "claude-sonnet-4-6"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 159,
+      "total_deletions": 1,
+      "accepted_lines": 158,
+      "overriden_lines": 0
+    }
+  }
+}
