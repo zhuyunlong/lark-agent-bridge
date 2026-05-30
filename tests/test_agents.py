@@ -5011,6 +5011,23 @@ class AgentTests(unittest.TestCase):
             next(i for i, p in enumerate(joined) if "aicabinservice" in p),
         )
 
+    def test_needs_skill_confirmation_gate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(data_dir=Path(tmp), workspace_root=Path(tmp))
+            runner = BugAnalysisRunner(config)
+            sel = runner._selection_from_plans([BugAnalysisPlan(kind="scene_signal")], source="agent", reason="r")
+            sel.confidence = "low"
+            self.assertTrue(runner._needs_skill_confirmation(sel))   # low + specific skill -> confirm
+            for c in ("high", "medium", ""):
+                sel.confidence = c
+                self.assertFalse(runner._needs_skill_confirmation(sel))  # only low confirms
+            gen = runner._selection_from_plans([BugAnalysisPlan(kind="general")], source="agent", reason="r")
+            gen.confidence = "low"
+            self.assertFalse(runner._needs_skill_confirmation(gen))  # general handled elsewhere
+            sel.confidence = "low"
+            config.bug_analysis.confirm_low_confidence_skill = False
+            self.assertFalse(runner._needs_skill_confirmation(sel))  # flag off disables gate
+
     def test_custom_skill_file_agent_uses_configured_internal_network_env(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "workspace"

@@ -103,6 +103,7 @@ class BugAnalysisOptions:
     default_prompt: str = ""
     resume_followup_sessions: bool = False
     auto_fallback_to_file_agent: bool = False
+    confirm_low_confidence_skill: bool = True
     force_reanalysis_terms: list[str] = field(
         default_factory=lambda: [
             "结果不合理",

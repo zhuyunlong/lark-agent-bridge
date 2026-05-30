@@ -1032,6 +1032,71 @@ class BugAnalysisRunner:
             },
         )
 
+    def _needs_skill_confirmation(self, selection: "BugAnalysisSelection") -> bool:
+        """Gate a low-confidence specific-skill pick before the expensive run."""
+        if not self.config.bug_analysis.confirm_low_confidence_skill:
+            return False
+        if selection.confidence != "low":
+            return False
+        if selection.skill_name in {"", "general"}:
+            return False  # general is already handled by _needs_general_direction
+        return not any(plan.kind == "general" for plan in selection.plans)
+
+    def _skill_confirmation_needed_result(
+        self,
+        *,
+        context,
+        selection: "BugAnalysisSelection",
+        started: float,
+        request_text: str,
+        bug_url: str,
+        title: str,
+        progress_callback: Callable[[dict[str, object]], None] | None,
+    ) -> TaskResult:
+        self._emit_progress(
+            progress_callback,
+            stage="bug_skill_confirmation_needed",
+            message="Skill 分类置信度偏低，先请用户确认分析方向",
+            job_id=context.job_id,
+            bug_url=bug_url,
+            title=title,
+            classification_skill=selection.skill_name,
+            classification_source=selection.source,
+            classification_reason=selection.reason,
+        )
+        label = selection.skill_label or selection.skill_name
+        message = (
+            f"我初步判定使用 **{label}** 分析"
+            + (f"（理由：{selection.reason}）" if selection.reason else "")
+            + "，但置信度偏低、可能选错预设。\n"
+            "为避免错跑较久的分析，先请你确认方向：\n"
+            f"- 如果同意，回复 `{label}` 或你认可的方向即可继续\n"
+            "- 如果不对，回复期望方向，例如：场景信号 / 主题切换 / 启动时序 / 卡顿黑屏 / 闪退 / 车道级 / 信号链路 / 感知数据"
+        )
+        return TaskResult(
+            success=True,
+            message=message,
+            skipped=True,
+            job_id=context.job_id,
+            job_dir=context.job_dir,
+            duration_seconds=time.monotonic() - started,
+            details={
+                "mode": "bug_skill_confirmation",
+                "analysis_kind": selection.plans[0].kind if selection.plans else "general",
+                "analysis_kinds": [item.kind for item in selection.plans],
+                "analysis_skill": selection.skill_name,
+                "analysis_skill_label": label,
+                "classification_source": selection.source,
+                "classification_reason": selection.reason,
+                "classification_provider": selection.provider,
+                "classification_confidence": selection.confidence,
+                "bug_url": bug_url,
+                "user_request_text": request_text,
+                "needs_user_direction": True,
+                "supported_bug_skills": self.supported_primary_bug_skills(),
+            },
+        )
+
     def _bug_time_clarification_result(
         self,
         *,
@@ -1229,10 +1294,14 @@ class BugAnalysisRunner:
             "不要因为文本里出现 signal/信号 字样就滥用。"
             "3D场景信号 / SceneType / 上电P / 临停P / 特殊场景 / 小憩 / 露营 / 洗车 / 充电场景 / 放电场景 / 场景选择 / 离车舒享 / 行车场景 / 泊车场景 优先考虑 scene-signal-diagnosis。"
             "xtheme / 105004 / 105009 / 晨曦 / 傍晚 / 主题切换 / XuiConditionHelper 应优先考虑 xtheme-analyzer。"
+            "车道级 / 车道级进不去 / 车道级渲染 / LD / lane-level / LDConf / CheckLDState / tile / 瓦片 优先考虑车道级（ld-lane-level）类 skill。"
+            "启动 / 时序 / 首帧 / UnityReady / displayChanged / startRender 优先考虑启动类 skill；卡顿 / 卡死 / 掉帧 / 黑屏 / ANR / 不刷新 优先考虑卡顿类 skill；闪退 / crash / tombstone / FATAL EXCEPTION / SIGSEGV / 异常退出 优先考虑 crash 类 skill；当前感知数据总结 优先考虑感知类 skill。"
+            "若用户已明确点名某 skill 或给出明确方向，直接采用并给 high 置信度；若多个预设都相近、信息不足或只能模糊归类，给 low 置信度并在 reason 里说明分诊依据。"
             "只输出一个 JSON 对象，字段必须完整："
             f'{{"analysis_kind":"{"|".join(analysis_kinds or ["general"])}",'
             f'"skill":"{"|".join(primary_skill_names or ["general"])}",'
             '"signal_hint":"可为空",'
+            '"confidence":"high|medium|low",'
             '"reason":"一句中文理由"}'
             "\n输入 JSON：\n"
             f"{json.dumps(payload, ensure_ascii=False, indent=2)}"
@@ -1244,6 +1313,9 @@ class BugAnalysisRunner:
         skill = str(parsed.get("skill") or "").strip()
         reason = str(parsed.get("reason") or "").strip()
         signal_hint = str(parsed.get("signal_hint") or "").strip()
+        confidence = str(parsed.get("confidence") or "").strip().lower()
+        if confidence not in {"high", "medium", "low"}:
+            confidence = ""
         primary_skill_map = self.skill_manager.primary_skill_map()
         if skill in primary_skill_map:
             kind = primary_skill_map[skill][0] or kind
@@ -1261,6 +1333,7 @@ class BugAnalysisRunner:
         if skill:
             selection.skill_name = skill
             selection.skill_label = self._skill_label_for_name(skill, plans[0].kind if plans else "general")
+        selection.confidence = confidence
         return selection
 
     def decide_bug_followup(
@@ -1834,6 +1907,16 @@ class BugAnalysisRunner:
             source_decision = decision.source_decision
             if self._needs_general_direction(selection, prompt_text=prompt_text):
                 return self._general_direction_needed_result(
+                    context=context,
+                    selection=selection,
+                    started=started,
+                    request_text=request_text,
+                    bug_url=request.bug_url,
+                    title=title,
+                    progress_callback=progress_callback,
+                )
+            if self._needs_skill_confirmation(selection):
+                return self._skill_confirmation_needed_result(
                     context=context,
                     selection=selection,
                     started=started,
@@ -16441,6 +16524,7 @@ class BugAnalysisSelection:
     source: str
     reason: str = ""
     provider: str = ""
+    confidence: str = ""
 
 
 @dataclass(slots=True)

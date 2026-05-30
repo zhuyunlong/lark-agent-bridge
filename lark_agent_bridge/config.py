@@ -479,6 +479,9 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
             auto_fallback_to_file_agent=bool(
                 bug_data.get("auto_fallback_to_file_agent", BugAnalysisOptions().auto_fallback_to_file_agent)
             ),
+            confirm_low_confidence_skill=bool(
+                bug_data.get("confirm_low_confidence_skill", BugAnalysisOptions().confirm_low_confidence_skill)
+            ),
             force_reanalysis_terms=_string_list(
                 bug_data.get("force_reanalysis_terms", BugAnalysisOptions().force_reanalysis_terms),
                 "bug_analysis.force_reanalysis_terms",
