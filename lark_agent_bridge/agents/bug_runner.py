@@ -11883,42 +11883,29 @@ class BugAnalysisRunner:
     def _source_stage_report_sections(self, analysis_text: str) -> list[ReportSection]:
         sections = self._parse_markdown_sections(analysis_text)
         rendered: list[ReportSection] = []
-
-        summary_items = self._source_stage_highlight_items(sections.get("结论摘要", ""), sev="green", limit=5)
-        if summary_items:
-            rendered.append(ReportSection(kind="issues", title="结论摘要", items=summary_items))
-
-        cause_entries = self._markdown_section_entries(sections.get("最可能原因", ""))
-        if cause_entries:
-            rendered.append(
-                ReportSection(
-                    kind="text",
-                    title="最可能原因",
-                    text=self._truncate_report_text("\n\n".join(cause_entries[:2]), 320),
-                    class_name="insight",
-                )
-            )
-
-        evidence_rows = self._source_stage_evidence_rows(sections.get("关键证据", ""))
-        if evidence_rows:
-            rendered.append(
-                ReportSection(
-                    kind="table",
-                    title="关键证据",
-                    cols=["位置", "关键点"],
-                    rows=evidence_rows,
-                    empty_text="未提取到关键证据摘要",
-                )
-            )
-
-        pending_items = self._source_stage_highlight_items(sections.get("待确认项", ""), sev="yellow", limit=5)
-        if pending_items:
-            rendered.append(ReportSection(kind="issues", title="待确认项", items=pending_items))
-
-        action_items = self._source_stage_highlight_items(sections.get("建议动作", ""), sev="green", limit=5)
-        if action_items:
-            rendered.append(ReportSection(kind="issues", title="建议动作", items=action_items))
-
+        for title, body in sections.items():
+            if not body.strip():
+                continue
+            if title == "关键证据":
+                evidence_rows = self._source_stage_evidence_rows(body, limit=12)
+                if evidence_rows:
+                    rendered.append(
+                        ReportSection(
+                            kind="table",
+                            title="关键证据",
+                            cols=["位置", "关键点"],
+                            rows=evidence_rows,
+                            empty_text="未提取到关键证据摘要",
+                        )
+                    )
+                continue
+            sev = "yellow" if title == "待确认项" else "green"
+            items = [
+                {"sev": sev, "title": self._truncate_report_text(entry, 600), "detail": ""}
+                for entry in self._markdown_section_entries(body)[:8]
+            ]
+            if items:
+                rendered.append(ReportSection(kind="issues", title=title, items=items))
         return rendered
 
     def _write_custom_skill_agent_report(
@@ -11979,7 +11966,7 @@ class BugAnalysisRunner:
             f"{combined_bug_html.render_table([('缺陷描述', description.strip() or '(无描述)')], ('字段', '内容'))}"
             "</div>"
         )
-        summary_sections = self._source_stage_report_sections(analysis_text) if _kind_spec(analysis_kind).is_source_stage else []
+        summary_sections = self._source_stage_report_sections(analysis_text)
         composition = ReportComposition(
             title=analysis_label,
             heading=analysis_label,
