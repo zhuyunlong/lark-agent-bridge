@@ -1,0 +1,80 @@
+config/routing_terms.toml
+  d28d385af9b35130 58
+lark_agent_bridge/agents/bug_runner.py
+  d28d385af9b35130 655-676,882
+  b5f5887dbf371269 4367-4368,4370,4375,4377-4378
+tests/test_agents.py
+  d28d385af9b35130 3917-3923,3928-3958
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.22",
+  "base_commit_sha": "a8d2ca4d1f6bea0ef23550d763a5eebd9c434df4",
+  "prompts": {
+    "3b7055b462d6b0d7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e785c-6809-7b11-979e-b5a10c2dbd84",
+        "model": "gpt-5.5"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 26,
+      "total_deletions": 49,
+      "accepted_lines": 0,
+      "overriden_lines": 0
+    },
+    "462bd152a3e603e6": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "45b74730-6d4b-488b-b279-6f4ffd9e465f",
+        "model": "mimo-v2.5-pro"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 48,
+      "total_deletions": 12,
+      "accepted_lines": 0,
+      "overriden_lines": 2
+    },
+    "654f38df490139e2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e7842-c3ea-7dc2-81d0-ac7a6a171d75",
+        "model": "gpt-5.4"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 178,
+      "total_deletions": 97,
+      "accepted_lines": 2,
+      "overriden_lines": 0
+    },
+    "b5f5887dbf371269": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "839a14d3-ebe9-4367-9f60-89da1f910d9a",
+        "model": "claude-sonnet-4-6"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 6,
+      "total_deletions": 3,
+      "accepted_lines": 6,
+      "overriden_lines": 0
+    },
+    "d28d385af9b35130": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e7965-86b6-7b03-819d-bf756d37130c",
+        "model": "gpt-5.4"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 173,
+      "total_deletions": 190,
+      "accepted_lines": 172,
+      "overriden_lines": 0
+    }
+  }
+}
