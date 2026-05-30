@@ -652,6 +652,29 @@ class BugAnalysisRunner:
         plans = self.classify_requests(prompt_text=prompt_text, title=title, description=description)
         return self._selection_from_plans(plans, source="manual_fallback", reason="Agent 分类不可用，退回本地规则分类。")
 
+    def _prompt_has_explicit_signal_target(self, prompt_text: str) -> bool:
+        signal_request = parse_signal_request(
+            prompt_text,
+            signal_aliases=self.config.signal_aliases,
+            command_prefixes=self.config.command_prefixes,
+            signal_resolver=self.signal_resolver,
+        )
+        return bool(signal_request.signal)
+
+    def _normalize_agent_bug_selection(
+        self,
+        selection: "BugAnalysisSelection | None",
+        *,
+        prompt_text: str,
+    ) -> "BugAnalysisSelection | None":
+        if selection is None:
+            return None
+        if not any(plan.kind == "signal" for plan in selection.plans):
+            return selection
+        if self._prompt_has_explicit_signal_target(prompt_text):
+            return selection
+        return None
+
     def _selection_from_plans(
         self,
         plans: list["BugAnalysisPlan"],
@@ -856,6 +879,7 @@ class BugAnalysisRunner:
             attachments=attachments,
             time_context=time_context,
         )
+        selection = self._normalize_agent_bug_selection(selection, prompt_text=prompt_text)
         if selection is not None and any(
             plan.kind == "signal" and not plan.signal_code for plan in selection.plans
         ):
@@ -4340,15 +4364,18 @@ class BugAnalysisRunner:
 
     def classify_requests(self, *, prompt_text: str, title: str, description: str) -> list["BugAnalysisPlan"]:
         combined = "\n".join(part for part in [prompt_text, title, description] if part).strip()
+        # Signal extraction uses only prompt_text to avoid picking up signal names
+        # that appear in bug descriptions/logs but are not what the user wants to investigate.
         signal_request = parse_signal_request(
-            combined,
+            prompt_text,
             signal_aliases=self.config.signal_aliases,
             command_prefixes=self.config.command_prefixes,
             signal_resolver=self.signal_resolver,
         )
+        prompt_lowered = prompt_text.casefold()
         lowered = combined.casefold()
-        explicit_signal_enum = "signal_" in lowered
-        explicit_signal_terms = any(term in lowered for term in SIGNAL_ROUTE_TERMS)
+        explicit_signal_enum = "signal_" in prompt_lowered
+        explicit_signal_terms = any(term in prompt_lowered for term in SIGNAL_ROUTE_TERMS)
         startup_requested = any(term in lowered for term in STARTUP_ROUTE_TERMS)
         stuck_requested = any(term in lowered for term in STUCK_ROUTE_TERMS)
         startup_blocked = any(term in lowered for term in STARTUP_BLOCK_ROUTE_TERMS)

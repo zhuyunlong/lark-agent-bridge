@@ -55,6 +55,7 @@ terms = [
 [scene_signal_context]
 terms = [
     "3d场景", "3d 场景", "sr场景", "sr 场景", "大车模",
+    "档位", "挡位", "r档", "倒档", "倒车档", "gear",
 ]
 
 [scene_signal_hint]

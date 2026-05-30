@@ -3914,6 +3914,49 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(plan.kind, "scene_signal")
         self.assertIsNone(plan.signal_code)
 
+    def test_bug_analysis_classifies_gear_signal_chain_as_scene_signal(self):
+        runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
+
+        plan = runner.classify_request(
+            prompt_text="调查档位信号链路",
+            title="【G02】【623】【Android16】标定后，倒车影像不出图",
+            description="测试步骤：AVM标定，后挂R档\n实际结果：R档不出图",
+        )
+
+        self.assertEqual(plan.kind, "scene_signal")
+        self.assertIsNone(plan.signal_code)
+
+    def test_bug_analysis_agent_signal_selection_requires_explicit_signal_target(self):
+        runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
+
+        with mock.patch.object(
+            runner,
+            "_run_bug_decision_agent",
+            return_value=(
+                {
+                    "analysis_kind": "signal",
+                    "skill": "signal-chain-analyzer",
+                    "signal_hint": "SIGNAL_FEATURE_SFM",
+                    "confidence": "high",
+                    "reason": "误把档位信号链路当成通用 signal 分析。",
+                },
+                "claude",
+            ),
+        ):
+            decision = runner.classify_and_decide(
+                request_text=(
+                    "https://project.feishu.cn/xpfailuremgmt/buglo/detail/7003441850 "
+                    "5-29 16:06 调查档位信号链路"
+                ),
+                prompt_text="5-29 16:06 调查档位信号链路",
+                title="【G02】【623】【Android16】标定后，倒车影像不出图",
+                description="测试步骤：AVM标定，后挂R档\n实际结果：R档不出图",
+            )
+
+        self.assertEqual([plan.kind for plan in decision.selection.plans], ["scene_signal"])
+        self.assertEqual(decision.selection.skill_name, "scene-signal-diagnosis")
+        self.assertEqual(decision.selection.source, "manual_fallback")
+
     def test_bug_analysis_does_not_treat_vin_suffix_as_signal(self):
         runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
 
