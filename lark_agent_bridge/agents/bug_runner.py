@@ -10640,6 +10640,106 @@ class BugAnalysisRunner:
         normalized = self._normalize_log_locator(value)
         return normalized.rsplit("/", 1)[-1]
 
+    def _parse_any_log_datetime(self, name: str) -> datetime | None:
+        """Parse a datetime from a log filename.
+
+        Supports ``main_YYYY-MM-DD_HH-MM`` and the montecarlo
+        ``DIAG_D-NNN-YYYYMMDD-HHMMSS_...`` naming.
+        """
+        st = self._parse_log_file_datetime(name)
+        if st is not None:
+            try:
+                return datetime.fromtimestamp(time.mktime(st))
+            except (OverflowError, ValueError, OSError):
+                return None
+        m = re.search(r"(20\d{2})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})", name)
+        if m:
+            return self._safe_datetime(*(int(m.group(i)) for i in range(1, 7)))
+        return None
+
+    def _is_montecarlo_or_logd_path(self, path: Path) -> bool:
+        parts = [part.casefold() for part in path.parts]
+        return any(part == "logd" for part in parts) or any("montecarlo" in part for part in parts)
+
+    def _decompress_zst(self, src: Path) -> Path | None:
+        """zstd-decompress ``src`` (``*.zst``) to the path without the suffix."""
+        src = src.resolve()
+        dst = src.with_suffix("")
+        if dst.exists():
+            return dst
+        zstd = shutil.which("zstd")
+        if not zstd:
+            logger.warning("zstd not found; cannot decompress %s", src)
+            return None
+        try:
+            result = _run_tracked_process(
+                [zstd, "-d", "-q", "-k", "-o", str(dst), str(src)],
+                watchdog=self.process_watchdog,
+                name="prepare-zst-decompress",
+                cwd=self._working_dir(),
+                capture_output=True,
+                text=True,
+                timeout=120,
+                check=False,
+            )
+        except Exception as exc:
+            logger.warning("zstd decompress failed for %s: %s", src, exc)
+            return None
+        if getattr(result, "returncode", 1) != 0 or not dst.exists():
+            logger.warning("zstd decompress returned non-zero for %s", src)
+            return None
+        return dst
+
+    def _ld_focus_log_candidates(self, root: Path, fault_dt: datetime | None, *, limit: int = 8) -> list[Path]:
+        """Rank readable log candidates, defaulting to montecarlo/logd near the fault time.
+
+        Montecarlo/logd logs rank first, then by time distance to the fault. Any
+        selected montecarlo/logd ``.zst`` nav log is decompressed in place so the
+        agent gets readable ``.log`` files covering the fault time by default.
+        """
+        scored: list[tuple[int, float, str, Path]] = []
+        preferred: list[tuple[float, str, Path]] = []
+        others: list[tuple[float, str, Path]] = []
+        window_seconds = float(6 * 3600)
+        try:
+            for path in root.rglob("*"):
+                if not path.is_file():
+                    continue
+                is_zst = path.name.lower().endswith(".zst")
+                montecarlo_or_logd = self._is_montecarlo_or_logd_path(path)
+                if not (self._is_log_coverage_file(path) or (is_zst and montecarlo_or_logd)):
+                    continue
+                file_dt = self._parse_any_log_datetime(path.name)
+                if fault_dt is not None and file_dt is not None:
+                    distance = abs((file_dt - fault_dt).total_seconds())
+                elif file_dt is None:
+                    distance = float(10 ** 9)
+                else:
+                    distance = 0.0
+                if montecarlo_or_logd:
+                    # Bound montecarlo/logd to the fault window so the candidate
+                    # list defaults to logs covering the problem time.
+                    if fault_dt is None or file_dt is None or distance <= window_seconds:
+                        preferred.append((distance, str(path), path))
+                elif len(others) < _BUG_LOG_COVERAGE_MAX_FILES:
+                    others.append((distance, str(path), path))
+        except OSError:
+            return []
+        preferred.sort(key=lambda item: (item[0], item[1]))
+        others.sort(key=lambda item: (item[0], item[1]))
+        ordered = [path for _, _, path in preferred] + [path for _, _, path in others]
+        result: list[Path] = []
+        for path in ordered:
+            if len(result) >= limit:
+                break
+            if path.name.lower().endswith(".zst"):
+                decoded = self._decompress_zst(path)
+                if decoded is None:
+                    continue
+                path = decoded
+            result.append(path)
+        return result
+
     def _ld_prepared_log_metadata_path(
         self,
         *,
@@ -10691,7 +10791,8 @@ class BugAnalysisRunner:
                 if abs((candidate_dt - fault_dt).total_seconds()) <= 7200:
                     _append(sibling)
         else:
-            for path in self._iter_log_coverage_files(prepared_input)[:8]:
+            fault_dt = self._parse_bug_datetime(fault_time)
+            for path in self._ld_focus_log_candidates(prepared_input, fault_dt, limit=8):
                 _append(path)
 
         lines = [
@@ -10701,6 +10802,7 @@ class BugAnalysisRunner:
             f"- 主输入: `{prepared_input}`",
             f"- 主工作目录: `{prepared_input.parent if prepared_input.is_file() else prepared_input}`",
             "- 使用规则: 先调用 `read_prepared_log_metadata()`，首轮只允许围绕下面列出的路径检索。",
+            "- 默认聚焦: 除非 Skill 另有建议，车道级/导航日志默认优先看 `com.xiaopeng.montecarlo` 与 `logd`，并以覆盖故障时间的文件为先（下方候选已按此排序，且 `.zst` 已解压为 `.log`）。",
             "- 限制: 不要扫描 `tools/lark-agent-bridge/data/bug_cache`、历史 job 输出或整个工作区；只有当这些候选文件明确不覆盖问题时间时，才允许扩到同目录相邻小时日志。",
             "",
             "## 候选日志",

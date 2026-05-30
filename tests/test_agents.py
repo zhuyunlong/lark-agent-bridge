@@ -4988,6 +4988,29 @@ class AgentTests(unittest.TestCase):
         self.assertIn("禁止扫描 bug_cache 以外的历史 job 目录", user_prompt)
         self.assertIn(prepared_dir, FakeRuntime.last_kwargs["extra_roots"])
 
+    def test_ld_focus_log_candidates_prefer_montecarlo_logd_near_fault(self):
+        from datetime import datetime as _dt
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=False, data_dir=Path(tmp) / "data", workspace_root=Path(tmp))
+            runner = BugAnalysisRunner(config)
+            logs = Path(tmp) / "logs" / "data" / "Log" / "log1"
+            # noise package far from fault, montecarlo + logd near fault
+            (logs / "app" / "com.xiaopeng.aicabinservice").mkdir(parents=True)
+            (logs / "app" / "com.xiaopeng.aicabinservice" / "main_2026-05-22_00-00.log").write_text("x", encoding="utf-8")
+            (logs / "app" / "com.xiaopeng.montecarlo").mkdir(parents=True)
+            (logs / "app" / "com.xiaopeng.montecarlo" / "main_2026-05-22_19-00.log").write_text("x", encoding="utf-8")
+            (logs / "logd").mkdir(parents=True)
+            (logs / "logd" / "main.txt").write_text("x", encoding="utf-8")
+            cands = runner._ld_focus_log_candidates(Path(tmp) / "logs", _dt(2026, 5, 22, 19, 46), limit=8)
+            joined = [str(c) for c in cands]
+        # montecarlo + logd must outrank the alphabetically-first aicabinservice noise
+        self.assertTrue(any("com.xiaopeng.montecarlo" in p for p in joined))
+        self.assertTrue(any("/logd/" in p for p in joined))
+        self.assertLess(
+            min(i for i, p in enumerate(joined) if "montecarlo" in p or "/logd/" in p),
+            next(i for i, p in enumerate(joined) if "aicabinservice" in p),
+        )
+
     def test_custom_skill_file_agent_uses_configured_internal_network_env(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "workspace"
