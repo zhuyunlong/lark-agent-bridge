@@ -8,6 +8,7 @@ from unittest import mock
 from lark_agent_bridge.agents.codex_app_server_runtime import (
     CodexAppServerResult,
     CodexAppServerRuntime,
+    CompletionState,
     _build_app_server_command,
     app_server_event_preview,
     check_codex_app_server_available,
@@ -72,11 +73,30 @@ class _FakeClient:
     def stderr_tail(self, n: int = 20) -> list[str]:
         return self.stderr_lines[-n:]
 
+    def stderr_line_count(self) -> int:
+        return len(self.stderr_lines)
+
     def is_alive(self) -> bool:
         return self.alive
 
     def close(self) -> None:
         self.closed = True
+
+
+def _runtime(client, **overrides):
+    kwargs = dict(
+        command="codex",
+        cwd="/tmp/project",
+        startup_timeout_seconds=1.0,
+        turn_timeout_seconds=1.0,
+        post_tool_quiet_timeout_seconds=1.0,
+        notification_poll_seconds=0.0,
+        max_event_audit=20,
+        sandbox_mode="read-only",
+        client_factory=lambda **_kwargs: client,
+    )
+    kwargs.update(overrides)
+    return CodexAppServerRuntime(**kwargs)
 
 
 class CodexAppServerRuntimeTests(unittest.TestCase):
@@ -249,7 +269,7 @@ class CodexAppServerRuntimeTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(client.responses, [(99, {"decision": "decline"})])
 
-    def test_runtime_accepts_complete_markdown_from_deltas_without_completion_event(self):
+    def test_runtime_without_completion_event_is_partial(self):
         client = _FakeClient(
             notifications=[
                 {
@@ -278,22 +298,15 @@ class CodexAppServerRuntimeTests(unittest.TestCase):
                 },
             ]
         )
-        runtime = CodexAppServerRuntime(
-            command="codex",
-            cwd="/tmp/project",
-            startup_timeout_seconds=1.0,
-            turn_timeout_seconds=0.01,
-            post_tool_quiet_timeout_seconds=0.01,
-            notification_poll_seconds=0.0,
-            max_event_audit=20,
-            sandbox_mode="read-only",
-            client_factory=lambda **_kwargs: client,
+        runtime = _runtime(
+            client, turn_timeout_seconds=0.01, post_tool_quiet_timeout_seconds=0.01,
         )
 
         result = runtime.run_turn("分析")
 
-        self.assertTrue(result.ok)
-        self.assertIn("## 结论摘要", result.final_text)
+        self.assertEqual(result.completion_state, CompletionState.PARTIAL)
+        self.assertFalse(result.ok)
+        self.assertIn("## 结论摘要", result.final_text)  # partial text preserved for audit
 
     def test_runtime_times_out_after_repeated_stream_disconnect_error(self):
         client = _FakeClient(
@@ -325,6 +338,47 @@ class CodexAppServerRuntimeTests(unittest.TestCase):
 
         self.assertFalse(result.ok)
         self.assertEqual(result.error_code, "codex_app_server_turn_timeout")
+        self.assertTrue(result.should_retire)
+
+    def test_turn_completed_event_yields_complete_state(self):
+        client = _FakeClient(
+            notifications=[
+                {
+                    "method": "item/completed",
+                    "params": {"item": {"type": "agentMessage", "phase": "final_answer",
+                        "text": "## 结论摘要\n- ok\n\n## 关键证据\n- L1 evidence\n"}},
+                },
+                {"method": "turn/completed", "params": {"turn": {"status": "completed"}}},
+            ]
+        )
+        result = _runtime(client).run_turn("分析")
+        self.assertEqual(result.completion_state, CompletionState.COMPLETE)
+        self.assertTrue(result.ok)
+
+    def test_ongoing_progress_prevents_post_tool_stall(self):
+        # tool completes, then reasoning + token usage arrive before the final
+        # answer: a short no_event timeout must NOT kill the turn, because those
+        # events count as progress.
+        client = _FakeClient(
+            notifications=[
+                {"method": "item/completed", "params": {"item": {"type": "commandExecution", "command": "rg x"}}},
+                {"method": "item/started", "params": {"item": {"type": "reasoning"}}},
+                {"method": "thread/tokenUsage/updated", "params": {"tokenUsage": {"total": {"totalTokens": 10}}}},
+                {"method": "item/completed", "params": {"item": {"type": "agentMessage", "phase": "final_answer",
+                    "text": "## 结论摘要\n- ok\n\n## 关键证据\n- L1\n\n## 建议动作\n- go\n"}}},
+                {"method": "turn/completed", "params": {"turn": {"status": "completed"}}},
+            ]
+        )
+        result = _runtime(client, no_event_timeout_seconds=5.0).run_turn("分析")
+        self.assertEqual(result.completion_state, CompletionState.COMPLETE)
+
+    def test_no_event_timeout_marks_partial_and_retires(self):
+        client = _FakeClient(notifications=[])  # genuinely silent: no events at all
+        result = _runtime(
+            client, turn_timeout_seconds=5.0, no_event_timeout_seconds=0.01,
+        ).run_turn("分析")
+        self.assertEqual(result.completion_state, CompletionState.PARTIAL)
+        self.assertEqual(result.error_code, "codex_app_server_no_event_timeout")
         self.assertTrue(result.should_retire)
 
     def test_check_codex_app_server_available_rejects_old_version(self):

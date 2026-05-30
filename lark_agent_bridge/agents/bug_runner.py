@@ -3298,6 +3298,7 @@ class BugAnalysisRunner:
             and skill_file_agent_execution_result is not None
             and bool(skill_file_agent_execution_result.get("ok"))
             and str(skill_file_agent_execution_result.get("executor") or "") == "codex_app_server"
+            and str(skill_file_agent_execution_result.get("completion_state") or "") == "complete"
             and any(_kind_spec(plan.kind).is_source_stage for plan in plans)
         )
         if use_source_stage_direct_reply:
@@ -10017,6 +10018,7 @@ class BugAnalysisRunner:
             startup_timeout_seconds=options.startup_timeout_seconds,
             turn_timeout_seconds=min(float(timeout), options.turn_timeout_seconds),
             post_tool_quiet_timeout_seconds=options.post_tool_quiet_timeout_seconds,
+            no_event_timeout_seconds=options.no_event_timeout_seconds,
             notification_poll_seconds=options.notification_poll_seconds,
             max_event_audit=options.max_event_audit,
             sandbox_mode=options.sandbox_mode,
@@ -10067,13 +10069,14 @@ class BugAnalysisRunner:
             "command": result.command,
             "stdout": result.stdout,
             "stderr": result.stderr,
-            "usage": result.usage,
+            "usage": normalize_token_usage(result.usage) or dict(result.usage),
             "thread_id": result.thread_id,
             "turn_id": result.turn_id,
             "events": result.events,
             "events_path": events_path,
             "duration_seconds": result.duration_seconds,
             "should_retire": result.should_retire,
+            "completion_state": result.completion_state.value,
             "app_server_version": version_or_error,
         }
 

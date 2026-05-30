@@ -592,6 +592,12 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
                     codex_app_server_defaults.notification_poll_seconds,
                 )
             ),
+            no_event_timeout_seconds=float(
+                codex_app_server_data.get(
+                    "no_event_timeout_seconds",
+                    codex_app_server_defaults.no_event_timeout_seconds,
+                )
+            ),
             max_event_audit=int(
                 codex_app_server_data.get(
                     "max_event_audit",
@@ -602,6 +608,12 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
                 codex_app_server_data.get(
                     "sandbox_mode",
                     codex_app_server_defaults.sandbox_mode,
+                )
+            ),
+            model=str(
+                codex_app_server_data.get(
+                    "model",
+                    codex_app_server_defaults.model,
                 )
             ),
             disable_node_repl=bool(

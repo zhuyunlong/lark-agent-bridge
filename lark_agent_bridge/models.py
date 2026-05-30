@@ -187,9 +187,11 @@ class CodexAppServerOptions:
     startup_timeout_seconds: float = 15.0
     turn_timeout_seconds: float = 600.0
     post_tool_quiet_timeout_seconds: float = 90.0
+    no_event_timeout_seconds: float = 0.0
     notification_poll_seconds: float = 0.25
     max_event_audit: int = 200
     sandbox_mode: str = "read-only"
+    model: str = ""
     disable_node_repl: bool = True
     disable_analytics: bool = True
     disable_memories: bool = True

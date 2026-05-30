@@ -5172,7 +5172,9 @@ class AgentTests(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["executor"], "codex_app_server")
-        self.assertEqual(result["usage"]["totalTokens"], 2468)
+        self.assertEqual(result["usage"]["total_tokens"], 2468)
+        self.assertEqual(result["usage"]["input_tokens"], 2000)
+        self.assertEqual(result["usage"]["output_tokens"], 468)
         self.assertEqual(result["thread_id"], "thread-app-server")
         self.assertIn("app-server 已完成", analysis_text)
         self.assertIn("\"method\": \"turn/completed\"", event_audit_text)
@@ -8418,6 +8420,7 @@ class AgentTests(unittest.TestCase):
                     "analysis_kind": "source_stage",
                     "provider": "codex",
                     "executor": "codex_app_server",
+                    "completion_state": "complete",
                     "analysis_markdown_path": analysis_path,
                     "html_path": kwargs["html_path"],
                     "json_path": kwargs["json_path"],
@@ -8462,6 +8465,93 @@ class AgentTests(unittest.TestCase):
         self.assertEqual(result.details["context_profile"], "scene-signal-diagnosis")
         self.assertEqual(result.details["agent_summary_execution_backend"], "source_stage_direct")
         summary_mock.assert_not_called()
+
+    def test_bug_reanalysis_partial_source_stage_falls_back_to_summary(self):
+        # A non-complete app-server result must NOT be reused as the final answer;
+        # the summary path runs instead (no truncated direct reply).
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(
+                dry_run=False, data_dir=Path(tmp), workspace_root=Path(tmp),
+                codex_app_server=CodexAppServerOptions(enabled=True, use_for_file_agent=True),
+            )
+            config.bug_analysis.provider = "codex"
+            config.bug_analysis.command = "codex"
+            runner = BugAnalysisRunner(config)
+            job_dir = Path(tmp) / "jobs" / "job_partial"
+            (job_dir / "output").mkdir(parents=True, exist_ok=True)
+            prepared_input = Path(tmp) / "logs"
+            self._write_matching_log(prepared_input, "2026-05-25 16:50:41")
+            previous_session = {
+                "job_id": "job_partial",
+                "job_dir": str(job_dir),
+                "details": {
+                    "analysis_kind": "xtheme",
+                    "analysis_kinds": ["xtheme", "source_stage"],
+                    "analysis_skill": "xtheme-analyzer",
+                    "prepared_log_input": str(prepared_input),
+                    "selected_log_input": str(prepared_input),
+                    "target_time": "2026-05-25 16:50",
+                    "user_request_text": "问题时间 2026-05-25 16:50:41 源码分析 3D场景信号分析",
+                },
+            }
+            previous_context = mock.Mock(
+                request_text=previous_session["details"]["user_request_text"],
+                summary_text="上一轮摘要", report_excerpt="上一轮报告摘录", history=[],
+            )
+
+            def fake_run_analysis(*, plan, html_path, json_path, **kwargs):
+                html_path.write_text("<html>scene</html>", encoding="utf-8")
+                json_path.write_text("{}", encoding="utf-8")
+                return subprocess.CompletedProcess(args=["scene_signal"], returncode=0, stdout="", stderr="")
+
+            def fake_file_agent(**kwargs):
+                analysis_dir = kwargs["analysis_dir"]
+                analysis_dir.mkdir(parents=True, exist_ok=True)
+                analysis_path = analysis_dir / "source_stage_analysis.md"
+                analysis_path.write_text("## 结论摘要\n- 半截\n\n## 关键证据\n- L1\n", encoding="utf-8")
+                kwargs["html_path"].write_text("<html>source</html>", encoding="utf-8")
+                kwargs["json_path"].write_text("{}", encoding="utf-8")
+                return {
+                    "ok": True,
+                    "analysis_kind": "source_stage",
+                    "provider": "codex",
+                    "executor": "codex_app_server",
+                    "completion_state": "partial",  # the key difference
+                    "analysis_markdown_path": analysis_path,
+                    "html_path": kwargs["html_path"],
+                    "json_path": kwargs["json_path"],
+                    "evidence_count": 1,
+                    "duration_seconds": 42.0,
+                    "usage": {},
+                    "custom_skill_analysis_status": "completed",
+                    "command": ["codex", "app-server"],
+                    "stdout": "", "stderr": "",
+                }
+
+            with (
+                mock.patch.object(runner, "_write_reanalysis_source_evidence", return_value=None),
+                mock.patch.object(runner, "_build_combined_report_artifacts", return_value=None),
+                mock.patch.object(runner, "_run_analysis", side_effect=fake_run_analysis),
+                mock.patch.object(runner, "_run_custom_skill_agent_analysis", side_effect=fake_file_agent),
+                mock.patch.object(runner, "_run_bug_agent_summary") as summary_mock,
+            ):
+                summary_mock.return_value = {
+                    "message": "## 结论摘要\n- 总结\n\n## 关键证据\n- L1\n",
+                    "command": None, "error": "", "provider": "codex", "session_id": "",
+                    "resumed": False, "duration_seconds": 1.0, "usage": {},
+                    "execution_backend": "codex_exec",
+                }
+                result = runner.run_bug_reanalysis(
+                    followup_text="基于源码重新分析，检查信号处理相关的代码逻辑",
+                    previous_context=previous_context,
+                    previous_session=previous_session,
+                    force_rerun=True,
+                    bridge_session_id="test-reanalysis-partial",
+                )
+
+        self.assertTrue(result.success)
+        self.assertNotEqual(result.details.get("agent_summary_execution_backend"), "source_stage_direct")
+        summary_mock.assert_called_once()
 
     def test_bug_reanalysis_source_stage_prefers_app_server_file_agent_over_pydantic_ai(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -8798,6 +8888,7 @@ class AgentTests(unittest.TestCase):
                     "analysis_kind": "source_stage",
                     "provider": "codex",
                     "executor": "codex_app_server",
+                    "completion_state": "complete",
                     "analysis_markdown_path": analysis_path,
                     "html_path": output_dir / "source_stage_report.html",
                     "json_path": output_dir / "source_stage_report.json",

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 import json
 import queue
 import re
@@ -20,6 +21,13 @@ _APPROVAL_METHODS = {
     "item/permissions/requestApproval",
 }
 _TOOL_ITEM_TYPES = {"commandExecution", "fileChange", "dynamicToolCall", "mcpToolCall"}
+_PARTIAL_ERROR_CODES = {"codex_app_server_no_event_timeout", "codex_app_server_turn_timeout"}
+
+
+class CompletionState(str, Enum):
+    COMPLETE = "complete"
+    PARTIAL = "partial"
+    FAILED = "failed"
 
 
 @dataclass(slots=True)
@@ -37,6 +45,7 @@ class CodexAppServerResult:
     events: list[dict[str, object]] = field(default_factory=list)
     should_retire: bool = False
     usage: dict[str, object] = field(default_factory=dict)
+    completion_state: CompletionState = CompletionState.FAILED
 
 
 @dataclass(slots=True)
@@ -318,6 +327,10 @@ class CodexAppServerClient:
         with self._stderr_lock:
             return list(self._stderr_lines[-n:])
 
+    def stderr_line_count(self) -> int:
+        with self._stderr_lock:
+            return len(self._stderr_lines)
+
     def is_alive(self) -> bool:
         return self._process.poll() is None
 
@@ -413,6 +426,7 @@ class CodexAppServerRuntime:
         notification_poll_seconds: float,
         max_event_audit: int,
         sandbox_mode: str,
+        no_event_timeout_seconds: float = 0.0,
         disable_node_repl: bool = True,
         emit_node_repl_flag: bool = True,
         disable_analytics: bool = True,
@@ -429,6 +443,7 @@ class CodexAppServerRuntime:
         self.startup_timeout_seconds = startup_timeout_seconds
         self.turn_timeout_seconds = turn_timeout_seconds
         self.post_tool_quiet_timeout_seconds = post_tool_quiet_timeout_seconds
+        self.no_event_timeout_seconds = no_event_timeout_seconds
         self.notification_poll_seconds = notification_poll_seconds
         self.max_event_audit = max_event_audit
         self.sandbox_mode = sandbox_mode
@@ -475,7 +490,13 @@ class CodexAppServerRuntime:
         preview_lines: list[str] = []
         events: list[dict[str, object]] = []
         stderr_text = ""
-        last_tool_completion_at: float | None = None
+        last_progress_at = time.monotonic()
+        stderr_seen = 0
+        no_event_timeout = (
+            self.no_event_timeout_seconds
+            if self.no_event_timeout_seconds > 0
+            else self.post_tool_quiet_timeout_seconds
+        )
         turn_completed = False
         result_error = ""
         result_error_code = ""
@@ -499,6 +520,7 @@ class CodexAppServerRuntime:
             )
             turn_id = _extract_turn_id(turn_result)
             deadline = time.monotonic() + self.turn_timeout_seconds
+            last_progress_at = time.monotonic()
 
             while time.monotonic() < deadline:
                 if not client.is_alive():
@@ -507,32 +529,30 @@ class CodexAppServerRuntime:
                     should_retire = True
                     break
 
-                if (
-                    last_tool_completion_at is not None
-                    and self.post_tool_quiet_timeout_seconds > 0
-                    and (time.monotonic() - last_tool_completion_at) > self.post_tool_quiet_timeout_seconds
-                ):
-                    fallback_text = final_answer_text or final_text
-                    if _looks_like_complete_agent_markdown(fallback_text):
-                        turn_completed = True
-                        final_text = fallback_text
-                        break
+                now = time.monotonic()
+                # Any new stderr line counts as progress (e.g. silent reasoning
+                # that still logs), so long reasoning is not killed as a stall.
+                stderr_count = client.stderr_line_count()
+                if stderr_count > stderr_seen:
+                    stderr_seen = stderr_count
+                    last_progress_at = now
+                if no_event_timeout > 0 and (now - last_progress_at) > no_event_timeout:
                     self._interrupt_turn(client, thread_id=thread_id, turn_id=turn_id)
-                    result_error = (
-                        "codex app-server went quiet after a tool result"
-                    )
-                    result_error_code = "codex_app_server_post_tool_quiet_timeout"
+                    result_error = "codex app-server produced no progress before timeout"
+                    result_error_code = "codex_app_server_no_event_timeout"
                     should_retire = True
                     break
 
                 server_request = client.take_server_request(timeout=0.0)
                 if server_request is not None:
                     self._handle_server_request(client, server_request)
+                    last_progress_at = time.monotonic()
                     continue
 
                 event = client.take_notification(timeout=self.notification_poll_seconds)
                 if event is None:
                     continue
+                last_progress_at = time.monotonic()
 
                 if len(events) < self.max_event_audit:
                     events.append(event)
@@ -559,7 +579,6 @@ class CodexAppServerRuntime:
                             agent_message_buffers[item_id] = [initial_text]
                         else:
                             agent_message_buffers.setdefault(item_id, [])
-                    last_tool_completion_at = None
                 elif method == "item/agentMessage/delta":
                     item_id = str(params.get("itemId") or "")
                     delta = str(params.get("delta") or "")
@@ -571,7 +590,6 @@ class CodexAppServerRuntime:
                             final_answer_text = buffered_text
                         elif buffered_text:
                             final_text = buffered_text
-                    last_tool_completion_at = None
 
                 if method == "thread/tokenUsage/updated":
                     token_usage = params.get("tokenUsage") or {}
@@ -591,9 +609,6 @@ class CodexAppServerRuntime:
                             final_text = text
                             if phase == "final_answer":
                                 final_answer_text = text
-                        last_tool_completion_at = None
-                    if item_type in _TOOL_ITEM_TYPES:
-                        last_tool_completion_at = time.monotonic()
                 elif method == "turn/completed":
                     turn = params.get("turn") or {}
                     turn_completed = True
@@ -604,15 +619,10 @@ class CodexAppServerRuntime:
                         result_error_code = "codex_app_server_turn_failed"
                     break
             if not turn_completed and not result_error_code:
-                fallback_text = final_answer_text or final_text
-                if _looks_like_complete_agent_markdown(fallback_text):
-                    turn_completed = True
-                    final_text = fallback_text
-                else:
-                    self._interrupt_turn(client, thread_id=thread_id, turn_id=turn_id)
-                    result_error = f"codex app-server turn timed out after {self.turn_timeout_seconds}s"
-                    result_error_code = "codex_app_server_turn_timeout"
-                    should_retire = True
+                self._interrupt_turn(client, thread_id=thread_id, turn_id=turn_id)
+                result_error = f"codex app-server turn timed out after {self.turn_timeout_seconds}s"
+                result_error_code = "codex_app_server_turn_timeout"
+                should_retire = True
 
             stderr_text = "\n".join(client.stderr_tail(40))
             chosen_text = final_answer_text or final_text
@@ -620,8 +630,15 @@ class CodexAppServerRuntime:
                 result_error = "codex app-server completed without final text"
                 result_error_code = "codex_app_server_empty_output"
 
+            if not result_error_code:
+                completion_state = CompletionState.COMPLETE
+            elif result_error_code in _PARTIAL_ERROR_CODES:
+                completion_state = CompletionState.PARTIAL
+            else:
+                completion_state = CompletionState.FAILED
+
             return CodexAppServerResult(
-                ok=not result_error_code,
+                ok=completion_state == CompletionState.COMPLETE,
                 final_text=chosen_text,
                 error=result_error,
                 error_code=result_error_code,
@@ -634,6 +651,7 @@ class CodexAppServerRuntime:
                 events=events,
                 should_retire=should_retire,
                 usage=usage,
+                completion_state=completion_state,
             )
         finally:
             try:
@@ -694,14 +712,6 @@ def _compact_text(text: str, *, max_chars: int) -> str:
     if len(compact) <= max_chars:
         return compact
     return compact[: max_chars - 1].rstrip() + "..."
-
-
-def _looks_like_complete_agent_markdown(text: str) -> bool:
-    normalized = text.strip()
-    if not normalized:
-        return False
-    required_sections = ("## 结论摘要", "## 关键证据")
-    return all(section in normalized for section in required_sections)
 
 
 def _build_app_server_command(
