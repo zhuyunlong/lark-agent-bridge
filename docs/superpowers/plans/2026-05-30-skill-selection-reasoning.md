@@ -1,135 +1,262 @@
-# Skill-Selection Reasoning Plan
+# Skill-Selection Reasoning Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-> 取代 `2026-05-30-agent-autonomous-bug-analysis.md`(已废弃)。那份"agent 全包解码+选 skill+分析+出 HTML"的全替换方案,针对的是错误的层、且引入解码跨平台/沙箱写权限/稳定性回退等高风险。真实痛点是 **skill 选择层**:①选择对"措辞"敏感,换说法/错字就选错;②路由死板、不会推理。本计划只改选择层。
+> 取代 `2026-05-30-agent-autonomous-bug-analysis.md`(已废弃)。那份方案把问题放在了解码/执行/HTML 层，改动面过大且风险高；真实痛点仍然是 **skill 选择层**：①对措辞敏感，换说法/带错字就会误选；②路由逻辑死板，模型没有足够语义材料做推理。本计划只改 **bug skill 选择与低置信交互**，不动执行与报告链路。
 
-**Goal:** 让 Bug skill 选择从"关键词字面匹配"变成"基于每个 skill 的 `when_to_use` 语义推理",消除措辞敏感(痛点①)与规则死板(痛点②)。**不动解码、确定性执行、HTML 生成、agent 权限**——稳定性原样保留。改动局限在一个已存在的分类函数 + skill frontmatter,成本/延迟与现状持平,且用标注集量化验收。
+**Goal:** 让 Bug 首轮分类和续聊重分析都从“字面关键词匹配”升级为“基于 skill 元数据的语义推理”，并把低置信结果通过现有澄清/Skill 按钮链路暴露给用户。
 
-**Architecture:** 选择层就地改造,执行/解码/报告链路不变。
-- `_available_bug_skills`(bug_runner.py:549)产出**富 catalog**:每个 skill 除 `description` 外带 `when_to_use / symptoms / not_for / examples`,来源是各 `SKILL.md` frontmatter(单一事实源,加新 skill 不改桥代码)。
-- `_classify_bug_request_with_agent`(bug_runner.py:1200)**删掉硬编码"出现X选Y"关键词规则**,改成通用推理指令:依据每个 skill 的 `when_to_use` 与用户症状推理,不按字面词匹配;输出 `{skill, confidence, candidates[], reason}`。
-- **低置信不硬选**:返回 top-N 候选给用户确认或要求补方向(复用现有交互模式)。
-- `routing_terms.toml` + `_manual_bug_selection`(bug_runner.py:651)**降级为先验/兜底**(LLM 不可用时仍能路由),不再是事实源。
+**Architecture:** 用 `skill_registry.py` 提供兼容旧调用的结构化 frontmatter 解析；`bug_runner.py` 基于该元数据构造完整 skill catalog，并让首轮分类和续聊分类共用同一套 prompt/result helper，避免两套规则漂移。低置信时不新造交互面，而是复用现有 `needs_user_direction + supported_bug_skills` 机制，并补充 `classification_confidence / classification_candidates` 供卡片与调试面展示。
 
-**Tech Stack:** Python 3.13 stdlib;现有 `BugAnalysisRunner` classify 路径(`_unified_classify_and_decide` @832 / `classify_and_decide` @896 / `_classify_bug_request_with_agent` @1200 / `_run_bug_decision_agent` / `_resolve_bug_plans` / `_selection_from_plans`)、`skill_manager.py`、`config/routing_terms.toml`、agent 输出模型(`agents/pydantic_models.py` / `agents/agent_output_models.py`);`pytest`/`unittest`。
+**Tech Stack:** Python 3.13 stdlib；`lark_agent_bridge/skill_registry.py`、`lark_agent_bridge/agents/bug_runner.py`、`lark_agent_bridge/skill_manager.py`、`lark_agent_bridge/app.py`、`config/routing_terms.toml`、`tests/test_skill_manager.py`、`tests/test_agents.py`、`tests/test_app.py`、`pytest`/`unittest`。
 
 ---
 
 ## Context
 
-Baseline reality(已对照当前代码核实,编辑前重新确认行号):
+Baseline reality（已对照当前代码核实，实施前重新确认行号）：
 
-- skill 选择**已经是一次 LLM 调用**:`_unified_classify_and_decide`(bug_runner.py:832)先调 `_classify_bug_request_with_agent`(:1200),失败才退 `_manual_bug_selection`(:651,纯关键词)。所以问题不是"不够 agentic"。
-- 根因在 `_classify_bug_request_with_agent` 的 prompt **塞满硬编码关键词规则**,例如「出现 xtheme/105004/晨曦/主题切换 → xtheme-analyzer」「3D场景信号/小憩/露营/洗车 → scene-signal-diagnosis」「signal-chain-analyzer 优先级最低」。等于把 `routing_terms.toml` 的脆弱关键词搬进提示词,逼模型做字面匹配 → 痛点①。
-- catalog 太薄:`_available_bug_skills`(bug_runner.py:549)只从 `SKILL.md` frontmatter 取 `frontmatter_name, description`(`_extract_skill_frontmatter`),每个 skill 只给模型一句话 → 模型缺推理材料 → 痛点②。
-- 分类器现输出 JSON `{analysis_kind, skill, signal_hint, reason}`,**无 confidence/candidates**,低置信也会硬选一个。
-- `SkillRecord`(skill_manager.py:62 `to_dict`)已有 `description` 字段,`debug_skill` 检查项明确写"建议补充 description 以提高路由可解释性",方向与本计划一致。
-- `routing_terms.toml` 现为关键词 tuple(`startup/stuck/signal/scene_signal/perception/crash/xtheme/...`),substring 精确匹配,对 paraphrase/typo 脆弱。
+- Bug 首轮选择已经是“Agent 先分，再本地回退”：
+  `BugAnalysisRunner._unified_classify_and_decide()` 先调 `_classify_bug_request_with_agent()`，失败才退 `_manual_bug_selection()`。
+- 问题不在“没有用 LLM”，而在于 **prompt 仍然硬编码 literal 规则**：
+  `_classify_bug_request_with_agent()` 和 `decide_bug_followup()` 都直接写了 `xtheme/105004/晨曦`、`小憩/露营/洗车`、`signal-chain-analyzer 优先级最低` 这类字面词规则。
+- 当前 frontmatter 解析函数不在 `bug_runner.py`，而是在 `lark_agent_bridge/skill_registry.py::extract_skill_frontmatter()`；它现在只返回 `(name, description)`，没有结构化元数据。
+- 当前分类结果也没有走 pydantic 结构化输出模型；`_run_bug_decision_agent()` 只是执行子进程，`_parse_bug_decision_json()` 再直接 `json.loads()`。因此只改 `agents/pydantic_models.py` 或 `agent_output_models.py` 不会影响 bug skill 分类。
+- `app.py` 当前只消费 `classification_source / classification_reason / classification_provider` 以及 `supported_bug_skills`，并依赖 `needs_user_direction` 来决定是否展示补充方向提示与 Skill 按钮。
+- skill 元数据实际读取目录是 `BridgeConfig.workspace_root/.ai/skills`。计划里的 frontmatter 内容工作必须落到 **当前验证配置真正使用的 workspace_root**；不能假定永远是某个固定 guideengine worktree 路径。
 
-Non-goals:
+Non-goals：
 
-- 不碰解码(log-decoder)、确定性脚本执行(`build_command`)、HTML 生成、agent 沙箱/权限。
-- 不删 `routing_terms.toml` / `_manual_bug_selection`:保留为离线兜底。
-- 不引入"让 agent 读日志来决定 skill":标题+描述+富 catalog 足够推理,读日志选 skill 又慢又贵。
-- 不改其它路径(signal_lifecycle / 感知总结 / omlx / 知识库)。
+- 不碰日志解码、确定性分析脚本、HTML 生成、agent 权限/沙箱。
+- 不删除 `routing_terms.toml`、`classify_requests()`、`_manual_bug_selection()`；它们继续作为 LLM 不可用时的离线兜底。
+- 不把“选 skill”升级成“先读日志/源码再选 skill”；选择层仍然只基于用户请求、标题、描述、附件摘要和 skill catalog。
+- 不顺手改动 signal lifecycle、感知总结、OMLX、知识库等非 bug skill 选择路径。
 
 ---
 
 ## Decision Log
 
-- **D1 富元数据落点:** 放在各 `SKILL.md` frontmatter(单一事实源,skill 作者本就在这维护;加新 skill 零桥码改动)。`_extract_skill_frontmatter` 扩展解析。
-- **D2 关键词去留:** 保留为先验/兜底,不删。强约束(如 signal-chain 最低优先级、scene vs signal 区分)从"散落关键词"改表达为 skill 自己的 `not_for` / 优先级元数据,由模型推理消化。
-- **D3 低置信策略:** 不硬选。低于阈值 → 给 top-2 候选让用户确认,或要求补充方向(复用现有 `_needs_general_direction` 交互)。阈值用标注集校准。
-- **D4 验收:** 必须用历史 case 标注集(请求→正确 skill)做改前/改后选择准确率对比,达标才合入。
+- **D1 解析契约保持 stdlib-only：** 新增结构化 frontmatter helper，但不引入 `PyYAML`。frontmatter v1 仅支持单行标量字段和单行 inline list（如 `["a", "b"]`）；不支持多行 YAML block。
+- **D2 catalog 必须先完整，再谈推理：** `_available_bug_skills()` 不能依赖目录里“刚好存在所有 built-in skill 的 `SKILL.md`”。它应先从 `PRIMARY_BUG_SKILL_MAP` / `AUX_BUG_SKILLS` 种出完整候选集，再用本地 `SKILL.md` 覆盖说明性元数据。
+- **D3 首轮分类与续聊分类必须共用同一套推理 helper：** 否则首轮改成语义推理后，追问/重分析仍会按旧 literal 规则漂移。
+- **D4 低置信不新增 UI 控件：** 继续复用现有 Skill 按钮与补充方向提示，只在结果详情中增加 `classification_confidence` 和 `classification_candidates`，并由 `app.py` 把这些信息展示出来。
+- **D5 这次不引入 pydantic bug-classifier model：** 当前 bug classifier 不是 `output_type` 路径；先把 prompt、JSON 解析和数据流打通，避免做一半迁移。
+- **D6 不额外改 `state.py`：** 当前首轮结果会通过 `TaskResult.details` 进入卡片/UI，续聊重分析读取的是 `previous_session["details"]` 而不是 `ConversationContext` 的完整分类载荷；本计划先不为 `confidence/candidates` 增加长期持久化。
 
 ---
 
 ## File Map
 
+- 修改 `lark_agent_bridge/skill_registry.py`
+  - 新增结构化 frontmatter 解析 helper。
+  - 保留现有 `extract_skill_frontmatter()` 作为兼容包装，避免 `SkillManager` 等调用方被一次性打碎。
 - 修改 `lark_agent_bridge/agents/bug_runner.py`
-  - `_extract_skill_frontmatter`:解析 `when_to_use / symptoms / not_for / examples`(缺省空)。
-  - `_available_bug_skills`(:549):catalog entry 带出上述新字段。
-  - `_classify_bug_request_with_agent`(:1200):删硬编码关键词规则;prompt 改为"按 when_to_use 推理";输出加 `confidence` + `candidates`。
-  - 消费 `confidence`:低置信走候选确认/要求补方向分支。
-- 修改 `lark_agent_bridge/agents/pydantic_models.py` 或 `agent_output_models.py`:分类输出模型加 `confidence: float` + `candidates: list`。
-- 修改 `config/routing_terms.toml`:顶部注释标注"先验/兜底,非事实源";不删条目。
-- 修改 skill frontmatter(guideengine 仓库 `xp/guideengine/.worktrees/os6_xpdev/.ai/skills/*/SKILL.md`):为 primary 分析 skill 补 `when_to_use` 等字段。
-- 测试:扩展 `tests/test_agents.py`(选择推理/低置信)、`tests/test_skill_manager.py`(frontmatter 解析);新增小标注集回归用例。
+  - `_available_bug_skills()`：生成完整 catalog，并附带 `when_to_use / symptoms / not_for / examples`。
+  - 新增共享 helper：catalog -> prompt payload、prompt 文本构造、classifier JSON 解析、low-confidence 判定。
+  - 同时修改 `_classify_bug_request_with_agent()` 与 `decide_bug_followup()`，彻底删除 prompt 中的硬编码字面规则。
+  - 扩展 `BugAnalysisSelection` / `BugFollowupSelection`，补充 `confidence` 与 `candidates`。
+  - 在首轮分析结果详情和续聊决策里写入 `classification_confidence / classification_candidates`。
+- 修改 `lark_agent_bridge/app.py`
+  - 在 Skill 选择提示文案里展示低置信候选与当前置信度。
+  - 继续复用现有 Skill 按钮，不新增按钮类型。
+- 修改 `config/routing_terms.toml`
+  - 仅补充注释，明确这是 LLM 不可用时的本地兜底词表，不再是“主事实源”。
+- 修改运行时实际使用的 `workspace_root/.ai/skills/*/SKILL.md`
+  - 为 bug 主分析 skill 补充 `when_to_use / symptoms / not_for / examples` 单行 frontmatter 字段。
+  - 只修改当前验证配置真正会读取的 skill 根目录。
+- 修改/新增测试
+  - `tests/test_skill_manager.py`：frontmatter 解析与兼容性。
+  - `tests/test_agents.py`：rich catalog、首轮分类、续聊分类、低置信细节。
+  - `tests/test_app.py`：低置信提示文案与 Skill 按钮说明。
+  - 新增 `tests/data/bug_skill_selection_cases.json`：标注集。
+  - 新增 `scripts/eval_bug_skill_selection.py`：改前/改后 live benchmark。
 
 ---
 
-## Task 1: 富 skill 元数据
+## Task 1: 锁定 frontmatter 契约与兼容解析
 
-让 catalog 给模型足够推理材料(治痛点②的基础)。
+**Files:**
+- Modify: `lark_agent_bridge/skill_registry.py`
+- Test: `tests/test_skill_manager.py`
 
-**Files:** `bug_runner.py`、`tests/test_skill_manager.py`(或 `test_agents.py`)。
+- [ ] **Step 1:** 先写失败测试，覆盖新旧两类输入：
+  - 旧格式只含 `name / description` 仍能被 `SkillManager` 正常读取。
+  - 新格式增加：
+    - `when_to_use: 一句话`
+    - `symptoms: ["词1", "词2"]`
+    - `not_for: 一句话`
+    - `examples: ["例子1", "例子2"]`
+  - 断言结构化 helper 能返回完整字段，兼容 wrapper 仍返回 `(name, description)`。
+- [ ] **Step 2:** 在 `skill_registry.py` 新增例如 `extract_skill_frontmatter_metadata(text: str) -> dict[str, object]` 的 helper：
+  - 只解析 frontmatter 区域。
+  - 标量字段返回 `str`。
+  - inline list 优先走 `ast.literal_eval`，失败时回退为单个字符串或逗号拆分后的列表。
+  - 缺省字段统一补空字符串/空列表，避免下游判空分支过多。
+- [ ] **Step 3:** 保留现有 `extract_skill_frontmatter()`，内部改为调用新的 metadata helper，并继续只返回 `(name, description)`，确保 `SkillManager` 与现有测试不被破坏。
 
-- [ ] **Step 1(先写失败测试):** 一个含 `when_to_use:` / `not_for:` frontmatter 的 SKILL.md fixture,断言 `_extract_skill_frontmatter` 解析出这些字段、`_available_bug_skills` entry 含这些字段。
-- [ ] **Step 2:** 扩展 `_extract_skill_frontmatter` 解析新字段(向后兼容:缺省为空)。
-- [ ] **Step 3:** `_available_bug_skills` 把新字段加入 primary/auxiliary entry。frontmatter 约定(最小):
+## Task 2: 构造完整 rich catalog，而不是依赖本地目录是否齐全
 
-```yaml
-when_to_use: 一句话——什么症状/场景该用这个 skill
-symptoms: [典型现象1, 典型现象2]
-not_for: 明确不该用的场景（用于互斥推理）
-```
+**Files:**
+- Modify: `lark_agent_bridge/agents/bug_runner.py`
+- Test: `tests/test_agents.py`
 
-## Task 2: 推理式分类 prompt + 置信输出
+- [ ] **Step 1:** 先写失败测试，覆盖两个关键场景：
+  - `workspace_root/.ai/skills` 目录存在但只含少量 skill 文件时，built-in primary skills 仍然会出现在 `_available_bug_skills()` 输出里。
+  - 存在对应 `SKILL.md` 时，catalog entry 会附带 `when_to_use / symptoms / not_for / examples`。
+- [ ] **Step 2:** 重写 `_available_bug_skills()` 的组装方式：
+  - 先根据 `primary_skill_map()` 种出 primary entries。
+  - 再根据 `auxiliary_skill_names()` 种出 auxiliary entries。
+  - 最后扫描 `workspace_root/.ai/skills/*/SKILL.md`，用 frontmatter 元数据覆盖已有 entry，或为额外 custom/auxiliary skill 新建 entry。
+- [ ] **Step 3:** `general` 继续作为显式 primary fallback 保留，并补默认 `when_to_use / not_for`，避免 model 在 catalog 里把 `general` 当成“万能源码分析”。
 
-去掉字面匹配规则(治痛点①),让模型推理并暴露不确定性。
+## Task 3: 用共享 helper 替换首轮分类与续聊分类里的硬编码关键词 prompt
 
-**Files:** `bug_runner.py`、输出模型文件、`tests/test_agents.py`。
+**Files:**
+- Modify: `lark_agent_bridge/agents/bug_runner.py`
+- Test: `tests/test_agents.py`
 
-- [ ] **Step 1(先写失败测试):** 断言分类 prompt **不含**硬编码示例词清单(如 "晨曦"、"小憩" 这类被搬进 prompt 的关键词规则);断言输出模型含 `confidence` 与 `candidates`。
-- [ ] **Step 2:** 重写 `_classify_bug_request_with_agent` 的 prompt:移除"出现X选Y"规则;改为「依据每个 skill 的 `when_to_use`/`not_for` 与用户症状**推理**最匹配项,不要按字面关键词匹配;给出 confidence(0-1)与至多 2 个候选及理由」。catalog 用 Task 1 的富字段。
-- [ ] **Step 3:** 输出模型加 `confidence: float`、`candidates: list[{skill, reason}]`;解析失败/字段缺失时安全降级(视为低置信)。
+- [ ] **Step 1:** 先写失败测试，至少覆盖：
+  - 首轮分类 prompt 不再包含 `晨曦`、`小憩`、`露营`、`洗车` 等硬编码示例词。
+  - 续聊分类 prompt 也不再包含这些硬编码示例词。
+  - 两条路径都改为携带 rich catalog 元数据。
+- [ ] **Step 2:** 在 `bug_runner.py` 新增共享 helper，建议最少拆出三层：
+  - 构造 classifier payload（首轮与续聊输入差异只体现在 request/followup/summary/log presence 上）。
+  - 构造 classifier prompt（共享语义推理规则、字段约束、低置信行为要求）。
+  - 解析 classifier response（统一解析 `skill / analysis_kind / reason / confidence / candidates`，续聊额外解析 `action / retry_download_if_missing`）。
+- [ ] **Step 3:** 修改 `_classify_bug_request_with_agent()`：
+  - 删除 literal routing 规则文本。
+  - 改为要求模型“优先依据 `when_to_use / not_for / symptoms / examples` 推理，不要因为单个词面相似就硬匹配”。
+  - 输出 JSON 升级为：
+    - `analysis_kind`
+    - `skill`
+    - `signal_hint`
+    - `reason`
+    - `confidence`
+    - `candidates`
+- [ ] **Step 4:** 修改 `decide_bug_followup()`，复用同一套 helper：
+  - 保留 `action / retry_download_if_missing` 续聊特有字段。
+  - 删除另一套重复的 literal rules，防止首轮与追问的路由逻辑分叉。
+- [ ] **Step 5:** 保持 `_manual_bug_selection()` 原样可用，仅在 agent JSON 解析失败、进程失败、或关键字段缺失时回退。
 
-## Task 3: 低置信处理 + 关键词降级
+## Task 4: 把 confidence / candidates 走完整条结果链路
 
-**Files:** `bug_runner.py`、`config/routing_terms.toml`、`tests/test_agents.py`。
+**Files:**
+- Modify: `lark_agent_bridge/agents/bug_runner.py`
+- Modify: `lark_agent_bridge/app.py`
+- Test: `tests/test_agents.py`
+- Test: `tests/test_app.py`
 
-- [ ] **Step 1:** `confidence` 低于阈值 → 不硬选,返回 top-2 候选请用户确认 / 要求补方向(复用 `_needs_general_direction` 路径)。阈值先取保守值,Task 5 校准。
-- [ ] **Step 2:** `_manual_bug_selection` / `routing_terms.toml` 仅在 LLM 不可用或显式兜底时生效;`routing_terms.toml` 顶部注释标注语义降级。
-- [ ] **Step 3:** 测试:换说法/错字命中正确 skill;模糊请求触发候选确认而非硬选;LLM 不可用时关键词兜底仍工作。
+- [ ] **Step 1:** 扩展 `BugAnalysisSelection` 与 `BugFollowupSelection` dataclass：
+  - 增加 `confidence: float = 0.0`
+  - 增加 `candidates: list[dict[str, str]] = field(default_factory=list)`
+- [ ] **Step 2:** 在 classifier 结果转 selection 时写入：
+  - `selection.confidence`
+  - `selection.candidates`
+  - 并对非法值做钳制：`confidence` 非法时按 `0.0` 处理。
+- [ ] **Step 3:** 在首轮 bug 分析里补 low-confidence 处理规则：
+  - 如果命中 `general` 且 `confidence` 低，继续走现有 `_general_direction_needed_result()` 风格的澄清分支。
+  - 如果命中了专用 skill 但 `confidence` 低，不直接新建交互，而是在结果详情里写入：
+    - `classification_confidence`
+    - `classification_candidates`
+    - `needs_user_direction = True`
+    - `supported_bug_skills`
+    让现有 Skill 按钮继续承担“人工纠偏”的入口。
+- [ ] **Step 4:** 在正常报告结果、直传分析结果、续聊重分析结果里也一并记录 `classification_confidence / classification_candidates`，确保：
+  - `agent_activity.json`
+  - 报告元数据
+  - report server 调试页
+  都能看到这一层决策信息。
+- [ ] **Step 5:** 更新 `app.py` 的 Skill 选择提示文案：
+  - 如果存在 `classification_candidates`，在 note 中展示“低置信候选：A / B”。
+  - 如果存在 `classification_confidence`，展示当前置信度数值或分档。
+  - 不新增按钮类型，继续复用现有 Skill 纠偏按钮。
 
-## Task 4: 为 primary 分析 skill 补 `when_to_use`(内容工作)
+## Task 5: 在实际运行时 skill 根目录补齐 frontmatter 元数据
 
-**Files:** guideengine `.ai/skills/*/SKILL.md` frontmatter。
+**Files:**
+- Modify: `ACTIVE_WORKSPACE_ROOT/.ai/skills/*/SKILL.md`
 
-- [ ] 至少覆盖 primary 分析 skill:`signal-chain-analyzer`(强调"仅明确具体 SignalCode 链路时用"——把原来散落的"最低优先级"规则表达成它自己的 `when_to_use`/`not_for`)、`scene-signal-diagnosis`、`3d-stuck-investigate`、`unity-startup-lifecycle-check`、`xtheme-analyzer`、`perception-data-summary`。
-- [ ] 用 `skill debug`(skill_manager `debug_skill`)校验 frontmatter 可读。
+- [ ] **Step 1:** 在执行此任务前先锁定“你实际要验证的 bridge profile 对应哪个 `BridgeConfig.workspace_root`”。
+  - 如果当前只在本仓库本地验证，skill 根目录就是 `lark-agent-bridge/.ai/skills`。
+  - 如果你验证的是 bridge 指向 guideengine worktree 的真实运行配置，就必须编辑那个 worktree 下的 `.ai/skills`，而不是只改 bridge 仓库自己的 `.ai/skills`。
+- [ ] **Step 2:** 至少为以下 primary bug skill 补齐单行 frontmatter 字段：
+  - `signal-chain-analyzer`
+  - `scene-signal-diagnosis`
+  - `3d-stuck-investigate`
+  - `unity-startup-lifecycle-check`
+  - `xtheme-analyzer`
+  - `perception-data-summary`
+  - `ld-lane-level-log-analysis-portable`
+  - `pullover-chain-analyzer`
+- [ ] **Step 3:** frontmatter 内容规则：
+  - `when_to_use` 写“什么症状/诉求时该用”
+  - `symptoms` 写典型现象关键词列表
+  - `not_for` 明确与其它 skill 的互斥边界
+  - `examples` 写 1-2 条高代表性的自然语言问法
+- [ ] **Step 4:** 对 `signal-chain-analyzer` 单独强调边界：
+  - 只在“用户明确要排查具体 SignalCode / SIGNAL_* 链路、来源、送达情况”时使用。
+  - `not_for` 明确排除“泛泛说到信号”“场景模式异常但未锁定具体 signal code”的场景。
+- [ ] **Step 5:** 用与运行配置一致的 `workspace_root` 跑一次 `SkillManager.debug_skill()`，确认这些字段可读、不会因为 parser 限制丢失。
 
-## Task 5: 选择准确率回归集 + 改前后对比(量化验收)
+## Task 6: 做一份可重复运行的标注集与 live benchmark
 
-**Files:** `tests/data/`(标注集)、`tests/test_agents.py` 或独立脚本。
+**Files:**
+- Create: `tests/data/bug_skill_selection_cases.json`
+- Create: `scripts/eval_bug_skill_selection.py`
+- Test: `tests/test_agents.py`
 
-- [ ] 从历史 case / `data/jobs` 抽一批 (请求文本+标题+描述 → 正确 skill) 标注集,含 paraphrase/错字/组合 样本。
-- [ ] 跑改前(关键词规则)vs 改后(推理),报告选择准确率、误选率、低置信触发率。
-- [ ] 定阈值:改后准确率不低于改前,且 paraphrase/错字子集明显改善,才合入;据此校准 Task 3 的置信阈值。
+- [ ] **Step 1:** 先整理标注集，每条至少包含：
+  - `prompt_text`
+  - `title`
+  - `description`
+  - `expected_skill`
+  - `bucket`（如 `paraphrase` / `typo` / `scene-vs-signal` / `xtheme` / `general`）
+- [ ] **Step 2:** 把“最容易被 literal 规则误导”的样本放进去：
+  - XTheme 的换说法，不直接出现 `xtheme/晨曦`
+  - 场景模式异常，但不直接出现 `小憩/露营/洗车`
+  - 泛化“信号异常”与“具体 SignalCode 链路”区分样本
+  - 模糊请求应走 `general + clarification` 的样本
+- [ ] **Step 3:** 新增 `scripts/eval_bug_skill_selection.py`：
+  - 读取标注集。
+  - 调用当前分支上的 classifier 路径。
+  - 输出总准确率、各 bucket 准确率、低置信触发率、fallback 触发率。
+- [ ] **Step 4:** 在替换 prompt 前先跑一次 baseline，把结果落到 `docs/superpowers/` 或同级 artifact 目录；改完后再跑一次，明确比较：
+  - 总准确率不能低于 baseline。
+  - `paraphrase / typo` 子集必须提升。
+  - `scene-vs-signal` 与 `signal-chain` 不得明显回归。
+- [ ] **Step 5:** 依据 live benchmark 结果回填 low-confidence threshold，避免拍脑袋设置。
 
 ---
 
 ## Verification
 
+先跑单测，再跑 live benchmark，最后做一次真实会话 smoke test。
+
 ```bash
 cd /Users/zhuyl/Documents/workspace/tools/lark-agent-bridge
-PYTHONPATH=. .venv/bin/python -m pytest -q tests/test_agents.py -k "select or classify or confidence"
-PYTHONPATH=. .venv/bin/python -m pytest -q tests/test_skill_manager.py
-.venv/bin/python -m unittest discover -s tests -v
+
+PYTHONPATH=. .venv/bin/python -m pytest -q tests/test_skill_manager.py -k "frontmatter or debug"
+PYTHONPATH=. .venv/bin/python -m pytest -q tests/test_agents.py -k "classify_bug_request_with_agent or decide_bug_followup or available_bug_skills or confidence"
+PYTHONPATH=. .venv/bin/python -m pytest -q tests/test_app.py -k "skill_choice or direction"
+
+PYTHONPATH=. .venv/bin/python scripts/eval_bug_skill_selection.py --cases tests/data/bug_skill_selection_cases.json
+
 git diff --check
 ```
 
-真实群聊:
+真实会话 smoke test：
 
-1. 用**换说法/带错字**的 bug 请求(如把"主题切换"说成"白天黑夜切换不对"),确认选中 `xtheme-analyzer` 而非误选。
-2. 用模糊请求,确认返回候选确认/要求补方向,而非自信硬选。
-3. 断开/禁用 LLM,确认关键词兜底仍能路由。
-4. 看 `data/state/agent_activity.json`:selection 带 reason 与 confidence。
+1. 用 XTheme 换说法样本（不显式写 `xtheme/晨曦`）发起 bug 分析，确认仍选 `xtheme-analyzer`。
+2. 用“场景模式不对/模式切换异常”但不含固定词面的小样本发起分析，确认优先落到 `scene-signal-diagnosis`，而不是因为“信号”二字误选 `signal-chain-analyzer`。
+3. 用模糊请求发起分析，确认结果会带 `needs_user_direction=true`、Skill 按钮可见，并且详情里能看到 `classification_candidates`。
+4. 人工让 classifier 不可用（错误 command 或 provider），确认 `_manual_bug_selection()` 仍可兜底，不阻塞分析。
+5. 看 `data/state/agent_activity.json`、报告元数据和 report server 调试页，确认能看到 `classification_confidence` 与 `classification_candidates`。
+
+---
 
 ## Risks
 
-- **R1 去掉硬规则后强约束回归**(signal-chain 滥用、scene vs signal 混淆):用 Task 5 标注集守住;强约束改表达为 skill 的 `not_for`/优先级元数据,而非散落关键词。
-- **R2 富 frontmatter 维护成本:** 单一事实源在 skill 自身,且 `debug_skill` 已鼓励补全;先覆盖 primary skill。
-- **R3 置信阈值校准:** 用标注集定,过高→频繁追问,过低→回到硬选;Task 5 调。
-- **R4 LLM 不可用:** 关键词兜底保留,不回归。
+- **R1 catalog 仍然不完整：** 如果实际运行 profile 的 `workspace_root` 下没有对应 `SKILL.md`，模型只能拿到默认 label/description。Task 2 通过“先种 built-ins、再 overlay metadata”缓解，但 Task 5 仍要补齐真正运行时的 skill 文件。
+- **R2 首轮/续聊漂移：** 若只改 `_classify_bug_request_with_agent()` 而漏改 `decide_bug_followup()`，追问重分析仍会走旧规则。Task 3 必须把两条路径一起收敛。
+- **R3 low-confidence 太激进：** 阈值过高会导致大量不必要澄清；过低又会回到“自信硬选”。必须以 Task 6 的标注集校准。
+- **R4 parser 过于“像 YAML 但不是 YAML”：** 如果 frontmatter 作者写多行 block/list，stdlib parser 可能读不出来。需要在文档模板或 code review 中明确“仅支持单行字段/inline list”。

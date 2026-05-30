@@ -9884,34 +9884,53 @@ class BugAnalysisRunner:
             emit_node_repl_flag=emit_node_repl_flag,
         )
 
-    def _prepare_codex_app_server_minimal_home(self) -> Path | None:
+    def _prepare_codex_app_server_minimal_home(self, *, run_id: str = "") -> Path | None:
         source_home = Path.home() / ".codex"
-        auth_path = source_home / "auth.json"
-        if not auth_path.exists():
+        if not (source_home / "auth.json").exists():
             return None
-        target_home = self.config.data_dir / "codex_app_server_home"
-        target_home.mkdir(parents=True, exist_ok=True)
+        base = self.config.data_dir / "codex_app_server_home"
+        template = base / "template"
+        template.mkdir(parents=True, exist_ok=True)
         for name in ("auth.json", "installation_id", "models_cache.json"):
             source = source_home / name
             if not source.exists():
                 continue
-            target = target_home / name
             try:
-                shutil.copy2(source, target)
+                shutil.copy2(source, template / name)
             except OSError:
                 continue
-        minimal_config = [
-            f'model = "{(self.config.bug_analysis.model or "gpt-5.4").strip() or "gpt-5.4"}"',
-            "",
-            "[analytics]",
-            "enabled = false",
-            "",
-        ]
+        config_lines = ["[analytics]", "enabled = false", ""]
+        model = self.config.codex_app_server.model.strip()
+        if model:
+            # Empty model => omit the line so Codex uses its own default.
+            config_lines = [f'model = "{model}"', ""] + config_lines
         try:
-            (target_home / "config.toml").write_text("\n".join(minimal_config), encoding="utf-8")
+            (template / "config.toml").write_text("\n".join(config_lines), encoding="utf-8")
         except OSError:
             return None
-        return target_home
+        runs_dir = base / "runs"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        self._sweep_stale_codex_app_server_runs(runs_dir)
+        run_home = runs_dir / (run_id or uuid.uuid4().hex[:12])
+        try:
+            shutil.rmtree(run_home, ignore_errors=True)
+            shutil.copytree(template, run_home)
+        except OSError:
+            return template
+        return run_home
+
+    def _sweep_stale_codex_app_server_runs(self, runs_dir: Path, max_age_seconds: float = 3600.0) -> None:
+        now = time.time()
+        try:
+            children = list(runs_dir.iterdir())
+        except OSError:
+            return
+        for child in children:
+            try:
+                if child.is_dir() and (now - child.stat().st_mtime) > max_age_seconds:
+                    shutil.rmtree(child, ignore_errors=True)
+            except OSError:
+                continue
 
     def _merge_codex_app_server_proxy_env(self, env: dict[str, str]) -> dict[str, str]:
         merged = dict(env)
@@ -10046,6 +10065,8 @@ class BugAnalysisRunner:
             )
 
         result = runtime.run_turn(prompt_text, on_event=_stream_event if progress_callback is not None else None)
+        if policy.codex_home is not None and policy.codex_home.parent.name == "runs":
+            shutil.rmtree(policy.codex_home, ignore_errors=True)
         stdout_path.write_text(result.stdout, encoding="utf-8")
         stderr_path.write_text(result.stderr, encoding="utf-8")
         self._write_app_server_event_audit(events_path, result.events)
