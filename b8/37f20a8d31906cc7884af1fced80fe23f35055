@@ -1,0 +1,23 @@
+lark_agent_bridge/agents/bug_runner.py
+  41813dff93c101ae 10643-10742,10794-10795,10805
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.22",
+  "base_commit_sha": "b837f20a8d31906cc7884af1fced80fe23f35055",
+  "prompts": {
+    "41813dff93c101ae": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e7704-1e08-7090-a4e8-0ef32a546ceb",
+        "model": "gpt-5.4"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 103,
+      "total_deletions": 1,
+      "accepted_lines": 103,
+      "overriden_lines": 0
+    }
+  }
+}
