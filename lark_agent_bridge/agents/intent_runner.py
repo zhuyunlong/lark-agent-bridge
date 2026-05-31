@@ -19,6 +19,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import time
+from typing import TYPE_CHECKING
 
 from ..health import ProcessWatchdog, _safe_terminate
 from ..log import get_logger
@@ -28,6 +29,9 @@ from .llm_client import LLMClient, LLMClientError
 from .pydantic_agents import IntentAgent
 
 logger = get_logger("agents")
+
+if TYPE_CHECKING:
+    from ..replay import AnalysisReplayContext, ReplayDecision
 
 
 def _run_tracked_process(*args, **kwargs):
@@ -63,6 +67,7 @@ class IntentAnalysisRunner:
     }
     FOLLOWUP_ACTIONS = {"continue_agent", "reanalysis", "context_chat", "none"}
     CONTEXT_SOURCES = {"explicit", "latest_chat", "none"}
+    REPLAY_ACTIONS = {"answer_from_existing", "reanalyze", "clarify", "new_request", "unsupported"}
 
     def __init__(self, config: BridgeConfig, process_watchdog: ProcessWatchdog | None = None) -> None:
         self.config = config
@@ -135,6 +140,36 @@ class IntentAnalysisRunner:
 
         # --- Path 2: Subprocess CLI (legacy fallback) ---
         return self._classify_via_subprocess(prompt)
+
+    def decide_replay(self, *, context: "AnalysisReplayContext") -> "ReplayDecision":
+        if not self.is_enabled():
+            raise IntentAnalysisFailure("intent analysis is disabled", error_code="intent_analysis_disabled")
+
+        prompt = self._build_replay_prompt(context=context)
+
+        if self.config.dry_run:
+            replay_module = importlib.import_module("lark_agent_bridge.replay")
+            ReplayDecision = replay_module.ReplayDecision
+            return ReplayDecision(
+                action="clarify",
+                mode=getattr(context, "mode", "unsupported"),
+                reason="dry-run: replay decision command planned but not executed",
+                confidence="low",
+            )
+
+        if self._llm_client is not None and self._llm_client.is_available():
+            try:
+                return self._decide_replay_via_api(prompt)
+            except (LLMClientError, ValueError) as exc:
+                if not self.config.intent_analysis.allow_subprocess_fallback:
+                    raise IntentAnalysisFailure(
+                        f"Direct API replay decision failed: {exc}",
+                        error_code="replay_decision_api_failed",
+                        stderr=str(exc),
+                    ) from exc
+                logger.warning("Direct API replay decision failed, trying subprocess fallback: %s", exc)
+
+        return self._decide_replay_via_subprocess(prompt)
 
     def _classify_via_pydantic_agent(self, prompt: str) -> IntentDecision:
         """Classify intent via pydantic-ai Agent with structured output validation.
@@ -290,6 +325,117 @@ class IntentAnalysisRunner:
             raise last_failure
         raise IntentAnalysisFailure("intent analysis command is not configured", error_code="intent_analysis_not_configured")
 
+    def _decide_replay_via_api(self, prompt: str) -> "ReplayDecision":
+        assert self._llm_client is not None
+        system_prompt = self.config.intent_analysis.system_prompt
+        max_retries = self.config.ai_provider.intent_max_retries
+
+        last_error: Exception | None = None
+        for attempt in range(max_retries + 1):
+            try:
+                response = self._llm_client.classify_intent(
+                    system_prompt=system_prompt,
+                    user_prompt=prompt,
+                )
+                decision = self._parse_replay_decision(response.content)
+                logger.info(
+                    "Replay decision via API: action=%s mode=%s confidence=%s duration=%.1fs model=%s",
+                    decision.action,
+                    decision.mode,
+                    decision.confidence,
+                    response.duration_seconds,
+                    response.model,
+                )
+                return decision
+            except ValueError as exc:
+                last_error = exc
+                if attempt < max_retries:
+                    logger.warning("Replay decision parse failed (attempt %d/%d): %s", attempt + 1, max_retries + 1, exc)
+                    continue
+                raise
+            except LLMClientError:
+                raise
+
+        raise IntentAnalysisFailure(
+            f"Replay decision failed after {max_retries + 1} attempts: {last_error}",
+            error_code="replay_decision_api_failed",
+        )
+
+    def _decide_replay_via_subprocess(self, prompt: str) -> "ReplayDecision":
+        primary_command, primary_output_path = self._build_command(prompt)
+        if not primary_command:
+            raise IntentAnalysisFailure("intent analysis command is not configured", error_code="intent_analysis_not_configured")
+        last_failure: IntentAnalysisFailure | None = None
+        attempts: list[tuple[list[str], Path | None]] = [(primary_command, primary_output_path)]
+        fallback_invocation = self._fallback_intent_invocation(prompt)
+        if fallback_invocation[0]:
+            attempts.append(fallback_invocation)
+        for index, (command, output_path) in enumerate(attempts):
+            try:
+                completed = _run_tracked_process(
+                    command,
+                    watchdog=self.process_watchdog,
+                    name="replay-decision-agent",
+                    cwd=self._working_dir(),
+                    capture_output=True,
+                    text=True,
+                    timeout=self.config.intent_analysis.timeout_seconds,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired as exc:
+                if output_path is not None:
+                    output_path.unlink(missing_ok=True)
+                last_failure = IntentAnalysisFailure(
+                    "分析续聊决策超时",
+                    error_code="replay_decision_timeout",
+                    command=command,
+                    stdout=exc.stdout or "",
+                    stderr=exc.stderr or "",
+                )
+                if index + 1 < len(attempts):
+                    continue
+                raise last_failure from exc
+            except OSError as exc:
+                if output_path is not None:
+                    output_path.unlink(missing_ok=True)
+                last_failure = IntentAnalysisFailure(
+                    f"分析续聊决策启动失败: {exc}",
+                    error_code="replay_decision_failed_to_start",
+                    command=command,
+                    stderr=str(exc),
+                )
+                if index + 1 < len(attempts):
+                    continue
+                raise last_failure from exc
+            raw_response = self._read_response(completed=completed, output_path=output_path)
+            if completed.returncode != 0:
+                last_failure = IntentAnalysisFailure(
+                    "分析续聊决策失败",
+                    error_code="replay_decision_failed",
+                    command=command,
+                    stdout=completed.stdout,
+                    stderr=completed.stderr or raw_response,
+                )
+                if index + 1 < len(attempts):
+                    continue
+                raise last_failure
+            try:
+                return self._parse_replay_decision(raw_response)
+            except ValueError as exc:
+                last_failure = IntentAnalysisFailure(
+                    f"分析续聊决策结果无法解析: {exc}",
+                    error_code="replay_decision_bad_response",
+                    command=command,
+                    stdout=raw_response,
+                    stderr=str(exc),
+                )
+                if index + 1 < len(attempts):
+                    continue
+                raise last_failure from exc
+        if last_failure is not None:
+            raise last_failure
+        raise IntentAnalysisFailure("intent analysis command is not configured", error_code="intent_analysis_not_configured")
+
     def _build_prompt(
         self,
         *,
@@ -364,6 +510,104 @@ class IntentAnalysisRunner:
             "updated_at": str(getattr(context, "updated_at", "") or ""),
             "history": history_items,
         }
+
+    def _build_replay_prompt(self, *, context: "AnalysisReplayContext") -> str:
+        payload = {
+            "previous_mode": str(getattr(context, "previous_mode", "") or ""),
+            "normalized_mode": str(getattr(context, "mode", "") or ""),
+            "original_request_text": self._clip(str(getattr(context, "original_request_text", "") or ""), 2000),
+            "current_user_text": self._clip(str(getattr(context, "current_text", "") or ""), 2000),
+            "history": self._history_snapshot(getattr(context, "history", None), limit=8, clip_chars=800),
+            "summary_text": self._clip(str(getattr(context, "summary_text", "") or ""), 1600),
+            "report_excerpt": self._clip(str(getattr(context, "report_excerpt", "") or ""), 2000),
+            "report_url": self._clip(str(getattr(context, "report_url", "") or ""), 500),
+            "bug": {
+                "url": self._clip(str(getattr(context, "bug_url", "") or ""), 500),
+                "title": self._clip(str(getattr(context, "bug_title", "") or ""), 500),
+                "description": self._clip(str(getattr(context, "bug_description", "") or ""), 2000),
+            },
+            "resources": self._replay_resource_snapshot(getattr(context, "resources", None)),
+        }
+        prompt = (
+            "请判断这条飞书消息是已有分析会话的继续问答、需要重新分析、需要澄清，还是一个无关的新分析请求。\n"
+            "只输出一个 JSON 对象，字段必须完整：\n"
+            '- "action": "answer_from_existing" | "reanalyze" | "clarify" | "new_request" | "unsupported"\n'
+            '- "mode": "bug" | "direct_analysis" | "signal_lifecycle" | "perception_summary" | "addr2line_resolve" | "rom_version_lookup" | "unsupported"\n'
+            '- "confidence": "high" | "medium" | "low"\n'
+            '- "reason": 一句简短中文说明\n'
+            '- "analysis_kind": 可选，非 bug 默认空字符串\n'
+            '- "skill_name": 可选，非 bug 默认空字符串\n'
+            '- "signal_hint": 可选，信号相关时填写用户当前纠正或目标信号\n'
+            '- "retry_download_if_missing": true | false\n'
+            '- "normalized_request_text": 综合原始请求和当前修正后的重分析请求；如果不是重分析则可为空\n\n'
+            "判断规则：\n"
+            "1. 最新用户文本优先；如果它修正了时间、信号、分析方向、目标场景或补充缺失输入，选择 reanalyze。\n"
+            "2. 用户明确说重新分析、重跑、重新生成报告、按新条件再查，选择 reanalyze。\n"
+            "3. 只有用户是在询问既有结论、证据、报告内容、为什么这样判断，且不要求读取新资源或重跑时，选择 answer_from_existing。\n"
+            "4. 只有消息明显开始一个无关分析任务时，选择 new_request。\n"
+            "5. 请求重分析但关键资源既没有可用本地路径，也没有可重试的远程资源或 bug 链接时，选择 clarify。\n"
+            "6. 不要选择具体 bug 分析 skill；bug 的 skill/plans 由 bug 专用决策后续决定。\n\n"
+            "输入 JSON：\n"
+            f"{json.dumps(payload, ensure_ascii=False, indent=2)}"
+        )
+        max_chars = max(2000, int(self.config.intent_analysis.max_prompt_chars))
+        if len(prompt) <= max_chars:
+            return prompt
+        return prompt[: max_chars - 1].rstrip() + "…"
+
+    def _history_snapshot(self, history: object, *, limit: int, clip_chars: int) -> list[dict[str, str]]:
+        if not isinstance(history, list):
+            return []
+        items: list[dict[str, str]] = []
+        for item in history[-limit:]:
+            if not isinstance(item, dict):
+                continue
+            role = str(item.get("role") or "").strip()
+            content = str(item.get("content") or "").strip()
+            if role and content:
+                items.append({"role": role, "content": self._clip(content, clip_chars)})
+        return items
+
+    def _replay_resource_snapshot(self, resources: object | None) -> dict[str, object]:
+        if resources is None:
+            return {
+                "current": [],
+                "reply_chain": [],
+                "session": [],
+                "local_existing": [],
+                "remote": [],
+                "missing_local_values": [],
+            }
+        return {
+            "current": self._resource_descriptors(getattr(resources, "current", None)),
+            "reply_chain": self._resource_descriptors(getattr(resources, "reply_chain", None)),
+            "session": self._resource_descriptors(getattr(resources, "session", None)),
+            "local_existing": self._resource_descriptors(getattr(resources, "local_existing", None)),
+            "remote": self._resource_descriptors(getattr(resources, "remote", None)),
+            "missing_local_values": [
+                self._clip(str(value), 500)
+                for value in (getattr(resources, "missing_local_values", None) or [])
+            ],
+        }
+
+    def _resource_descriptors(self, resources: object) -> list[dict[str, str]]:
+        if not isinstance(resources, list):
+            return []
+        descriptors: list[dict[str, str]] = []
+        for item in resources[:20]:
+            kind = str(getattr(item, "kind", "") or "")
+            value = str(getattr(item, "value", "") or "")
+            if not kind and not value:
+                continue
+            descriptors.append(
+                {
+                    "kind": self._clip(kind, 80),
+                    "value": self._clip(value, 500),
+                    "display_name": self._clip(str(getattr(item, "display_name", "") or ""), 200),
+                    "source_message_id": self._clip(str(getattr(item, "source_message_id", "") or ""), 120),
+                }
+            )
+        return descriptors
 
     def _build_command(self, prompt: str) -> tuple[list[str], Path | None]:
         provider, command_name, _ = self._resolved_provider()
@@ -448,6 +692,39 @@ class IntentAnalysisRunner:
             context_source=context_source,
             confidence=confidence,
             reason=reason,
+        )
+
+    def _parse_replay_decision(self, raw_response: str) -> "ReplayDecision":
+        replay_module = importlib.import_module("lark_agent_bridge.replay")
+        ReplayDecision = replay_module.ReplayDecision
+        normalize_replay_action = replay_module.normalize_replay_action
+        normalize_replay_mode = replay_module.normalize_replay_mode
+
+        payload = self._extract_json_payload(raw_response)
+        try:
+            parsed = json.loads(payload)
+        except json.JSONDecodeError as exc:
+            raise ValueError("response is not valid JSON") from exc
+        if not isinstance(parsed, dict):
+            raise ValueError("response must be a JSON object")
+        action = normalize_replay_action(str(parsed.get("action") or "").strip())
+        mode = normalize_replay_mode(str(parsed.get("mode") or "unsupported").strip())
+        confidence = str(parsed.get("confidence") or "medium").strip()
+        reason = str(parsed.get("reason") or "").strip()
+        if action not in self.REPLAY_ACTIONS:
+            raise ValueError(f"unknown replay action: {action}")
+        if confidence not in {"high", "medium", "low"}:
+            confidence = "medium"
+        return ReplayDecision(
+            action=action,
+            mode=mode,
+            reason=reason,
+            confidence=confidence,
+            analysis_kind=str(parsed.get("analysis_kind") or "").strip(),
+            skill_name=str(parsed.get("skill_name") or "").strip(),
+            signal_hint=str(parsed.get("signal_hint") or "").strip(),
+            retry_download_if_missing=bool(parsed.get("retry_download_if_missing") or False),
+            normalized_request_text=str(parsed.get("normalized_request_text") or "").strip(),
         )
 
     def _extract_json_payload(self, raw_response: str) -> str:

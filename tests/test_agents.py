@@ -46,6 +46,7 @@ from lark_agent_bridge.prompt_snapshots import (
     SnapshotEvidence,
     SnapshotFact,
 )
+from lark_agent_bridge.replay import AnalysisReplayContext, ReplayResourceBundle
 from lark_agent_bridge.reporting import ReportComposition
 
 
@@ -404,6 +405,112 @@ class AgentTests(unittest.TestCase):
 
         self.assertIs(decision, expected)
         subprocess_mock.assert_called_once()
+
+    def test_replay_decision_prompt_includes_full_context_and_resources(self):
+        config = BridgeConfig(dry_run=False)
+        runner = IntentAnalysisRunner(config)
+        context = AnalysisReplayContext(
+            root_message_id="om_root",
+            chat_id="oc_1",
+            previous_mode="bug_analysis",
+            mode="bug",
+            original_request_text="原始请求：分析 bug",
+            current_text="重新分析，时间改成 10:35",
+            history=[{"role": "user", "content": "之前的问题"}],
+            summary_text="旧结论",
+            report_excerpt="报告摘录",
+            report_url="http://report.local/r/1",
+            bug_url="https://bug.example/123",
+            bug_title="3D 场景卡住",
+            bug_description="bug body",
+            resources=ReplayResourceBundle(
+                current=[
+                    DownloadResource(
+                        kind="file",
+                        value="https://files.example/current.zip",
+                        display_name="current.zip",
+                    )
+                ],
+                reply_chain=[],
+                session=[DownloadResource(kind="local", value="/tmp/prepared_logs", display_name="prepared")],
+                local_existing=[DownloadResource(kind="local", value="/tmp/prepared_logs", display_name="prepared")],
+                remote=[DownloadResource(kind="bug", value="https://bug.example/123")],
+                missing_local_values=["/tmp/missing_logs"],
+            ),
+        )
+
+        prompt = runner._build_replay_prompt(context=context)
+
+        self.assertIn('"previous_mode": "bug_analysis"', prompt)
+        self.assertIn('"current_user_text": "重新分析，时间改成 10:35"', prompt)
+        self.assertIn('"url": "https://bug.example/123"', prompt)
+        self.assertIn('"title": "3D 场景卡住"', prompt)
+        self.assertIn("/tmp/prepared_logs", prompt)
+        self.assertIn("/tmp/missing_logs", prompt)
+        self.assertIn("最新用户文本优先", prompt)
+
+    def test_replay_decision_parser_returns_replay_decision(self):
+        config = BridgeConfig(dry_run=False)
+        runner = IntentAnalysisRunner(config)
+
+        decision = runner._parse_replay_decision(
+            json.dumps(
+                {
+                    "action": "reanalyze",
+                    "mode": "bug_analysis",
+                    "confidence": "high",
+                    "reason": "用户修正了时间",
+                    "analysis_kind": "scene_signal",
+                    "signal_hint": "SCENE_CHANGED",
+                    "retry_download_if_missing": True,
+                    "normalized_request_text": "按 10:35 重新分析",
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        self.assertEqual(decision.action, "reanalyze")
+        self.assertEqual(decision.mode, "bug")
+        self.assertEqual(decision.confidence, "high")
+        self.assertEqual(decision.analysis_kind, "scene_signal")
+        self.assertEqual(decision.signal_hint, "SCENE_CHANGED")
+        self.assertTrue(decision.retry_download_if_missing)
+        self.assertEqual(decision.normalized_request_text, "按 10:35 重新分析")
+
+    def test_decide_replay_uses_direct_api_when_available(self):
+        config = BridgeConfig(dry_run=False)
+        config.intent_analysis.enabled = True
+        runner = IntentAnalysisRunner(config)
+        runner._llm_client = mock.Mock()
+        runner._llm_client.is_available.return_value = True
+        runner._llm_client.classify_intent.return_value = LLMResponse(
+            content=json.dumps(
+                {
+                    "action": "answer_from_existing",
+                    "mode": "direct_analysis",
+                    "confidence": "medium",
+                    "reason": "用户询问已有报告结论",
+                },
+                ensure_ascii=False,
+            ),
+            model="test-model",
+            duration_seconds=0.1,
+        )
+        context = AnalysisReplayContext(
+            root_message_id="om_root",
+            chat_id="oc_1",
+            mode="direct_analysis",
+            previous_mode="direct_analysis",
+            original_request_text="分析这份日志",
+            current_text="这个结论依据是什么？",
+            history=[],
+        )
+
+        decision = runner.decide_replay(context=context)
+
+        self.assertEqual(decision.action, "answer_from_existing")
+        self.assertEqual(decision.mode, "direct_analysis")
+        runner._llm_client.classify_intent.assert_called_once()
 
     def test_claude_skill_dry_run_returns_command_and_artifact(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -4218,6 +4325,12 @@ class AgentTests(unittest.TestCase):
         self.assertIn("不要在整个源码根目录直接执行无边界 `rg`", context_text)
         self.assertIn("--max-count", context_text)
         self.assertIn("head -80", context_text)
+        self.assertIn("## 5.1 CodeGraph 语义检索", context_text)
+        self.assertIn("codegraph status <源码根>", context_text)
+        self.assertIn("codegraph query", context_text)
+        self.assertIn("codegraph callers", context_text)
+        self.assertIn("codegraph context", context_text)
+        self.assertIn("--max-nodes 30", context_text)
 
     def test_file_agent_prompt_includes_search_output_budget_rules(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -4248,6 +4361,11 @@ class AgentTests(unittest.TestCase):
         self.assertIn("不要在整个源码根目录直接执行无边界 `rg`", prompt)
         self.assertIn("--max-count", prompt)
         self.assertIn("head -80", prompt)
+        self.assertIn("codegraph status <源码根>", prompt)
+        self.assertIn("codegraph query", prompt)
+        self.assertIn("codegraph callers", prompt)
+        self.assertIn("codegraph context", prompt)
+        self.assertIn("--max-nodes 30", prompt)
 
     def test_custom_skill_agent_command_for_codex_uses_source_root_as_cwd(self):
         with tempfile.TemporaryDirectory() as tmp:

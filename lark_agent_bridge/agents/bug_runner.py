@@ -9490,6 +9490,21 @@ class BugAnalysisRunner:
             "每轮最多保留最有价值的少量源码/日志锚点，优先读具体文件行号，再产出结论；不要把大段检索结果当作分析正文。",
         ]
 
+    def _file_agent_codegraph_rules(self, source_roots: list[Path] | None = None) -> list[str]:
+        si_opts = self.config.source_investigation
+        if not si_opts.codegraph_enabled:
+            return []
+        command = (si_opts.codegraph_command or "codegraph").strip() or "codegraph"
+        roots = source_roots if source_roots is not None else self._custom_skill_agent_source_roots()
+        roots_hint = "、".join(f"`{path}`" for path in roots[:3]) if roots else "`<源码根>`"
+        return [
+            f"可用源码根: {roots_hint}；先用 `{command} status <源码根>` 确认索引可用。",
+            f"按符号/信号名定位入口: `{command} query \"<类名/函数名/信号名>\" --path <源码根> --json --limit 20`。",
+            f"追调用方: `{command} callers \"<符号名>\" --path <源码根> --json --limit 20`。",
+            f"需要全局入口点时: `{command} context \"<分析目标>\" --path <源码根> --format json --no-code --max-nodes 30`。",
+            "CodeGraph 只用于收敛候选文件和调用链；最终证据仍要回到具体源码文件+行号，不要把完整 JSON 大段贴入结论。",
+        ]
+
     def _file_agent_focus_candidates(
         self,
         *,
@@ -9658,6 +9673,15 @@ class BugAnalysisRunner:
         else:
             lines.append("- 未配置源码根目录。")
         lines.append(f"- 预检索源码证据: `{source_evidence_path}`" if source_evidence_path else "- 预检索源码证据: 未生成")
+        codegraph_rules = self._file_agent_codegraph_rules(source_roots)
+        if codegraph_rules:
+            lines.extend(
+                [
+                    "",
+                    "## 5.1 CodeGraph 语义检索",
+                    *[f"- {rule}" for rule in codegraph_rules],
+                ]
+            )
         if prior_findings:
             lines.extend(
                 [
@@ -9866,6 +9890,7 @@ class BugAnalysisRunner:
                 "",
                 "检索预算：",
                 *[f"- {rule}" for rule in self._file_agent_search_budget_rules()],
+                *[f"- {rule}" for rule in self._file_agent_codegraph_rules()],
                 "",
             ]
         )
