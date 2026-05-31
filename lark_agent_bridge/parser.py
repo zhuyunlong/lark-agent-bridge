@@ -6,14 +6,17 @@ import re
 
 from .config import DEFAULT_SIGNAL_ALIASES
 from .models import (
+    AppServerInvestigationRequest,
     Addr2LineRequest,
     BugRequest,
     ClaudeSkillRequest,
     DirectAnalysisRequest,
     DownloadResource,
     PerceptionSummaryRequest,
+    ReportFollowupRequest,
     RomVersionLookupRequest,
     SignalRequest,
+    SourceAnalysisRequest,
 )
 from .signal_resolver import SignalResolver
 
@@ -265,6 +268,82 @@ DIRECT_ANALYSIS_DEICTIC_RE = re.compile(
     r"^(?:看下|看一下|看看|帮我看(?:下|一下)?|分析(?:下|一下)?|排查(?:下|一下)?|调查(?:下|一下)?|查(?:下|一下)?)"
     r"(?:这个|这份|这个文件|这个日志|这份日志|这个附件|这份附件)?[？?]?$"
 )
+APP_SERVER_INVESTIGATION_AUTO_TERMS = ("auto模式", "auto")
+APP_SERVER_INVESTIGATION_FREE_TERMS = ("全技能自主分析", "全技能分析", "自主分析")
+SOURCE_ANALYSIS_TERMS = (
+    "源码",
+    "源代码",
+    "基于源码",
+    "根据源码",
+    "从源码",
+    "看源码",
+    "读源码",
+    "查源码",
+    "源码分析",
+    "源码调查",
+    "source code",
+)
+SOURCE_ANALYSIS_ACTION_TERMS = (
+    "分析",
+    "调查",
+    "定位",
+    "解释",
+    "梳理",
+    "看下",
+    "查下",
+    "链路",
+    "流程",
+    "时序",
+    "监听",
+    "注册",
+    "分发",
+    "调用",
+    "怎么",
+    "如何",
+)
+SOURCE_ANALYSIS_CHAIN_TERMS = (
+    "链路",
+    "流程",
+    "时序",
+    "数据流",
+    "泳道",
+    "监听",
+    "注册",
+    "分发",
+    "调用",
+    "回调",
+)
+REPORT_FOLLOWUP_TERMS = (
+    "HTML 报告",
+    "html 报告",
+    "HTML输出",
+    "HTML 输出",
+    "输出报告",
+    "整理成 HTML",
+    "整理成html",
+    "泳道图",
+    "时序图",
+    "流程图",
+    "数据流图",
+    "链路图",
+    "画图",
+    "画出",
+)
+SOURCE_IDENTIFIER_RE = re.compile(
+    r"(?<![A-Za-z0-9_])("
+    r"SIGNAL_[A-Z0-9_]+"
+    r"|[A-Za-z_][A-Za-z0-9_]*(?:Ready|Service|Manager|Handler|Signal|Flow|Msg|Message|Callback|Listener|State|Context|Adapter|ViewModel|Repository|Controller|Biz|Proxy)[A-Za-z0-9_]*"
+    r"|[a-z_]+[A-Z][A-Za-z0-9_]*"
+    r")(?![A-Za-z0-9_])"
+)
+
+_SOURCE_TARGET_STOP_WORDS = {
+    "source",
+    "code",
+    "html",
+    "unity",
+    "signal",
+}
 
 
 def parse_signal_request(
@@ -562,6 +641,114 @@ def parse_direct_analysis_request(text: str) -> DirectAnalysisRequest:
     )
 
 
+def parse_app_server_investigation_request(
+    text: str,
+    *,
+    bug_url_re: re.Pattern[str] | None = None,
+    auto_terms: tuple[str, ...] | list[str] = APP_SERVER_INVESTIGATION_AUTO_TERMS,
+    free_terms: tuple[str, ...] | list[str] = APP_SERVER_INVESTIGATION_FREE_TERMS,
+) -> AppServerInvestigationRequest:
+    normalized_text = text or ""
+    cleaned = _strip_leading_mentions(normalized_text).strip()
+    match = _app_server_investigation_trigger(cleaned, auto_terms=auto_terms, free_terms=free_terms)
+    if match is None:
+        return AppServerInvestigationRequest(prompt="", raw_text=normalized_text, triggered=False)
+    stripped = match["remaining"].strip()
+    bug_request = parse_bug_request(stripped, bug_url_re=bug_url_re)
+    resources = _find_resources(stripped)
+    if bug_request.triggered:
+        resources = [
+            item for item in resources
+            if not (item.kind == "url" and item.value.rstrip(TRAILING_URL_PUNCTUATION) == bug_request.bug_url)
+        ]
+    prompt = bug_request.prompt if bug_request.triggered else stripped
+    prompt = re.sub(r"\s+", " ", prompt).strip()
+    return AppServerInvestigationRequest(
+        prompt=prompt,
+        bug_url=bug_request.bug_url if bug_request.triggered else "",
+        resources=resources,
+        raw_text=normalized_text,
+        triggered=True,
+        error=None,
+        trigger_mode=str(match["mode"]),
+        trigger_term=str(match["term"]),
+    )
+
+
+def parse_source_analysis_request(
+    text: str,
+    *,
+    bug_url_re: re.Pattern[str] | None = None,
+) -> SourceAnalysisRequest:
+    normalized_text = text or ""
+    cleaned = _strip_leading_mentions(normalized_text).strip()
+    resources = _find_resources(cleaned)
+    if resources:
+        return SourceAnalysisRequest(prompt="", raw_text=normalized_text, triggered=False)
+    if parse_bug_request(cleaned, bug_url_re=bug_url_re).triggered:
+        return SourceAnalysisRequest(prompt="", raw_text=normalized_text, triggered=False)
+    target = _source_analysis_target_from_text(cleaned)
+    if not looks_like_source_analysis_prompt(cleaned, bug_url_re=bug_url_re, resources_present=False):
+        return SourceAnalysisRequest(prompt="", target=target, raw_text=normalized_text, triggered=False)
+    return SourceAnalysisRequest(
+        prompt=cleaned,
+        target=target,
+        raw_text=normalized_text,
+        triggered=True,
+        error=None if target else "missing_source_target",
+        source_mode="repository_only",
+        diagram_kinds=_diagram_kinds_from_text(cleaned, default_for_chain=True),
+        output_html=True,
+        reason="explicit_source_request_without_bug_or_resource",
+    )
+
+
+def parse_report_followup_request(text: str) -> ReportFollowupRequest:
+    normalized_text = text or ""
+    cleaned = _strip_leading_mentions(normalized_text).strip()
+    if not looks_like_report_or_diagram_request(cleaned):
+        return ReportFollowupRequest(prompt="", raw_text=normalized_text, triggered=False)
+    return ReportFollowupRequest(
+        prompt=cleaned,
+        raw_text=normalized_text,
+        triggered=True,
+        diagram_kinds=_diagram_kinds_from_text(cleaned, default_for_chain=True),
+        output_html=True,
+        reason="explicit_report_or_diagram_followup",
+    )
+
+
+def looks_like_source_analysis_prompt(
+    text: str,
+    *,
+    bug_url_re: re.Pattern[str] | None = None,
+    resources_present: bool = False,
+) -> bool:
+    normalized_text = text or ""
+    cleaned = _strip_leading_mentions(normalized_text).strip()
+    if not cleaned:
+        return False
+    if resources_present or _find_resources(cleaned):
+        return False
+    if parse_bug_request(cleaned, bug_url_re=bug_url_re).triggered:
+        return False
+    if build_basic_chat_reply(cleaned) is not None:
+        return False
+    lowered = cleaned.casefold()
+    has_source = _contains_any(cleaned, lowered, SOURCE_ANALYSIS_TERMS)
+    has_action = _contains_any(cleaned, lowered, SOURCE_ANALYSIS_ACTION_TERMS)
+    if not has_source or not has_action:
+        return False
+    return bool(_source_analysis_target_from_text(cleaned))
+
+
+def looks_like_report_or_diagram_request(text: str) -> bool:
+    cleaned = _strip_leading_mentions(text or "").strip()
+    if not cleaned:
+        return False
+    return _contains_any(cleaned, cleaned.casefold(), REPORT_FOLLOWUP_TERMS)
+
+
 def looks_like_direct_analysis_prompt(
     text: str, *, resources_present: bool = False, bug_url_re: re.Pattern[str] | None = None
 ) -> bool:
@@ -579,6 +766,100 @@ def looks_like_direct_analysis_prompt(
     if resources_present:
         return has_action or bool(DIRECT_ANALYSIS_DEICTIC_RE.fullmatch(cleaned))
     return has_action and has_domain
+
+
+def _source_analysis_target_from_text(text: str) -> str:
+    cleaned = URL_RE.sub(" ", _strip_leading_mentions(text or "")).strip()
+    for match in SOURCE_IDENTIFIER_RE.finditer(cleaned):
+        candidate = match.group(1).strip("`'\"“”‘’")
+        if not candidate:
+            continue
+        if candidate.casefold() in _SOURCE_TARGET_STOP_WORDS:
+            continue
+        return candidate
+    chinese_target = _source_analysis_chinese_target(cleaned)
+    return chinese_target
+
+
+def _source_analysis_chinese_target(text: str) -> str:
+    normalized = text
+    for term in (*SOURCE_ANALYSIS_TERMS, *SOURCE_ANALYSIS_ACTION_TERMS, *REPORT_FOLLOWUP_TERMS):
+        normalized = normalized.replace(term, " ")
+    normalized = re.sub(r"[\s,，。；;：:、!?？!()\[\]【】{}<>`'\"“”‘’]+", " ", normalized)
+    for token in normalized.split():
+        stripped = token.strip()
+        if len(stripped) < 2:
+            continue
+        if stripped.casefold() in _SOURCE_TARGET_STOP_WORDS:
+            continue
+        if stripped in {"信号", "链路", "流程", "时序", "报告", "源码", "源代码"}:
+            continue
+        return stripped[:80]
+    return ""
+
+
+def _app_server_investigation_trigger(
+    text: str,
+    *,
+    auto_terms: tuple[str, ...] | list[str],
+    free_terms: tuple[str, ...] | list[str],
+) -> dict[str, str] | None:
+    cleaned = text.strip()
+    if not cleaned:
+        return None
+    auto_pattern = _independent_term_pattern(auto_terms, leading_only=True)
+    auto_match = auto_pattern.match(cleaned)
+    if auto_match:
+        return {
+            "mode": "auto",
+            "term": auto_match.group("term"),
+            "remaining": cleaned[auto_match.end("term") :].strip(),
+        }
+    free_pattern = _independent_term_pattern(free_terms, leading_only=False)
+    free_match = free_pattern.search(cleaned)
+    if not free_match:
+        return None
+    remaining = f"{cleaned[: free_match.start('term')]} {cleaned[free_match.end('term') :]}"
+    return {
+        "mode": "free",
+        "term": free_match.group("term"),
+        "remaining": re.sub(r"\s+", " ", remaining).strip(),
+    }
+
+
+def _independent_term_pattern(terms: tuple[str, ...] | list[str], *, leading_only: bool) -> re.Pattern[str]:
+    unique_terms = [term.strip() for term in terms if str(term or "").strip()]
+    unique_terms.sort(key=len, reverse=True)
+    if not unique_terms:
+        return re.compile(r"$^")
+    alternation = "|".join(re.escape(term) for term in unique_terms)
+    if leading_only:
+        return re.compile(rf"^(?P<term>{alternation})(?=\s|$)", re.I)
+    return re.compile(rf"(^|\s)(?P<term>{alternation})(?=\s|$)")
+
+
+def _diagram_kinds_from_text(text: str, *, default_for_chain: bool = False) -> list[str]:
+    cleaned = text or ""
+    lowered = cleaned.casefold()
+    kinds: list[str] = []
+
+    def add(kind: str) -> None:
+        if kind not in kinds:
+            kinds.append(kind)
+
+    if "泳道" in cleaned:
+        add("swimlane")
+    if "时序" in cleaned or "sequence" in lowered:
+        add("sequence")
+    if "数据流" in cleaned or "data flow" in lowered:
+        add("data_flow")
+    if "流程" in cleaned or "process" in lowered:
+        add("process")
+    if "链路" in cleaned or "调用链" in cleaned or "chain" in lowered:
+        add("chain")
+    if default_for_chain and _contains_any(cleaned, lowered, SOURCE_ANALYSIS_CHAIN_TERMS):
+        add("swimlane")
+    return kinds
 
 
 def parse_bug_request(text: str, *, bug_url_re: re.Pattern[str] | None = None) -> BugRequest:

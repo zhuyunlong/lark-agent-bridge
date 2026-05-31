@@ -610,6 +610,9 @@ class _LogResourcesMixin:
             "bug_reanalysis",
             "bug_agent_followup",
             "direct_analysis",
+            "app_server_investigation",
+            "source_analysis",
+            "diagram_report_followup",
             "perception_summary",
             "signal_lifecycle",
         }
@@ -1115,6 +1118,34 @@ class _LogResourcesMixin:
             error=None if route_content.strip() else "missing_prompt",
         )
 
+    def _build_app_server_investigation_request(
+        self,
+        route_content: str,
+        referenced_resources: list[DownloadResource],
+        *,
+        event: LarkEvent | None = None,
+    ):
+        request = parse_app_server_investigation_request(
+            route_content,
+            bug_url_re=self.bug_url_re,
+            auto_terms=self.config.bug_analysis.app_server_investigation.auto_terms,
+            free_terms=self.config.bug_analysis.app_server_investigation.free_terms,
+        )
+        if not request.triggered:
+            return request
+        local_resources = self._authorized_local_download_resources(event, route_content)
+        merged_resources = self._merge_resources(request.resources, [*referenced_resources, *local_resources])
+        return request.__class__(
+            prompt=request.prompt,
+            bug_url=request.bug_url,
+            resources=merged_resources,
+            raw_text=request.raw_text,
+            triggered=True,
+            error=request.error,
+            trigger_mode=request.trigger_mode,
+            trigger_term=request.trigger_term,
+        )
+
     def _authorized_local_download_resources(self, event: LarkEvent | None, route_content: str) -> list[DownloadResource]:
         options = self.config.local_resources
         if not options.enabled or event is None:
@@ -1249,6 +1280,14 @@ class _LogResourcesMixin:
     def _should_lookup_current_message_for_resources(self, event: LarkEvent, route_content: str) -> bool:
         if event.reply_to or event.parent_id or event.root_id:
             return True
+        inline_app_server = parse_app_server_investigation_request(
+            route_content,
+            bug_url_re=self.bug_url_re,
+            auto_terms=self.config.bug_analysis.app_server_investigation.auto_terms,
+            free_terms=self.config.bug_analysis.app_server_investigation.free_terms,
+        )
+        if inline_app_server.triggered:
+            return not inline_app_server.resources and not inline_app_server.bug_url
         inline_direct = parse_direct_analysis_request(route_content)
         if inline_direct.triggered:
             return not inline_direct.resources

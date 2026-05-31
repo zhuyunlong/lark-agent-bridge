@@ -10,6 +10,7 @@ import tomllib
 
 from .models import (
     AIProviderOptions,
+    AppServerInvestigationOptions,
     BugAnalysisOptions,
     BridgeConfig,
     ApprovalOptions,
@@ -485,6 +486,46 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
             force_reanalysis_terms=_string_list(
                 bug_data.get("force_reanalysis_terms", BugAnalysisOptions().force_reanalysis_terms),
                 "bug_analysis.force_reanalysis_terms",
+            ),
+            app_server_investigation=AppServerInvestigationOptions(
+                enabled=bool(
+                    (bug_data.get("app_server_investigation") or {}).get(
+                        "enabled",
+                        BugAnalysisOptions().app_server_investigation.enabled,
+                    )
+                ),
+                auto_terms=_string_list(
+                    (bug_data.get("app_server_investigation") or {}).get(
+                        "auto_terms",
+                        BugAnalysisOptions().app_server_investigation.auto_terms,
+                    ),
+                    "bug_analysis.app_server_investigation.auto_terms",
+                ),
+                free_terms=_string_list(
+                    (bug_data.get("app_server_investigation") or {}).get(
+                        "free_terms",
+                        BugAnalysisOptions().app_server_investigation.free_terms,
+                    ),
+                    "bug_analysis.app_server_investigation.free_terms",
+                ),
+                require_description_for_file_resources=bool(
+                    (bug_data.get("app_server_investigation") or {}).get(
+                        "require_description_for_file_resources",
+                        BugAnalysisOptions().app_server_investigation.require_description_for_file_resources,
+                    )
+                ),
+                require_time_for_file_resources=bool(
+                    (bug_data.get("app_server_investigation") or {}).get(
+                        "require_time_for_file_resources",
+                        BugAnalysisOptions().app_server_investigation.require_time_for_file_resources,
+                    )
+                ),
+                prompt_template=str(
+                    (bug_data.get("app_server_investigation") or {}).get(
+                        "prompt_template",
+                        BugAnalysisOptions().app_server_investigation.prompt_template,
+                    )
+                ),
             ),
         ),
         intent_analysis=IntentAnalysisOptions(

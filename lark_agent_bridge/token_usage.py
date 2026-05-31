@@ -62,6 +62,19 @@ def extract_prefixed_token_usage(value: Mapping[str, object] | None, prefix: str
     return usage
 
 
+def extract_first_prefixed_token_usage(value: Mapping[str, object] | None, prefixes: tuple[str, ...] | list[str]) -> tuple[str, dict[str, int]]:
+    if not isinstance(value, Mapping):
+        return "", {}
+    for prefix in prefixes:
+        normalized = str(prefix or "")
+        if not normalized:
+            continue
+        usage = extract_prefixed_token_usage(value, normalized)
+        if usage:
+            return normalized, usage
+    return "", {}
+
+
 def coerce_token_count(value: object) -> int | None:
     if isinstance(value, bool):
         return None

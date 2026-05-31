@@ -3,6 +3,7 @@ import tempfile
 import unittest
 
 from lark_agent_bridge.parser import (
+    parse_app_server_investigation_request,
     build_basic_chat_reply,
     find_resources,
     parse_addr2line_request,
@@ -11,8 +12,10 @@ from lark_agent_bridge.parser import (
     parse_direct_analysis_request,
     parse_followup_action,
     parse_perception_summary_request,
+    parse_report_followup_request,
     parse_rom_version_lookup_request,
     parse_signal_request,
+    parse_source_analysis_request,
     should_use_omlx_chat,
 )
 from lark_agent_bridge.signal_resolver import SignalResolver
@@ -381,6 +384,82 @@ class ParserTests(unittest.TestCase):
 
         self.assertFalse(request.triggered)
         self.assertEqual(request.resources[0].kind, "file")
+
+    def test_source_analysis_request_requires_source_intent_and_target(self):
+        request = parse_source_analysis_request("@bot 基于源码分析 UnityReady 信号链路如何监听")
+
+        self.assertTrue(request.triggered)
+        self.assertEqual(request.target, "UnityReady")
+        self.assertEqual(request.source_mode, "repository_only")
+        self.assertIn("swimlane", request.diagram_kinds)
+
+    def test_source_analysis_request_does_not_steal_simple_chat(self):
+        request = parse_source_analysis_request("@bot UnityReady 是什么")
+
+        self.assertFalse(request.triggered)
+
+    def test_source_analysis_request_does_not_steal_bug_link(self):
+        request = parse_source_analysis_request(
+            "@bot https://project.feishu.cn/xpfailuremgmt/buglo/detail/6993883118 基于源码分析 UnityReady"
+        )
+
+        self.assertFalse(request.triggered)
+
+    def test_source_analysis_request_does_not_steal_file_analysis(self):
+        request = parse_source_analysis_request("@bot 基于源码分析 UnityReady file_abc123")
+
+        self.assertFalse(request.triggered)
+
+    def test_report_followup_request_recognizes_diagram_output(self):
+        request = parse_report_followup_request("基于这个回复画出泳道图和时序图")
+
+        self.assertTrue(request.triggered)
+        self.assertIn("swimlane", request.diagram_kinds)
+        self.assertIn("sequence", request.diagram_kinds)
+        self.assertTrue(request.output_html)
+
+    def test_app_server_investigation_auto_trigger_requires_leading_token(self):
+        request = parse_app_server_investigation_request(
+            "@bot auto https://project.feishu.cn/xpfailuremgmt/buglo/detail/6993883118 调查下 3D 生命周期"
+        )
+
+        self.assertTrue(request.triggered)
+        self.assertEqual(request.trigger_mode, "auto")
+        self.assertEqual(request.trigger_term.lower(), "auto")
+        self.assertEqual(request.bug_url, "https://project.feishu.cn/xpfailuremgmt/buglo/detail/6993883118")
+        self.assertEqual(request.prompt, "调查下 3D 生命周期")
+
+    def test_app_server_investigation_auto_trigger_is_case_insensitive(self):
+        request = parse_app_server_investigation_request(
+            "@bot AUTO https://project.feishu.cn/xpfailuremgmt/buglo/detail/6993883118 调查 3D 生命周期"
+        )
+
+        self.assertTrue(request.triggered)
+        self.assertEqual(request.trigger_mode, "auto")
+
+    def test_app_server_investigation_auto_trigger_does_not_match_nonleading_token(self):
+        request = parse_app_server_investigation_request(
+            "@bot 请 auto https://project.feishu.cn/xpfailuremgmt/buglo/detail/6993883118 调查 3D 生命周期"
+        )
+
+        self.assertFalse(request.triggered)
+
+    def test_app_server_investigation_free_trigger_matches_independent_term(self):
+        request = parse_app_server_investigation_request(
+            "@bot https://project.feishu.cn/xpfailuremgmt/buglo/detail/6993883118 全技能分析 调查 3D 生命周期"
+        )
+
+        self.assertTrue(request.triggered)
+        self.assertEqual(request.trigger_mode, "free")
+        self.assertEqual(request.trigger_term, "全技能分析")
+        self.assertEqual(request.prompt, "调查 3D 生命周期")
+
+    def test_app_server_investigation_free_trigger_requires_independent_term(self):
+        request = parse_app_server_investigation_request(
+            "@bot https://project.feishu.cn/xpfailuremgmt/buglo/detail/6993883118 全技能分析一下 调查 3D 生命周期"
+        )
+
+        self.assertFalse(request.triggered)
 
     def test_omlx_chat_candidate_for_simple_question(self):
         self.assertTrue(should_use_omlx_chat("帮我解释一下什么是 token？"))

@@ -887,7 +887,46 @@ class _CustomSkillMixin:
             env=subprocess_env,
         )
 
+        delta_chunks: list[str] = []
+        delta_start_at = 0.0
+
+        def _flush_delta() -> None:
+            nonlocal delta_chunks, delta_start_at
+            if not delta_chunks:
+                return
+            combined = "".join(delta_chunks).strip()
+            delta_chunks = []
+            delta_start_at = 0.0
+            if not combined:
+                return
+            preview = _app_server_delta_preview(combined)
+            if not preview:
+                return
+            self._emit_progress(
+                progress_callback,
+                stage=f"{analysis_kind}_agent_analysis_stream",
+                message=f"Codex app-server: {preview}",
+                provider="codex",
+                stream_preview=preview,
+                stream_kind="delta_group",
+            )
+
         def _stream_event(event: dict[str, object]) -> None:
+            nonlocal delta_start_at
+            method = str(event.get("method") or "")
+            params = event.get("params") or {}
+            if not isinstance(params, dict):
+                params = {}
+            if method == "item/agentMessage/delta":
+                delta = str(params.get("delta") or "")
+                if delta:
+                    if not delta_chunks:
+                        delta_start_at = time.monotonic()
+                    delta_chunks.append(delta)
+                    if _app_server_delta_should_flush("".join(delta_chunks), started_at=delta_start_at):
+                        _flush_delta()
+                return
+            _flush_delta()
             preview = app_server_event_preview(event)
             if not preview:
                 return
@@ -900,6 +939,7 @@ class _CustomSkillMixin:
             )
 
         result = runtime.run_turn(prompt_text, on_event=_stream_event if progress_callback is not None else None)
+        _flush_delta()
         if policy.codex_home is not None and policy.codex_home.parent.name == "runs":
             shutil.rmtree(policy.codex_home, ignore_errors=True)
         stdout_path.write_text(result.stdout, encoding="utf-8")
@@ -963,3 +1003,24 @@ class _CustomSkillMixin:
                     shutil.rmtree(child, ignore_errors=True)
             except OSError:
                 continue
+
+
+def _app_server_delta_preview(text: str, *, max_chars: int = 220) -> str:
+    normalized = " ".join((text or "").replace("\n", " ").split()).strip()
+    if not normalized:
+        return ""
+    if len(normalized) > max_chars:
+        normalized = normalized[: max_chars - 1].rstrip() + "..."
+    return f"Codex 文本 {normalized}"
+
+
+def _app_server_delta_should_flush(text: str, *, started_at: float, max_chars: int = 180) -> bool:
+    if not text:
+        return False
+    if len(text) >= max_chars:
+        return True
+    if text.endswith(("\n", "。", "！", "？", ".", "!", "?")) and len(text.strip()) >= 24:
+        return True
+    if started_at and (time.monotonic() - started_at) >= 1.2 and len(text.strip()) >= 48:
+        return True
+    return False

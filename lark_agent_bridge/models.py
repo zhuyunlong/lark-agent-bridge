@@ -89,6 +89,16 @@ class ClaudeAgentOptions:
 
 
 @dataclass(slots=True)
+class AppServerInvestigationOptions:
+    enabled: bool = False
+    auto_terms: list[str] = field(default_factory=lambda: ["auto", "auto模式"])
+    free_terms: list[str] = field(default_factory=lambda: ["全技能自主分析", "全技能分析", "自主分析"])
+    require_description_for_file_resources: bool = True
+    require_time_for_file_resources: bool = True
+    prompt_template: str = ""
+
+
+@dataclass(slots=True)
 class BugAnalysisOptions:
     enabled: bool = True
     provider: str = "claude"
@@ -117,6 +127,7 @@ class BugAnalysisOptions:
             "再分析",
         ]
     )
+    app_server_investigation: AppServerInvestigationOptions = field(default_factory=AppServerInvestigationOptions)
 
 
 @dataclass(slots=True)
@@ -655,6 +666,42 @@ class DirectAnalysisRequest:
     raw_text: str = ""
     triggered: bool = False
     error: str | None = None
+
+
+@dataclass(slots=True)
+class AppServerInvestigationRequest:
+    prompt: str
+    bug_url: str = ""
+    resources: list[DownloadResource] = field(default_factory=list)
+    raw_text: str = ""
+    triggered: bool = False
+    error: str | None = None
+    trigger_mode: str = ""
+    trigger_term: str = ""
+
+
+@dataclass(slots=True)
+class SourceAnalysisRequest:
+    prompt: str
+    target: str = ""
+    raw_text: str = ""
+    triggered: bool = False
+    error: str | None = None
+    source_mode: str = "repository_only"
+    diagram_kinds: list[str] = field(default_factory=list)
+    output_html: bool = True
+    reason: str = ""
+
+
+@dataclass(slots=True)
+class ReportFollowupRequest:
+    prompt: str
+    raw_text: str = ""
+    triggered: bool = False
+    error: str | None = None
+    diagram_kinds: list[str] = field(default_factory=list)
+    output_html: bool = True
+    reason: str = ""
 
 
 @dataclass(slots=True)

@@ -1199,6 +1199,95 @@ class AgentsCustomSkillTests(_AgentTestBase):
         self.assertTrue(runtime_cls.call_args.kwargs["disable_computer_use_feature"])
         self.assertEqual(runtime_cls.call_args.kwargs["reasoning_effort"], "medium")
         run_mock.assert_not_called()
+
+    def test_app_server_progress_aggregates_delta_chunks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "workspace"
+            skill_name = "app-server-custom-skill"
+            skill_dir = root / ".ai" / "skills" / skill_name
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "---\nname: App Server Custom Skill\ndescription: app-server test.\n---\n\n# App Server\n",
+                encoding="utf-8",
+            )
+            config = BridgeConfig(
+                dry_run=False,
+                data_dir=Path(tmp) / "data",
+                workspace_root=root,
+                codex_app_server=CodexAppServerOptions(enabled=True, use_for_file_agent=True, fallback_to_exec=True),
+            )
+            config.bug_analysis.provider = "codex"
+            config.bug_analysis.command = "codex"
+            config.source_investigation.repo_roots = [root]
+            runner = BugAnalysisRunner(config)
+            log_root = Path(tmp) / "logs"
+            self._write_matching_log(log_root, "2026-05-25 16:50:41")
+            progress_events: list[dict[str, object]] = []
+            runtime = mock.Mock()
+
+            def _run_turn(_prompt_text, *, on_event=None):
+                if on_event is not None:
+                    on_event({"method": "item/agentMessage/delta", "params": {"itemId": "msg-1", "delta": "故"}})
+                    on_event({"method": "item/agentMessage/delta", "params": {"itemId": "msg-1", "delta": "障"}})
+                    on_event({"method": "item/agentMessage/delta", "params": {"itemId": "msg-1", "delta": "正常。"}})
+                    on_event(
+                        {
+                            "method": "item/started",
+                            "params": {"item": {"type": "commandExecution", "command": "/bin/zsh -lc \"rg scene\""}},
+                        }
+                    )
+                return CodexAppServerResult(
+                    ok=True,
+                    final_text="## 结论摘要\n- ok\n\n## 关键证据\n- L1\n",
+                    command=["codex", "app-server"],
+                    stdout="Codex command rg scene",
+                    stderr="",
+                    thread_id="thread-app-server",
+                    turn_id="turn-app-server",
+                    duration_seconds=2.0,
+                    events=[],
+                    usage={"totalTokens": 10, "inputTokens": 8, "outputTokens": 2},
+                    completion_state=CompletionState.COMPLETE,
+                )
+
+            runtime.run_turn.side_effect = _run_turn
+
+            with (
+                mock.patch(
+                    "lark_agent_bridge.agents.bug.custom_skill.check_codex_app_server_available",
+                    return_value=(True, "0.134.0"),
+                ),
+                mock.patch(
+                    "lark_agent_bridge.agents.bug.custom_skill.CodexAppServerRuntime",
+                    return_value=runtime,
+                ),
+                mock.patch.object(
+                    runner,
+                    "_prepare_codex_app_server_minimal_home",
+                    return_value=Path(tmp) / "codex_home",
+                ),
+            ):
+                runner._run_custom_skill_agent_analysis(
+                    skill_name=skill_name,
+                    request_text="2026-05-25 16:50:41 3D场景模式",
+                    prompt_text="2026-05-25 16:50:41 3D场景模式",
+                    title="3D 场景模式",
+                    description="",
+                    fault_time="2026-05-25 16:50:41",
+                    selected_input=log_root,
+                    prepared_input=log_root,
+                    source_evidence_path=None,
+                    html_path=Path(tmp) / "bug_custom_skill_report.html",
+                    json_path=Path(tmp) / "bug_custom_skill_report.json",
+                    analysis_dir=Path(tmp) / "custom_skill_analysis",
+                    progress_callback=progress_events.append,
+                    timeout=30,
+                )
+
+        messages = [str(event.get("message") or "") for event in progress_events]
+        self.assertTrue(any("Codex 文本 故障正常。" in message for message in messages))
+        self.assertFalse(any("Codex delta 故" in message for message in messages))
+
     def test_app_server_policy_honors_disable_node_repl_under_minimal_home(self):
         # Regression: 1219603 flipped disable_node_repl to False whenever
         # use_minimal_home prepared a home, silently overriding user config.

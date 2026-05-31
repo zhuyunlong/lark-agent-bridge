@@ -55,6 +55,7 @@ from ..knowledge import KnowledgeService
 from ..lark_client import LarkClient
 from ..lifecycle import AnalysisType, LifecycleStore, mode_to_analysis_type
 from ..models import (
+    AppServerInvestigationRequest,
     Addr2LineRequest,
     BridgeConfig,
     CardActionEvent,
@@ -62,17 +63,21 @@ from ..models import (
     DirectAnalysisRequest,
     IntentDecision,
     LarkEvent,
+    ReportFollowupRequest,
     RomVersionLookupRequest,
     SignalRequest,
+    SourceAnalysisRequest,
     TaskResult,
     create_job_context,
 )
 from ..parser import (
+    parse_app_server_investigation_request,
     build_basic_chat_reply,
     build_bug_url_re,
     extract_first_keyword_payload,
     find_resources,
     looks_like_direct_analysis_prompt,
+    parse_report_followup_request,
     parse_followup_action,
     parse_claude_skill_request,
     parse_bug_request,
@@ -81,10 +86,12 @@ from ..parser import (
     parse_addr2line_request,
     parse_rom_version_lookup_request,
     parse_signal_request,
+    parse_source_analysis_request,
     should_use_omlx_chat,
 )
 from ..policy import PolicyDecision, build_policy_rejection_message, evaluate_event_policy
 from ..report_server import HtmlReportPublisher, ReportHttpServer, resolve_bind_host, resolve_public_base_url
+from ..reporting.source_report_html import render_context_diagram_report
 from ..report_version import ReportVersionStore, derive_group_key
 from ..replay import (
     AnalysisReplayContext,
@@ -97,8 +104,10 @@ from ..replay import (
 from ..runner import SignalChainRunner
 from ..signal_resolver import SignalResolver
 from ..skill_manager import SkillManager
+from ..app_server_investigation import AppServerInvestigationRunner
+from ..source_analysis import RepositorySourceAnalysisRunner
 from ..state import AgentActivityStore, ConversationContext, ConversationContextStore, EventStateStore
-from ..token_usage import extract_prefixed_token_usage
+from ..token_usage import extract_first_prefixed_token_usage, extract_prefixed_token_usage
 from ..handlers.signal_lifecycle import SignalLifecycleHandler
 from ..workflow_archive import WorkflowArchiver
 
@@ -281,6 +290,9 @@ class _RouteContext:
     signal_request: SignalRequest | None = None
     bug_request: object = None
     direct_analysis_request: object = None
+    app_server_investigation_request: AppServerInvestigationRequest | None = None
+    source_analysis_request: SourceAnalysisRequest | None = None
+    report_followup_request: ReportFollowupRequest | None = None
     perception_request: object = None
     rom_version_request: object = None
     addr2line_request: Addr2LineRequest | None = None
@@ -343,21 +355,26 @@ __all__ = [
     'LifecycleStore',
     'mode_to_analysis_type',
     'Addr2LineRequest',
+    'AppServerInvestigationRequest',
     'BridgeConfig',
     'CardActionEvent',
     'DownloadResource',
     'DirectAnalysisRequest',
     'IntentDecision',
     'LarkEvent',
+    'ReportFollowupRequest',
     'RomVersionLookupRequest',
     'SignalRequest',
+    'SourceAnalysisRequest',
     'TaskResult',
     'create_job_context',
     'build_basic_chat_reply',
+    'parse_app_server_investigation_request',
     'build_bug_url_re',
     'extract_first_keyword_payload',
     'find_resources',
     'looks_like_direct_analysis_prompt',
+    'parse_report_followup_request',
     'parse_followup_action',
     'parse_claude_skill_request',
     'parse_bug_request',
@@ -366,6 +383,7 @@ __all__ = [
     'parse_addr2line_request',
     'parse_rom_version_lookup_request',
     'parse_signal_request',
+    'parse_source_analysis_request',
     'should_use_omlx_chat',
     'PolicyDecision',
     'build_policy_rejection_message',
@@ -374,6 +392,7 @@ __all__ = [
     'ReportHttpServer',
     'resolve_bind_host',
     'resolve_public_base_url',
+    'render_context_diagram_report',
     'ReportVersionStore',
     'derive_group_key',
     'serialize_resource_status',
@@ -385,10 +404,13 @@ __all__ = [
     'SignalChainRunner',
     'SignalResolver',
     'SkillManager',
+    'AppServerInvestigationRunner',
+    'RepositorySourceAnalysisRunner',
     'AgentActivityStore',
     'ConversationContext',
     'ConversationContextStore',
     'EventStateStore',
+    'extract_first_prefixed_token_usage',
     'extract_prefixed_token_usage',
     'SignalLifecycleHandler',
     'WorkflowArchiver',

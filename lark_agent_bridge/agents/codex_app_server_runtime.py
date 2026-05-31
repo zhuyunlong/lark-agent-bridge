@@ -188,8 +188,7 @@ def app_server_event_preview(event: dict[str, object]) -> str:
         if item_type == "fileChange":
             return "Codex file change request"
     if method == "item/agentMessage/delta":
-        delta = _compact_text(str(params.get("delta") or ""), max_chars=80)
-        return f"Codex delta {delta}" if delta else ""
+        return ""
     return ""
 
 

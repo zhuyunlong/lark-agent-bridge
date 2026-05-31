@@ -96,6 +96,8 @@ def list_messages(page_size: int = 5) -> list[dict]:
 def find_bot_card_reply(user_msg_id: str, timeout: int = MAX_WAIT) -> Optional[dict]:
     """Poll until the bot sends an interactive card replying to *user_msg_id*
     with status ✅ 已完成, or timeout."""
+    done_re = re.compile(r"\*\*当前状态：\*\*\s*✅ 已完成")
+    running_re = re.compile(r"\*\*当前状态：\*\*\s*[🔍🟡]?\s*(分析中|处理中)")
     deadline = time.time() + timeout
     while time.time() < deadline:
         msgs = list_messages(page_size=8)
@@ -105,10 +107,10 @@ def find_bot_card_reply(user_msg_id: str, timeout: int = MAX_WAIT) -> Optional[d
                 and msg.get("msg_type") == "interactive"
             ):
                 content = msg.get("content", "")
-                if "✅ 已完成" in content or "已完成" in content:
+                if done_re.search(content):
                     return msg
                 # still running
-                if "分析中" in content or "处理中" in content:
+                if running_re.search(content):
                     break  # wait more
         time.sleep(POLL_INTERVAL)
     return None
@@ -158,6 +160,50 @@ def test_initial_bug_analysis() -> TestResult:
         details,
         card_msg_id=card["message_id"],
     )
+
+
+def test_auto_app_server_investigation() -> TestResult:
+    """Case 0a: Trigger autonomous app-server analysis with leading auto."""
+    print("\n🔷 Case 0a: App-server autonomous analysis (auto)")
+    t0 = time.time()
+
+    msg_text = f"{BOT_MENTION} auto {BUG_URL_3D} 调查下 3D 生命周期"
+    user_msg_id = send_message(msg_text)
+    print(f"  → Sent: {user_msg_id}")
+
+    card = find_bot_card_reply(user_msg_id)
+    elapsed = time.time() - t0
+
+    if card is None:
+        return TestResult("auto_app_server", False, elapsed, "Bot did not complete autonomous analysis within timeout")
+
+    content = card.get("content", "")
+    has_done = "✅ 已完成" in content
+    has_mode = any(term in content for term in ("AI 自主分析", "自主分析", "app-server"))
+    details = f"completed={has_done}, autonomous_mode={has_mode}, msg_id={card['message_id']}"
+    return TestResult("auto_app_server", has_done and has_mode, elapsed, details, card_msg_id=card["message_id"])
+
+
+def test_full_skill_app_server_investigation() -> TestResult:
+    """Case 0b: Trigger autonomous app-server analysis with free-term prompt."""
+    print("\n🔷 Case 0b: App-server autonomous analysis (全技能分析)")
+    t0 = time.time()
+
+    msg_text = f"{BOT_MENTION} {BUG_URL_3D} 全技能分析 调查下 3D 生命周期"
+    user_msg_id = send_message(msg_text)
+    print(f"  → Sent: {user_msg_id}")
+
+    card = find_bot_card_reply(user_msg_id)
+    elapsed = time.time() - t0
+
+    if card is None:
+        return TestResult("full_skill_app_server", False, elapsed, "Bot did not complete full-skill autonomous analysis within timeout")
+
+    content = card.get("content", "")
+    has_done = "✅ 已完成" in content
+    has_mode = any(term in content for term in ("AI 自主分析", "自主分析", "app-server"))
+    details = f"completed={has_done}, autonomous_mode={has_mode}, msg_id={card['message_id']}"
+    return TestResult("full_skill_app_server", has_done and has_mode, elapsed, details, card_msg_id=card["message_id"])
 
 
 def test_followup_reanalysis(parent_card_id: str) -> TestResult:
@@ -271,7 +317,7 @@ def main():
     parser = argparse.ArgumentParser(description="Standard real group-chat test suite")
     parser.add_argument(
         "--case",
-        choices=["initial", "followup", "time_fix", "source", "all"],
+        choices=["auto", "full_skill", "initial", "followup", "time_fix", "source", "all"],
         default="all",
         help="Which test case to run (default: all)",
     )
@@ -283,13 +329,19 @@ def main():
 
     results: list[TestResult] = []
 
+    if args.case in ("all", "auto"):
+        results.append(test_auto_app_server_investigation())
+
+    if args.case in ("all", "full_skill"):
+        results.append(test_full_skill_app_server_investigation())
+
     if args.case in ("all", "initial"):
         r1 = test_initial_bug_analysis()
         results.append(r1)
         parent_card = r1.card_msg_id
     else:
         parent_card = args.parent_card_id
-        if not parent_card:
+        if not parent_card and args.case in {"followup", "time_fix", "source"}:
             print("ERROR: --parent-card-id is required for followup/time_fix cases")
             sys.exit(1)
 

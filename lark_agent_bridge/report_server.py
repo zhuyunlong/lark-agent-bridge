@@ -29,7 +29,7 @@ from .models import BridgeConfig, TaskResult
 from .report_version import ReportVersionStore
 from .state import AgentActivityStore, ConversationContextStore
 from .skill_manager import SkillManager, SkillManagerError
-from .token_usage import extract_prefixed_token_usage
+from .token_usage import extract_first_prefixed_token_usage, extract_prefixed_token_usage
 
 
 _KNOWLEDGE_EXPORT_REPORT_ROUTES = {"/knowledge/export-report", "/knowledge/export-report.html"}
@@ -119,6 +119,10 @@ class HtmlReportPublisher:
                     "agent_summary_input_tokens": result.details.get("agent_summary_input_tokens"),
                     "agent_summary_output_tokens": result.details.get("agent_summary_output_tokens"),
                     "agent_summary_total_tokens": result.details.get("agent_summary_total_tokens"),
+                    "app_server_input_tokens": result.details.get("app_server_input_tokens"),
+                    "app_server_cached_input_tokens": result.details.get("app_server_cached_input_tokens"),
+                    "app_server_output_tokens": result.details.get("app_server_output_tokens"),
+                    "app_server_total_tokens": result.details.get("app_server_total_tokens"),
                     "duration_seconds": result.duration_seconds,
                 },
                 ensure_ascii=False,
@@ -1300,12 +1304,14 @@ def _runtime_summary_items(result: TaskResult) -> list[tuple[str, str]]:
     provider = str(details.get("agent_summary_provider") or details.get("provider") or "").strip()
     if provider:
         items.append(("Agent 类型", provider))
-    usage = extract_prefixed_token_usage(details, "agent_summary_")
+    usage_prefix, usage = extract_first_prefixed_token_usage(details, ("agent_summary_", "app_server_"))
     input_tokens = usage.get("input_tokens")
     cached_input_tokens = usage.get("cached_input_tokens")
     output_tokens = usage.get("output_tokens")
     total_tokens = usage.get("total_tokens")
-    usage_scope = str(details.get("agent_summary_usage_scope") or "").strip()
+    usage_scope = str(
+        details.get("agent_summary_usage_scope" if usage_prefix == "agent_summary_" else "app_server_usage_scope") or ""
+    ).strip()
     if any(isinstance(value, int) for value in (input_tokens, cached_input_tokens, output_tokens, total_tokens)):
         parts = [_format_token_millions(input_tokens)]
         if isinstance(cached_input_tokens, int):
@@ -1318,13 +1324,23 @@ def _runtime_summary_items(result: TaskResult) -> list[tuple[str, str]]:
         )
         items.append(
             (
-                "本轮 Agent Token" if usage_scope == "delta" else "累计 Agent Token",
+                (
+                    "本轮 AI Token"
+                    if usage_scope == "delta" and usage_prefix == "app_server_"
+                    else "累计 AI Token"
+                    if usage_prefix == "app_server_"
+                    else "本轮 Agent Token"
+                    if usage_scope == "delta"
+                    else "累计 Agent Token"
+                ),
                 " / ".join(parts),
             )
         )
     agent_duration = details.get("agent_summary_duration_seconds")
+    if not isinstance(agent_duration, (int, float)):
+        agent_duration = details.get("duration_seconds") if usage_prefix == "app_server_" else None
     if isinstance(agent_duration, (int, float)):
-        items.append(("Agent 耗时", f"{float(agent_duration):.1f} 秒"))
+        items.append(("AI 耗时" if usage_prefix == "app_server_" else "Agent 耗时", f"{float(agent_duration):.1f} 秒"))
     if isinstance(result.duration_seconds, (int, float)):
         items.append(("总耗时", f"{float(result.duration_seconds):.1f} 秒"))
     return items

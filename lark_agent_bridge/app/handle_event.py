@@ -19,6 +19,8 @@ class _HandleEventMixin:
         chat_client: OmlxChatClient | None = None,
         intent_runner: IntentAnalysisRunner | None = None,
         knowledge_service: KnowledgeService | None = None,
+        app_server_investigation_runner: AppServerInvestigationRunner | None = None,
+        source_analysis_runner: RepositorySourceAnalysisRunner | None = None,
         report_publisher: HtmlReportPublisher | None = None,
         report_http_server: ReportHttpServer | None = None,
         conversation_store: ConversationContextStore | None = None,
@@ -82,6 +84,18 @@ class _HandleEventMixin:
             process_watchdog=self.process_watchdog,
             lark_client=self.lark_client,
             skill_manager=self.skill_manager,
+        )
+        self.app_server_investigation_runner = (
+            app_server_investigation_runner
+            or AppServerInvestigationRunner(
+                config,
+                bug_runner=self.bug_runner,
+                skill_manager=self.skill_manager,
+            )
+        )
+        self.source_analysis_runner = source_analysis_runner or RepositorySourceAnalysisRunner(
+            config,
+            bug_runner=self.bug_runner,
         )
         self.perception_runner = perception_runner or PerceptionSummaryRunner(
             config,
@@ -280,6 +294,13 @@ class _HandleEventMixin:
                 triggered=False,
             )
         direct_analysis_request = self._build_direct_analysis_request(route_content, referenced_resources, event=event)
+        app_server_investigation_request = self._build_app_server_investigation_request(
+            route_content,
+            referenced_resources,
+            event=event,
+        )
+        source_analysis_request = parse_source_analysis_request(route_content, bug_url_re=self.bug_url_re)
+        report_followup_request = parse_report_followup_request(route_content)
         perception_request = self._build_perception_summary_request(route_content, referenced_resources)
         if (
             not decision.allowed
@@ -321,6 +342,9 @@ class _HandleEventMixin:
             signal_request=signal_request,
             bug_request=bug_request,
             direct_analysis_request=direct_analysis_request,
+            app_server_investigation_request=app_server_investigation_request,
+            source_analysis_request=source_analysis_request,
+            report_followup_request=report_followup_request,
             perception_request=perception_request,
             rom_version_request=rom_version_request,
             addr2line_request=addr2line_request,
@@ -335,25 +359,28 @@ class _HandleEventMixin:
         # Each returns TaskResult on match, or None to fall through.
         _ROUTE_HANDLERS = [
             self._route_analysis_replay_decision,  # 1. Follow-up replay decision before fresh routes
-            self._route_bug_followup,       # 2. Bug followup conversation
-            self._route_direct_analysis_followup,  # 3. File-analysis followup / retry
-            self._route_bug_intent,         # 4. Explicit bug analysis request
-            self._route_addr2line_resolve,  # 5. Native stack address reverse lookup
-            self._route_rom_version_lookup, # 6. ROM version lookup
-            self._route_scene_signal,       # 7. Scene signal shortcut
-            self._route_knowledge_qa,       # 8. Personal knowledge QA / ADB templates
-            self._route_signal_request,     # 9. Signal lifecycle analysis
-            self._route_claude_skill,       # 10. Optional configured local skill route
-            self._route_bug_request,        # 11. Bug request (secondary match)
-            self._route_perception,         # 12. Perception summary
-            self._route_direct_analysis,    # 13. Direct file/log analysis
-            self._route_followup_intent,    # 14. Followup intent keywords
-            self._route_general_followup,   # 15. General followup conversation
-            self._route_knowledge_probe,    # 16. Internal operation QA from knowledge before chat
-            self._route_stale_light_interaction,  # 17. Replayed old lightweight messages
-            self._route_basic_chat,         # 18. Deterministic help/identity replies
-            self._route_omlx_chat,          # 19. OMLX chat conversation
-            self._route_intent_router,      # 20. Intent fallback for unresolved tasks
+            self._route_report_followup,    # 2. Explicit HTML/diagram report followup
+            self._route_app_server_investigation,  # 3. Explicit app-server autonomous analysis
+            self._route_bug_followup,       # 4. Bug followup conversation
+            self._route_direct_analysis_followup,  # 5. File-analysis followup / retry
+            self._route_bug_intent,         # 6. Explicit bug analysis request
+            self._route_addr2line_resolve,  # 7. Native stack address reverse lookup
+            self._route_rom_version_lookup, # 8. ROM version lookup
+            self._route_scene_signal,       # 9. Scene signal shortcut
+            self._route_knowledge_qa,       # 10. Personal knowledge QA / ADB templates
+            self._route_source_analysis,    # 11. Repository-only source analysis
+            self._route_signal_request,     # 12. Signal lifecycle analysis
+            self._route_claude_skill,       # 13. Optional configured local skill route
+            self._route_bug_request,        # 14. Bug request (secondary match)
+            self._route_perception,         # 15. Perception summary
+            self._route_direct_analysis,    # 16. Direct file/log analysis
+            self._route_followup_intent,    # 17. Followup intent keywords
+            self._route_general_followup,   # 18. General followup conversation
+            self._route_knowledge_probe,    # 19. Internal operation QA from knowledge before chat
+            self._route_stale_light_interaction,  # 20. Replayed old lightweight messages
+            self._route_basic_chat,         # 21. Deterministic help/identity replies
+            self._route_omlx_chat,          # 22. OMLX chat conversation
+            self._route_intent_router,      # 23. Intent fallback for unresolved tasks
         ]
         for handler in _ROUTE_HANDLERS:
             result = handler(ctx)
@@ -373,6 +400,99 @@ class _HandleEventMixin:
         return result
 
     # --- Individual route handlers (ordered by priority) ---
+
+    def _route_app_server_investigation(self, ctx: _RouteContext) -> TaskResult | None:
+        request = ctx.app_server_investigation_request
+        if request is None or not request.triggered:
+            return None
+        if not self.state_store.mark_seen(ctx.event):
+            return TaskResult(True, f"duplicate event skipped: {ctx.event.event_id}", skipped=True)
+        return self._run_app_server_investigation_request(ctx.event, request, ctx.route_content)
+
+    def _route_report_followup(self, ctx: _RouteContext) -> TaskResult | None:
+        request = ctx.report_followup_request
+        if ctx.followup_context is None or request is None or not request.triggered:
+            return None
+        if parse_followup_action(request.prompt) in {"retry", "continue"}:
+            return None
+        if not self.state_store.mark_seen(ctx.event):
+            return TaskResult(True, f"duplicate event skipped: {ctx.event.event_id}", skipped=True)
+        job = create_job_context(self.config.data_dir, ctx.event)
+        html_path = job.output_dir / "diagram_report_followup.html"
+        html_path.write_text(
+            render_context_diagram_report(
+                title="上下文图表报告",
+                request_text=ctx.followup_context.request_text,
+                followup_text=request.prompt,
+                summary_text=ctx.followup_context.summary_text,
+                report_excerpt=ctx.followup_context.report_excerpt,
+                history=ctx.followup_context.history,
+                diagram_kinds=request.diagram_kinds,
+                source_mode=ctx.followup_context.source_mode,
+                context_profile=ctx.followup_context.context_profile,
+            ),
+            encoding="utf-8",
+        )
+        result = TaskResult(
+            success=True,
+            message="已基于上一轮分析上下文生成 HTML 图表报告。",
+            job_id=job.job_id,
+            job_dir=job.job_dir,
+            html_report=html_path,
+            details={
+                "mode": "diagram_report_followup",
+                "source_mode": ctx.followup_context.source_mode,
+                "context_profile": ctx.followup_context.context_profile,
+                "classification_source": "deterministic_report_followup",
+                "diagram_kinds": list(request.diagram_kinds),
+                "followup_text": request.prompt,
+                "user_request_text": ctx.followup_context.request_text,
+                "files_to_send": [html_path],
+            },
+        )
+        return self._deliver_result(
+            ctx.event,
+            result,
+            request_text=ctx.followup_context.request_text,
+            root_message_id=ctx.followup_context.root_message_id,
+        )
+
+    def _route_source_analysis(self, ctx: _RouteContext) -> TaskResult | None:
+        request = ctx.source_analysis_request
+        if request is None or not request.triggered:
+            return None
+        if ctx.referenced_resources:
+            return None
+        if ctx.bug_request is not None and getattr(ctx.bug_request, "triggered", False):
+            return None
+        if ctx.direct_analysis_request is not None and getattr(ctx.direct_analysis_request, "triggered", False):
+            return None
+        if not self.state_store.mark_seen(ctx.event):
+            return TaskResult(True, f"duplicate event skipped: {ctx.event.event_id}", skipped=True)
+        self._notify_progress(
+            "source_analysis_request_received",
+            "收到源码分析请求",
+            event=ctx.event,
+            mode="source_analysis",
+            target=request.target,
+        )
+        def _source_progress(payload: dict[str, object]) -> None:
+            details = payload.get("details") if isinstance(payload.get("details"), dict) else {}
+            progress_details = dict(details)
+            progress_details.setdefault("mode", "source_analysis")
+            self._notify_progress(
+                str(payload.get("stage") or "source_analysis"),
+                str(payload.get("message") or "源码分析"),
+                event=ctx.event,
+                **progress_details,
+            )
+
+        result = self.source_analysis_runner.run(
+            request,
+            ctx.event,
+            progress_callback=_source_progress,
+        )
+        return self._deliver_result(ctx.event, result, request_text=request.raw_text or request.prompt)
 
     def _route_bug_followup(self, ctx: _RouteContext) -> TaskResult | None:
         if ctx.followup_context is None or "bug" not in str(ctx.followup_context.mode).casefold():
@@ -882,6 +1002,9 @@ class _HandleEventMixin:
             "bug_followup_existing_answer": "Bug 追问",
             "bug_agent_followup": "Bug 追问",
             "direct_analysis": "直传文件分析",
+            "app_server_investigation": "AI 自主分析",
+            "source_analysis": "源码分析",
+            "diagram_report_followup": "图表报告",
             "perception_summary": "感知数据总结",
             "signal_lifecycle": "信号生命周期",
             "claude_skill": "Claude Code 分析",
@@ -900,9 +1023,10 @@ class _HandleEventMixin:
         model = str(result.details.get("agent_summary_model") or "").strip()
         if model:
             metadata["Agent 模型"] = model
-        total_tokens = extract_prefixed_token_usage(result.details, "agent_summary_").get("total_tokens")
+        usage_prefix, usage = extract_first_prefixed_token_usage(result.details, ("agent_summary_", "app_server_"))
+        total_tokens = usage.get("total_tokens")
         if isinstance(total_tokens, int):
-            metadata["Agent Token"] = str(total_tokens)
+            metadata["AI Token" if usage_prefix == "app_server_" else "Agent Token"] = str(total_tokens)
         skill_label = str(result.details.get("analysis_skill_label") or "").strip()
         skill_name = str(result.details.get("analysis_skill") or "").strip()
         if skill_label or skill_name:

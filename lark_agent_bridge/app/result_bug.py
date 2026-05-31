@@ -468,7 +468,7 @@ class _ResultBugMixin:
     def _progress_token_usage(self, result: TaskResult | None) -> dict[str, int] | None:
         if result is None:
             return None
-        usage = extract_prefixed_token_usage(result.details, "agent_summary_")
+        _prefix, usage = extract_first_prefixed_token_usage(result.details, ("agent_summary_", "app_server_"))
         return usage or None
 
     def _progress_mode_label(self, mode: str) -> str:
@@ -478,6 +478,9 @@ class _ResultBugMixin:
             "bug_reanalysis": "Bug 重新分析",
             "bug_agent_followup": "Bug 追问",
             "direct_analysis": "直传文件分析",
+            "app_server_investigation": "AI 自主分析",
+            "source_analysis": "源码分析",
+            "diagram_report_followup": "图表报告",
             "perception_summary": "感知数据总结",
             "signal_lifecycle": "信号生命周期",
             "claude_skill": "Claude Code 分析",
@@ -699,6 +702,53 @@ class _ResultBugMixin:
             classification_reason=classification_reason,
         )
         return self._deliver_result(event, result, request_text=direct_analysis_request.raw_text or route_content)
+
+    def _run_app_server_investigation_request(
+        self,
+        event: LarkEvent,
+        request,
+        route_content: str,
+    ) -> TaskResult:
+        self._send_intent_preflight_card(
+            event,
+            _IntentPreflightDecision(
+                title="AI 自主分析",
+                intent_label="AI 自主分析",
+                confidence_label="高置信度",
+                strategy_label="自动执行",
+                reason="消息命中显式自主分析触发词，将由 Codex app-server 自行选择 skill 并执行只读分析。",
+            ),
+        )
+        self._notify_progress(
+            "app_server_investigation_request_received",
+            "收到 AI 自主分析请求",
+            event=event,
+            bug_url=request.bug_url,
+            prompt=request.prompt,
+            raw_text=request.raw_text,
+            resources=[item.value for item in request.resources],
+            trigger_mode=request.trigger_mode,
+            trigger_term=request.trigger_term,
+        )
+        details = {"触发词": request.trigger_term or request.trigger_mode or "未知"}
+        if request.bug_url:
+            details["Bug 链接"] = request.bug_url[:60]
+        if request.resources:
+            details["文件数"] = str(len(request.resources))
+        self.send_status_card(
+            event,
+            title="AI 自主分析",
+            status="analyzing",
+            details=details,
+            note="分析进行中，请稍候…",
+        )
+        result = self.app_server_investigation_runner.run(
+            request,
+            event=event,
+            progress_callback=self._event_progress_callback(event),
+        )
+        self._ensure_result_bug_url(result, request.bug_url)
+        return self._deliver_result(event, result, request_text=request.raw_text or route_content)
 
     def _run_rom_version_lookup_request(self, event: LarkEvent, rom_version_request) -> TaskResult:
         self._notify_progress(

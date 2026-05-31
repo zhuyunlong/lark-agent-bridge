@@ -89,8 +89,18 @@
     .step::before { content: ""; position: absolute; left: -22px; top: 4px; width: 10px; height: 10px; border-radius: 999px; background: var(--blue); }
     .step.failed::before { background: var(--red); }
     .step.succeeded::before { background: var(--green); }
-    pre { white-space: pre-wrap; word-break: break-word; background: #111827; color: #e5e7eb; border-radius: 8px; padding: 12px; overflow: auto; font-size: 12px; line-height: 1.5; }
+    .step-message { margin: 6px 0 8px; line-height: 1.65; font-size: 13px; color: #10213d; }
+    .step-badges { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+    .detail-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px; margin-top: 8px; }
+    .detail-item { border: 1px solid var(--line); border-radius: 8px; background: #f8fafc; padding: 8px 10px; }
+    .detail-item .k { color: var(--muted); font-size: 11px; margin-bottom: 4px; }
+    .detail-item .v { font-size: 12px; line-height: 1.55; word-break: break-word; }
+    details.raw-dump { margin-top: 10px; border: 1px solid var(--line); border-radius: 8px; background: #f8fafc; padding: 8px 10px; }
+    details.raw-dump summary { cursor: pointer; color: var(--muted); font-size: 12px; font-weight: 700; }
+    pre { white-space: pre-wrap; word-break: break-word; background: #f8fafc; color: #1f2937; border-radius: 8px; padding: 12px; overflow: auto; font-size: 12px; line-height: 1.6; border: 1px solid var(--line); }
     pre.stream-log { max-height: 320px; }
+    .mono-chip { display: inline-flex; align-items: center; border-radius: 999px; background: #e0f2fe; color: #075985; font-size: 11px; font-weight: 700; padding: 2px 8px; }
+    .section-note { color: var(--muted); font-size: 12px; line-height: 1.6; margin: 0 0 10px; }
     table { width: 100%; border-collapse: collapse; }
     th, td { border-bottom: 1px solid var(--line); padding: 10px; text-align: left; vertical-align: top; font-size: 13px; }
     th { color: var(--muted); background: #f8fafc; font-size: 12px; }
@@ -557,11 +567,14 @@
       $("selected-status").replaceChildren(badge(session.status));
       const root = $("detail");
       root.textContent = "";
+      const details = session.details || {};
       const cards = el("div", { class: "cards" },
         card("session", session.session_id),
         card("event", session.event_id),
         card("chat", session.chat_id),
+        card("mode", session.mode),
         card("job", session.job_id),
+        card("AI Token", tokenSummary(details) || "-"),
         card("耗时", session.duration_seconds ? session.duration_seconds + "s" : "-"),
         card("更新", session.updated_at)
       );
@@ -575,18 +588,26 @@
       root.appendChild(el("pre", { text: text(session.content) }));
       root.appendChild(el("h3", { text: "回复结果" }));
       root.appendChild(el("pre", { text: text(session.message) }));
-      const stream = streamText(session);
-      if (stream) {
-        root.appendChild(el("h3", { text: "深度分析输出" }));
-        root.appendChild(el("pre", { class: "stream-log", text: stream }));
-      }
       root.appendChild(el("h3", { text: "后台过程" }));
       const timeline = el("div", { class: "timeline" });
-      for (const step of session.progress || []) {
+      for (const step of aggregateProgress(session.progress || [])) {
         const cls = /fail|error|失败/.test(step.stage || step.message || "") ? "step failed" : /done|完成|succeed/.test(step.stage || step.message || "") ? "step succeeded" : "step";
         const row = el("div", { class: "row" }, el("strong", { text: step.stage || "progress" }), el("span", { class: "meta", text: step.timestamp || "" }));
-        const node = el("div", { class: cls }, row, el("div", { text: step.message || "" }));
-        if (step.details && Object.keys(step.details).length) node.appendChild(el("pre", { text: JSON.stringify(step.details, null, 2) }));
+        const node = el("div", { class: cls }, row, el("div", { class: "step-message", text: stepSummary(step) }));
+        const stepDetails = step.details || {};
+        const badges = [];
+        if (stepDetails.provider) badges.push(el("span", { class: "mono-chip", text: String(stepDetails.provider) }));
+        if (stepDetails.executor) badges.push(el("span", { class: "mono-chip", text: String(stepDetails.executor) }));
+        if (stepDetails.repeat_count && Number(stepDetails.repeat_count) > 1) badges.push(el("span", { class: "mono-chip", text: "x" + stepDetails.repeat_count }));
+        if (badges.length) node.appendChild(el("div", { class: "step-badges" }, ...badges));
+        const compact = renderDetailGrid(compactDetailEntries(stepDetails, step));
+        if (compact) node.appendChild(compact);
+        if (step.details && Object.keys(step.details).length) {
+          node.appendChild(el("details", { class: "raw-dump" },
+            el("summary", { text: "Raw" }),
+            el("pre", { text: JSON.stringify(step.details, null, 2) })
+          ));
+        }
         timeline.appendChild(node);
       }
       if (!(session.progress || []).length) timeline.appendChild(el("p", { class: "muted", text: "暂无进度事件。" }));
@@ -664,10 +685,12 @@
       $("history-status").replaceChildren(badge(item.status));
       const root = $("case-detail");
       root.textContent = "";
+      const details = item.details || {};
       root.appendChild(el("div", { class: "cards" },
         card("session", item.session_id),
         card("job", item.job_id),
         card("类型", item.mode),
+        card("AI Token", tokenSummary(details) || "-"),
         card("耗时", item.duration_seconds ? item.duration_seconds + "s" : "-"),
         card("更新", item.updated_at),
         card("证据文件", item.details && item.details.evidence_log_file_count)
@@ -684,11 +707,24 @@
       root.appendChild(el("pre", { text: text(item.message) }));
       root.appendChild(el("h3", { text: "调查过程" }));
       const timeline = el("div", { class: "timeline" });
-      for (const step of item.progress || []) {
+      for (const step of aggregateProgress(item.progress || [])) {
         const cls = /fail|error|失败/.test(step.stage || step.message || "") ? "step failed" : /done|完成|succeed/.test(step.stage || step.message || "") ? "step succeeded" : "step";
         const row = el("div", { class: "row" }, el("strong", { text: step.stage || "progress" }), el("span", { class: "meta", text: step.timestamp || "" }));
-        const node = el("div", { class: cls }, row, el("div", { text: step.message || "" }));
-        if (step.details && Object.keys(step.details).length) node.appendChild(el("pre", { text: JSON.stringify(step.details, null, 2) }));
+        const node = el("div", { class: cls }, row, el("div", { class: "step-message", text: stepSummary(step) }));
+        const stepDetails = step.details || {};
+        const badges = [];
+        if (stepDetails.provider) badges.push(el("span", { class: "mono-chip", text: String(stepDetails.provider) }));
+        if (stepDetails.executor) badges.push(el("span", { class: "mono-chip", text: String(stepDetails.executor) }));
+        if (stepDetails.repeat_count && Number(stepDetails.repeat_count) > 1) badges.push(el("span", { class: "mono-chip", text: "x" + stepDetails.repeat_count }));
+        if (badges.length) node.appendChild(el("div", { class: "step-badges" }, ...badges));
+        const compact = renderDetailGrid(compactDetailEntries(stepDetails, step));
+        if (compact) node.appendChild(compact);
+        if (step.details && Object.keys(step.details).length) {
+          node.appendChild(el("details", { class: "raw-dump" },
+            el("summary", { text: "Raw" }),
+            el("pre", { text: JSON.stringify(step.details, null, 2) })
+          ));
+        }
         timeline.appendChild(node);
       }
       if (!(item.progress || []).length) timeline.appendChild(el("p", { class: "muted", text: "暂无过程记录。" }));
@@ -819,16 +855,155 @@
       return raw.length > limit ? raw.slice(0, limit - 1) + "…" : raw;
     }
 
-    function streamText(session) {
-      const lines = [];
-      for (const step of session.progress || []) {
-        if (!String(step.stage || "").startsWith("bug_agent_summary_stream")) continue;
-        const details = step.details || {};
-        const body = details.stream_preview || details.stream_text || step.message || "";
-        if (!body) continue;
-        lines.push([step.timestamp || "", body].filter(Boolean).join("  "));
+    function prettyKey(key) {
+      const mapping = {
+        provider: "Provider",
+        executor: "执行器",
+        stream_kind: "流类型",
+        trigger_term: "触发词",
+        trigger_mode: "触发模式",
+        output_path: "输出路径",
+        html_path: "HTML",
+        json_path: "JSON",
+        bug_url: "Bug 链接",
+        path: "文件路径",
+        model: "模型",
+        app_server_version: "App-server 版本",
+        error_code: "错误码",
+        report_url: "报告链接",
+        target: "目标",
+        plan_label: "分析类型",
+        skill: "Skill",
+        stream_preview: "流式摘要",
+        stream_text: "流式文本",
+        aggregated_chunks: "聚合块数",
+        app_server_input_tokens: "AI 输入 Token",
+        app_server_output_tokens: "AI 输出 Token",
+        app_server_total_tokens: "AI 总 Token",
+      };
+      if (mapping[key]) return mapping[key];
+      return String(key || "").replace(/_/g, " ");
+    }
+
+    function compactValue(value) {
+      if (value === null || value === undefined) return "";
+      if (Array.isArray(value)) return clip(value.map(item => text(item)).join(" , "), 180);
+      if (typeof value === "object") return clip(JSON.stringify(value), 180);
+      return clip(String(value), 180);
+    }
+
+    function tokenSummary(details) {
+      if (!details || typeof details !== "object") return "";
+      const total = details.app_server_total_tokens || details.agent_summary_total_tokens;
+      const input = details.app_server_input_tokens || details.agent_summary_input_tokens;
+      const output = details.app_server_output_tokens || details.agent_summary_output_tokens;
+      if (!(total || input || output)) return "";
+      return ["in " + (input || "-"), "out " + (output || "-"), "total " + (total || "-")].join(" / ");
+    }
+
+    function stepSummary(step) {
+      const details = step.details || {};
+      const preview = text(details.stream_preview || details.stream_text || "");
+      if (preview) return preview;
+      return text(step.message || "");
+    }
+
+    function isCodexDeltaStep(step) {
+      const preview = stepSummary(step);
+      return String(step.stage || "").endsWith("_agent_analysis_stream")
+        && (preview.startsWith("Codex delta ") || preview.startsWith("Codex 文本 "));
+    }
+
+    function normalizedDeltaText(step) {
+      const preview = stepSummary(step);
+      return preview.replace(/^Codex (delta|文本)\s+/, "").trim();
+    }
+
+    function flushAggregatedDelta(items, deltaState) {
+      if (!deltaState.text) return;
+      const aggregated = {
+        stage: deltaState.stage,
+        timestamp: deltaState.timestamp,
+        message: "Codex 文本 " + clip(deltaState.text, 260),
+        details: {
+          provider: deltaState.provider,
+          executor: deltaState.executor,
+          stream_kind: "delta_group",
+          aggregated_chunks: deltaState.count
+        }
+      };
+      items.push(aggregated);
+      deltaState.text = "";
+      deltaState.count = 0;
+      deltaState.stage = "";
+      deltaState.timestamp = "";
+      deltaState.provider = "";
+      deltaState.executor = "";
+    }
+
+    function mergeDuplicateStep(items, step) {
+      const prev = items[items.length - 1];
+      const summary = stepSummary(step);
+      const prevSummary = prev ? stepSummary(prev) : "";
+      if (!prev || prev.stage !== step.stage || prevSummary !== summary) {
+        items.push(step);
+        return;
       }
-      return lines.join("\n");
+      prev.details = prev.details || {};
+      prev.details.repeat_count = (Number(prev.details.repeat_count || 1) + 1);
+      prev.timestamp = step.timestamp || prev.timestamp;
+    }
+
+    function aggregateProgress(progress) {
+      const items = [];
+      const deltaState = { text: "", count: 0, stage: "", timestamp: "", provider: "", executor: "" };
+      for (const step of progress || []) {
+        if (isCodexDeltaStep(step)) {
+          const details = step.details || {};
+          deltaState.text += normalizedDeltaText(step);
+          deltaState.count += 1;
+          deltaState.stage = String(step.stage || deltaState.stage);
+          deltaState.timestamp = step.timestamp || deltaState.timestamp;
+          deltaState.provider = String(details.provider || deltaState.provider || "");
+          deltaState.executor = String(details.executor || deltaState.executor || "");
+          if (/[。！？.!?\n]$/.test(deltaState.text) || deltaState.text.length >= 180) {
+            flushAggregatedDelta(items, deltaState);
+          }
+          continue;
+        }
+        flushAggregatedDelta(items, deltaState);
+        mergeDuplicateStep(items, { ...step });
+      }
+      flushAggregatedDelta(items, deltaState);
+      return items;
+    }
+
+    function compactDetailEntries(details, step) {
+      if (!details || typeof details !== "object") return [];
+      const entries = [];
+      const summary = stepSummary(step);
+      for (const [key, value] of Object.entries(details)) {
+        if (value === null || value === undefined || value === "") continue;
+        if (key === "stream_preview" || key === "stream_text") continue;
+        if (compactValue(value) === summary) continue;
+        if (typeof value === "object" && !Array.isArray(value)) continue;
+        entries.push([prettyKey(key), compactValue(value)]);
+      }
+      return entries.slice(0, 8);
+    }
+
+    function renderDetailGrid(entries) {
+      if (!entries.length) return null;
+      const root = el("div", { class: "detail-grid" });
+      for (const [key, value] of entries) {
+        root.appendChild(
+          el("div", { class: "detail-item" },
+            el("div", { class: "k", text: key }),
+            el("div", { class: "v", text: value })
+          )
+        );
+      }
+      return root;
     }
 
     async function loadAll() {

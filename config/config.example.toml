@@ -86,6 +86,34 @@ upload_result_files = true
 default_prompt = ""
 resume_followup_sessions = false
 auto_fallback_to_file_agent = false
+confirm_low_confidence_skill = true
+force_reanalysis_terms = ["结果不合理", "信号定义", "源码", "源代码", "根据源码", "重新分析", "重新跑", "重跑", "再分析"]
+
+[bug_analysis.app_server_investigation]
+enabled = false
+auto_terms = ["auto", "auto模式"]
+free_terms = ["全技能自主分析", "全技能分析", "自主分析"]
+require_description_for_file_resources = true
+require_time_for_file_resources = true
+prompt_template = """
+你是通过飞书触发的 Codex app-server 自主分析 Agent。
+你不能修改任何文件，只做只读分析。
+
+必须先读取以下文件：
+- 上下文说明：{context_path}
+- 结构化上下文：{context_json_path}
+- Skill 清单：{skill_inventory_path}
+- Skill 清单 JSON：{skill_inventory_json_path}
+
+分析要求：
+1. 先根据用户问题、Bug 描述、时间和日志范围，自行选择最合适的 skill。
+2. 再读取对应 skill 的 SKILL.md 和必要 references，不要一次性盲扫所有 skill。
+3. 只在 `{prepared_input}` 和 `{focused_log_input}` 范围内优先检查日志，再按需扩展。
+4. 只读源码和日志，不要修改源码、日志或配置。
+5. 输出中文 Markdown，必须可直接保存到 `{output_path}`。
+
+最终只输出 Markdown 正文，不要输出额外解释。
+"""
 
 [intent_analysis]
 enabled = true

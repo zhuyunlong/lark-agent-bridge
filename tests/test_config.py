@@ -276,6 +276,35 @@ force_reanalysis_terms = ["重新分析", "源码"]
         self.assertTrue(config.bug_analysis.auto_fallback_to_file_agent)
         self.assertEqual(config.bug_analysis.force_reanalysis_terms, ["重新分析", "源码"])
 
+    def test_load_app_server_investigation_options(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text(
+                """
+[bug_analysis]
+enabled = true
+
+[bug_analysis.app_server_investigation]
+enabled = true
+auto_terms = ["auto", "auto模式"]
+free_terms = ["全技能分析", "自主分析"]
+require_description_for_file_resources = true
+require_time_for_file_resources = true
+prompt_template = "CTX={context_path}\\nINV={skill_inventory_path}\\nOUT={output_path}"
+""",
+                encoding="utf-8",
+            )
+
+            config = load_config(config_path)
+
+        opts = config.bug_analysis.app_server_investigation
+        self.assertTrue(opts.enabled)
+        self.assertEqual(opts.auto_terms, ["auto", "auto模式"])
+        self.assertEqual(opts.free_terms, ["全技能分析", "自主分析"])
+        self.assertTrue(opts.require_description_for_file_resources)
+        self.assertTrue(opts.require_time_for_file_resources)
+        self.assertEqual(opts.prompt_template, "CTX={context_path}\nINV={skill_inventory_path}\nOUT={output_path}")
+
     def test_bug_analysis_command_defaults_to_codex_for_openai_api_format(self):
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "config.toml"
