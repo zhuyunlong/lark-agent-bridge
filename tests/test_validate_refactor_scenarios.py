@@ -43,7 +43,7 @@ class ValidateRefactorScenariosTests(unittest.TestCase):
 
         self.assertFalse(checks[0]["ok"])
         self.assertEqual(checks[0]["skill"], "ld-lane-level-log-analysis-portable")
-        self.assertIn("kind=custom_skill", checks[0]["reason"])
+        self.assertIn("kind=source_code_skill", checks[0]["reason"])
         self.assertFalse(scenarios._validation_passed({"runtime_checks": checks}))
 
     def test_runtime_route_checks_accept_builtin_ld_kind_without_custom_route(self):
