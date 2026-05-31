@@ -590,6 +590,49 @@ class AppGroupBugTests(_AppTestBase):
         self.assertIn("file agent summary", delivered_text)
         self.assertNotIn("当前没有可执行分析器", delivered_text)
         self.assertEqual([Path(item["path"]).name for item in fake_lark.files], ["source_stage_report.html"])
+
+    def test_progress_card_update_error_does_not_crash_bug_delivery(self):
+        class RecursingUpdateLarkClient(FakeLarkClient):
+            def update_card(self, message_id, card_json):
+                self.updated_cards.append({"message_id": message_id, "card_json": card_json})
+                raise RecursionError("maximum recursion depth exceeded")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = Path(tmp) / "bug_metadata.md"
+            html = Path(tmp) / "bug_report.html"
+            metadata.write_text("metadata", encoding="utf-8")
+            html.write_text("<html></html>", encoding="utf-8")
+            fake_lark = RecursingUpdateLarkClient()
+            fake_bug = FakeBugRunner(metadata, html)
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    allowed_chats=["oc_denied"],
+                ),
+                lark_client=fake_lark,
+                bug_runner=fake_bug,
+            )
+
+            result = app.handle_event(
+                event(
+                    event_id="evt_progress_card_recursion",
+                    message_id="om_progress_card_recursion",
+                    content="@bot https://project.feishu.cn/xpfailuremgmt/buglo/detail/6998811703 分析3D场景信号",
+                )
+            )
+            session = app.activity_store.get_session("om_progress_card_recursion")
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.details["mode"], "bug_analysis")
+        self.assertEqual(len(fake_bug.requests), 1)
+        self.assertGreaterEqual(len(fake_lark.files), 1)
+        self.assertIsNotNone(session)
+        assert session is not None
+        failed_updates = [item for item in session["progress"] if item["stage"] == "progress_card_update_failed"]
+        self.assertTrue(failed_updates)
+        self.assertEqual(failed_updates[-1]["details"]["error_type"], "RecursionError")
+
     def test_group_bug_request_accepts_rich_text_wrapped_bot_name(self):
         with tempfile.TemporaryDirectory() as tmp:
             metadata = Path(tmp) / "bug_metadata.md"

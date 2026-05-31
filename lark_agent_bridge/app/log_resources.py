@@ -163,15 +163,62 @@ class _LogResourcesMixin:
         progress_details.setdefault("executor", self._progress_executor(stage, progress_details))
         payload["details"] = progress_details
         self.activity_store.record_progress(payload)
-        if (
-            event is not None
-            and event.chat_type in {"group", "p2p"}
-            and self._should_update_progress_card_from_progress(event, stage=stage, session_id=session_id)
-        ):
-            self._update_progress_card(event, session_id=session_id)
+        if event is not None and event.chat_type in {"group", "p2p"}:
+            try:
+                should_update_card = self._should_update_progress_card_from_progress(
+                    event,
+                    stage=stage,
+                    session_id=session_id,
+                )
+            except Exception as exc:
+                logger.debug(
+                    "failed to inspect progress card state for %s: %s",
+                    event.message_id,
+                    exc,
+                    exc_info=True,
+                )
+                self._record_progress_card_update_failure(event, session_id=session_id, error=exc)
+                should_update_card = False
+            if should_update_card:
+                self._update_progress_card(event, session_id=session_id)
         if self.progress_callback is None:
             return
         self.progress_callback(payload)
+
+    def _record_progress_card_update_failure(
+        self,
+        event: LarkEvent | None,
+        *,
+        session_id: str | None = None,
+        error: BaseException,
+    ) -> None:
+        payload: dict[str, object] = {
+            "type": "progress",
+            "stage": "progress_card_update_failed",
+            "message": "进度卡更新失败，后台流程继续",
+            "details": {
+                "error_type": type(error).__name__,
+                "error": str(error)[:MAX_ERROR_PREVIEW],
+                "executor": "Bridge 发布器",
+            },
+        }
+        if session_id:
+            payload["session_id"] = session_id
+        if event is not None:
+            payload.update(
+                {
+                    "event_id": event.event_id,
+                    "message_id": event.message_id,
+                    "chat_id": event.chat_id,
+                    "chat_type": event.chat_type,
+                }
+            )
+        self.activity_store.record_progress(payload)
+        if self.progress_callback is not None:
+            try:
+                self.progress_callback(payload)
+            except Exception as exc:
+                logger.debug("failed to emit progress-card failure event: %s", exc, exc_info=True)
 
     def _progress_executor(self, stage: str, details: dict[str, object]) -> str:
         for key in ("executor", "executed_by", "actor", "runner"):

@@ -1399,8 +1399,13 @@ class _HandleEventMixin:
         message_id = str(card_state.get("message_id") or "")
         if not message_id:
             return False
-        card = self._build_progress_card(event, key=key, status=status, result=result, note=note)
-        send_result = self.lark_client.update_card(message_id, card_to_json(card))
+        try:
+            card = self._build_progress_card(event, key=key, status=status, result=result, note=note)
+            send_result = self.lark_client.update_card(message_id, card_to_json(card))
+        except Exception as exc:
+            logger.debug("failed to update progress card %s: %s", message_id, exc, exc_info=True)
+            self._record_progress_card_update_failure(event, session_id=session_id, error=exc)
+            return False
         if send_result.returncode == 0:
             now = datetime.now(timezone.utc)
             card_state["last_card_update_at"] = now
