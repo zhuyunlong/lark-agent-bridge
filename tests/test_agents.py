@@ -68,6 +68,31 @@ class AgentTests(unittest.TestCase):
         path.write_text(f"{timestamp} I TestTag: time anchor\n", encoding="utf-8")
         return path
 
+    def _fake_source_stage_success(self, **kwargs):
+        analysis_dir = kwargs["analysis_dir"]
+        html_path = kwargs["html_path"]
+        json_path = kwargs["json_path"]
+        analysis_dir.mkdir(parents=True, exist_ok=True)
+        html_path.write_text("<html>source stage ok</html>", encoding="utf-8")
+        json_path.write_text('{"source_stage":"ok"}', encoding="utf-8")
+        analysis_markdown_path = analysis_dir / "source_stage_analysis.md"
+        analysis_markdown_path.write_text(
+            "## 结论摘要\n- mock source stage ok\n\n"
+            "## 关键证据\n- mock evidence\n\n",
+            encoding="utf-8",
+        )
+        return {
+            "ok": True,
+            "message": "mock source stage ok",
+            "command": ["mock-source-stage"],
+            "provider": "test",
+            "executor": "mock",
+            "stdout": "",
+            "stderr": "",
+            "analysis_markdown_path": analysis_markdown_path,
+            "completion_state": "complete",
+        }
+
     def test_bug_analysis_subprocess_gets_default_debug_log_path(self):
         with tempfile.TemporaryDirectory() as tmp:
             runner = BugAnalysisRunner(
@@ -2621,6 +2646,8 @@ class AgentTests(unittest.TestCase):
                     "_run_bug_agent_summary",
                     return_value={"message": "", "command": None, "error": "", "provider": "", "session_id": "", "resumed": False, "duration_seconds": 0.0, "usage": {}},
                 ),
+                mock.patch.object(runner, "_run_source_stage_pydantic_ai", side_effect=self._fake_source_stage_success),
+                mock.patch.object(runner, "_run_custom_skill_agent_analysis", side_effect=self._fake_source_stage_success),
             ):
                 result = runner.run_bug_analysis(
                     BugRequest(
@@ -2809,6 +2836,8 @@ class AgentTests(unittest.TestCase):
                 ),
                 mock.patch.object(runner, "_run_analysis", side_effect=AssertionError("general request should not run log scripts")),
                 mock.patch.object(runner, "_build_combined_report_artifacts", return_value=None),
+                mock.patch.object(runner, "_run_source_stage_pydantic_ai", side_effect=self._fake_source_stage_success),
+                mock.patch.object(runner, "_run_custom_skill_agent_analysis", side_effect=self._fake_source_stage_success),
                 mock.patch.object(
                     runner,
                     "_run_bug_agent_summary",
@@ -8069,6 +8098,20 @@ class AgentTests(unittest.TestCase):
                 mock.patch.object(runner, "_run_analysis", side_effect=fake_run_analysis),
                 mock.patch.object(runner, "_run_custom_skill_agent_analysis", side_effect=fake_custom_skill_agent_analysis),
                 mock.patch.object(runner, "_build_combined_report_artifacts", return_value=None),
+                mock.patch.object(
+                    runner,
+                    "_run_bug_agent_summary",
+                    return_value={
+                        "message": "agent summary",
+                        "command": [],
+                        "error": "",
+                        "provider": "test",
+                        "session_id": "",
+                        "resumed": False,
+                        "duration_seconds": 0.0,
+                        "usage": {},
+                    },
+                ),
             ):
                 result = runner.run_direct_analysis(
                     DirectAnalysisRequest(
@@ -9816,6 +9859,8 @@ class AgentTests(unittest.TestCase):
                         "resumed": True,
                     },
                 ),
+                mock.patch.object(runner, "_run_source_stage_pydantic_ai", side_effect=self._fake_source_stage_success),
+                mock.patch.object(runner, "_run_custom_skill_agent_analysis", side_effect=self._fake_source_stage_success),
             ):
                 followup_selection = runner.decide_bug_followup(
                     followup_text="分析结果不合理，在信号定义找到VCU_ELECTRICIT_PERCENT相关的信号定义，然后根据源码分析",
@@ -9920,6 +9965,8 @@ class AgentTests(unittest.TestCase):
                         "resumed": False,
                     },
                 ),
+                mock.patch.object(runner, "_run_source_stage_pydantic_ai", side_effect=self._fake_source_stage_success),
+                mock.patch.object(runner, "_run_custom_skill_agent_analysis", side_effect=self._fake_source_stage_success),
             ):
                 followup_selection = runner.decide_bug_followup(
                     followup_text="结果不合理，在信号定义找到CAMPING_MODE_STATUS，然后结合露营模式源码重新分析",
