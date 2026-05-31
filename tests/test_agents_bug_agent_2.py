@@ -1203,6 +1203,20 @@ class AgentsBugAgent2Tests(_AgentTestBase):
                 mock.patch.object(runner, "_run_analysis", side_effect=fake_run_analysis),
                 mock.patch.object(runner, "_run_custom_skill_agent_analysis", side_effect=fake_custom_skill_agent_analysis),
                 mock.patch.object(runner, "_build_combined_report_artifacts", return_value=None),
+                mock.patch.object(
+                    runner,
+                    "_run_bug_agent_summary",
+                    return_value={
+                        "message": "agent summary",
+                        "command": [],
+                        "error": "",
+                        "provider": "test",
+                        "session_id": "",
+                        "resumed": False,
+                        "duration_seconds": 0.0,
+                        "usage": {},
+                    },
+                ),
             ):
                 result = runner.run_direct_analysis(
                     DirectAnalysisRequest(

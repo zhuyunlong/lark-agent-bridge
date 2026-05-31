@@ -329,6 +329,16 @@ class AgentsBugReanalysis2Tests(_AgentTestBase):
                         "resumed": True,
                     },
                 ),
+                mock.patch.object(
+                    runner,
+                    "_run_source_stage_pydantic_ai",
+                    side_effect=self._fake_source_stage_success,
+                ),
+                mock.patch.object(
+                    runner,
+                    "_run_custom_skill_agent_analysis",
+                    side_effect=self._fake_source_stage_success,
+                ),
             ):
                 followup_selection = runner.decide_bug_followup(
                     followup_text="分析结果不合理，在信号定义找到VCU_ELECTRICIT_PERCENT相关的信号定义，然后根据源码分析",
@@ -431,6 +441,16 @@ class AgentsBugReanalysis2Tests(_AgentTestBase):
                         "session_id": "",
                         "resumed": False,
                     },
+                ),
+                mock.patch.object(
+                    runner,
+                    "_run_source_stage_pydantic_ai",
+                    side_effect=self._fake_source_stage_success,
+                ),
+                mock.patch.object(
+                    runner,
+                    "_run_custom_skill_agent_analysis",
+                    side_effect=self._fake_source_stage_success,
                 ),
             ):
                 followup_selection = runner.decide_bug_followup(

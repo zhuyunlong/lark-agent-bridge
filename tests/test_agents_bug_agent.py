@@ -1086,18 +1086,12 @@ class AgentsBugAgentTests(_AgentTestBase):
                 mock.patch.object(
                     runner,
                     "_run_source_stage_pydantic_ai",
-                    side_effect=lambda **kwargs: (
-                        kwargs["html_path"].write_text("<html>source</html>", encoding="utf-8"),
-                        kwargs["json_path"].write_text("{}", encoding="utf-8"),
-                        {
-                            "ok": True,
-                            "command": ["source-stage"],
-                            "stdout": "",
-                            "stderr": "",
-                            "provider": "test",
-                            "duration_seconds": 0.0,
-                        },
-                    )[-1],
+                    side_effect=self._fake_source_stage_success,
+                ),
+                mock.patch.object(
+                    runner,
+                    "_run_custom_skill_agent_analysis",
+                    side_effect=self._fake_source_stage_success,
                 ),
                 mock.patch.object(
                     runner,
