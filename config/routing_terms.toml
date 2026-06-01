@@ -70,6 +70,7 @@ terms = [
     "无感知", "sr无感知",
     "vhalhelper", "mapdatahandler", "x3dcb",
     "xdatanativeproxy", "unity收到的数据统计",
+    "xpu计数", "ld normal", "receivemsg bizcode", "收到:放弃",
 ]
 
 [crash]
@@ -83,6 +84,12 @@ terms = [
     "xtheme", "signal_sr_xtheme", "105004", "105009",
     "时光主题", "时光变化", "晨曦", "傍晚", "黄昏",
     "日出日落", "主题切换", "黑白夜", "xuiconditionhelper",
+    "themehelper", "theme helper", "xthemestrategy",
+    "nav_xthemestrategy", "nav_xuiconditionhelper",
+    "nav_themetype", "nav_themehelper",
+    "signal_sr_xtheme_msg", "theme mode", "thememode",
+    "time period", "timeperiod", "srthemeskin",
+    "ui mode", "uimode",
 ]
 
 [ld_lane_level]
@@ -108,6 +115,8 @@ terms = [
     "百度没返回靠边停车", "百度回调没有sideparkinfo",
     "pullovermsg is null", "final status is none", "position is nullptr",
     "side_parking_info", "side_park_info",
+    "sideparkinfo", "side park info", "xsideparkinfo",
+    "side parking info", "side parking:",
     "pulloverstatus", "pull_over_status",
 ]
 

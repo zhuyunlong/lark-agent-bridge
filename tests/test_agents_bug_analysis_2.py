@@ -406,6 +406,17 @@ class AgentsBugAnalysis2Tests(_AgentTestBase):
 
         self.assertEqual(plan.kind, "xtheme")
         self.assertIsNone(plan.signal_code)
+    def test_bug_analysis_classifies_xtheme_source_log_tokens(self):
+        runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
+
+        plan = runner.classify_request(
+            prompt_text="NAV_XThemeStrategy ThemeMode TimePeriod SrThemeSkin 发送后黑白夜异常",
+            title="",
+            description="",
+        )
+
+        self.assertEqual(plan.kind, "xtheme")
+        self.assertIsNone(plan.signal_code)
     def test_bug_analysis_prefers_perception_over_generic_signal_terms(self):
         runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
 
@@ -413,6 +424,17 @@ class AgentsBugAnalysis2Tests(_AgentTestBase):
             prompt_text="分析当前感知数据和信号链路",
             title="SR无感知显示",
             description="请看 VHALHelper / X3DCB / XDataNativeProxy",
+        )
+
+        self.assertEqual(plan.kind, "perception")
+        self.assertIsNone(plan.signal_code)
+    def test_bug_analysis_classifies_perception_receive_msg_tokens(self):
+        runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
+
+        plan = runner.classify_request(
+            prompt_text="XDataNativeProxy ReceiveMsg bizCode 收到:放弃 当前统计是否正常",
+            title="",
+            description="",
         )
 
         self.assertEqual(plan.kind, "perception")
@@ -818,6 +840,14 @@ class AgentsBugAnalysis2Tests(_AgentTestBase):
         runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
         plan = runner.classify_request(
             prompt_text="百度回调没有 SideParkInfo",
+            title="",
+            description="",
+        )
+        self.assertEqual(plan.kind, "pullover_chain")
+    def test_bug_analysis_classifies_pullover_chain_log_token(self):
+        runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
+        plan = runner.classify_request(
+            prompt_text="Side Parking 日志没有出现，side_parking_info 也没到 Unity",
             title="",
             description="",
         )
