@@ -1033,6 +1033,76 @@ class AgentsIntentAnalysisTests(_AgentTestBase):
 
         self.assertIn("SKILL_NOISE", prompt)
         self.assertIn("REPORT_NOISE", prompt)
+
+    def test_bug_direct_api_prompt_compacts_scene_signal_target_focus(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=True, data_dir=Path(tmp), workspace_root=Path(tmp))
+            runner = BugAnalysisRunner(config)
+            output_dir = Path(tmp) / "jobs" / "job_1" / "output"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            skill_dir = Path(tmp) / ".ai" / "skills" / "scene-signal-diagnosis"
+            skill_dir.mkdir(parents=True, exist_ok=True)
+            skill_path = skill_dir / "SKILL.md"
+            request_artifact = output_dir / "bug_agent_reanalysis_request.md"
+            metadata_path = output_dir / "bug_reanalysis_metadata.md"
+            report_json = output_dir / "bug_scene_signal_report.json"
+            request_artifact.write_text("本次追问: 问题时间点 14:03分 调查场景信号", encoding="utf-8")
+            skill_path.write_text(
+                "---\n"
+                "name: scene-signal-diagnosis\n"
+                "description: demo scene signal skill\n"
+                "---\n\n"
+                "# Demo Scene Signal Skill\n",
+                encoding="utf-8",
+            )
+            report_json.write_text(
+                json.dumps(
+                    {
+                        "target_time": "2026-05-29T14:03",
+                        "verdict": "SIGNAL_SR_SCENE_TYPE 最后完整链路闭环：Android 已输出 P_Gear_Pilot_Interim_Scene / 泊车临停P，Unity 已收到场景变化 10。",
+                        "target_focus": {
+                            "headline": "目标时间 14:03:00 需要按最近一次关键状态回溯；当前日志里目标时间前最近一次已知状态出现在 2026-05-29T14:00:40。",
+                            "summary": "目标时间 14:03:00 前最近一次已知关键状态出现在 2026-05-29T14:00:40。 按目标时间前最近一次已知状态推断：GearSt=TEMPORARY_P / 临停P。 目标时间后的第一次关键状态变化出现在 2026-05-29T14:06:22。",
+                            "inferred_state_summary": "GearSt=TEMPORARY_P / 临停P",
+                        },
+                        "latest_sr_chain": {
+                            "value": "10",
+                            "value_desc": "P_Gear_Pilot_Interim_Scene / 泊车临停P",
+                            "android_event": {
+                                "time": "2026-05-29T14:06:39.542",
+                            },
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            metadata_path.write_text(
+                "# Bug Reanalysis Metadata\n"
+                "- 分析类型: `scene_signal`\n"
+                "- 命中 Skill: `scene-signal-diagnosis`\n"
+                f"- Skill 规范:\n  - `{skill_path}`\n"
+                "- 最新 JSON 报告:\n"
+                f"  - `scene_signal` -> `{report_json}`\n",
+                encoding="utf-8",
+            )
+
+            prompt = runner._build_bug_agent_summary_prompt_for_api(
+                request_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/7003312758 分析场景信号",
+                request_artifact=request_artifact,
+                metadata_path=metadata_path,
+                followup_text="问题时间点 14:03分 调查场景信号",
+                snapshot_details={
+                    "analysis_kind": "scene_signal",
+                    "analysis_kinds": ["scene_signal"],
+                    "bug_url": "https://project.feishu.cn/xpfailuremgmt/buglo/detail/7003312758",
+                },
+                snapshot_plans=[BugAnalysisPlan(kind="scene_signal")],
+            )
+
+        self.assertIn("target_focus: 目标时间 14:03:00 需要按最近一次关键状态回溯；当前日志里目标时间前最近一次已知状态出现在 2026-05-29T14:00:40。", prompt)
+        self.assertIn("target_state: GearSt=TEMPORARY_P / 临停P", prompt)
+        self.assertNotIn("latest_sr_chain:", prompt)
     def test_bug_direct_api_summary_writes_prompt_audit_files(self):
         with tempfile.TemporaryDirectory() as tmp:
             ai_provider = AIProviderOptions(

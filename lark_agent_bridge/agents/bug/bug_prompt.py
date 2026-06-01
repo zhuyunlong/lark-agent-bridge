@@ -293,6 +293,7 @@ class _BugPromptMixin:
     def _markdown_section_entries(self, section_text: str) -> list[str]:
         entries: list[str] = []
         current: list[str] = []
+        list_prefix_pattern = r"^(?:[-*]|\d+[.)、])\s+"
         for raw_line in section_text.splitlines():
             stripped = raw_line.strip()
             if not stripped:
@@ -300,10 +301,10 @@ class _BugPromptMixin:
                     entries.append(" ".join(current).strip())
                     current = []
                 continue
-            if re.match(r"^[-*]\s+", stripped):
+            if re.match(list_prefix_pattern, stripped):
                 if current:
                     entries.append(" ".join(current).strip())
-                current = [re.sub(r"^[-*]\s+", "", stripped)]
+                current = [re.sub(list_prefix_pattern, "", stripped)]
             else:
                 if current:
                     current.append(stripped)
@@ -329,26 +330,146 @@ class _BugPromptMixin:
             return normalized
         return normalized[: limit - 1].rstrip() + "…"
 
-    def _source_stage_highlight_items(self, section_text: str, *, sev: str, limit: int = 4) -> list[dict[str, str]]:
+    def _markdown_table_block_length(self, lines: Sequence[str], start: int) -> int:
+        if start + 2 >= len(lines):
+            return 0
+        header = lines[start].strip()
+        separator = lines[start + 1].strip()
+        if not (header.startswith("|") and header.endswith("|")):
+            return 0
+        if not re.match(r"^\|?(?:\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\|?$", separator):
+            return 0
+        index = start + 2
+        row_count = 0
+        while index < len(lines):
+            current = lines[index].strip()
+            if not (current.startswith("|") and current.endswith("|")):
+                break
+            row_count += 1
+            index += 1
+        if row_count == 0:
+            return 0
+        return index - start
+
+    def _parse_markdown_table_row(self, raw_line: str) -> list[str]:
+        return [self._clean_markdown_inline_text(cell) for cell in raw_line.strip().strip("|").split("|")]
+
+    def _source_stage_first_markdown_table(self, section_text: str) -> tuple[list[str], list[tuple[str, ...]]]:
+        lines = section_text.splitlines()
+        for index in range(len(lines)):
+            block_len = self._markdown_table_block_length(lines, index)
+            if not block_len:
+                continue
+            block = lines[index:index + block_len]
+            header = self._parse_markdown_table_row(block[0])
+            rows: list[tuple[str, ...]] = []
+            width = len(header)
+            for row_line in block[2:]:
+                values = self._parse_markdown_table_row(row_line)
+                if len(values) < width:
+                    values.extend([""] * (width - len(values)))
+                values = values[:width]
+                if any(value.strip() for value in values):
+                    rows.append(tuple(values))
+            if header and rows:
+                return header, rows
+        return [], []
+
+    def _strip_markdown_tables(self, section_text: str) -> str:
+        cleaned_lines: list[str] = []
+        lines = section_text.splitlines()
+        index = 0
+        while index < len(lines):
+            block_len = self._markdown_table_block_length(lines, index)
+            if block_len:
+                index += block_len
+                continue
+            cleaned_lines.append(lines[index].rstrip())
+            index += 1
+        return "\n".join(cleaned_lines).strip()
+
+    def _source_stage_entry_title_detail(self, entry: str) -> tuple[str, str]:
+        raw_entry = entry.strip()
+        patterns = [
+            r"^\d+[.)、]?\s*\*\*(.+?)\*\*[：:，,]\s*(.+)$",
+            r"^\*\*(.+?)\*\*[：:，,]\s*(.+)$",
+            r"^([^：:]{1,24})[：:]\s*(.+)$",
+        ]
+        for pattern in patterns:
+            match = re.match(pattern, raw_entry)
+            if match:
+                return (
+                    self._clean_markdown_inline_text(match.group(1)),
+                    self._clean_markdown_inline_text(match.group(2)),
+                )
+        return "", self._clean_markdown_inline_text(raw_entry)
+
+    def _source_stage_issue_items(self, section_text: str, *, sev: str, limit: int = 8) -> list[dict[str, str]]:
         items: list[dict[str, str]] = []
         for entry in self._markdown_section_entries(section_text)[:limit]:
+            title, detail = self._source_stage_entry_title_detail(entry)
+            if title:
+                items.append({
+                    "sev": sev,
+                    "title": self._truncate_report_text(title, 80),
+                    "detail": self._truncate_report_text(detail, 360),
+                })
+                continue
             items.append({
                 "sev": sev,
-                "title": self._truncate_report_text(entry, 160),
+                "title": self._truncate_report_text(detail, 220),
                 "detail": "",
             })
         return items
 
-    def _source_stage_evidence_rows(self, section_text: str, *, limit: int = 6) -> list[tuple[str, str]]:
-        rows: list[tuple[str, str]] = []
+    def _source_stage_swimlane_rows(self, section_text: str) -> list[tuple[str, str, str]]:
+        headers, rows = self._source_stage_first_markdown_table(section_text)
+        if not headers or not rows:
+            return []
+        if self._clean_markdown_inline_text(headers[0]) != "泳道":
+            return []
+        swimlanes: list[tuple[str, str, str]] = []
+        for row in rows:
+            lane = row[0] if len(row) > 0 else ""
+            action = row[1] if len(row) > 1 else ""
+            anchor = row[2] if len(row) > 2 else ""
+            if lane or action or anchor:
+                swimlanes.append((lane, action, anchor))
+        return swimlanes
+
+    def _normalize_source_anchor(self, source_text: str) -> str:
+        cleaned = self._clean_markdown_inline_text(source_text)
+        anchors = re.findall(
+            r"([A-Za-z0-9_.-]+\.[A-Za-z0-9_+-]+(?::\d+(?:[-~]\d+)?)?(?:、:\d+(?:[-~]\d+)?)*)",
+            cleaned,
+        )
+        deduped: list[str] = []
+        for anchor in anchors:
+            if anchor not in deduped:
+                deduped.append(anchor)
+        if deduped:
+            return "；".join(deduped[:3])
+        return self._truncate_report_text(cleaned, 180)
+
+    def _source_stage_evidence_rows(self, section_text: str, *, limit: int = 6) -> list[tuple[str, str, str]]:
+        rows: list[tuple[str, str, str]] = []
         for entry in self._markdown_section_entries(section_text)[:limit]:
-            location = "证据"
-            detail = entry
-            match = re.match(r"^\*\*(.+?)\*\*:\s*(.+)$", entry)
-            if match:
-                location = self._clean_markdown_inline_text(match.group(1))
-                detail = match.group(2)
-            rows.append((location, self._truncate_report_text(detail, 160)))
+            detail_text = entry
+            anchor_text = ""
+            source_match = re.search(r"(?:来源|源码锚点)[：:]\s*(.+)$", entry)
+            if source_match:
+                detail_text = entry[:source_match.start()].strip()
+                anchor_text = self._normalize_source_anchor(source_match.group(1))
+            title, detail = self._source_stage_entry_title_detail(detail_text)
+            location = title or "证据"
+            content = detail or self._clean_markdown_inline_text(detail_text)
+            rows.append(
+                (
+                    self._truncate_report_text(location, 80),
+                    self._truncate_report_text(content, 220),
+                    anchor_text or "见完整分析",
+                )
+            )
         return rows
 
     def _source_stage_report_sections(self, analysis_text: str) -> list[ReportSection]:
@@ -357,6 +478,24 @@ class _BugPromptMixin:
         for title, body in sections.items():
             if not body.strip():
                 continue
+            if title == "结论摘要":
+                summary_body = self._strip_markdown_tables(body)
+                summary_items = self._source_stage_issue_items(summary_body, sev="green", limit=6)
+                if summary_items:
+                    rendered.append(ReportSection(kind="issues", title="结论摘要", items=summary_items))
+                swimlane_rows = self._source_stage_swimlane_rows(body)
+                if swimlane_rows:
+                    rendered.append(
+                        ReportSection(
+                            kind="swimlane",
+                            title="泳道图",
+                            description="按发送、分发和消费路径拆开展示源码链路。",
+                            cols=["泳道", "时序动作", "源码锚点"],
+                            rows=swimlane_rows,
+                            empty_text="未提取到结构化泳道节点",
+                        )
+                    )
+                continue
             if title == "关键证据":
                 evidence_rows = self._source_stage_evidence_rows(body, limit=12)
                 if evidence_rows:
@@ -364,17 +503,14 @@ class _BugPromptMixin:
                         ReportSection(
                             kind="table",
                             title="关键证据",
-                            cols=["位置", "关键点"],
+                            cols=["位置", "关键点", "源码锚点"],
                             rows=evidence_rows,
                             empty_text="未提取到关键证据摘要",
                         )
                     )
                 continue
             sev = "yellow" if title == "待确认项" else "green"
-            items = [
-                {"sev": sev, "title": self._truncate_report_text(entry, 600), "detail": ""}
-                for entry in self._markdown_section_entries(body)[:8]
-            ]
+            items = self._source_stage_issue_items(body, sev=sev, limit=8)
             if items:
                 rendered.append(ReportSection(kind="issues", title=title, items=items))
         return rendered

@@ -3,6 +3,48 @@ from _agents_base import _AgentTestBase
 
 
 class AgentsBugAnalysisTests(_AgentTestBase):
+    def test_build_summary_from_report_scene_signal_prefers_target_focus(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = BugAnalysisRunner(
+                BridgeConfig(dry_run=True, data_dir=Path(tmp), workspace_root=Path(tmp))
+            )
+            report_json = Path(tmp) / "bug_scene_signal_report.json"
+            report_json.write_text(
+                json.dumps(
+                    {
+                        "target_time": "2026-05-29T14:03",
+                        "verdict": "SIGNAL_SR_SCENE_TYPE 最后完整链路闭环：Android 已输出 P_Gear_Pilot_Interim_Scene / 泊车临停P，Unity 已收到场景变化 10。",
+                        "target_focus": {
+                            "summary": "目标时间 14:03:00 前最近一次已知关键状态出现在 2026-05-29T14:00:40。 按目标时间前最近一次已知状态推断：GearSt=IMMERSIVE_P / 上电P。",
+                            "latest_prior_state_time": "2026-05-29T14:00:40",
+                            "inferred_state_summary": "GearSt=IMMERSIVE_P / 上电P",
+                        },
+                        "latest_sr_chain": {
+                            "value": "10",
+                            "value_desc": "P_Gear_Pilot_Interim_Scene / 泊车临停P",
+                            "android_event": {"time": "2026-05-29T14:06:39.542"},
+                        },
+                        "event_count": 942,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            summary = runner._build_summary_from_report(
+                plan=BugAnalysisPlan(kind="scene_signal"),
+                report_json=report_json,
+                prompt_text="分析场景信号",
+                fault_time="2026-05-29 14:03",
+                html_path=Path(tmp) / "bug_scene_signal_report.html",
+                selected_input=None,
+            )
+
+        self.assertIn("目标时间: 2026-05-29T14:03", summary)
+        self.assertIn("目标时间 14:03:00 前最近一次已知关键状态出现在 2026-05-29T14:00:40", summary)
+        self.assertIn("目标时间前最近状态时间: 2026-05-29T14:00:40", summary)
+        self.assertIn("目标时间前最近状态: GearSt=IMMERSIVE_P / 上电P", summary)
+
     def test_bug_analysis_general_request_with_logs_collects_source_evidence(self):
         with tempfile.TemporaryDirectory() as tmp:
             guideengine_repo = Path(tmp) / "guideengine"

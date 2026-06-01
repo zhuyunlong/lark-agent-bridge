@@ -115,15 +115,20 @@ class _GeneralSummaryMixin:
 
         if plan.kind == "scene_signal":
             verdict = str(payload.get("verdict") or "已生成 3D 场景信号报告") if isinstance(payload, dict) else "已生成 3D 场景信号报告"
-            latest_chain = payload.get("latest_sr_chain", {}) if isinstance(payload, dict) else {}
-            chain_value = str(latest_chain.get("value") or "") if isinstance(latest_chain, dict) else ""
-            chain_desc = str(latest_chain.get("value_desc") or "") if isinstance(latest_chain, dict) else ""
+            target_focus = payload.get("target_focus", {}) if isinstance(payload, dict) else {}
             event_count = payload.get("event_count", "") if isinstance(payload, dict) else ""
+            target_summary = str(target_focus.get("summary") or "").strip() if isinstance(target_focus, dict) else ""
+            target_time = str(payload.get("target_time") or fault_time or "未识别") if isinstance(payload, dict) else (fault_time or "未识别")
+            inferred_state = str(target_focus.get("inferred_state_summary") or "").strip() if isinstance(target_focus, dict) else ""
+            prior_state_time = str(target_focus.get("latest_prior_state_time") or "").strip() if isinstance(target_focus, dict) else ""
             return (
                 "Bug 分析完成\n"
                 f"类型: {self._analysis_label(plan.kind)}\n"
-                f"结论: {verdict}\n"
-                f"最终 SR 场景: {chain_value or '未命中'} {chain_desc}\n"
+                f"结论: {target_summary or verdict}\n"
+                f"目标时间: {target_time}\n"
+                f"脚本 verdict: {verdict}\n"
+                f"目标时间前最近状态时间: {prior_state_time or '未命中'}\n"
+                f"目标时间前最近状态: {inferred_state or '未命中'}\n"
                 f"事件数: {event_count or '未知'}\n"
                 f"描述: {prompt_text}\n"
                 f"HTML: {html_path}"

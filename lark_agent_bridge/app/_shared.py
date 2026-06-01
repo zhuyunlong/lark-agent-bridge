@@ -304,6 +304,24 @@ class _RouteContext:
     latest_chat_context: ConversationContext | None = None
 
 
+@dataclass
+class RouteCandidate:
+    route: str
+    band: str
+    score: int
+    reason: str
+    blocked_by: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "route": self.route,
+            "band": self.band,
+            "score": self.score,
+            "reason": self.reason,
+            "blocked_by": list(self.blocked_by),
+        }
+
+
 __all__ = [
     'dataclass',
     'field',
@@ -440,4 +458,5 @@ __all__ = [
     '_FAST_ANSWER_STOP_TOKENS',
     '_FAST_ANSWER_LATIN_DOMAIN_STOP_TERMS',
     '_RouteContext',
+    'RouteCandidate',
 ]

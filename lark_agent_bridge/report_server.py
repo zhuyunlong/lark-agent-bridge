@@ -132,7 +132,7 @@ class HtmlReportPublisher:
         )
         return PublishedReport(
             slug=published_slug,
-            url=self._url_for_slug(published_slug),
+            url=self._url_for_slug(published_slug, primary_report=copied_paths[0] if len(copied_paths) == 1 else None),
             directory=target_dir,
             index_path=index_path,
             report_paths=copied_paths,
@@ -220,8 +220,8 @@ class HtmlReportPublisher:
             (
                 "<section class=\"report-card\">"
                 f"<h2>{escape(_report_title(mode, index, len(reports), report))}</h2>"
-                "<p class=\"muted\">完整报告较长，包含详细证据、图表和运行信息；首页只保留摘要和入口，避免重复嵌套展示。请在新窗口打开完整报告。</p>"
-                f"<p><a class=\"report-link\" href=\"{quote(report.name)}\" target=\"_blank\" rel=\"noreferrer\">打开 HTML 报告</a></p>"
+                "<p class=\"muted\">完整报告较长，包含详细证据、图表和运行信息；首页只保留摘要和入口，避免重复嵌套展示。点击进入完整报告。</p>"
+                f"<p><a class=\"report-link\" href=\"{quote(report.name)}\">打开 HTML 报告</a></p>"
                 "</section>"
             )
             for index, report in enumerate(reports, start=1)
@@ -278,9 +278,12 @@ class HtmlReportPublisher:
             "</html>\n"
         )
 
-    def _url_for_slug(self, slug: str) -> str:
+    def _url_for_slug(self, slug: str, *, primary_report: Path | None = None) -> str:
         base = self.public_base_url.rstrip("/")
-        return f"{base}/{'/'.join(quote(part) for part in slug.split('/'))}/"
+        slug_path = "/".join(quote(part) for part in slug.split("/"))
+        if primary_report is not None:
+            return f"{base}/{slug_path}/{quote(primary_report.name)}"
+        return f"{base}/{slug_path}/"
 
 
 class ReportHttpServer:
@@ -393,6 +396,7 @@ def _build_handler(
 ):
     class _ReportHandler(SimpleHTTPRequestHandler):
         def __init__(self, *args, **kwargs):
+            self._disable_cache_for_response = False
             super().__init__(*args, directory=str(root_dir), **kwargs)
 
         def do_GET(self) -> None:
@@ -479,6 +483,7 @@ def _build_handler(
             if not self._rewrite_report_path():
                 self.send_error(404)
                 return
+            self._disable_cache_for_response = True
             super().do_GET()
 
         def do_HEAD(self) -> None:
@@ -520,6 +525,7 @@ def _build_handler(
             if not self._rewrite_report_path():
                 self.send_error(404)
                 return
+            self._disable_cache_for_response = True
             super().do_HEAD()
 
         def do_POST(self) -> None:
@@ -648,6 +654,13 @@ def _build_handler(
 
         def log_message(self, format: str, *args) -> None:
             return
+
+        def end_headers(self) -> None:
+            if self._disable_cache_for_response:
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Pragma", "no-cache")
+                self.send_header("Expires", "0")
+            super().end_headers()
 
         def _rewrite_report_path(self) -> bool:
             parsed = urlsplit(self.path)

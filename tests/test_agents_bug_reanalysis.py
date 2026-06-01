@@ -804,6 +804,85 @@ class AgentsBugReanalysisTests(_AgentTestBase):
         self.assertIn("foo.kt:12", html)
         self.assertIn("bar.cs:34", html)
         self.assertIn("展开查看完整分析 Markdown", html)
+
+    def test_write_custom_skill_agent_report_renders_structured_swimlane_and_source_anchors(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=False, data_dir=Path(tmp), workspace_root=Path(tmp))
+            runner = BugAnalysisRunner(config)
+            html_path = Path(tmp) / "source_stage_report.html"
+            json_path = Path(tmp) / "source_stage_report.json"
+            analysis_path = Path(tmp) / "source_stage_analysis.md"
+            analysis_path.write_text(
+                "\n".join(
+                    [
+                        "## 结论摘要",
+                        "",
+                        "- 当前车道级信号分成 guideengine 与 Napa5 两条主链。",
+                        "- 本轮只有源码，没有日志，运行态触发情况待确认。",
+                        "",
+                        "| 泳道 | 时序动作 | 源码锚点 |",
+                        "|---|---|---|",
+                        "| Unity / LD | 上报 LD 中心点、LD 场景 | `SetLdTileCenterMsg.sendMsgData`、`LDSceneMsg.sendMsgData` |",
+                        "| XData Transport | 分发 Unity / Native 信号 | `XDataTransport.onSignalData` |",
+                        "| Napa5 渲染 | 消费变道和红毯事件 | `SRMarks.OnLaneChanged`、`SRLayerAEB.OnFrontLaneWarning` |",
+                        "",
+                        "## 关键证据",
+                        "",
+                        "- **Unity 入口**：`sendMsgToAndroid(...)` 负责把 LD 场景发到 Android。 来源：`/tmp/SetLdTileCenterMsg.java:17`、`:23`",
+                        "- **XData 分发**：`onSignalData(...)` 按 source 转发给 Unity Service 或 FloorCenter。 来源：`/tmp/XDataTransport.kt:284`、`:304`",
+                        "",
+                        "## 最可能原因",
+                        "",
+                        "- 这更像链路解释请求，不是运行态异常定因。",
+                        "",
+                        "## 待确认项",
+                        "",
+                        "- 需要补日志确认信号是否真实触发。",
+                        "",
+                        "## 建议动作",
+                        "",
+                        "- 后续补抓 Unity/XData/LD 标签日志。",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            skill_md = Path(tmp) / "SKILL.md"
+            skill_md.write_text("# Source Analysis\n", encoding="utf-8")
+
+            with mock.patch.object(runner, "_skill_context_paths", return_value=[skill_md]):
+                runner._write_custom_skill_agent_report(
+                    analysis_kind="source_stage",
+                    analysis_label="源码分析阶段",
+                    html_path=html_path,
+                    json_path=json_path,
+                    analysis_markdown_path=analysis_path,
+                    skill_name="source_analysis",
+                    provider="codex",
+                    request_text="基于源码解释车道级相关信号",
+                    prompt_text="基于源码解释车道级相关信号",
+                    title="车道级信号分析",
+                    description="问题描述",
+                    fault_time="",
+                    selected_input=None,
+                    prepared_input=None,
+                    source_evidence_path=None,
+                    evidence_count=2,
+                    duration_seconds=8.2,
+                    executor="codex_app_server",
+                )
+
+            html = html_path.read_text(encoding="utf-8")
+
+        self.assertIn("<h2>泳道图</h2>", html)
+        self.assertIn('class="swimlane-svg-wrap"', html)
+        self.assertIn("<svg", html)
+        self.assertIn("Unity / LD", html)
+        self.assertIn("XData Transport", html)
+        self.assertIn("Napa5 渲染", html)
+        self.assertIn("源码锚点", html)
+        self.assertIn("SetLdTileCenterMsg.java:17", html)
+        self.assertIn("XDataTransport.kt:284", html)
+
     def test_bug_reanalysis_source_stage_app_server_can_skip_separate_summary(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = BridgeConfig(

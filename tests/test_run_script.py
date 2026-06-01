@@ -5,6 +5,7 @@ import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 RUN_SCRIPT = ROOT / "run.sh"
+STOP_SCRIPT = ROOT / "stop.sh"
 PRESETS = ROOT / "config" / "presets.toml"
 
 
@@ -67,6 +68,18 @@ class RunScriptTests(unittest.TestCase):
     def test_run_openai_entrypoint_is_removed(self):
         removed_entry = "run-" + "openai.sh"
         self.assertFalse((ROOT / removed_entry).exists())
+
+    def test_stop_sh_targets_this_checkout_listener_and_event_bus(self):
+        content = STOP_SCRIPT.read_text(encoding="utf-8")
+
+        self.assertIn('CONFIG="$PROJECT_DIR/config.toml"', content)
+        self.assertIn("-m lark_agent_bridge listen", content)
+        self.assertIn("index($0, config) > 0", content)
+        self.assertIn("kill -TERM", content)
+        self.assertIn("lark-cli event stop --json --force", content)
+        self.assertIn("--no-event-bus", content)
+        self.assertIn("--dry-run", content)
+        self.assertNotIn("mapfile", content)
 
     def test_repository_keeps_one_runtime_config_and_centralized_templates(self):
         runtime_configs = {path.name for path in ROOT.glob("config*.toml")}

@@ -165,6 +165,13 @@ _DIRECT_API_COMPACTION_PROFILES: tuple[DirectApiCompactionProfileSpec, ...] = (
         handler="_direct_api_context_excerpt_for_startup_unity_lifecycle",
         metadata_markers=("bug_3d_startup_report",),
     ),
+    DirectApiCompactionProfileSpec(
+        name="scene_signal_target_focus",
+        analysis_kind="scene_signal",
+        skill_name="scene-signal-diagnosis",
+        handler="_direct_api_context_excerpt_for_scene_signal_target_focus",
+        metadata_markers=("bug_scene_signal_report",),
+    ),
 )
 
 # Derived sets — kept for call sites that need a set (e.g. set membership tests

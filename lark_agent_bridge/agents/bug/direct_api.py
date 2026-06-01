@@ -546,9 +546,33 @@ class _DirectApiMixin:
                     detail = self._clean_markdown_inline_text(str(item.get("detail") or ""))
                     if title or detail:
                         lines.append(f"  - {title}: {detail}".rstrip(": "))
+        elif isinstance(verdict, str):
+            verdict_message = self._clean_markdown_inline_text(verdict)
+            if verdict_message:
+                lines.append(f"- verdict: {verdict_message}")
         target_time = str(payload.get("target_time") or "").strip()
         if target_time:
             lines.append(f"- target_time: {target_time}")
+        target_focus = payload.get("target_focus")
+        if isinstance(target_focus, dict):
+            headline = self._clean_markdown_inline_text(str(target_focus.get("headline") or ""))
+            summary = self._clean_markdown_inline_text(str(target_focus.get("summary") or ""))
+            inferred = self._clean_markdown_inline_text(str(target_focus.get("inferred_state_summary") or ""))
+            if headline:
+                lines.append(f"- target_focus: {headline}")
+            elif summary:
+                lines.append(f"- target_focus: {summary}")
+            if inferred:
+                lines.append(f"- target_state: {inferred}")
+        latest_chain = payload.get("latest_sr_chain")
+        if isinstance(latest_chain, dict) and not isinstance(target_focus, dict):
+            android_event = latest_chain.get("android_event")
+            chain_time = ""
+            if isinstance(android_event, dict):
+                chain_time = str(android_event.get("time") or "").strip()
+            chain_value = self._clean_markdown_inline_text(str(latest_chain.get("value_desc") or latest_chain.get("value") or ""))
+            if chain_time or chain_value:
+                lines.append(f"- latest_sr_chain: {chain_time or '未命中'} {chain_value}".rstrip())
         focus_session_index = payload.get("focus_session_index")
         focus_session_pid = payload.get("focus_session_pid")
         if focus_session_index not in (None, "") or focus_session_pid not in (None, ""):
@@ -696,6 +720,25 @@ class _DirectApiMixin:
                 max_headings=6,
                 max_entries_per_heading=4,
                 max_table_rows=2,
+            )
+        return self._read_bug_summary_context_excerpt(path, max_chars)
+
+    def _direct_api_context_excerpt_for_scene_signal_target_focus(
+        self,
+        *,
+        title: str,
+        path: Path,
+        max_chars: int,
+    ) -> str:
+        if self._is_report_json_path(path):
+            return self._compact_structured_report_excerpt(path, max_chars=min(max_chars, 2200))
+        if title.startswith("Matched Skill:") or title.startswith("Matched Skill Reference:"):
+            return self._compact_markdown_outline_excerpt(
+                path,
+                max_chars=min(max_chars, 1600),
+                max_headings=6,
+                max_entries_per_heading=3,
+                max_table_rows=3,
             )
         return self._read_bug_summary_context_excerpt(path, max_chars)
 

@@ -170,6 +170,9 @@ disable_computer_use_feature = true
 preserve_proxy_env = true
 reasoning_effort = "medium"
 use_minimal_home = true
+# use_minimal_home=true 且 source_investigation.codegraph_enabled=true 时，
+# Bridge 会在临时 CODEX_HOME 中注入 bridge_codegraph MCP 工具，供 app-server
+# 通过 codegraph_status/search_codegraph/get_callers/get_code_context 使用索引。
 
 [claude_agent]
 enabled = false

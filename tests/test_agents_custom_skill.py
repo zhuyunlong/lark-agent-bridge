@@ -1,5 +1,6 @@
 from _agents_base import *  # noqa: F401,F403
 from _agents_base import _AgentTestBase
+import tomllib
 
 
 class AgentsCustomSkillTests(_AgentTestBase):
@@ -1353,6 +1354,31 @@ class AgentsCustomSkillTests(_AgentTestBase):
         self.assertIsInstance(policy.env, dict)
         self.assertNotEqual(policy.env, {})              # never falls back to inherit-all
         self.assertEqual(policy.env.get("CODEX_HOME"), str(Path(tmp) / "codex_home"))
+
+    def test_minimal_home_injects_bridge_codegraph_mcp(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root_a = Path(tmp) / "guideengine"
+            root_b = Path(tmp) / "Napa5"
+            root_a.mkdir()
+            root_b.mkdir()
+            config = BridgeConfig(data_dir=Path(tmp) / "data", workspace_root=Path(tmp))
+            config.source_investigation.codegraph_enabled = True
+            config.source_investigation.codegraph_command = "codegraph-test"
+            config.source_investigation.codegraph_timeout_seconds = 7
+            config.source_investigation.repo_roots = [root_a, root_b]
+            runner = BugAnalysisRunner(config)
+
+            body = "\n".join(runner._codex_app_server_codegraph_mcp_config_lines())
+            parsed = tomllib.loads(body)
+
+        server = parsed["mcp_servers"]["bridge_codegraph"]
+        self.assertEqual(server["command"], sys.executable)
+        self.assertEqual(server["args"], ["-m", "lark_agent_bridge.mcp_codegraph_server"])
+        env = server["env"]
+        self.assertIn(str(root_a.resolve()), env["LARK_AGENT_BRIDGE_CODEGRAPH_ROOTS"].splitlines())
+        self.assertIn(str(root_b.resolve()), env["LARK_AGENT_BRIDGE_CODEGRAPH_ROOTS"].splitlines())
+        self.assertEqual(env["LARK_AGENT_BRIDGE_CODEGRAPH_COMMAND"], "codegraph-test")
+        self.assertEqual(env["LARK_AGENT_BRIDGE_CODEGRAPH_TIMEOUT_SECONDS"], "7.0")
     def test_codex_app_server_reinjects_proxy_env(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "workspace"

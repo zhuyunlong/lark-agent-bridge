@@ -102,8 +102,8 @@ class AppBugRequestTests(_AppTestBase):
         self.assertEqual(followup.details["report_group_key"], f"bug:{bug_url}")
         self.assertEqual(followup.details["report_version"], 2)
         self.assertNotEqual(first.details["published_report_url"], followup.details["published_report_url"])
-        self.assertTrue(first.details["published_report_url"].endswith("/v1/"))
-        self.assertTrue(followup.details["published_report_url"].endswith("/v2/"))
+        self.assertTrue(first.details["published_report_url"].endswith("/v1/report.html"))
+        self.assertTrue(followup.details["published_report_url"].endswith("/v2/report.html"))
     def test_report_ready_notification_pushes_when_enabled(self):
         with tempfile.TemporaryDirectory() as tmp:
             metadata = Path(tmp) / "bug_metadata.md"

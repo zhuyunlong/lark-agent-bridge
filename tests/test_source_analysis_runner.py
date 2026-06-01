@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 
 from lark_agent_bridge.knowledge.source_investigation import SourceInvestigationResult
-from lark_agent_bridge.models import SourceAnalysisRequest
+from lark_agent_bridge.models import CodexAppServerOptions, SourceAnalysisRequest
 from lark_agent_bridge.source_analysis import RepositorySourceAnalysisRunner
 
 from tests._app_base import BridgeConfig, event
@@ -81,6 +81,82 @@ class SourceAnalysisRunnerTests(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertEqual(result.error_code, "source_analysis_failed")
         self.assertNotIn("files_to_send", result.details)
+
+    def test_app_server_source_analysis_rewrites_bug_style_html_to_generic_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            analysis_dir = Path(tmp) / "analysis"
+            analysis_dir.mkdir(parents=True, exist_ok=True)
+            analysis_path = analysis_dir / "source_stage_analysis.md"
+            analysis_path.write_text(
+                "\n".join(
+                    [
+                        "## 结论摘要",
+                        "",
+                        "- 当前车道级信号分成 guideengine 与 Napa5 两条主链。",
+                        "",
+                        "| 泳道 | 时序动作 | 源码锚点 |",
+                        "|---|---|---|",
+                        "| Unity / LD | 上报 LD 中心点、LD 场景 | `SetLdTileCenterMsg.sendMsgData` |",
+                        "| XData Transport | 分发 Unity / Native 信号 | `XDataTransport.onSignalData` |",
+                        "",
+                        "## 关键证据",
+                        "",
+                        "- **Unity 入口**：`sendMsgToAndroid(...)` 负责把 LD 场景发到 Android。 来源：`/tmp/SetLdTileCenterMsg.java:17`",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            class FakeBugRunner:
+                def _run_custom_skill_agent_analysis(self, **kwargs):
+                    html_path = Path(kwargs["html_path"])
+                    html_path.parent.mkdir(parents=True, exist_ok=True)
+                    html_path.write_text("<html><body><h1>Bug 标题：旧报告</h1></body></html>", encoding="utf-8")
+                    Path(kwargs["json_path"]).write_text("{}", encoding="utf-8")
+                    return {
+                        "ok": True,
+                        "executor": "codex_app_server",
+                        "provider": "codex",
+                        "analysis_markdown_path": analysis_path,
+                        "html_path": html_path,
+                        "json_path": Path(kwargs["json_path"]),
+                        "command": ["codex", "app-server"],
+                        "stdout": "",
+                        "stderr": "",
+                        "thread_id": "thread-src",
+                        "turn_id": "turn-src",
+                        "app_server_version": "0.135.0",
+                    }
+
+            config = BridgeConfig(
+                dry_run=False,
+                data_dir=Path(tmp),
+                codex_app_server=CodexAppServerOptions(enabled=True, use_for_file_agent=True),
+            )
+            runner = RepositorySourceAnalysisRunner(
+                config,
+                source_runner=FakeSourceInvestigationRunner(None),
+                bug_runner=FakeBugRunner(),
+            )
+            request = SourceAnalysisRequest(
+                prompt="基于源码分析车道级相关信号",
+                target="车道级相关信号",
+                raw_text="@bot 基于源码分析车道级相关信号",
+                triggered=True,
+                diagram_kinds=["swimlane"],
+            )
+
+            result = runner.run(request, event(event_id="evt_source_app_server"))
+
+            self.assertTrue(result.success)
+            html_path = Path(result.html_report)
+            html = html_path.read_text(encoding="utf-8")
+            self.assertIn('class="swimlane-svg-wrap"', html)
+            self.assertIn("车道级相关信号", html)
+            self.assertNotIn("Bug 标题", html)
+            self.assertNotIn("执行器", html)
+            self.assertEqual(result.details["mode"], "source_analysis")
+            self.assertEqual(result.details["source_execution_backend"], "codex_app_server")
 
 
 if __name__ == "__main__":

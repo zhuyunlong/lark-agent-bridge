@@ -762,6 +762,7 @@ class _CustomSkillMixin:
         if model:
             # Empty model => omit the line so Codex uses its own default.
             config_lines = [f'model = "{model}"', ""] + config_lines
+        config_lines.extend(self._codex_app_server_codegraph_mcp_config_lines())
         try:
             (template / "config.toml").write_text("\n".join(config_lines), encoding="utf-8")
         except OSError:
@@ -776,6 +777,42 @@ class _CustomSkillMixin:
         except OSError:
             return template
         return run_home
+
+    def _codex_app_server_codegraph_mcp_config_lines(self) -> list[str]:
+        si_opts = self.config.source_investigation
+        if not si_opts.codegraph_enabled:
+            return []
+        roots: list[Path] = []
+        for root in si_opts.repo_roots or []:
+            try:
+                resolved = root.expanduser().resolve()
+            except OSError:
+                continue
+            if resolved.exists() and resolved not in roots:
+                roots.append(resolved)
+        if not roots:
+            return []
+
+        repo_root = Path(__file__).resolve().parents[3]
+        python_path = str(repo_root)
+        inherited_python_path = os.environ.get("PYTHONPATH", "").strip()
+        if inherited_python_path:
+            python_path = os.pathsep.join([python_path, inherited_python_path])
+        command = (si_opts.codegraph_command or "codegraph").strip() or "codegraph"
+        timeout = str(max(1.0, float(si_opts.codegraph_timeout_seconds or 10.0)))
+        return [
+            "",
+            "[mcp_servers.bridge_codegraph]",
+            f"command = {_toml_string(sys.executable)}",
+            f"args = {_toml_array(['-m', 'lark_agent_bridge.mcp_codegraph_server'])}",
+            "startup_timeout_sec = 30",
+            "",
+            "[mcp_servers.bridge_codegraph.env]",
+            f"PYTHONPATH = {_toml_string(python_path)}",
+            f"LARK_AGENT_BRIDGE_CODEGRAPH_COMMAND = {_toml_string(command)}",
+            f"LARK_AGENT_BRIDGE_CODEGRAPH_TIMEOUT_SECONDS = {_toml_string(timeout)}",
+            f"LARK_AGENT_BRIDGE_CODEGRAPH_ROOTS = {_toml_string(chr(10).join(str(root) for root in roots))}",
+        ]
 
     def _merge_codex_app_server_proxy_env(self, env: dict[str, str]) -> dict[str, str]:
         merged = dict(env)
@@ -994,10 +1031,11 @@ class _CustomSkillMixin:
         roots = source_roots if source_roots is not None else self._custom_skill_agent_source_roots()
         roots_hint = "、".join(f"`{path}`" for path in roots[:3]) if roots else "`<源码根>`"
         return [
-            f"可用源码根: {roots_hint}；先用 `{command} status <源码根>` 确认索引可用。",
-            f"按符号/信号名定位入口: `{command} query \"<类名/函数名/信号名>\" --path <源码根> --json --limit 20`。",
-            f"追调用方: `{command} callers \"<符号名>\" --path <源码根> --json --limit 20`。",
-            f"需要全局入口点时: `{command} context \"<分析目标>\" --path <源码根> --format json --no-code --max-nodes 30`。",
+            f"可用源码根: {roots_hint}；若可见 `bridge_codegraph` MCP 工具，优先调用 `codegraph_status`、`search_codegraph`、`get_callers`、`get_code_context`。",
+            f"若 MCP 工具不可用，再用 CLI fallback: `{command} status <源码根>`；sandbox 下 status 失败只表示 CLI 受限，不代表宿主索引一定不可用。",
+            f"CLI 按符号/信号名定位入口: `{command} query \"<类名/函数名/信号名>\" --path <源码根> --json --limit 20`。",
+            f"CLI 追调用方: `{command} callers \"<符号名>\" --path <源码根> --json --limit 20`。",
+            f"CLI 需要全局入口点时: `{command} context \"<分析目标>\" --path <源码根> --format json --no-code --max-nodes 30`。",
             "CodeGraph 只用于收敛候选文件和调用链；最终证据仍要回到具体源码文件+行号，不要把完整 JSON 大段贴入结论。",
         ]
 
@@ -1039,3 +1077,11 @@ def _app_server_delta_should_flush(text: str, *, started_at: float, max_chars: i
 def _prompt_requires_json_fence(prompt_text: str) -> bool:
     normalized = (prompt_text or "").casefold()
     return "```json" in normalized or ("json" in normalized and "fenced block" in normalized)
+
+
+def _toml_string(value: object) -> str:
+    return json.dumps(str(value), ensure_ascii=False)
+
+
+def _toml_array(values: list[object]) -> str:
+    return "[" + ", ".join(_toml_string(value) for value in values) + "]"

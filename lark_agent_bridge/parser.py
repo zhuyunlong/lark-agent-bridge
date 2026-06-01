@@ -549,7 +549,8 @@ def build_basic_chat_reply(text: str, *, command_prefixes: list[str] | None = No
         return (
             "我是本地运行的 Lark Agent Bridge。"
             "我负责在飞书里接收消息、下载日志或附件，并调用本地分析脚本回传报告；"
-            "现在支持 Bug 链接分析、附件/URL 直传分析、信号链路分析、当前感知数据总结、"
+            "现在支持 Bug 链接分析、需求链接源码分析、仓库源码分析、附件/URL 直传分析、"
+            "信号链路分析、当前感知数据总结、"
             "个人知识库问答、历史报告续聊、普通聊天和帮助回复。\n"
             "发送 `help` 可以查看常用触发示例。"
         )
@@ -565,6 +566,8 @@ def build_basic_chat_reply(text: str, *, command_prefixes: list[str] | None = No
             "| Bug 信号链 | `@机器人 <bug链接> 分析132002为什么没到Unity` |\n"
             "| Bug XTheme | `@机器人 <bug链接> 分析 xtheme / 晨曦 / 主题切换` |\n"
             "| Bug 感知总结 | `@机器人 <bug链接> 总结当前感知数据` |\n"
+            "| 需求源码分析 | `@机器人 https://project.feishu.cn/demo/story/detail/12345 结合源码分析是否可行` |\n"
+            "| 仓库源码分析 | `@机器人 基于源码分析 UnityReady 信号链路如何监听` |\n"
             "| 附件/日志分析 | 回复文件、文件夹、压缩包或日志：`@机器人 分析启动和卡顿 file_xxx 11:30` |\n"
             "| 信号链分析 | `@机器人 /signal 132002 日志 https://.../Log.zip`，或 `@机器人 调查 SIGNAL_X3D_LD_NORMAL_OVER_ALL_DATA 日志 file_xxx`，触发 `signal-chain-analyzer` |\n"
             "| 个人知识库 | `@机器人 知识库 OTA信号如何模拟`、`@机器人 查知识 主题信号如何模拟`，/kb 仍兼容 |\n"
@@ -572,7 +575,7 @@ def build_basic_chat_reply(text: str, *, command_prefixes: list[str] | None = No
             "| 续聊/重跑 | 回复上一条报告卡片或报告文件：`@机器人 基于源码重新分析` |\n"
             "| 普通聊天 | 群里 `@机器人 /chat 讲个笑话`，私聊可直接提问 |\n"
             "\n"
-            "只有明确的 Bug 链接、日志/附件分析、信号/感知、知识库、ROM 查询等请求会进入卡片式处理；普通问答会直接文本回复。"
+            "只有明确的 Bug 链接、需求链接源码分析、仓库源码分析、日志/附件分析、信号/感知、知识库、ROM 查询等请求会进入卡片式处理；普通问答会直接文本回复。"
         )
 
     if _contains_any(cleaned_text, lowered, GREETING_TERMS):

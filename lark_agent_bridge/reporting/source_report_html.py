@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import html
+import re
 from typing import Iterable, Mapping, Sequence
+
+from .combined_bug_html import render_swimlane_rows
 
 
 BASE_REPORT_CSS = """
@@ -20,19 +23,19 @@ body {
     radial-gradient(circle at 100% 0, rgba(217, 119, 6, 0.06), transparent 42%),
     #f4f6f8;
 }
-.container { max-width: 1320px; margin: 0 auto; padding: 30px 24px 44px; }
-h1 { margin: 0 0 8px; font-size: 30px; line-height: 1.25; color: #111827; }
-.sub { max-width: 980px; color: #6b7280; margin-bottom: 24px; font-size: 13px; line-height: 1.65; }
+.container { max-width: 1380px; margin: 0 auto; padding: 34px 28px 52px; }
+h1 { margin: 0 0 10px; font-size: 36px; line-height: 1.2; color: #111827; }
+.sub { max-width: 1040px; color: #6b7280; margin-bottom: 26px; font-size: 14px; line-height: 1.75; }
 .verdict {
-  padding: 20px 24px;
-  border-radius: 16px;
+  padding: 22px 26px;
+  border-radius: 18px;
   color: #fff;
-  font-size: 18px;
+  font-size: 20px;
   font-weight: 700;
   box-shadow: 0 18px 42px rgba(15, 23, 42, 0.16);
   border: 1px solid rgba(255, 255, 255, 0.24);
-  margin-bottom: 24px;
-  line-height: 1.55;
+  margin-bottom: 26px;
+  line-height: 1.6;
 }
 .v-red { background: linear-gradient(140deg, #ef4444, #b91c1c); }
 .v-yellow { background: linear-gradient(140deg, #f59e0b, #b45309); }
@@ -47,8 +50,8 @@ h1 { margin: 0 0 8px; font-size: 30px; line-height: 1.25; color: #111827; }
   box-shadow: 0 10px 26px rgba(15, 23, 42, 0.07);
 }
 .card .lbl { font-size: 12px; font-weight: 700; letter-spacing: 0.02em; color: #64748b; }
-.card .val { font-size: 23px; font-weight: 700; margin-top: 4px; word-break: break-word; color: #0f172a; }
-.card .desc { color: #64748b; font-size: 12px; line-height: 1.6; margin-top: 6px; }
+.card .val { font-size: 24px; font-weight: 700; margin-top: 4px; word-break: break-word; color: #0f172a; }
+.card .desc { color: #64748b; font-size: 13px; line-height: 1.65; margin-top: 6px; }
 .card.red { border-top-color: #dc2626; }
 .card.yellow { border-top-color: #d97706; }
 .card.green { border-top-color: #059669; }
@@ -57,18 +60,18 @@ h1 { margin: 0 0 8px; font-size: 30px; line-height: 1.25; color: #111827; }
 .card.green .val { color: #047857; }
 .section {
   background: #fff;
-  border-radius: 12px;
+  border-radius: 14px;
   border: 1px solid #e5e7eb;
-  padding: 20px 24px;
-  margin-bottom: 18px;
+  padding: 22px 26px;
+  margin-bottom: 20px;
   box-shadow: 0 10px 26px rgba(15, 23, 42, 0.06);
   overflow-x: auto;
 }
-.section h2 { margin: 0 0 14px; font-size: 18px; border-left: 4px solid #d97706; padding-left: 10px; }
+.section h2 { margin: 0 0 16px; font-size: 21px; border-left: 4px solid #d97706; padding-left: 10px; }
 .issue {
-  padding: 10px 14px;
-  border-radius: 8px;
-  margin-bottom: 8px;
+  padding: 12px 16px;
+  border-radius: 10px;
+  margin-bottom: 10px;
   border: 1px solid #d1d5db;
   border-left: 4px solid #94a3b8;
   background: #f8fafc;
@@ -76,20 +79,20 @@ h1 { margin: 0 0 8px; font-size: 30px; line-height: 1.25; color: #111827; }
 .issue.red { border-color: #fecaca; border-left-color: #dc2626; background: #fef2f2; }
 .issue.yellow { border-color: #fde68a; border-left-color: #d97706; background: #fffbeb; }
 .issue.green { border-color: #a7f3d0; border-left-color: #059669; background: #ecfdf5; }
-.issue .t { font-weight: 600; }
-.issue .d { color: #6b7280; font-size: 12px; margin-top: 4px; line-height: 1.55; }
-table { width: 100%; min-width: 720px; border-collapse: collapse; font-size: 13px; }
-th, td { padding: 9px 11px; border-bottom: 1px solid #edf2f7; text-align: left; vertical-align: top; }
+.issue .t { font-weight: 700; font-size: 15px; }
+.issue .d { color: #6b7280; font-size: 13px; margin-top: 5px; line-height: 1.65; }
+table { width: 100%; min-width: 840px; border-collapse: collapse; font-size: 14px; }
+th, td { padding: 10px 12px; border-bottom: 1px solid #edf2f7; text-align: left; vertical-align: top; }
 th { background: #f8fafc; font-weight: 600; color: #334155; }
 details { margin-top: 10px; border: 1px solid rgba(148, 163, 184, 0.28); border-radius: 10px; padding: 10px 12px; background: rgba(248, 250, 252, 0.72); }
-summary { cursor: pointer; color: #b45309; font-size: 13px; font-weight: 700; }
+summary { cursor: pointer; color: #b45309; font-size: 14px; font-weight: 700; }
 pre {
   max-height: 560px;
   background: #f8fafc;
-  padding: 10px;
-  border-radius: 6px;
-  font-size: 12px;
-  line-height: 1.55;
+  padding: 12px;
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 1.65;
   white-space: pre-wrap;
   word-break: break-word;
   overflow-x: auto;
@@ -127,12 +130,8 @@ pre {
 .chain-title { font-weight: 700; font-size: 15px; margin-bottom: 4px; }
 .chain-evi, .chain-down { font-size: 13px; color: #475569; line-height: 1.55; margin-top: 2px; }
 .chain-arrow { text-align: center; font-size: 22px; color: #94a3b8; line-height: 1.1; padding: 4px 0; font-weight: 700; }
-.swimlane { display: grid; grid-template-columns: repeat(4, minmax(190px, 1fr)); gap: 10px; min-width: 820px; }
-.lane { border: 1px solid #e5e7eb; border-radius: 10px; background: #f8fafc; overflow: hidden; }
-.lane-title { padding: 10px 12px; font-weight: 700; color: #334155; background: #eef2f7; border-bottom: 1px solid #e5e7eb; }
-.lane-step { margin: 10px; padding: 10px 12px; border-radius: 8px; background: #fff; border-left: 4px solid #d97706; box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06); }
-.lane-step .name { font-weight: 700; margin-bottom: 4px; }
-.lane-step .desc { color: #64748b; font-size: 12px; line-height: 1.55; }
+.swimlane-svg-wrap { overflow-x: auto; padding-bottom: 4px; }
+.swimlane-svg { display: block; width: 100%; min-width: 1280px; height: auto; }
 .flow-line { display: flex; align-items: stretch; gap: 10px; overflow-x: auto; padding-bottom: 2px; }
 .flow-step { min-width: 230px; background: #f8fafc; border: 1px solid #e5e7eb; border-radius: 12px; padding: 12px 14px; }
 .flow-step .tag { font-size: 11px; color: #b45309; margin-bottom: 6px; font-weight: 700; }
@@ -166,30 +165,48 @@ def render_source_analysis_report(
     success: bool,
 ) -> str:
     evidence = list(source_evidence or [])
-    severity = "green" if success and evidence else "yellow" if success else "red"
-    verdict = _source_verdict(answer=answer, evidence=evidence, success=success)
+    sections = _markdown_sections(answer)
+    swimlane_rows = _markdown_swimlane_rows(sections.get("结论摘要", "")) if sections else []
+    evidence_rows = _markdown_evidence_rows(sections.get("关键证据", "")) if sections else []
+    visual_evidence = evidence or [
+        {"file": row[2], "line": "", "text": f"{row[0]}：{row[1]}"}
+        for row in evidence_rows
+    ]
+    effective_evidence_count = len(evidence) or len(evidence_rows)
+    severity = "green" if success and effective_evidence_count else "yellow" if success else "red"
+    summary_items = _section_issue_items(_strip_markdown_tables(sections.get("结论摘要", ""))) if sections else []
+    verdict = (
+        str(summary_items[0].get("title") or "")
+        if summary_items
+        else _source_verdict(answer=answer, evidence=visual_evidence, success=success)
+    )
+    summary_body = render_issue_list(summary_items, empty_text=_short_text(answer or verdict, 240)) if summary_items else f"<pre>{H(answer or verdict)}</pre>"
+    boundary_items = _source_boundary_items(coverage_boundary, sections.get("待确认项", "") if sections else "")
+    reason_items = _section_issue_items(sections.get("最可能原因", "")) if sections else []
+    action_items = _section_issue_items(sections.get("建议动作", "")) if sections else []
+    chain_nodes = _chain_nodes_from_evidence(answer=answer, evidence=visual_evidence, target=target, success=success)
     cards = [
         ("目标", target or "未识别", "green" if target else "yellow", ""),
-        ("输出", "HTML报告", "green", "复杂源码/链路请求统一输出报告。"),
-        ("证据条数", str(len(evidence)), "green" if evidence else "yellow", "来自源码调查结果。"),
+        ("输出", "咨询/源码报告", "green", "面向源码与业务咨询请求的独立报告壳。"),
+        ("证据条数", str(effective_evidence_count), "green" if effective_evidence_count else "yellow", "来自源码调查结果。"),
         ("后端", backend or "unknown", "green" if backend else "yellow", ""),
     ]
-    issues = _source_issues(success=success, evidence=evidence, coverage_boundary=coverage_boundary)
-    chain_nodes = _chain_nodes_from_evidence(answer=answer, evidence=evidence, target=target, success=success)
     body = (
         '<div class="container">'
         f"<h1>{H(title or '源码分析报告')}</h1>"
         f'<div class="sub">请求：{H(request_text)}</div>'
         f'<div class="verdict v-{severity}">{H(verdict)}</div>'
         f'<div class="cards">{render_cards(cards)}</div>'
-        f'{render_section("结论摘要", f"<pre>{H(answer or verdict)}</pre>")}'
-        f'{render_section("异常摘要", render_issue_list(issues))}'
-        f'{render_swimlane(target=target, answer=answer, evidence=evidence, diagram_kinds=diagram_kinds)}'
+        f'{render_section("结论摘要", summary_body)}'
+        f'{render_swimlane(target=target, answer=answer, evidence=evidence, diagram_kinds=diagram_kinds, swimlane_rows=swimlane_rows)}'
+        f'{render_section("最可能原因", render_issue_list(reason_items, empty_text="未明确给出最可能原因。"))}'
+        f'{render_section("边界与说明", render_issue_list(boundary_items, empty_text="未返回额外边界说明。"))}'
+        f'{render_section("建议动作", render_issue_list(action_items, empty_text="当前没有额外建议动作。"))}'
         f'{render_flow(diagram_kinds=diagram_kinds, target=target, evidence=evidence)}'
-        f'{render_chain(chain_nodes, title="卡点链路", description="按入口、分发、消费和待确认组织源码证据。")}'
-        f'{render_section("源码证据", render_table(_evidence_rows(evidence), ("文件", "行号", "证据")))}'
-        f'{render_details("完整结论", "展开查看源码调查输出", answer)}'
+        f'{render_chain(chain_nodes, title="分析链路", description="按入口、分发、消费和待确认组织源码证据。")}'
+        f'{render_section("源码证据", render_table(_final_evidence_rows(evidence, evidence_rows), ("位置", "关键点", "源码锚点")))}'
         f'{render_details("边界说明", "展开查看覆盖范围与限制", coverage_boundary or "未返回覆盖边界。")}'
+        f'{render_details("原始源码分析输出", "展开查看源码调查输出", answer)}'
         "</div>"
     )
     return render_document(title or "源码分析报告", body)
@@ -343,9 +360,15 @@ def render_swimlane(
     answer: str,
     evidence: Sequence[Mapping[str, object]],
     diagram_kinds: Sequence[str],
+    swimlane_rows: Sequence[Sequence[object]] | None = None,
 ) -> str:
     if diagram_kinds and "swimlane" not in diagram_kinds and "chain" not in diagram_kinds:
         return ""
+    if swimlane_rows:
+        return render_section(
+            "泳道图",
+            render_swimlane_rows(swimlane_rows, cols=("泳道", "时序动作", "源码锚点")),
+        )
     lanes = [
         ("入口识别", target or "用户问题", "从用户请求中识别源码目标和链路问题。"),
         ("源码定位", _first_evidence_file(evidence) or "待检索", "通过源码调查、索引或 app-server 读取关键定义。"),
@@ -502,3 +525,176 @@ def _short_text(text: str, limit: int) -> str:
     if len(normalized) <= limit:
         return normalized
     return normalized[: limit - 1].rstrip() + "..."
+
+
+def _markdown_sections(text: str) -> dict[str, str]:
+    sections: dict[str, list[str]] = {}
+    current = ""
+    for raw_line in (text or "").splitlines():
+        match = re.match(r"^\s*##\s+(.+?)\s*$", raw_line.rstrip())
+        if match:
+            current = match.group(1).strip()
+            sections.setdefault(current, [])
+            continue
+        if current:
+            sections[current].append(raw_line.rstrip())
+    return {key: "\n".join(value).strip() for key, value in sections.items()}
+
+
+def _markdown_section_entries(section_text: str) -> list[str]:
+    entries: list[str] = []
+    current: list[str] = []
+    list_prefix = r"^(?:[-*]|\d+[.)、])\s+"
+    for raw_line in (section_text or "").splitlines():
+        stripped = raw_line.strip()
+        if not stripped:
+            if current:
+                entries.append(" ".join(current).strip())
+                current = []
+            continue
+        if stripped.startswith("|") and stripped.endswith("|"):
+            continue
+        if re.match(list_prefix, stripped):
+            if current:
+                entries.append(" ".join(current).strip())
+            current = [re.sub(list_prefix, "", stripped)]
+        else:
+            if current:
+                current.append(stripped)
+            else:
+                current = [stripped]
+    if current:
+        entries.append(" ".join(current).strip())
+    return [item for item in entries if item]
+
+
+def _clean_markdown_inline(text: str) -> str:
+    cleaned = text.strip()
+    cleaned = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", cleaned)
+    cleaned = re.sub(r"`([^`]+)`", r"\1", cleaned)
+    cleaned = re.sub(r"\*\*([^*]+)\*\*", r"\1", cleaned)
+    cleaned = re.sub(r"\*([^*]+)\*", r"\1", cleaned)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def _markdown_table_block_length(lines: Sequence[str], start: int) -> int:
+    if start + 2 >= len(lines):
+        return 0
+    header = lines[start].strip()
+    separator = lines[start + 1].strip()
+    if not (header.startswith("|") and header.endswith("|")):
+        return 0
+    if not re.match(r"^\|?(?:\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\|?$", separator):
+        return 0
+    index = start + 2
+    row_count = 0
+    while index < len(lines):
+        current = lines[index].strip()
+        if not (current.startswith("|") and current.endswith("|")):
+            break
+        row_count += 1
+        index += 1
+    return index - start if row_count else 0
+
+
+def _parse_markdown_table_row(raw_line: str) -> list[str]:
+    return [_clean_markdown_inline(cell) for cell in raw_line.strip().strip("|").split("|")]
+
+
+def _markdown_swimlane_rows(section_text: str) -> list[tuple[str, str, str]]:
+    lines = (section_text or "").splitlines()
+    for index in range(len(lines)):
+        block_len = _markdown_table_block_length(lines, index)
+        if not block_len:
+            continue
+        block = lines[index:index + block_len]
+        header = _parse_markdown_table_row(block[0])
+        if not header or header[0] != "泳道":
+            continue
+        rows: list[tuple[str, str, str]] = []
+        for row_line in block[2:]:
+            cells = _parse_markdown_table_row(row_line)
+            while len(cells) < 3:
+                cells.append("")
+            rows.append((cells[0], cells[1], cells[2]))
+        return rows
+    return []
+
+
+def _strip_markdown_tables(section_text: str) -> str:
+    cleaned: list[str] = []
+    lines = (section_text or "").splitlines()
+    index = 0
+    while index < len(lines):
+        block_len = _markdown_table_block_length(lines, index)
+        if block_len:
+            index += block_len
+            continue
+        cleaned.append(lines[index].rstrip())
+        index += 1
+    return "\n".join(cleaned).strip()
+
+
+def _entry_title_detail(entry: str) -> tuple[str, str]:
+    raw = entry.strip()
+    patterns = [
+        r"^\d+[.)、]?\s*\*\*(.+?)\*\*[：:，,]\s*(.+)$",
+        r"^\*\*(.+?)\*\*[：:，,]\s*(.+)$",
+        r"^([^：:]{1,24})[：:]\s*(.+)$",
+    ]
+    for pattern in patterns:
+        match = re.match(pattern, raw)
+        if match:
+            return _clean_markdown_inline(match.group(1)), _clean_markdown_inline(match.group(2))
+    return "", _clean_markdown_inline(raw)
+
+
+def _section_issue_items(section_text: str) -> list[dict[str, object]]:
+    items: list[dict[str, object]] = []
+    for entry in _markdown_section_entries(section_text):
+        title, detail = _entry_title_detail(entry)
+        if title:
+            items.append({"sev": "green", "title": title, "detail": detail})
+        elif detail:
+            items.append({"sev": "green", "title": detail, "detail": ""})
+    return items
+
+
+def _markdown_evidence_rows(section_text: str) -> list[tuple[str, str, str]]:
+    rows: list[tuple[str, str, str]] = []
+    for entry in _markdown_section_entries(section_text):
+        detail_text = entry
+        anchor_text = ""
+        source_match = re.search(r"(?:来源|源码锚点)[：:]\s*(.+)$", entry)
+        if source_match:
+            detail_text = entry[:source_match.start()].strip()
+            anchor_text = _clean_markdown_inline(source_match.group(1))
+        title, detail = _entry_title_detail(detail_text)
+        rows.append((title or "证据", detail or _clean_markdown_inline(detail_text), anchor_text or "见原始输出"))
+    return rows
+
+
+def _source_boundary_items(coverage_boundary: str, pending_section: str) -> list[dict[str, object]]:
+    items: list[dict[str, object]] = []
+    if coverage_boundary.strip():
+        items.append({"sev": "yellow", "title": "覆盖边界", "detail": coverage_boundary.strip()})
+    for item in _section_issue_items(pending_section):
+        item["sev"] = "yellow"
+        items.append(item)
+    return items
+
+
+def _final_evidence_rows(
+    evidence: Sequence[Mapping[str, object]],
+    markdown_rows: Sequence[tuple[str, str, str]],
+) -> list[tuple[object, object, object]]:
+    if markdown_rows:
+        return list(markdown_rows)
+    return [
+        (
+            f'{item.get("file", "")}:{item.get("line", "")}'.strip(":"),
+            item.get("text", ""),
+            "",
+        )
+        for item in evidence
+    ]

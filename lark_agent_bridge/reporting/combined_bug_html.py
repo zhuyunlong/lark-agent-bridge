@@ -101,6 +101,8 @@ code { background: rgba(37,99,235,.10); padding: 1px 6px; border-radius: 999px; 
 .flow-step .flow-note { font-size: 12px; color: var(--muted); margin-top: 8px; line-height: 1.6; }
 .flow-arrow-inline { display: flex; align-items: center; justify-content: center; min-width: 28px;
                      color: #7c8db0; font-size: 24px; font-weight: 700; }
+.swimlane-svg-wrap { overflow-x: auto; padding-bottom: 4px; }
+.swimlane-svg { display: block; width: 100%; min-width: 1024px; height: auto; }
 .insight { padding: 14px 16px; border-radius: 12px; border-left: 4px solid var(--blue); background: linear-gradient(90deg, rgba(37,99,235,.12), rgba(124,58,237,.06));
            color: #1d3d87; line-height: 1.7; box-shadow: inset 0 1px 0 rgba(255,255,255,.5); }
 .split-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; }
@@ -260,6 +262,214 @@ def render_flow_line(nodes: Iterable[Mapping[str, object]], empty_text: str = "�
     return "".join(chunks)
 
 
+def render_swimlane_rows(
+    rows: Iterable[Sequence[object]],
+    cols: Sequence[object] | None = None,
+    empty_text: str = "未提取到结构化泳道节点。",
+) -> str:
+    row_list = [tuple(row) for row in rows if any(str(value).strip() for value in row)]
+    if not row_list:
+        return f'<p class="muted">{H(empty_text)}</p>'
+    lane_label = str(cols[0]) if cols and len(cols) > 0 else "泳道"
+    action_label = str(cols[1]) if cols and len(cols) > 1 else "时序动作"
+    anchor_label = str(cols[2]) if cols and len(cols) > 2 else "源码锚点"
+    outer_x = 28
+    outer_y = 18
+    lane_w = 250
+    lane_gap = 20
+    header_h = 54
+    card_y = 108
+    card_padding = 16
+    step_r = 16
+    line_h = 18
+    total_w = outer_x * 2 + len(row_list) * lane_w + max(0, len(row_list) - 1) * lane_gap
+
+    layout_rows: list[dict[str, object]] = []
+    max_card_h = 0
+    for index, row in enumerate(row_list, 1):
+        lane_name = str(row[0]) if len(row) > 0 else ""
+        action_text = str(row[1]) if len(row) > 1 else ""
+        anchor_text = str(row[2]) if len(row) > 2 else ""
+        lane_lines = _wrap_svg_text(lane_name, 12)
+        action_lines = _wrap_svg_text(action_text, 20)
+        anchor_lines = _wrap_svg_text(anchor_text, 22)
+        card_h = max(138, 66 + len(action_lines) * 18 + len(anchor_lines) * 16)
+        max_card_h = max(max_card_h, card_h)
+        layout_rows.append(
+            {
+                "index": index,
+                "lane_lines": lane_lines,
+                "action_lines": action_lines,
+                "anchor_lines": anchor_lines,
+            }
+        )
+    total_h = card_y + max_card_h + 44
+    chunks: list[str] = [
+        '<div class="swimlane-svg-wrap">',
+        (
+            f'<svg class="swimlane-svg" viewBox="0 0 {total_w} {total_h}" '
+            'xmlns="http://www.w3.org/2000/svg" role="img" aria-label="泳道图">'
+        ),
+        "<defs>",
+        '<linearGradient id="laneHeader" x1="0" y1="0" x2="1" y2="0">',
+        '<stop offset="0%" stop-color="#2563eb" stop-opacity="0.18"/>',
+        '<stop offset="100%" stop-color="#0891b2" stop-opacity="0.08"/>',
+        "</linearGradient>",
+        '<marker id="laneArrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">',
+        '<path d="M 0 0 L 10 5 L 0 10 z" fill="#7c8db0"/>',
+        "</marker>",
+        "</defs>",
+        f'<rect x="{outer_x}" y="{outer_y}" width="{total_w - outer_x * 2}" height="{header_h}" rx="18" fill="#e9eef5" stroke="#d8e1f4"/>',
+    ]
+    for idx, row in enumerate(layout_rows):
+        lane_x = outer_x + idx * (lane_w + lane_gap)
+        if idx:
+            separator_x = lane_x - lane_gap / 2
+            chunks.append(
+                f'<line x1="{separator_x}" y1="{outer_y + 10}" x2="{separator_x}" y2="{outer_y + header_h - 10}" stroke="#d1d9e6"/>'
+            )
+        lane_lines = row["lane_lines"]
+        lane_text_y = outer_y + 28 - (len(lane_lines) - 1) * 8
+        chunks.extend(
+            _svg_text_block(
+                lane_x + lane_w / 2,
+                lane_text_y,
+                lane_lines,
+                fill="#111827",
+                font_size=13,
+                font_weight=700,
+                line_height=16,
+                anchor="middle",
+            )
+        )
+
+    arrow_y = card_y + max_card_h / 2
+    for idx, row in enumerate(layout_rows):
+        lane_x = outer_x + idx * (lane_w + lane_gap)
+        lane_lines = row["lane_lines"]
+        action_lines = row["action_lines"]
+        anchor_lines = row["anchor_lines"]
+        chunks.append(
+            f'<rect x="{lane_x}" y="{card_y}" width="{lane_w}" height="{max_card_h}" rx="18" fill="#ffffff" stroke="#94a3b8" stroke-width="1.5"/>'
+        )
+        chunks.append(
+            f'<circle cx="{lane_x + 28}" cy="{card_y + 28}" r="{step_r}" fill="#2563eb"/>'
+        )
+        chunks.append(
+            f'<text x="{lane_x + 28}" y="{card_y + 32}" text-anchor="middle" fill="#ffffff" font-size="12" font-weight="700">{row["index"]}</text>'
+        )
+        chunks.append(
+            f'<text x="{lane_x + 54}" y="{card_y + 31}" fill="#7c3aed" font-size="11" font-weight="700">{H(action_label)}</text>'
+        )
+        chunks.extend(
+            _svg_text_block(
+                lane_x + card_padding,
+                card_y + 62,
+                action_lines,
+                fill="#334155",
+                font_size=13,
+                font_weight=600,
+            )
+        )
+        anchor_label_y = card_y + max_card_h - 38 - max(0, len(anchor_lines) - 1) * 16
+        chunks.append(
+            f'<line x1="{lane_x + 16}" y1="{anchor_label_y - 10}" x2="{lane_x + lane_w - 16}" y2="{anchor_label_y - 10}" stroke="#dbe4f0"/>'
+        )
+        chunks.append(
+            f'<text x="{lane_x + 16}" y="{anchor_label_y}" fill="#1d4ed8" font-size="11" font-weight="700">{H(anchor_label)}</text>'
+        )
+        chunks.extend(
+            _svg_text_block(
+                lane_x + 16,
+                anchor_label_y + 20,
+                anchor_lines,
+                fill="#2563eb",
+                font_size=12,
+                font_weight=500,
+                line_height=16,
+            )
+        )
+        if idx < len(layout_rows) - 1:
+            start_x = lane_x + lane_w
+            end_x = lane_x + lane_w + lane_gap
+            chunks.append(
+                f'<line x1="{start_x}" y1="{arrow_y}" x2="{end_x - 6}" y2="{arrow_y}" stroke="#94a3b8" stroke-width="2" marker-end="url(#laneArrow)"/>'
+            )
+    chunks.extend(["</svg>", "</div>"])
+    return "".join(chunks)
+
+
+def _svg_text_block(
+    x: int,
+    y: int,
+    lines: Sequence[str],
+    *,
+    fill: str,
+    font_size: int,
+    font_weight: int,
+    line_height: int = 18,
+    anchor: str = "start",
+) -> list[str]:
+    chunks = [
+        (
+            f'<text x="{x}" y="{y}" fill="{fill}" font-size="{font_size}" '
+            f'font-weight="{font_weight}" text-anchor="{anchor}" '
+            f'font-family="-apple-system, Helvetica Neue, PingFang SC, Microsoft YaHei, sans-serif">'
+        )
+    ]
+    for index, line in enumerate(lines):
+        dy = y + index * line_height
+        chunks.append(f'<tspan x="{x}" y="{dy}">{H(line)}</tspan>')
+    chunks.append("</text>")
+    return chunks
+
+
+def _wrap_svg_text(text: str, max_units: int) -> list[str]:
+    normalized = " ".join(str(text or "").split())
+    if not normalized:
+        return [""]
+    lines: list[str] = []
+    current = ""
+    for token in normalized.split(" "):
+        pieces = _split_svg_token(token, max_units)
+        for piece in pieces:
+            if not current:
+                current = piece
+                continue
+            candidate = f"{current} {piece}"
+            if _svg_text_units(candidate) <= max_units:
+                current = candidate
+                continue
+            lines.append(current)
+            current = piece
+    if current:
+        lines.append(current)
+    return lines or [normalized]
+
+
+def _split_svg_token(token: str, max_units: int) -> list[str]:
+    if _svg_text_units(token) <= max_units:
+        return [token]
+    pieces: list[str] = []
+    current: list[str] = []
+    current_units = 0
+    for char in token:
+        units = 1 if ord(char) < 128 else 2
+        if current and current_units + units > max_units:
+            pieces.append("".join(current))
+            current = []
+            current_units = 0
+        current.append(char)
+        current_units += units
+    if current:
+        pieces.append("".join(current))
+    return pieces or [token]
+
+
+def _svg_text_units(text: str) -> int:
+    return sum(1 if ord(char) < 128 else 2 for char in text)
+
+
 def render_section(title: str, body_html: str, description: str = "") -> str:
     desc_html = f'<p class="muted">{H(description)}</p>' if description else ""
     return f'<div class="section"><h2>{H(title)}</h2>{desc_html}{body_html}</div>'
@@ -304,6 +514,12 @@ def render_sections(sections: Iterable[Mapping[str, object]]) -> str:
             )
         elif kind == "flow":
             body_html = render_flow_line(section.get("nodes", []), empty_text=empty_text or "未提取到可视化链路节点。")
+        elif kind == "swimlane":
+            body_html = render_swimlane_rows(
+                section.get("rows", []),
+                cols=section.get("cols", []),
+                empty_text=empty_text or "未提取到结构化泳道节点。",
+            )
         elif kind == "text":
             text = str(section.get("text") or "")
             css_class = str(section.get("class_name") or "insight")

@@ -65,6 +65,12 @@ cp config/config.example.toml config.toml
 ./run.sh claude-offi
 ```
 
+Stop the listener and the current `lark-cli` event bus:
+
+```bash
+./stop.sh
+```
+
 Or use the CLI directly with the same config and interpreter:
 
 ```bash

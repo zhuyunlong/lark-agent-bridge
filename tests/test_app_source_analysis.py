@@ -4,8 +4,10 @@ from pathlib import Path
 
 from lark_agent_bridge.models import TaskResult
 
-from tests._app_base import BridgeConfig, FakeBugRunner, FakeLarkClient, FakeSignalHandler, event
+from tests._app_base import BridgeConfig, FakeBugRunner, FakeLarkClient, FakeSignalHandler, KnowledgeOptions, event
 from lark_agent_bridge.app import BridgeApp
+from lark_agent_bridge.app._shared import _RouteContext
+from lark_agent_bridge.parser import parse_bug_request, parse_direct_analysis_request, parse_source_analysis_request
 
 
 class FakeSourceAnalysisRunner:
@@ -32,7 +34,61 @@ class FakeSourceAnalysisRunner:
         )
 
 
+class GreedyKnowledgeService:
+    def __init__(self):
+        self.questions = []
+
+    def should_handle(self, text):
+        cleaned = text or ""
+        return ("如何" in cleaned and "信号" in cleaned) or "知识库" in cleaned
+
+    def answer(self, question):
+        self.questions.append(question)
+        return TaskResult(
+            success=True,
+            message="知识库命中",
+            details={
+                "mode": "knowledge_qa",
+                "knowledge_hits": [],
+            },
+        )
+
+
 class AppSourceAnalysisTests(unittest.TestCase):
+    def test_arbitrated_candidates_include_source_and_knowledge_for_overlap_prompt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            html = Path(tmp) / "source.html"
+            fake_source = FakeSourceAnalysisRunner(html)
+            fake_knowledge = GreedyKnowledgeService()
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    allowed_chats=["oc_denied"],
+                    knowledge=KnowledgeOptions(enabled=True),
+                ),
+                lark_client=FakeLarkClient(),
+                source_analysis_runner=fake_source,
+                knowledge_service=fake_knowledge,
+            )
+
+            route_content = "基于源码 告诉我UnityReady信号如何使用和定义"
+            ctx = _RouteContext(
+                event=event(content=f"@bot {route_content}"),
+                route_content=route_content,
+                bug_request=parse_bug_request(route_content),
+                direct_analysis_request=parse_direct_analysis_request(route_content),
+                source_analysis_request=parse_source_analysis_request(route_content),
+            )
+
+            candidates = app._collect_arbitrated_route_candidates(ctx)
+
+        self.assertEqual([candidate.route for candidate in candidates], ["knowledge_qa", "source_analysis"])
+        winner = app._choose_arbitrated_route(ctx, candidates)
+        self.assertIsNotNone(winner)
+        assert winner is not None
+        self.assertEqual(winner.route, "source_analysis")
+
     def test_no_file_no_bug_source_request_routes_to_source_runner_not_signal(self):
         with tempfile.TemporaryDirectory() as tmp:
             html = Path(tmp) / "source.html"
@@ -60,6 +116,74 @@ class AppSourceAnalysisTests(unittest.TestCase):
         self.assertEqual(fake_source.requests[0]["request"].target, "UnityReady")
         self.assertEqual(fake_signal.requests, [])
         self.assertIn("published_report_url", result.details)
+
+    def test_explicit_source_request_is_not_stolen_by_knowledge_heuristic(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            html = Path(tmp) / "source.html"
+            fake_lark = FakeLarkClient()
+            fake_source = FakeSourceAnalysisRunner(html)
+            fake_knowledge = GreedyKnowledgeService()
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    allowed_chats=["oc_denied"],
+                    knowledge=KnowledgeOptions(enabled=True),
+                ),
+                lark_client=fake_lark,
+                source_analysis_runner=fake_source,
+                knowledge_service=fake_knowledge,
+            )
+
+            result = app.handle_event(
+                event(
+                    event_id="evt_source_vs_knowledge",
+                    message_id="om_source_vs_knowledge",
+                    content="@bot 基于源码 告诉我UnityReady信号如何使用和定义",
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.details["mode"], "source_analysis")
+        self.assertEqual(len(fake_source.requests), 1)
+        self.assertEqual(fake_knowledge.questions, [])
+        self.assertEqual(result.details["route_winner"], "source_analysis")
+        self.assertEqual(
+            [item["route"] for item in result.details["route_candidates"]],
+            ["knowledge_qa", "source_analysis"],
+        )
+
+    def test_explicit_knowledge_prefix_still_routes_to_knowledge(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            html = Path(tmp) / "source.html"
+            fake_lark = FakeLarkClient()
+            fake_source = FakeSourceAnalysisRunner(html)
+            fake_knowledge = GreedyKnowledgeService()
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    allowed_chats=["oc_denied"],
+                    knowledge=KnowledgeOptions(enabled=True),
+                ),
+                lark_client=fake_lark,
+                source_analysis_runner=fake_source,
+                knowledge_service=fake_knowledge,
+            )
+
+            result = app.handle_event(
+                event(
+                    event_id="evt_explicit_knowledge_source",
+                    message_id="om_explicit_knowledge_source",
+                    content="@bot 知识库 基于源码 告诉我UnityReady信号如何使用和定义",
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.details["mode"], "knowledge_qa")
+        self.assertEqual(len(fake_source.requests), 0)
+        self.assertEqual(fake_knowledge.questions, ["知识库 基于源码 告诉我UnityReady信号如何使用和定义"])
+        self.assertEqual(result.details["route_winner"], "knowledge_qa")
 
     def test_bug_link_with_source_wording_still_routes_to_bug_runner(self):
         with tempfile.TemporaryDirectory() as tmp:

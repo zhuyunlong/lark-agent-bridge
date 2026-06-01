@@ -374,14 +374,11 @@ class _HandleEventMixin:
             self._route_addr2line_resolve,  # 7. Native stack address reverse lookup
             self._route_rom_version_lookup, # 8. ROM version lookup
             self._route_scene_signal,       # 9. Scene signal shortcut
-            self._route_knowledge_qa,       # 10. Personal knowledge QA / ADB templates
+            self._route_arbitrated_business_routes,  # 10. Scoped candidate arbitration
             self._route_requirement_analysis,  # 11. Feishu Project requirement + source analysis
-            self._route_source_analysis,    # 12. Repository-only source analysis
-            self._route_signal_request,     # 13. Signal lifecycle analysis
-            self._route_claude_skill,       # 14. Optional configured local skill route
-            self._route_bug_request,        # 15. Bug request (secondary match)
-            self._route_perception,         # 16. Perception summary
-            self._route_direct_analysis,    # 17. Direct file/log analysis
+            self._route_signal_request,     # 12. Signal lifecycle analysis
+            self._route_claude_skill,       # 13. Optional configured local skill route
+            self._route_perception,         # 14. Perception summary
             self._route_followup_intent,    # 18. Followup intent keywords
             self._route_general_followup,   # 19. General followup conversation
             self._route_knowledge_probe,    # 20. Internal operation QA from knowledge before chat
@@ -408,6 +405,173 @@ class _HandleEventMixin:
         return result
 
     # --- Individual route handlers (ordered by priority) ---
+
+    def _route_arbitrated_business_routes(self, ctx: _RouteContext) -> TaskResult | None:
+        candidates = self._collect_arbitrated_route_candidates(ctx)
+        if not candidates:
+            return None
+        winner = self._choose_arbitrated_route(ctx, candidates)
+        if winner is None:
+            return None
+        result = self._invoke_arbitrated_route(ctx, winner.route)
+        if result is None:
+            return None
+        details = result.details if isinstance(result.details, dict) else {}
+        details = dict(details)
+        details.setdefault("route_candidates", [item.to_dict() for item in candidates])
+        details.setdefault("route_winner", winner.route)
+        details.setdefault("route_winner_reason", winner.reason)
+        result.details = details
+        return result
+
+    def _collect_arbitrated_route_candidates(self, ctx: _RouteContext) -> list[RouteCandidate]:
+        candidates: list[RouteCandidate] = []
+        if self._would_route_knowledge_qa(ctx):
+            candidates.append(
+                RouteCandidate(
+                    route="knowledge_qa",
+                    band="explicit" if self._has_explicit_knowledge_trigger(ctx.route_content) else "heuristic",
+                    score=95 if self._has_explicit_knowledge_trigger(ctx.route_content) else 40,
+                    reason=(
+                        "explicit_knowledge_trigger"
+                        if self._has_explicit_knowledge_trigger(ctx.route_content)
+                        else "knowledge_heuristic_should_handle"
+                    ),
+                )
+            )
+        if self._would_route_source_analysis(ctx):
+            blocked_by: list[str] = []
+            if self._would_route_requirement_analysis(ctx):
+                blocked_by.append("requirement_analysis")
+            candidates.append(
+                RouteCandidate(
+                    route="source_analysis",
+                    band="explicit",
+                    score=90,
+                    reason="explicit_source_analysis_request",
+                    blocked_by=blocked_by,
+                )
+            )
+        if self._would_route_bug_request(ctx):
+            blocked_by = []
+            if self._would_route_requirement_analysis(ctx):
+                blocked_by.append("requirement_analysis")
+            if self._would_route_signal_request(ctx):
+                blocked_by.append("signal_request")
+            if self._would_route_claude_skill(ctx):
+                blocked_by.append("claude_skill")
+            candidates.append(
+                RouteCandidate(
+                    route="bug_request",
+                    band="explicit",
+                    score=85,
+                    reason="explicit_bug_request",
+                    blocked_by=blocked_by,
+                )
+            )
+        if self._would_route_direct_analysis(ctx):
+            blocked_by = []
+            if self._would_route_requirement_analysis(ctx):
+                blocked_by.append("requirement_analysis")
+            if self._would_route_signal_request(ctx):
+                blocked_by.append("signal_request")
+            if self._would_route_claude_skill(ctx):
+                blocked_by.append("claude_skill")
+            if self._would_route_perception(ctx):
+                blocked_by.append("perception_summary")
+            candidates.append(
+                RouteCandidate(
+                    route="direct_analysis",
+                    band="explicit",
+                    score=80,
+                    reason="explicit_direct_analysis_request",
+                    blocked_by=blocked_by,
+                )
+            )
+        return candidates
+
+    def _choose_arbitrated_route(self, ctx: _RouteContext, candidates: list[RouteCandidate]) -> RouteCandidate | None:
+        del ctx
+        viable = [candidate for candidate in candidates if not candidate.blocked_by]
+        if not viable:
+            return None
+        band_rank = {
+            "hard_gate": 5,
+            "explicit": 4,
+            "contextual": 3,
+            "heuristic": 2,
+            "fallback": 1,
+        }
+        return max(viable, key=lambda item: (band_rank.get(item.band, 0), item.score))
+
+    def _invoke_arbitrated_route(self, ctx: _RouteContext, route: str) -> TaskResult | None:
+        if route == "knowledge_qa":
+            return self._route_knowledge_qa(ctx)
+        if route == "source_analysis":
+            return self._route_source_analysis(ctx)
+        if route == "bug_request":
+            return self._route_bug_request(ctx)
+        if route == "direct_analysis":
+            return self._route_direct_analysis(ctx)
+        return None
+
+    def _would_route_requirement_analysis(self, ctx: _RouteContext) -> bool:
+        request = ctx.requirement_analysis_request
+        if request is None or not request.triggered:
+            return False
+        if not self.config.requirement_analysis.enabled:
+            return False
+        return not (ctx.bug_request is not None and getattr(ctx.bug_request, "triggered", False))
+
+    def _would_route_source_analysis(self, ctx: _RouteContext) -> bool:
+        request = ctx.source_analysis_request
+        if request is None or not request.triggered:
+            return False
+        if ctx.referenced_resources:
+            return False
+        if ctx.bug_request is not None and getattr(ctx.bug_request, "triggered", False):
+            return False
+        if ctx.direct_analysis_request is not None and getattr(ctx.direct_analysis_request, "triggered", False):
+            return False
+        return True
+
+    def _would_route_signal_request(self, ctx: _RouteContext) -> bool:
+        request = ctx.signal_request
+        if request is None or not request.triggered:
+            return False
+        if (
+            not request.signal
+            and ctx.direct_analysis_request is not None
+            and bool(ctx.direct_analysis_request.resources)
+            and self._looks_like_direct_analysis_prompt(ctx.route_content)
+        ):
+            return False
+        return True
+
+    def _would_route_knowledge_qa(self, ctx: _RouteContext) -> bool:
+        if not self.config.knowledge.enabled:
+            return False
+        if ctx.referenced_resources:
+            return False
+        return self.knowledge_service.should_handle(ctx.route_content)
+
+    def _would_route_bug_request(self, ctx: _RouteContext) -> bool:
+        return bool(ctx.bug_request is not None and getattr(ctx.bug_request, "triggered", False))
+
+    def _would_route_direct_analysis(self, ctx: _RouteContext) -> bool:
+        if ctx.direct_analysis_request is None or not getattr(ctx.direct_analysis_request, "triggered", False):
+            return False
+        return not self._should_defer_direct_analysis_to_intent(ctx)
+
+    def _would_route_perception(self, ctx: _RouteContext) -> bool:
+        return bool(ctx.perception_request is not None and getattr(ctx.perception_request, "triggered", False))
+
+    def _would_route_claude_skill(self, ctx: _RouteContext) -> bool:
+        skill_request = parse_claude_skill_request(
+            ctx.route_content,
+            trigger_prefixes=self.config.claude_agent.trigger_prefixes,
+        )
+        return bool(skill_request.triggered)
 
     def _route_app_server_investigation(self, ctx: _RouteContext) -> TaskResult | None:
         request = ctx.app_server_investigation_request
@@ -652,6 +816,13 @@ class _HandleEventMixin:
         if not self.state_store.mark_seen(ctx.event):
             return TaskResult(True, f"duplicate event skipped: {ctx.event.event_id}", skipped=True)
         return self._run_signal_request(ctx.event, request, ctx.route_content)
+
+    def _has_explicit_knowledge_trigger(self, text: str) -> bool:
+        cleaned = (text or "").strip()
+        for prefix in self.config.knowledge.trigger_prefixes:
+            if prefix and cleaned.startswith(prefix):
+                return True
+        return "知识库" in cleaned or "查知识" in cleaned
 
     def _route_knowledge_qa(self, ctx: _RouteContext) -> TaskResult | None:
         if not self.config.knowledge.enabled:

@@ -40,7 +40,7 @@ class ReportServerTests(unittest.TestCase):
 
                 self.assertIsNotNone(published)
                 assert published is not None
-                self.assertEqual(published.url, "http://10.2.3.4:8765/reports/evt_bug_1/")
+                self.assertEqual(published.url, "http://10.2.3.4:8765/reports/evt_bug_1/report.html")
                 self.assertTrue(published.index_path.exists())
                 self.assertTrue(published.report_paths[0].exists())
                 self.assertEqual(published.source_report_paths, [html_path.resolve()])
@@ -80,8 +80,8 @@ class ReportServerTests(unittest.TestCase):
                 self.assertIsNotNone(first)
                 self.assertIsNotNone(second)
                 assert first is not None and second is not None
-                self.assertEqual(first.url, "http://10.2.3.4:8765/reports/evt_bug_1/v1/")
-                self.assertEqual(second.url, "http://10.2.3.4:8765/reports/evt_bug_1/v2/")
+                self.assertEqual(first.url, "http://10.2.3.4:8765/reports/evt_bug_1/v1/report.html")
+                self.assertEqual(second.url, "http://10.2.3.4:8765/reports/evt_bug_1/v2/report.html")
                 self.assertTrue(first.index_path.exists())
                 self.assertTrue(second.index_path.exists())
                 self.assertNotEqual(first.index_path, second.index_path)
@@ -164,7 +164,8 @@ class ReportServerTests(unittest.TestCase):
             index_html = published.index_path.read_text(encoding="utf-8")
 
         self.assertIn('href="report.html"', index_html)
-        self.assertIn("在新窗口打开完整报告", index_html)
+        self.assertIn("点击进入完整报告", index_html)
+        self.assertNotIn('target="_blank"', index_html)
         self.assertNotIn("<iframe", index_html)
         self.assertIn("3D Unity 启动生命周期报告", index_html)
 
@@ -385,6 +386,7 @@ class ReportServerTests(unittest.TestCase):
                     daemon = json.loads(response.read().decode("utf-8"))
                 with urllib.request.urlopen(f"http://127.0.0.1:{port}/reports/job_1/", timeout=5) as response:
                     report = response.read().decode("utf-8")
+                    report_cache_control = response.headers.get("Cache-Control")
                 delete_request = urllib.request.Request(
                     f"http://127.0.0.1:{port}/api/analysis-history/om_1",
                     method="DELETE",
@@ -428,6 +430,7 @@ class ReportServerTests(unittest.TestCase):
         self.assertIn("summary", debug_skill)
         self.assertEqual(daemon["daemon"]["stage"], "event_consumer_ready")
         self.assertIn("report ok", report)
+        self.assertEqual(report_cache_control, "no-store")
         self.assertTrue(deleted["ok"])
         self.assertEqual(deleted["item"]["session_id"], "om_1")
         self.assertEqual(deleted["authorization"]["scope"], "analysis_history.delete")

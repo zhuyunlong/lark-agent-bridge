@@ -82,6 +82,41 @@ class SourceReportHtmlTests(unittest.TestCase):
         self.assertIn("原始分析摘要", html)
         self.assertIn("报告摘录", html)
 
+    def test_source_analysis_report_renders_svg_swimlane_from_markdown_answer(self):
+        html = render_source_analysis_report(
+            title="车道级信号 源码分析",
+            request_text="基于源码解释车道级相关信号",
+            answer="""
+## 结论摘要
+
+- 当前车道级信号分成 guideengine 与 Napa5 两条主链。
+- 本轮只有源码，没有日志，运行态触发情况待确认。
+
+| 泳道 | 时序动作 | 源码锚点 |
+|---|---|---|
+| Unity / LD | 上报 LD 中心点、LD 场景 | `SetLdTileCenterMsg.sendMsgData`、`LDSceneMsg.sendMsgData` |
+| XData Transport | 分发 Unity / Native 信号 | `XDataTransport.onSignalData` |
+| Napa5 渲染 | 消费变道和红毯事件 | `SRMarks.OnLaneChanged`、`SRLayerAEB.OnFrontLaneWarning` |
+
+## 关键证据
+
+- **Unity 入口**：`sendMsgToAndroid(...)` 负责把 LD 场景发到 Android。 来源：`/tmp/SetLdTileCenterMsg.java:17`、`:23`
+""",
+            target="车道级相关信号",
+            source_evidence=[],
+            coverage_boundary="只检查源码仓。",
+            diagram_kinds=["swimlane"],
+            backend="codex_app_server",
+            success=True,
+        )
+
+        self.assertIn('class="swimlane-svg-wrap"', html)
+        self.assertIn("<svg", html)
+        self.assertIn("guideengine 与 Napa5 两条主链", html)
+        self.assertIn("SetLdTileCenterMsg.sendMsgData", html)
+        self.assertIn("SetLdTileCenterMsg.java:17", html)
+        self.assertNotIn("lane-grid", html)
+
 
 if __name__ == "__main__":
     unittest.main()

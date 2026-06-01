@@ -140,6 +140,7 @@ class RepositorySourceAnalysisRunner:
         analysis_dir = context.output_dir / "source_stage"
         html_path = context.output_dir / "source_analysis_report.html"
         json_path = context.output_dir / "source_analysis_report.json"
+        execution_html_path = analysis_dir / "source_stage_report.html"
         self._emit(progress_callback, "source_analysis_app_server_started", "通过 Codex app-server 执行源码分析", target=request.target)
         try:
             execution = execute(
@@ -154,7 +155,7 @@ class RepositorySourceAnalysisRunner:
                 selected_input=None,
                 prepared_input=None,
                 source_evidence_path=None,
-                html_path=html_path,
+                html_path=execution_html_path,
                 json_path=json_path,
                 analysis_dir=analysis_dir,
                 progress_callback=progress_callback,
@@ -169,11 +170,24 @@ class RepositorySourceAnalysisRunner:
             return None
         if not isinstance(execution, dict) or not execution.get("ok"):
             return None
-        produced_html = Path(execution.get("html_path") or html_path)
         analysis_path = execution.get("analysis_markdown_path")
         analysis_text = ""
         if isinstance(analysis_path, Path) and analysis_path.exists():
             analysis_text = analysis_path.read_text(encoding="utf-8", errors="replace").strip()
+        html_path.write_text(
+            render_source_analysis_report(
+                title=f"{request.target or '源码'} 源码分析",
+                request_text=request.prompt,
+                answer=analysis_text,
+                target=request.target or "源码目标",
+                source_evidence=[],
+                coverage_boundary="当前为只读源码咨询路径；运行态、日志态和真实触发时序需结合额外材料确认。",
+                diagram_kinds=request.diagram_kinds,
+                backend=str(execution.get("executor") or "codex_app_server"),
+                success=True,
+            ),
+            encoding="utf-8",
+        )
         duration = time.monotonic() - started
         self._emit(progress_callback, "source_analysis_app_server_completed", "Codex app-server 源码分析完成", target=request.target)
         return TaskResult(
@@ -181,7 +195,7 @@ class RepositorySourceAnalysisRunner:
             message=_first_line(analysis_text) or "源码分析完成，已生成 HTML 报告。",
             job_id=context.job_id,
             job_dir=context.job_dir,
-            html_report=produced_html if produced_html.exists() else None,
+            html_report=html_path if html_path.exists() else None,
             command=list(execution.get("command") or []) or None,
             duration_seconds=duration,
             stdout=str(execution.get("stdout") or ""),
@@ -201,10 +215,11 @@ class RepositorySourceAnalysisRunner:
                 "diagram_kinds": list(request.diagram_kinds),
                 "user_request_text": request.raw_text or request.prompt,
                 "source_analysis_file": str(analysis_path or ""),
+                "source_stage_report_html": str(execution.get("html_path") or ""),
                 "app_server_version": str(execution.get("app_server_version") or ""),
                 "app_server_thread_id": str(execution.get("thread_id") or ""),
                 "app_server_turn_id": str(execution.get("turn_id") or ""),
-                "files_to_send": [produced_html] if produced_html.exists() else [],
+                "files_to_send": [html_path] if html_path.exists() else [],
             },
         )
 

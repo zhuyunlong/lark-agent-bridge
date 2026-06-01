@@ -216,6 +216,10 @@ class ParserTests(unittest.TestCase):
         self.assertIn("知识库 OTA信号如何模拟", reply)
         self.assertIn("查知识 主题信号如何模拟", reply)
         self.assertIn("/kb 仍兼容", reply)
+        self.assertIn("需求源码分析", reply)
+        self.assertIn("仓库源码分析", reply)
+        self.assertIn("结合源码分析是否可行", reply)
+        self.assertIn("UnityReady", reply)
         self.assertIn("ROM/导航版本", reply)
         self.assertIn("找下导航版本", reply)
         self.assertNotIn("SIGNAL_OTA_ST 怎么模拟", reply)
@@ -232,6 +236,7 @@ class ParserTests(unittest.TestCase):
 
         self.assertIsNotNone(reply)
         self.assertIn("Bug 分析", reply)
+        self.assertIn("需求源码分析", reply)
         self.assertIn("个人知识库", reply)
         self.assertIn("普通聊天", reply)
 
