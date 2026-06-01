@@ -13,6 +13,8 @@ from .models import (
     DirectAnalysisRequest,
     DownloadResource,
     PerceptionSummaryRequest,
+    RequirementAnalysisRequest,
+    RequirementWorkItemRef,
     ReportFollowupRequest,
     RomVersionLookupRequest,
     SignalRequest,
@@ -23,6 +25,14 @@ from .signal_resolver import SignalResolver
 
 URL_RE = re.compile(r"https?://[^\s<>\"]+")
 DRIVE_FOLDER_URL_RE = re.compile(r"https?://[^\s<>\"]*/drive/folder/(?P<token>[^/?#\s<>\"]+)")
+PROJECT_WORKITEM_URL_RE = re.compile(
+    r"https?://project\.feishu\.cn/"
+    r"(?P<project_key>[^/\s<>\"]+)/"
+    r"(?P<work_item_type>story|task|issue|requirement)/detail/"
+    r"(?P<work_item_id>\d+)"
+    r"(?:[/?#][^\s<>\"，。；;、)）\]】}]*)?",
+    re.I,
+)
 _DEFAULT_BUG_URL_DOMAINS = ("project.feishu.cn", "meegle.com")
 
 
@@ -328,6 +338,22 @@ REPORT_FOLLOWUP_TERMS = (
     "链路图",
     "画图",
     "画出",
+)
+REQUIREMENT_ANALYSIS_TERMS = (
+    "需求",
+    "需求链接",
+    "需求分析",
+    "story",
+)
+REQUIREMENT_ANALYSIS_ACTION_TERMS = (
+    "结合源码",
+    "基于源码",
+    "源码分析",
+    "源代码",
+    "源码对比",
+    "可行",
+    "可行性",
+    "实现方案",
 )
 SOURCE_IDENTIFIER_RE = re.compile(
     r"(?<![A-Za-z0-9_])("
@@ -675,6 +701,42 @@ def parse_app_server_investigation_request(
     )
 
 
+def parse_requirement_analysis_request(
+    text: str,
+    *,
+    bug_url_re: re.Pattern[str] | None = None,
+) -> RequirementAnalysisRequest:
+    normalized_text = text or ""
+    cleaned = _strip_leading_mentions(normalized_text).strip()
+    empty_ref = RequirementWorkItemRef(url="", project_key="", work_item_type="", work_item_id="")
+    if parse_bug_request(cleaned, bug_url_re=bug_url_re).triggered:
+        return RequirementAnalysisRequest(prompt="", workitem=empty_ref, raw_text=normalized_text, triggered=False)
+    match = _project_workitem_match(cleaned)
+    if match is None:
+        return RequirementAnalysisRequest(prompt="", workitem=empty_ref, raw_text=normalized_text, triggered=False)
+    lowered = cleaned.casefold()
+    if not _contains_any(cleaned, lowered, REQUIREMENT_ANALYSIS_TERMS):
+        return RequirementAnalysisRequest(prompt="", workitem=empty_ref, raw_text=normalized_text, triggered=False)
+    if not _contains_any(cleaned, lowered, REQUIREMENT_ANALYSIS_ACTION_TERMS):
+        return RequirementAnalysisRequest(prompt="", workitem=empty_ref, raw_text=normalized_text, triggered=False)
+    ref = RequirementWorkItemRef(
+        url=match.group(0).rstrip(TRAILING_URL_PUNCTUATION),
+        project_key=match.group("project_key"),
+        work_item_type=match.group("work_item_type").lower(),
+        work_item_id=match.group("work_item_id"),
+    )
+    return RequirementAnalysisRequest(
+        prompt=cleaned,
+        workitem=ref,
+        raw_text=normalized_text,
+        triggered=True,
+        source_mode="requirement_source",
+        diagram_kinds=_diagram_kinds_from_text(cleaned, default_for_chain=True),
+        output_html=True,
+        reason="feishu_project_workitem_source_analysis",
+    )
+
+
 def parse_source_analysis_request(
     text: str,
     *,
@@ -761,6 +823,8 @@ def looks_like_direct_analysis_prompt(
         return False
     if parse_bug_request(cleaned, bug_url_re=bug_url_re).triggered:
         return False
+    if _project_workitem_match(cleaned) is not None:
+        return False
     has_action = _contains_any(cleaned, lowered, DIRECT_ANALYSIS_ACTION_TERMS)
     has_domain = _contains_any(cleaned, lowered, DIRECT_ANALYSIS_DOMAIN_TERMS)
     if resources_present:
@@ -779,6 +843,11 @@ def _source_analysis_target_from_text(text: str) -> str:
         return candidate
     chinese_target = _source_analysis_chinese_target(cleaned)
     return chinese_target
+
+
+def _project_workitem_match(text: str) -> re.Match[str] | None:
+    cleaned = _strip_leading_mentions(text or "").strip()
+    return PROJECT_WORKITEM_URL_RE.search(cleaned)
 
 
 def _source_analysis_chinese_target(text: str) -> str:

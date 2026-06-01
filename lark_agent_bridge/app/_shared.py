@@ -63,6 +63,7 @@ from ..models import (
     DirectAnalysisRequest,
     IntentDecision,
     LarkEvent,
+    RequirementAnalysisRequest,
     ReportFollowupRequest,
     RomVersionLookupRequest,
     SignalRequest,
@@ -83,6 +84,7 @@ from ..parser import (
     parse_bug_request,
     parse_direct_analysis_request,
     parse_perception_summary_request,
+    parse_requirement_analysis_request,
     parse_addr2line_request,
     parse_rom_version_lookup_request,
     parse_signal_request,
@@ -105,6 +107,7 @@ from ..runner import SignalChainRunner
 from ..signal_resolver import SignalResolver
 from ..skill_manager import SkillManager
 from ..app_server_investigation import AppServerInvestigationRunner
+from ..requirement_analysis import RequirementAnalysisRunner
 from ..source_analysis import RepositorySourceAnalysisRunner
 from ..state import AgentActivityStore, ConversationContext, ConversationContextStore, EventStateStore
 from ..token_usage import extract_first_prefixed_token_usage, extract_prefixed_token_usage
@@ -291,6 +294,7 @@ class _RouteContext:
     bug_request: object = None
     direct_analysis_request: object = None
     app_server_investigation_request: AppServerInvestigationRequest | None = None
+    requirement_analysis_request: RequirementAnalysisRequest | None = None
     source_analysis_request: SourceAnalysisRequest | None = None
     report_followup_request: ReportFollowupRequest | None = None
     perception_request: object = None
@@ -362,6 +366,7 @@ __all__ = [
     'DirectAnalysisRequest',
     'IntentDecision',
     'LarkEvent',
+    'RequirementAnalysisRequest',
     'ReportFollowupRequest',
     'RomVersionLookupRequest',
     'SignalRequest',
@@ -380,6 +385,7 @@ __all__ = [
     'parse_bug_request',
     'parse_direct_analysis_request',
     'parse_perception_summary_request',
+    'parse_requirement_analysis_request',
     'parse_addr2line_request',
     'parse_rom_version_lookup_request',
     'parse_signal_request',
@@ -405,6 +411,7 @@ __all__ = [
     'SignalResolver',
     'SkillManager',
     'AppServerInvestigationRunner',
+    'RequirementAnalysisRunner',
     'RepositorySourceAnalysisRunner',
     'AgentActivityStore',
     'ConversationContext',

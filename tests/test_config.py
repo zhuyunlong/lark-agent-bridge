@@ -305,6 +305,32 @@ prompt_template = "CTX={context_path}\\nINV={skill_inventory_path}\\nOUT={output
         self.assertTrue(opts.require_time_for_file_resources)
         self.assertEqual(opts.prompt_template, "CTX={context_path}\nINV={skill_inventory_path}\nOUT={output_path}")
 
+    def test_load_requirement_analysis_options(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text(
+                """
+[requirement_analysis]
+enabled = true
+timeout_seconds = 180
+fetch_comments = false
+fetch_wiki_body = true
+max_requirement_chars = 9000
+max_fact_count = 12
+""",
+                encoding="utf-8",
+            )
+
+            config = load_config(config_path)
+
+        opts = config.requirement_analysis
+        self.assertTrue(opts.enabled)
+        self.assertEqual(opts.timeout_seconds, 180)
+        self.assertFalse(opts.fetch_comments)
+        self.assertTrue(opts.fetch_wiki_body)
+        self.assertEqual(opts.max_requirement_chars, 9000)
+        self.assertEqual(opts.max_fact_count, 12)
+
     def test_bug_analysis_command_defaults_to_codex_for_openai_api_format(self):
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "config.toml"

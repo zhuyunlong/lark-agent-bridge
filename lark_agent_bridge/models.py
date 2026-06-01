@@ -366,6 +366,16 @@ class AIProviderOptions:
 
 
 @dataclass(slots=True)
+class RequirementAnalysisOptions:
+    enabled: bool = True
+    timeout_seconds: int = 120
+    fetch_comments: bool = True
+    fetch_wiki_body: bool = False
+    max_requirement_chars: int = 12000
+    max_fact_count: int = 30
+
+
+@dataclass(slots=True)
 class BridgeConfig:
     dry_run: bool = True
     workspace_root: Path = field(default_factory=lambda: Path.cwd())
@@ -395,6 +405,7 @@ class BridgeConfig:
     dual_agent: DualAgentOptions = field(default_factory=DualAgentOptions)
     knowledge: KnowledgeOptions = field(default_factory=KnowledgeOptions)
     ai_provider: AIProviderOptions = field(default_factory=AIProviderOptions)
+    requirement_analysis: RequirementAnalysisOptions = field(default_factory=RequirementAnalysisOptions)
     signal_resolver: SignalResolverOptions = field(default_factory=SignalResolverOptions)
     runner_timeout_seconds: int = 900
 
@@ -689,6 +700,65 @@ class SourceAnalysisRequest:
     error: str | None = None
     source_mode: str = "repository_only"
     diagram_kinds: list[str] = field(default_factory=list)
+    output_html: bool = True
+    reason: str = ""
+
+
+@dataclass(slots=True)
+class RequirementWorkItemRef:
+    url: str
+    project_key: str
+    work_item_type: str
+    work_item_id: str
+
+
+@dataclass(slots=True)
+class RequirementFact:
+    fact_id: str
+    text: str
+    source_field: str = ""
+
+
+@dataclass(slots=True)
+class RequirementWorkItemSnapshot:
+    ref: RequirementWorkItemRef
+    title: str = ""
+    status: str = ""
+    item_type_name: str = ""
+    priority: str = ""
+    wiki_url: str = ""
+    description: str = ""
+    create_time: str = ""
+    update_time: str = ""
+    comments_count: int | None = None
+    facts: list[RequirementFact] = field(default_factory=list)
+    raw: dict[str, Any] = field(default_factory=dict)
+    fetch_warnings: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class RequirementSourceComparison:
+    verdict: str
+    summary: str
+    matched_items: list[RequirementFact] = field(default_factory=list)
+    gap_items: list[RequirementFact] = field(default_factory=list)
+    unknown_items: list[RequirementFact] = field(default_factory=list)
+    architecture_impact: str = "unknown"
+    architecture_impact_reason: str = ""
+    source_evidence: list[dict[str, Any]] = field(default_factory=list)
+    diagram_notes: list[str] = field(default_factory=list)
+    parse_warnings: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class RequirementAnalysisRequest:
+    prompt: str
+    workitem: RequirementWorkItemRef
+    raw_text: str = ""
+    triggered: bool = False
+    error: str | None = None
+    source_mode: str = "requirement_source"
+    diagram_kinds: list[str] = field(default_factory=lambda: ["swimlane"])
     output_html: bool = True
     reason: str = ""
 

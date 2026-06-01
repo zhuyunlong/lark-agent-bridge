@@ -125,6 +125,14 @@ timeout_seconds = 180
 max_prompt_chars = 12000
 allow_subprocess_fallback = false
 
+[requirement_analysis]
+enabled = true
+timeout_seconds = 120
+fetch_comments = true
+fetch_wiki_body = false
+max_requirement_chars = 12000
+max_fact_count = 30
+
 [source_investigation]
 enabled = true
 provider = ""

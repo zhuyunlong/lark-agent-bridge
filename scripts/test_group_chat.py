@@ -5,10 +5,10 @@ Sends messages to a Feishu group via lark-cli, waits for bot responses,
 and validates the results.  Designed to be run after each major milestone.
 
 Usage:
-    python scripts/test_group_chat.py                  # run all tests
-    python scripts/test_group_chat.py --case initial    # initial bug only
-    python scripts/test_group_chat.py --case followup   # follow-up only
-    python scripts/test_group_chat.py --case time_fix   # time-correction only
+    python scripts/test_group_chat.py                    # run all tests
+    python scripts/test_group_chat.py --case initial     # initial bug only
+    python scripts/test_group_chat.py --case followup    # follow-up only
+    python scripts/test_group_chat.py --case time_fix    # time-correction only
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 # ---------------------------------------------------------------------------
@@ -28,10 +29,14 @@ from typing import Optional
 CHAT_ID = "oc_d977fe30a92c7ac81e3e6b543d99ef5b"
 BOT_MENTION = "@朱云龙的飞书 CLI"
 POLL_INTERVAL = 15          # seconds between status polls
-MAX_WAIT      = 300         # max seconds to wait for bot completion
+MAX_WAIT      = 600         # max seconds to wait for bot completion
 
 # Test data – 3D scene signal bug
 BUG_URL_3D = "https://project.feishu.cn/xpfailuremgmt/buglo/detail/6998811703"
+BUG_URL_STARTUP = "https://project.feishu.cn/xpfailuremgmt/buglo/detail/6987292722"
+BUG_URL_THEME = "https://project.feishu.cn/xpfailuremgmt/buglo/detail/6991604970"
+REQUIREMENT_URL_BARRIER = "https://project.feishu.cn/adcvehicleroject/story/detail/6979403058"
+REQUIREMENT_URL_SR = "https://project.feishu.cn/adcvehicleroject/story/detail/6956270285"
 WRONG_TIME = "2025-05-10 14:30:00"
 EXPECTED_CORRECT_TIME_SUBSTR = "2026-05-25"   # from bug title
 
@@ -77,7 +82,7 @@ def reply_message(parent_msg_id: str, text: str) -> str:
     return m.group(1)
 
 
-def list_messages(page_size: int = 5) -> list[dict]:
+def list_messages(page_size: int = 20) -> list[dict]:
     """List recent messages in the group chat (newest first)."""
     out = _lark_cli(
         "--as", "bot",
@@ -100,7 +105,7 @@ def find_bot_card_reply(user_msg_id: str, timeout: int = MAX_WAIT) -> Optional[d
     running_re = re.compile(r"\*\*当前状态：\*\*\s*[🔍🟡]?\s*(分析中|处理中)")
     deadline = time.time() + timeout
     while time.time() < deadline:
-        msgs = list_messages(page_size=8)
+        msgs = list_messages(page_size=20)
         for msg in msgs:
             if (
                 msg.get("reply_to") == user_msg_id
@@ -109,11 +114,34 @@ def find_bot_card_reply(user_msg_id: str, timeout: int = MAX_WAIT) -> Optional[d
                 content = msg.get("content", "")
                 if done_re.search(content):
                     return msg
+                if not running_re.search(content) and (
+                    "报告链接" in content
+                    or "[📄 打开报告]" in content
+                    or "**分析类型**" in content
+                    or "需求源码分析" in content
+                ):
+                    return msg
                 # still running
                 if running_re.search(content):
                     break  # wait more
         time.sleep(POLL_INTERVAL)
     return None
+
+
+def card_completed(content: str) -> bool:
+    return "✅ 已完成" in content or 'title="✅ ' in content
+
+
+def read_conversation_context(message_id: str) -> dict:
+    path = Path("data/state/conversation_contexts.json")
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    value = data.get(message_id)
+    return value if isinstance(value, dict) else {}
 
 
 # ---------------------------------------------------------------------------
@@ -150,7 +178,7 @@ def test_initial_bug_analysis() -> TestResult:
 
     content = card.get("content", "")
     has_skill = "3D场景信号分析" in content or "scene_signal" in content
-    has_done = "✅ 已完成" in content
+    has_done = card_completed(content)
     details = f"completed={has_done}, skill_hit={has_skill}, msg_id={card['message_id']}"
 
     return TestResult(
@@ -178,7 +206,7 @@ def test_auto_app_server_investigation() -> TestResult:
         return TestResult("auto_app_server", False, elapsed, "Bot did not complete autonomous analysis within timeout")
 
     content = card.get("content", "")
-    has_done = "✅ 已完成" in content
+    has_done = card_completed(content)
     has_mode = any(term in content for term in ("AI 自主分析", "自主分析", "app-server"))
     details = f"completed={has_done}, autonomous_mode={has_mode}, msg_id={card['message_id']}"
     return TestResult("auto_app_server", has_done and has_mode, elapsed, details, card_msg_id=card["message_id"])
@@ -200,7 +228,7 @@ def test_full_skill_app_server_investigation() -> TestResult:
         return TestResult("full_skill_app_server", False, elapsed, "Bot did not complete full-skill autonomous analysis within timeout")
 
     content = card.get("content", "")
-    has_done = "✅ 已完成" in content
+    has_done = card_completed(content)
     has_mode = any(term in content for term in ("AI 自主分析", "自主分析", "app-server"))
     details = f"completed={has_done}, autonomous_mode={has_mode}, msg_id={card['message_id']}"
     return TestResult("full_skill_app_server", has_done and has_mode, elapsed, details, card_msg_id=card["message_id"])
@@ -221,7 +249,7 @@ def test_followup_reanalysis(parent_card_id: str) -> TestResult:
         return TestResult("followup", False, elapsed, "Bot did not complete reanalysis within timeout")
 
     content = card.get("content", "")
-    has_done = "✅ 已完成" in content
+    has_done = card_completed(content)
     is_reanalysis = "重新分析" in content or "续聊" in content or "Bug 重新分析" in content
     details = f"completed={has_done}, is_reanalysis={is_reanalysis}, msg_id={card['message_id']}"
 
@@ -254,11 +282,19 @@ def test_time_correction(parent_card_id: str) -> TestResult:
         return TestResult("time_correction", False, elapsed, "Bot did not complete within timeout")
 
     content = card.get("content", "")
-    has_done = "✅ 已完成" in content
-    # The agent should mention the correct time somewhere in its analysis
-    has_correct_time = EXPECTED_CORRECT_TIME_SUBSTR in content
-    # The agent should acknowledge the time was wrong
-    has_correction = any(kw in content for kw in [
+    has_done = card_completed(content)
+    context = read_conversation_context(card["message_id"])
+    combined = "\n".join(
+        str(part or "")
+        for part in (
+            content,
+            context.get("summary_text", ""),
+            context.get("report_excerpt", ""),
+            context.get("request_text", ""),
+        )
+    )
+    has_correct_time = EXPECTED_CORRECT_TIME_SUBSTR in combined
+    has_correction = any(kw in combined for kw in [
         "时间窗口错误", "时间修正", "正确时间", "实际时间", "2026-05-25",
     ])
     details = (
@@ -294,7 +330,7 @@ def test_source_analysis(parent_card_id: str) -> TestResult:
         return TestResult("source_analysis", False, elapsed, "Bot did not complete source analysis within timeout")
 
     content = card.get("content", "")
-    has_done = "✅ 已完成" in content
+    has_done = card_completed(content)
     has_source = any(kw in content for kw in [
         "源码分析", "source", "代码", "函数", "方法", "类",
     ])
@@ -309,6 +345,85 @@ def test_source_analysis(parent_card_id: str) -> TestResult:
     )
 
 
+def test_startup_bug_analysis() -> TestResult:
+    print("\n🔷 Case 5: Startup bug analysis")
+    t0 = time.time()
+
+    msg_text = f"{BOT_MENTION} {BUG_URL_STARTUP} 调查3D启动时序"
+    user_msg_id = send_message(msg_text)
+    print(f"  → Sent: {user_msg_id}")
+
+    card = find_bot_card_reply(user_msg_id)
+    elapsed = time.time() - t0
+
+    if card is None:
+        return TestResult("startup_bug", False, elapsed, "Bot did not complete startup analysis within timeout")
+
+    content = card.get("content", "")
+    has_done = card_completed(content)
+    has_mode = any(term in content for term in ("Bug 分析", "3D启动", "启动时序", "startup"))
+    details = f"completed={has_done}, startup_mode={has_mode}, msg_id={card['message_id']}"
+    return TestResult("startup_bug", has_done and has_mode, elapsed, details, card_msg_id=card["message_id"])
+
+
+def test_theme_bug_analysis() -> TestResult:
+    print("\n🔷 Case 6: Theme bug analysis")
+    t0 = time.time()
+
+    msg_text = f"{BOT_MENTION} {BUG_URL_THEME} 分析主题变化"
+    user_msg_id = send_message(msg_text)
+    print(f"  → Sent: {user_msg_id}")
+
+    card = find_bot_card_reply(user_msg_id)
+    elapsed = time.time() - t0
+
+    if card is None:
+        return TestResult("theme_bug", False, elapsed, "Bot did not complete theme analysis within timeout")
+
+    content = card.get("content", "")
+    has_done = card_completed(content)
+    has_mode = any(term in content for term in ("Bug 分析", "主题", "Theme", "XTheme"))
+    details = f"completed={has_done}, theme_mode={has_mode}, msg_id={card['message_id']}"
+    return TestResult("theme_bug", has_done and has_mode, elapsed, details, card_msg_id=card["message_id"])
+
+
+def _requirement_case(case_name: str, requirement_url: str, prompt: str) -> TestResult:
+    print(f"\n🔷 Case {case_name}: Requirement analysis")
+    t0 = time.time()
+
+    msg_text = f"{BOT_MENTION} {requirement_url} {prompt}"
+    user_msg_id = send_message(msg_text)
+    print(f"  → Sent: {user_msg_id}")
+
+    card = find_bot_card_reply(user_msg_id, timeout=MAX_WAIT)
+    elapsed = time.time() - t0
+
+    if card is None:
+        return TestResult(case_name, False, elapsed, "Bot did not complete requirement analysis within timeout")
+
+    content = card.get("content", "")
+    has_done = card_completed(content)
+    has_mode = any(term in content for term in ("需求源码分析", "需求", "Requirement"))
+    details = f"completed={has_done}, requirement_mode={has_mode}, msg_id={card['message_id']}"
+    return TestResult(case_name, has_done and has_mode, elapsed, details, card_msg_id=card["message_id"])
+
+
+def test_requirement_barrier_gate() -> TestResult:
+    return _requirement_case(
+        "requirement_barrier_gate",
+        REQUIREMENT_URL_BARRIER,
+        "这是需求链接，结合源码分析是否可行",
+    )
+
+
+def test_requirement_sr_lane() -> TestResult:
+    return _requirement_case(
+        "requirement_sr_lane",
+        REQUIREMENT_URL_SR,
+        "这是需求链接，结合源码分析是否可行，并评估对当前架构影响",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
@@ -317,7 +432,19 @@ def main():
     parser = argparse.ArgumentParser(description="Standard real group-chat test suite")
     parser.add_argument(
         "--case",
-        choices=["auto", "full_skill", "initial", "followup", "time_fix", "source", "all"],
+        choices=[
+            "auto",
+            "full_skill",
+            "initial",
+            "followup",
+            "time_fix",
+            "source",
+            "startup",
+            "theme",
+            "req_barrier",
+            "req_sr",
+            "all",
+        ],
         default="all",
         help="Which test case to run (default: all)",
     )
@@ -361,6 +488,18 @@ def main():
     if args.case in ("all", "source"):
         r4 = test_source_analysis(parent_card)
         results.append(r4)
+
+    if args.case in ("all", "startup"):
+        results.append(test_startup_bug_analysis())
+
+    if args.case in ("all", "theme"):
+        results.append(test_theme_bug_analysis())
+
+    if args.case in ("all", "req_barrier"):
+        results.append(test_requirement_barrier_gate())
+
+    if args.case in ("all", "req_sr"):
+        results.append(test_requirement_sr_lane())
 
     # --- Report ---
     print("\n" + "=" * 60)

@@ -28,6 +28,7 @@ from .models import (
     LocalResourceOptions,
     NotificationOptions,
     OmlxChatOptions,
+    RequirementAnalysisOptions,
     ReportServerOptions,
     SignalResolverOptions,
     SourceInvestigationOptions,
@@ -257,6 +258,7 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
     dual_agent_data = data.get("dual_agent") or {}
     knowledge_data = data.get("knowledge") or {}
     ai_provider_data = data.get("ai_provider") or {}
+    requirement_analysis_data = data.get("requirement_analysis") or {}
     user_presets_data = data.get("provider_presets") or {}
     provider_presets = _load_provider_presets(user_presets_data if isinstance(user_presets_data, dict) else None)
     agent_provider_override = str(os.environ.get("LARK_AGENT_BRIDGE_AGENT_PROVIDER") or "").strip()
@@ -849,6 +851,27 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
             ),
         ),
         ai_provider=ai_provider,
+        requirement_analysis=RequirementAnalysisOptions(
+            enabled=bool(requirement_analysis_data.get("enabled", RequirementAnalysisOptions().enabled)),
+            timeout_seconds=int(
+                requirement_analysis_data.get("timeout_seconds", RequirementAnalysisOptions().timeout_seconds)
+            ),
+            fetch_comments=bool(
+                requirement_analysis_data.get("fetch_comments", RequirementAnalysisOptions().fetch_comments)
+            ),
+            fetch_wiki_body=bool(
+                requirement_analysis_data.get("fetch_wiki_body", RequirementAnalysisOptions().fetch_wiki_body)
+            ),
+            max_requirement_chars=int(
+                requirement_analysis_data.get(
+                    "max_requirement_chars",
+                    RequirementAnalysisOptions().max_requirement_chars,
+                )
+            ),
+            max_fact_count=int(
+                requirement_analysis_data.get("max_fact_count", RequirementAnalysisOptions().max_fact_count)
+            ),
+        ),
         runner_timeout_seconds=int(runner_data.get("timeout_seconds", 900)),
     )
     _warn_suspicious_paths(config)

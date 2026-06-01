@@ -20,6 +20,7 @@ class _HandleEventMixin:
         intent_runner: IntentAnalysisRunner | None = None,
         knowledge_service: KnowledgeService | None = None,
         app_server_investigation_runner: AppServerInvestigationRunner | None = None,
+        requirement_analysis_runner: RequirementAnalysisRunner | None = None,
         source_analysis_runner: RepositorySourceAnalysisRunner | None = None,
         report_publisher: HtmlReportPublisher | None = None,
         report_http_server: ReportHttpServer | None = None,
@@ -96,6 +97,10 @@ class _HandleEventMixin:
         self.source_analysis_runner = source_analysis_runner or RepositorySourceAnalysisRunner(
             config,
             bug_runner=self.bug_runner,
+        )
+        self.requirement_analysis_runner = requirement_analysis_runner or RequirementAnalysisRunner(
+            config,
+            source_analysis_runner=self.source_analysis_runner,
         )
         self.perception_runner = perception_runner or PerceptionSummaryRunner(
             config,
@@ -299,6 +304,7 @@ class _HandleEventMixin:
             referenced_resources,
             event=event,
         )
+        requirement_analysis_request = parse_requirement_analysis_request(route_content, bug_url_re=self.bug_url_re)
         source_analysis_request = parse_source_analysis_request(route_content, bug_url_re=self.bug_url_re)
         report_followup_request = parse_report_followup_request(route_content)
         perception_request = self._build_perception_summary_request(route_content, referenced_resources)
@@ -343,6 +349,7 @@ class _HandleEventMixin:
             bug_request=bug_request,
             direct_analysis_request=direct_analysis_request,
             app_server_investigation_request=app_server_investigation_request,
+            requirement_analysis_request=requirement_analysis_request,
             source_analysis_request=source_analysis_request,
             report_followup_request=report_followup_request,
             perception_request=perception_request,
@@ -368,19 +375,20 @@ class _HandleEventMixin:
             self._route_rom_version_lookup, # 8. ROM version lookup
             self._route_scene_signal,       # 9. Scene signal shortcut
             self._route_knowledge_qa,       # 10. Personal knowledge QA / ADB templates
-            self._route_source_analysis,    # 11. Repository-only source analysis
-            self._route_signal_request,     # 12. Signal lifecycle analysis
-            self._route_claude_skill,       # 13. Optional configured local skill route
-            self._route_bug_request,        # 14. Bug request (secondary match)
-            self._route_perception,         # 15. Perception summary
-            self._route_direct_analysis,    # 16. Direct file/log analysis
-            self._route_followup_intent,    # 17. Followup intent keywords
-            self._route_general_followup,   # 18. General followup conversation
-            self._route_knowledge_probe,    # 19. Internal operation QA from knowledge before chat
-            self._route_stale_light_interaction,  # 20. Replayed old lightweight messages
-            self._route_basic_chat,         # 21. Deterministic help/identity replies
-            self._route_omlx_chat,          # 22. OMLX chat conversation
-            self._route_intent_router,      # 23. Intent fallback for unresolved tasks
+            self._route_requirement_analysis,  # 11. Feishu Project requirement + source analysis
+            self._route_source_analysis,    # 12. Repository-only source analysis
+            self._route_signal_request,     # 13. Signal lifecycle analysis
+            self._route_claude_skill,       # 14. Optional configured local skill route
+            self._route_bug_request,        # 15. Bug request (secondary match)
+            self._route_perception,         # 16. Perception summary
+            self._route_direct_analysis,    # 17. Direct file/log analysis
+            self._route_followup_intent,    # 18. Followup intent keywords
+            self._route_general_followup,   # 19. General followup conversation
+            self._route_knowledge_probe,    # 20. Internal operation QA from knowledge before chat
+            self._route_stale_light_interaction,  # 21. Replayed old lightweight messages
+            self._route_basic_chat,         # 22. Deterministic help/identity replies
+            self._route_omlx_chat,          # 23. OMLX chat conversation
+            self._route_intent_router,      # 24. Intent fallback for unresolved tasks
         ]
         for handler in _ROUTE_HANDLERS:
             result = handler(ctx)
@@ -492,6 +500,38 @@ class _HandleEventMixin:
             ctx.event,
             progress_callback=_source_progress,
         )
+        return self._deliver_result(ctx.event, result, request_text=request.raw_text or request.prompt)
+
+    def _route_requirement_analysis(self, ctx: _RouteContext) -> TaskResult | None:
+        request = ctx.requirement_analysis_request
+        if request is None or not request.triggered:
+            return None
+        if not self.config.requirement_analysis.enabled:
+            return None
+        if ctx.bug_request is not None and getattr(ctx.bug_request, "triggered", False):
+            return None
+        if not self.state_store.mark_seen(ctx.event):
+            return TaskResult(True, f"duplicate event skipped: {ctx.event.event_id}", skipped=True)
+        self._notify_progress(
+            "requirement_analysis_request_received",
+            "收到需求源码分析请求",
+            event=ctx.event,
+            mode="requirement_analysis",
+            work_item_id=request.workitem.work_item_id,
+        )
+
+        def _requirement_progress(payload: dict[str, object]) -> None:
+            details = payload.get("details") if isinstance(payload.get("details"), dict) else {}
+            progress_details = dict(details)
+            progress_details.setdefault("mode", "requirement_analysis")
+            self._notify_progress(
+                str(payload.get("stage") or "requirement_analysis"),
+                str(payload.get("message") or "需求源码分析"),
+                event=ctx.event,
+                **progress_details,
+            )
+
+        result = self.requirement_analysis_runner.run(request, ctx.event, progress_callback=_requirement_progress)
         return self._deliver_result(ctx.event, result, request_text=request.raw_text or request.prompt)
 
     def _route_bug_followup(self, ctx: _RouteContext) -> TaskResult | None:
@@ -1003,6 +1043,7 @@ class _HandleEventMixin:
             "bug_agent_followup": "Bug 追问",
             "direct_analysis": "直传文件分析",
             "app_server_investigation": "AI 自主分析",
+            "requirement_analysis": "需求源码分析",
             "source_analysis": "源码分析",
             "diagram_report_followup": "图表报告",
             "perception_summary": "感知数据总结",
@@ -1190,6 +1231,7 @@ class _HandleEventMixin:
                 ctx.direct_analysis_request,
                 ctx.perception_request,
                 ctx.rom_version_request,
+                ctx.requirement_analysis_request,
             )
         )
 

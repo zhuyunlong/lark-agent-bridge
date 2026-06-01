@@ -12,6 +12,7 @@ from lark_agent_bridge.parser import (
     parse_direct_analysis_request,
     parse_followup_action,
     parse_perception_summary_request,
+    parse_requirement_analysis_request,
     parse_report_followup_request,
     parse_rom_version_lookup_request,
     parse_signal_request,
@@ -460,6 +461,46 @@ class ParserTests(unittest.TestCase):
         )
 
         self.assertFalse(request.triggered)
+
+    def test_story_link_with_requirement_wording_routes_to_requirement_analysis_not_direct(self):
+        text = (
+            "@bot https://project.feishu.cn/adcvehicleroject/story/detail/6979403058 "
+            "这是需求链接，结合源码分析是否可行"
+        )
+
+        requirement = parse_requirement_analysis_request(text)
+        direct = parse_direct_analysis_request(text)
+
+        self.assertTrue(requirement.triggered)
+        self.assertEqual(requirement.workitem.project_key, "adcvehicleroject")
+        self.assertEqual(requirement.workitem.work_item_type, "story")
+        self.assertEqual(requirement.workitem.work_item_id, "6979403058")
+        self.assertFalse(direct.triggered)
+
+    def test_bug_link_with_source_wording_still_routes_to_bug_not_requirement(self):
+        text = "@bot https://project.feishu.cn/xpfailuremgmt/buglo/detail/6993883118 基于源码分析 UnityReady"
+
+        requirement = parse_requirement_analysis_request(text)
+        bug = parse_bug_request(text)
+
+        self.assertTrue(bug.triggered)
+        self.assertFalse(requirement.triggered)
+
+    def test_generic_url_direct_analysis_is_not_blocked_by_requirement_parser(self):
+        text = "@bot https://example.com/log.zip 分析这份日志"
+
+        requirement = parse_requirement_analysis_request(text)
+        direct = parse_direct_analysis_request(text)
+
+        self.assertFalse(requirement.triggered)
+        self.assertTrue(direct.triggered)
+
+    def test_workitem_link_without_analysis_intent_does_not_trigger_requirement_analysis(self):
+        text = "@bot https://project.feishu.cn/demo/story/detail/12345"
+
+        requirement = parse_requirement_analysis_request(text)
+
+        self.assertFalse(requirement.triggered)
 
     def test_omlx_chat_candidate_for_simple_question(self):
         self.assertTrue(should_use_omlx_chat("帮我解释一下什么是 token？"))
