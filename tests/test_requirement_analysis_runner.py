@@ -168,6 +168,49 @@ class RequirementSourcePromptTests(unittest.TestCase):
         self.assertEqual(comparison.unknown_items[0].fact_id, "REQ-2")
         self.assertEqual(comparison.source_evidence[0]["file"], "router.py")
 
+    def test_parse_markdown_fallback_when_agent_omits_json_block(self):
+        answer = """
+## 结论摘要
+
+当前仓库只能证明上游链路部分具备，但没有看到它接入下游触发链路，属于 partially_implemented。
+
+## 关键证据
+
+1. **现有触发链路不含新条件**
+   - 来源：`/workspace/app/decision.py:111`
+   - 关键内容：`update_state()` 只读取旧条件。
+   - 影响：需求入口没有闭环。
+
+2. **上游信号已存在**
+   - 来源：`/workspace/native/handler.cpp:250`
+   - 关键内容：按 FOV 过滤并输出最近距离。
+
+## 最可能原因
+
+1. **两条链路并行未打通**
+   - 支撑证据：证据 1、2。
+   - 说明：上游信号没有进入下游状态机。
+
+## 待确认项
+
+- framework 下游是否会触发目标能力。
+
+## 建议动作
+
+1. 明确入口归属，再补齐状态机。
+"""
+
+        comparison = parse_requirement_source_comparison(answer)
+
+        self.assertEqual(comparison.verdict, "partially_implemented")
+        self.assertIn("上游链路部分具备", comparison.summary)
+        self.assertEqual(len(comparison.source_evidence), 2)
+        self.assertEqual(comparison.source_evidence[0]["file"], "/workspace/app/decision.py")
+        self.assertEqual(comparison.source_evidence[0]["line"], 111)
+        self.assertIn("两条链路并行未打通", comparison.architecture_impact_reason)
+        self.assertEqual(comparison.unknown_items[0].text, "framework 下游是否会触发目标能力。")
+        self.assertIn("source_comparison_json_missing_markdown_fallback", comparison.parse_warnings)
+
 
 class FakeRequirementClient:
     def __init__(self, snapshot):

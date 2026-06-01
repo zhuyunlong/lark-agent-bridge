@@ -3,6 +3,49 @@ from _agents_base import _AgentTestBase
 
 
 class AgentsCustomSkillTests(_AgentTestBase):
+    def test_file_agent_context_allows_json_fence_when_prompt_requires_structured_output(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = BugAnalysisRunner(BridgeConfig(dry_run=False, data_dir=Path(tmp) / "data"))
+            analysis_dir = Path(tmp) / "analysis"
+            prompt_text = "请输出中文分析，并在末尾输出一个 ```json fenced block，字段必须包括 verdict。"
+
+            context_path = runner._write_file_agent_context(
+                analysis_kind="source_stage",
+                skill_name="source_analysis",
+                request_text=prompt_text,
+                prompt_text=prompt_text,
+                title="需求源码分析",
+                description="",
+                fault_time="",
+                original_selected_input=None,
+                focused_log_input=None,
+                log_focus_manifest=None,
+                source_evidence_path=None,
+                analysis_dir=analysis_dir,
+                analysis_markdown_path=analysis_dir / "source_stage_analysis.md",
+            )
+            context_body = context_path.read_text(encoding="utf-8")
+            prompt_body = runner._build_custom_skill_agent_prompt(
+                analysis_kind="source_stage",
+                skill_name="source_analysis",
+                request_text=prompt_text,
+                prompt_text=prompt_text,
+                title="需求源码分析",
+                description="",
+                fault_time="",
+                selected_input=None,
+                prepared_input=None,
+                source_evidence_path=None,
+                analysis_markdown_path=analysis_dir / "source_stage_analysis.md",
+                context_path=context_path,
+                writes_output_file=True,
+            )
+
+            self.assertIn("允许在末尾输出该 JSON 代码块", context_body)
+            self.assertIn("允许在末尾输出该 JSON 代码块", prompt_body)
+            self.assertNotIn("不要输出代码块围栏", context_body)
+            self.assertNotIn("不要输出代码块围栏", prompt_body)
+
     def test_stage_plan_plain_scene_signal_request_stays_domain_only(self):
         runner = BugAnalysisRunner(BridgeConfig(dry_run=False))
 

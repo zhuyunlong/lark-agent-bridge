@@ -405,11 +405,16 @@ class _CustomSkillMixin:
             for label, kind, verdict in prior_findings:
                 lines.append(f"- **{label}** (`{kind}`): {verdict}")
             lines.append("- 以上结论来自其他专用 Skill，请在此基础上做源码级深入分析。")
+        output_rule = (
+            "- 输出中文 Markdown 正文，不要输出 HTML；本轮 prompt 明确要求结构化 JSON fenced block，允许在末尾输出该 JSON 代码块。"
+            if _prompt_requires_json_fence(prompt_text)
+            else "- 只输出 Markdown 正文，不要输出代码块围栏，不要输出 HTML。"
+        )
         lines.extend(
             [
                 "",
                 "## 输出要求",
-                "- 只输出 Markdown 正文，不要输出代码块围栏，不要输出 HTML。",
+                output_rule,
                 "- 必须包含这些二级标题：`## 结论摘要`、`## 关键证据`、`## 最可能原因`、`## 待确认项`、`## 建议动作`。",
                 "- `## 关键证据` 不能为空，每条证据都要能回指到日志文件+时间，或源码文件+行号，或 bridge 生成的工具结果文件。",
                 f"- 最终正文会由 bridge 保存到 `{analysis_markdown_path}`。",
@@ -589,12 +594,17 @@ class _CustomSkillMixin:
             for label, kind, verdict in prior_findings:
                 lines.append(f"- {label}: {verdict}")
             lines.extend(["", "请在以上结论基础上，做源码级深入分析，补充日志和源码证据。", ""])
+        output_rule = (
+            "3. 输出中文 Markdown，不要输出 HTML；本轮 prompt 明确要求结构化 JSON fenced block，允许在末尾输出该 JSON 代码块。除此之外不要输出额外解释。"
+            if _prompt_requires_json_fence(prompt_text)
+            else "3. 输出中文 Markdown，不要输出代码块围栏或额外解释。"
+        )
         lines.extend(
             [
                 "硬性要求：",
                 "1. 必须先读取上下文文件、SKILL.md、可用源码证据和必要输入材料；不能只根据标题/描述直接下根因结论。",
                 "2. 只读分析，不修改文件，不生成无证据结论。",
-                "3. 输出中文 Markdown，不要输出代码块围栏或额外解释。",
+                output_rule,
                 "4. Markdown 必须包含这些二级标题：`## 结论摘要`、`## 关键证据`、`## 最可能原因`、`## 待确认项`、`## 建议动作`。",
                 "5. `## 关键证据` 必须非空，每条证据要能回指到日志/源码/工具结果；证据不足时明确写待确认，不要编造。",
                 "6. 不要重复输出 bug 链接；该信息已经结构化。",
@@ -1024,3 +1034,8 @@ def _app_server_delta_should_flush(text: str, *, started_at: float, max_chars: i
     if started_at and (time.monotonic() - started_at) >= 1.2 and len(text.strip()) >= 48:
         return True
     return False
+
+
+def _prompt_requires_json_fence(prompt_text: str) -> bool:
+    normalized = (prompt_text or "").casefold()
+    return "```json" in normalized or ("json" in normalized and "fenced block" in normalized)
