@@ -1,0 +1,61 @@
+README.md
+  089b4018d480926e 68-73
+stop.sh
+  089b4018d480926e 1-6,8-15,24,26-33,35-37,39-49,53-79,155,163-173,183-245,297-329,331
+  18344a2da683638a 7,16-23,25,34,38,50-52,80-154,156-162,174-182,246-296,330
+docs/superpowers/plans/2026-06-01-requirement-link-source-analysis-v2.md
+  255a71f51b64b41c 7,46-62,85-86,90,95-96,111,164-195,203,324,990,1344-1366,1393-1413,1415-1419,1444-1497,1499-1531,1589,1623-1641,1654,1657,1674,1728,1737-1740,1742-1750,1810-1813
+  089b4018d480926e 1-6,8-45,63-84,87-89,91-94,97-110,112-163,196-202,204-323,325-989,991-1343,1367-1392,1414,1420-1443,1498,1532-1588,1590-1622,1642-1653,1655-1656,1658-1673,1675-1727,1729-1736,1741,1751-1809,1814-1816
+tests/test_run_script.py
+  089b4018d480926e 8,72-82
+docs/superpowers/plans/2026-05-31-requirement-link-source-analysis.md
+  089b4018d480926e 1-1464
+docs/superpowers/plans/2026-05-31-source-request-html-diagram-routing.md
+  089b4018d480926e 1-126
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.22",
+  "base_commit_sha": "dd6f481f4eb1d62bc184c35a1bb12c94788bd76c",
+  "prompts": {
+    "089b4018d480926e": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e7e33-35c3-7f02-afbd-e54e019a08cc",
+        "model": "gpt-5.4"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 3362,
+      "overriden_lines": 0
+    },
+    "18344a2da683638a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e8251-798b-7c93-9889-6c77fef606af",
+        "model": "gpt-5.5"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 158,
+      "total_deletions": 1,
+      "accepted_lines": 158,
+      "overriden_lines": 0
+    },
+    "255a71f51b64b41c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e7e08-3ade-7f12-b4c5-feb4e3bad0d0",
+        "model": "gpt-5.5"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 255,
+      "overriden_lines": 0
+    }
+  }
+}
