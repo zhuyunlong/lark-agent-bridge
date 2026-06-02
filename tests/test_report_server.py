@@ -335,8 +335,8 @@ class ReportServerTests(unittest.TestCase):
             )
             try:
                 server.start()
-            except PermissionError as exc:
-                self.skipTest(f"local HTTP bind is not permitted in this environment: {exc}")
+            except (PermissionError, OSError) as exc:
+                self.skipTest(f"local HTTP bind is unavailable in this environment: {exc}")
             assert server._server is not None
             port = server._server.server_address[1]
             try:
@@ -474,8 +474,8 @@ class ReportServerTests(unittest.TestCase):
             server = ReportHttpServer(config, activity_store=activity_store, process_watchdog=watchdog)
             try:
                 server.start()
-            except PermissionError as exc:
-                self.skipTest(f"local HTTP bind is not permitted in this environment: {exc}")
+            except (PermissionError, OSError) as exc:
+                self.skipTest(f"local HTTP bind is unavailable in this environment: {exc}")
             assert server._server is not None
             port = server._server.server_address[1]
             request = urllib.request.Request(
@@ -518,8 +518,8 @@ class ReportServerTests(unittest.TestCase):
             server = ReportHttpServer(config, knowledge_service=knowledge)
             try:
                 server.start()
-            except PermissionError as exc:
-                self.skipTest(f"local HTTP bind is not permitted in this environment: {exc}")
+            except (PermissionError, OSError) as exc:
+                self.skipTest(f"local HTTP bind is unavailable in this environment: {exc}")
             assert server._server is not None
             port = server._server.server_address[1]
             try:
@@ -553,8 +553,8 @@ class ReportServerTests(unittest.TestCase):
             server = ReportHttpServer(config)
             try:
                 server.start()
-            except PermissionError as exc:
-                self.skipTest(f"local HTTP bind is not permitted in this environment: {exc}")
+            except (PermissionError, OSError) as exc:
+                self.skipTest(f"local HTTP bind is unavailable in this environment: {exc}")
             assert server._server is not None
             port = server._server.server_address[1]
             try:

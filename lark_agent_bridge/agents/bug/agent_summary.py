@@ -4,7 +4,7 @@ from ._shared import *  # noqa: F401,F403
 from . import _shared
 
 
-class _RunBug3Mixin:
+class _AgentSummaryMixin:
     def _run_bug_agent_summary_once(
         self,
         *,

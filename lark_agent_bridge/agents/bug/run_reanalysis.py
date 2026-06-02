@@ -3,7 +3,7 @@ from __future__ import annotations
 from ._shared import *  # noqa: F401,F403
 
 
-class _RunBug2Mixin:
+class _RunReanalysisMixin:
     def run_bug_reanalysis(
         self,
         *,
