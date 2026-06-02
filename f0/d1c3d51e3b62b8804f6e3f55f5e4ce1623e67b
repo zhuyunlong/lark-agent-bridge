@@ -1,0 +1,71 @@
+lark_agent_bridge/app/log_resources.py
+  6492f767ca8007cc 3-6
+lark_agent_bridge/app/replay_flow.py
+  6492f767ca8007cc 3-5
+docs/project-overview-architecture.md
+  6492f767ca8007cc 3,5-8,14,16,19-20,22-23,27-100,102,104,106,108-114,116,120-153,157,159-168,172,178,182,186,189,198,202,209,216-217,220,225-226,229,235-238,243,245,247-250,256-261,267,269,274,279,288,291,297,301-302,305,307,310,316,318,320-328,330-332,334,336,338,342,344-346,348,350,352,354-356,358,362,364-367,369-370
+lark_agent_bridge/agents/bug/run_reanalysis.py
+  6492f767ca8007cc 1-1080
+lark_agent_bridge/app/context_from.py
+  6492f767ca8007cc 3-10
+lark_agent_bridge/agents/bug/run_primary.py
+  6492f767ca8007cc 1-936
+docs/architecture-refactor-blueprint.md
+  6492f767ca8007cc 1-208
+lark_agent_bridge/agents/bug_runner.py
+  6492f767ca8007cc 5-6,15,21-22,31
+lark_agent_bridge/agents/bug/agent_summary.py
+  6492f767ca8007cc 1-1376
+lark_agent_bridge/app/result_bug.py
+  6492f767ca8007cc 3-7
+lark_agent_bridge/app/handle_event.py
+  6492f767ca8007cc 3-8
+tests/test_report_server.py
+  6492f767ca8007cc 338-339,477-478,521-522,556-557
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.22",
+  "base_commit_sha": "f0d1c3d51e3b62b8804f6e3f55f5e4ce1623e67b",
+  "prompts": {
+    "6492f767ca8007cc": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e86bd-618b-70a0-8adf-bf403bf7981c",
+        "model": "gpt-5.5"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 3861,
+      "total_deletions": 332,
+      "accepted_lines": 3861,
+      "overriden_lines": 0
+    },
+    "9eb7f83a796675ca": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e8422-f5c0-7661-8e05-4b1c926170d3",
+        "model": "gpt-5.5"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 0,
+      "overriden_lines": 0
+    },
+    "bd156991d1bb4903": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e842f-2e8a-7d23-b27e-6b0baf2ab61d",
+        "model": "gpt-5.5"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 0,
+      "overriden_lines": 0
+    }
+  }
+}
