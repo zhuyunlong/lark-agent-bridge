@@ -22,6 +22,19 @@ L2 拆成两个计划：
 - 不在 L2A 改任何 skill 脚本 / SKILL.md / agent prompt 行为（属 L2B）。
 - 不做 source_stage 语义内容消费（属 L2B B2）。
 
+## 执行状态（2026-06-03，subagent-driven）
+
+**已完成并提交（分支 `pydantic_xpdev`，targeted commit）：**
+- A1 intent 启发式 + 字段 — `8c46176` + `88ec683`（评审发现 `_shared.py` 有 `__all__`，`from ._shared import *` 不带入新函数→会 NameError；已把 `infer_intent_from_text`/`resolve_effective_intent` 加进 `__all__` 并加锁测试）
+- A2 透传 intent 到合并渲染器 — `c05c8f6`
+- A3 (intent×has_logs) 侧重渲染 + 劫持修复测试 — `055d7c3`
+
+**验证：** L2A 新增/扩展测试全过（intent 推断 6 + 报告渲染 15）；全量回归 1174 passed，仅 2 个预先存在的 `pydantic_ai` 失败；端到端链路经代码 trace 确认串通（text→source_decision.intent→resolve_effective_intent→build_combined→graph.intent→render 侧重）。
+
+**L2B 待办（需 RED 基线，单独成计划）：** source_stage agent 结构化输出(status+findings, `apply_source_stage`) + signal `--json-only` + 6b 完整"不生成"。
+
+---
+
 ## File Structure
 - Modify `lark_agent_bridge/agents/bug/_shared.py:552` — `SourceAnalysisDecision` 加 `intent: str = ""`；新增模块级纯函数 `infer_intent_from_text` / `resolve_effective_intent` + 词表常量。
 - Modify `lark_agent_bridge/agents/bug/resolve_source.py:312` — 构造 `SourceAnalysisDecision` 时传 `intent=...`。
