@@ -173,7 +173,7 @@ def render_source_analysis_report(
         for row in evidence_rows
     ]
     effective_evidence_count = len(evidence) or len(evidence_rows)
-    severity = "green" if success and effective_evidence_count else "yellow" if success else "red"
+    severity = "green" if success and effective_evidence_count else "yellow" if effective_evidence_count else "red"
     summary_items = _section_issue_items(_strip_markdown_tables(sections.get("结论摘要", ""))) if sections else []
     verdict = (
         str(summary_items[0].get("title") or "")

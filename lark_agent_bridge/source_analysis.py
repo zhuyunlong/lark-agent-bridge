@@ -86,7 +86,7 @@ class RepositorySourceAnalysisRunner:
                 coverage_boundary=result.coverage_boundary,
                 diagram_kinds=request.diagram_kinds,
                 backend="source_investigation",
-                success=True,
+                success=bool(result.source_evidence),
             ),
             encoding="utf-8",
         )
@@ -184,7 +184,7 @@ class RepositorySourceAnalysisRunner:
                 coverage_boundary="当前为只读源码咨询路径；运行态、日志态和真实触发时序需结合额外材料确认。",
                 diagram_kinds=request.diagram_kinds,
                 backend=str(execution.get("executor") or "codex_app_server"),
-                success=True,
+                success=False,
             ),
             encoding="utf-8",
         )

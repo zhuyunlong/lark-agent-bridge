@@ -118,5 +118,25 @@ class SourceReportHtmlTests(unittest.TestCase):
         self.assertNotIn("lane-grid", html)
 
 
+    def test_empty_evidence_not_green(self):
+        html = render_source_analysis_report(
+            title="t", request_text="r", answer="（无结构化结论）", target="X",
+            source_evidence=[], coverage_boundary="", diagram_kinds=[], backend="x", success=True,
+        )
+        # verdict banner must not be green when there is no evidence
+        body = html.split("</style>")[-1]
+        self.assertNotIn("v-green", body)
+
+    def test_with_evidence_can_be_green(self):
+        html = render_source_analysis_report(
+            title="t", request_text="r", answer="## 结论摘要\n- ok", target="X",
+            source_evidence=[{"file": "A.kt", "line": "10", "text": "hit"}],
+            coverage_boundary="", diagram_kinds=[], backend="x", success=True,
+        )
+        # verdict banner must be green when there is evidence and success=True
+        body = html.split("</style>")[-1]
+        self.assertIn("v-green", body)
+
+
 if __name__ == "__main__":
     unittest.main()
