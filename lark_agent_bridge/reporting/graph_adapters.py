@@ -217,3 +217,131 @@ def signal_json_to_graph(payload: Mapping[str, object]) -> ReportGraph:
         verdict=verdict, lanes=lanes, nodes=nodes, edges=edges,
         timeline=timeline, values=values, findings=findings,
     )
+
+
+def _module_of(path: str) -> tuple[str, str]:
+    if not path:
+        return ("unknown", "unknown")
+    parts = path.split("/")
+    return (parts[0], "/".join(parts[:2]) if len(parts) > 1 else parts[0])
+
+
+def _cg_node_id(path: str, line: int, name: str) -> str:
+    return f"{path}:{line}:{name}"
+
+
+def build_consult_graph_from_codegraph(
+    seed_symbols, cg_client, repo, *,
+    request_text: str, max_depth: int = 2, max_nodes: int = 30, max_per_node: int = 8,
+) -> ReportGraph:
+    """从种子符号用 codegraph 构造函数级静态调用图(按模块分泳道)。
+    codegraph 不可用/未建索引 → inconclusive 最小图(不伪 green)。"""
+    try:
+        available = bool(cg_client.is_available() and cg_client.is_indexed(repo))
+    except Exception:
+        available = False
+    if not available:
+        return ReportGraph(
+            intent="consult", has_logs=False,
+            verdict=Verdict(status="inconclusive",
+                            headline="未建立静态调用图（codegraph 不可用或未建索引）",
+                            next_step="建立 codegraph 索引后重试以获得函数级链路图"),
+            lanes=[{"id": "source", "title": "源码"}], nodes=[], edges=[],
+            timeline=[], values=[],
+            findings=[Finding(severity="warn", title="codegraph 不可用：无法构建静态调用图", kind="todo")],
+        )
+
+    lanes: list[dict] = []
+    lane_ids: set[str] = set()
+    nodes: dict[str, GraphNode] = {}
+    edges: list[GraphEdge] = []
+    findings: list[Finding] = []
+
+    def ensure_lane(path: str) -> str:
+        mid, title = _module_of(path)
+        if mid not in lane_ids:
+            lane_ids.add(mid)
+            lanes.append({"id": mid, "title": f"模块 / {title}"})
+        return mid
+
+    def ensure_node(name: str, path: str, line, kind: str = ""):
+        nid = _cg_node_id(path, int(line or 0), name)
+        if nid in nodes:
+            return nid
+        if len(nodes) >= max_nodes:
+            return None
+        lane = ensure_lane(path)
+        nodes[nid] = GraphNode(id=nid, lane=lane, label=name or _short_file(path),
+                               status="unknown", anchors=[Anchor(file=_short_file(path), line=int(line or 0))],
+                               note=kind)
+        return nid
+
+    roots = []
+    for seed in seed_symbols or []:
+        try:
+            hits = cg_client.search_symbol(seed, repo, limit=3)
+        except Exception:
+            hits = []
+        for h in list(hits)[:1]:
+            rid = ensure_node(getattr(h, "qualified_name", str(seed)), getattr(h, "path", ""), getattr(h, "line", 0))
+            if rid:
+                roots.append(rid)
+
+    frontier = [(rid, 0) for rid in roots]
+    visited = set(roots)
+    truncated = False
+    while frontier:
+        nid, depth = frontier.pop(0)
+        if depth >= max_depth:
+            continue
+        node = nodes.get(nid)
+        if node is None:
+            continue
+        sym = node.label
+        try:
+            callees = cg_client.get_callees(sym, repo, limit=max_per_node) or []
+        except Exception:
+            callees = []
+        try:
+            callers = cg_client.get_callers(sym, repo, limit=max_per_node) or []
+        except Exception:
+            callers = []
+        for h in list(callees)[:max_per_node]:
+            cid = ensure_node(getattr(h, "name", ""), getattr(h, "path", ""), getattr(h, "line", 0), getattr(h, "kind", ""))
+            if cid is None:
+                truncated = True
+                continue
+            edges.append(GraphEdge(**{"from": nid, "to": cid, "kind": "calls", "status": "unknown"}))
+            if cid not in visited:
+                visited.add(cid)
+                frontier.append((cid, depth + 1))
+        for h in list(callers)[:max_per_node]:
+            cid = ensure_node(getattr(h, "name", ""), getattr(h, "path", ""), getattr(h, "line", 0), getattr(h, "kind", ""))
+            if cid is None:
+                truncated = True
+                continue
+            edges.append(GraphEdge(**{"from": cid, "to": nid, "kind": "calls", "status": "unknown"}))
+            if cid not in visited:
+                visited.add(cid)
+                frontier.append((cid, depth + 1))
+
+    node_list = list(nodes.values())
+    seen_e: set[tuple[str, str]] = set()
+    uniq_edges: list[GraphEdge] = []
+    for e in edges:
+        k = (e.from_, e.to)
+        if k in seen_e or e.from_ == e.to:
+            continue
+        seen_e.add(k)
+        uniq_edges.append(e)
+    if truncated:
+        findings.append(Finding(severity="info", title=f"调用图已截断（max_nodes={max_nodes}）", kind="todo"))
+    if not node_list:
+        findings.append(Finding(severity="warn", title="未从 codegraph 解析到种子符号；静态调用图为空", kind="todo"))
+    headline = f"静态调用图：{len(lanes)} 模块 / {len(node_list)} 函数 / {len(uniq_edges)} 调用关系"
+    return ReportGraph(
+        intent="consult", has_logs=False,
+        verdict=Verdict(status="inconclusive", headline=headline, next_step="如需运行态确认，请提供日志/bug"),
+        lanes=lanes, nodes=node_list, edges=uniq_edges,
+        timeline=[], values=[], findings=findings,
+    )
