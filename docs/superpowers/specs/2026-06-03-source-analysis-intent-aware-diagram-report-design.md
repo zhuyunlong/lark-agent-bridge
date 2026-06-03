@@ -93,10 +93,11 @@ ReportGraph {
 - **判据（启发式，不新增 LLM）**：有症状描述（"收不到/看不到/为什么没/黑屏/卡住"等）或 `selected_input` 存在且诉求是"排查" → `diagnose`；纯"了解/怎么接入/涉及哪些模块/链路怎么走" → `consult`。
 - **透传**：`run_primary.py:538-585` source_stage 分支增传 `intent` 与 `has_logs = selected_input is not None` 给执行器与渲染器。
 
-### C4. 意图劫持修复（L3）
-- **落点**：`handle_event.py:642-645`（镜像 `532-542`）、`parser.py:753-754`。
-- **改法**：当 `bug_request/referenced_resources` 存在但用户文本命中 `looks_like_source_analysis_prompt` 且**无症状词**（即 `intent=consult`）时，不再无条件踢出 source_analysis —— 允许产咨询报告并**把附带日志当佐证**（落右上格"咨询·有日志"）。
-- **风险**：动路由判定，必须有针对性测试覆盖（见测试策略）。
+### C4. 意图劫持修复（L3，采用"让意图驱动侧重"而非重写路由）
+- **决策（已定）**：在两个候选中选 **(b) bug 路径内按 `intent` 产侧重报告**，而非 (a) 把 consult-with-logs 改路由到咨询路径。原因：现有咨询路径（`RepositorySourceAnalysisRunner`，`source_analysis.py:55 hits=[]`）**设计上不吃日志**，(a) 会把用户带来的日志丢弃，恰好违背"咨询·有日志=架构图+用日志佐证"这一格；而 bug 路径已具备完整日志摄取管线（`selected_input`/evidence_logs/signal 脚本读 `.alog`），更贴近用户需求且风险更低。
+- **落点**：consult-with-logs 仍进 bug 路径（`_route_bug_intent`），但 `intent=consult` 透传到 source_stage 执行与 C5 渲染，产出**咨询侧重**报告（架构优先 + 用日志佐证），不再强制诊断。`handle_event.py:642-645` 路由判定**无需重写**，只需保证 consult-with-logs 正常进入 bug 路径并携带 `intent`。
+- **效果**：把现状问题 #1（意图被劫持）从"路由 broken"降级为"渲染侧重"问题，由 L2 的 intent 透传顺带解决；针对性测试仍需覆盖 consult-with-logs 场景。
+- **纯无日志 consult**（无 bug/无附件）仍走轻量咨询路径（`_route_source_analysis`）+ L4 静态调用图，不变。
 
 ### C5. `reporting/source_signal_report_html.py`（新增，侧重感知渲染）
 - **职责**：消费 `ReportGraph` 出单份 HTML，章节权重/verdict 按 `(intent, has_logs)` 切换。
@@ -106,10 +107,11 @@ ReportGraph {
 - **依赖**：C1、扩展后的 `render_swimlane_rows`。
 
 ### C6. 合并接线（L1）
-- **落点**：扩展 `general_summary.py:548-607 _build_combined_report_artifacts`，新增分支处理 `[<domain>, source_stage]`（覆盖 `[signal, source_stage]` 及未来 `[startup/stuck/scene, source_stage]`）→ 返回单份 combined artifact；`run_primary.py:909-917` 走 combined 分支只发一份。两份原始 HTML 仍写 job 目录留档，不进 `files_to_send`。
+- **落点**：扩展 `general_summary.py:548-607 _build_combined_report_artifacts`，新增分支处理 `[<domain>, source_stage]`（覆盖 `[signal, source_stage]` 及未来 `[startup/stuck/scene, source_stage]`）→ 返回单份 combined artifact；`run_primary.py:909-917` 走 combined 分支只发一份。
+- **两份原始 HTML 不再生成（决策已定）**：source_stage 个体 HTML 不再渲染（由 combined 取代）；signal 链路脚本 `analyze_signal_chain.py` 增加 `--json-only`，只产 JSON 供 C2 适配器消费，不再 direct-write `bug_signal_chain_report.html`。`files_to_send` 只含合并报告。
 
-### C7. 静态模块/架构图生成器（L4）
-- **落点**：新增 `source_analysis/module_graph.py`，用 `codegraph_client.py:184-204 get_callers/get_callees` 构造模块级调用/依赖图 → 喂 `ReportGraph`（咨询路径）。
+### C7. 静态调用图生成器（L4，函数级 + 标注模块）
+- **落点（决策已定）**：新增 `source_analysis/call_graph.py`，用 `codegraph_client.py:184-204 get_callers/get_callees` 构造**函数级**调用图 → 喂 `ReportGraph`；每个节点 label **同时标明所属模块/文件**（如 `DataCenter.dispatchSignal @ module_datacenter/.../DataCenter.kt`），泳道（lane）按模块分组，节点为函数。
 - **附带修复**：空证据咨询报告不再标绿/黄成功（`source_analysis.py:183`、`source_report_html.py:176`），如实反映"无运行态证据"。
 
 ### C8. skill 规范更新（F）
@@ -131,12 +133,12 @@ ReportGraph {
 - **C3/C4 意图测**：矩阵 5 场景 → 正确 intent + 路径；重点回归"咨询·带日志"→ 产咨询报告而非诊断。
 - **回归**：迁移期保留旧双报告路径可用，L1 完成后切换。
 
-## 决策点（请在 spec review 时确认）
+## 决策点（已确认）
 
-1. **旧双报告**：合并后两份原始 HTML 仅 job 目录留档（默认），还是彻底不生成？
-2. **source_stage agent 输出格式**：改为输出"对图节点的 status 标注 + findings"是行为变更，需先 RED 基线 —— 是否接受这一步纳入 L2？
-3. **L3 劫持修复粒度**：在路由层直接放行 consult（改 `handle_event`），还是在 bug 路径内按 `intent=consult` 产咨询报告？前者更彻底、风险更集中在路由。
-4. **L4 模块图深度**：模块级（文件/类粒度）够用，还是要到函数级调用图？后者更重。
+1. **旧双报告 → 彻底不生成**：合并后不再生成 signal/source_stage 各自的 HTML（signal 脚本 `--json-only`，source_stage 不单独渲染）。见 C6。
+2. **source_stage agent 输出格式变更 → 接受纳入 L2**：改为输出"图节点 status 标注 + findings"，改 skill 前先跑 RED 基线（C8）。
+3. **L3 修复粒度 → 选 (b) bug 路径内按 intent 产侧重报告**：不重写路由。理由见 C4（咨询路径不吃日志，(a) 会丢弃用户带来的日志）。
+4. **L4 调用图深度 → 函数级 + 标注模块**：lane 按模块分组、节点为函数。见 C7。
 
 ## Non-Goals
 
@@ -147,11 +149,11 @@ ReportGraph {
 
 ## Acceptance Criteria
 
-1. 源码分析类请求（含本案例）产出**单份**报告，不再同时上传 signal + source_stage 两份。
+1. 源码分析类请求（含本案例）产出**单份**报告；signal/source_stage 各自的 HTML **不再生成**（signal 脚本 `--json-only`，source_stage 不单独渲染）。
 2. 报告以 **SVG 泳道图为核心**，节点按 status 染色，body 中不再有死 CSS（定义了却不用的 chain/flow/swimlane 样式）。
 3. 泳道节点可展开看 `file:line` + **原始日志原文**（覆盖 +41s/+582s 等后段事件，不再截断在 +22s）。
 4. 报告含生命周期时间线（注入→连接→注册→订阅，注销缺失如实标注）+ 值变化分轨（真实/缓存/HMI）+ findings（OK/risk/todo），且把 `-1` 矛盾、property id `557847217`=40019 陷阱、Unity recv=0、16:50:41 窗口未分析等提炼为 risk/todo。
 5. 分类决策产出 `intent = consult | diagnose`，并透传到渲染器与 source_stage prompt。
 6. 同一诉求在 `(intent, has_logs)` 四格下，报告章节顺序与 verdict 措辞不同（咨询置顶架构视图、诊断置顶断开点）。
 7. "带 bug 链接但文本是咨询链路"的请求，产出咨询型报告（用日志佐证），不再被劫持成诊断。
-8. 咨询路径在无日志时产出基于静态 codegraph 的模块/架构图，不再是占位骨架；空证据不再标绿/黄成功。
+8. 咨询路径在无日志时产出基于静态 codegraph 的**函数级调用图（节点标注模块）**，不再是占位骨架；空证据不再标绿/黄成功。
