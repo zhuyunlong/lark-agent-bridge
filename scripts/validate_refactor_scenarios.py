@@ -97,6 +97,9 @@ def main() -> int:
     config.ai_provider.enabled = False
     config.source_investigation.codegraph_enabled = False
     config.bug_analysis.auto_fallback_to_file_agent = False
+    # Keep validation fully offline: the app-server investigation issues outbound
+    # HTTP/2 calls to an internal endpoint that is unreachable (and hangs) off-corp-network.
+    config.bug_analysis.app_server_investigation.enabled = False
 
     runtime_checks = _runtime_route_checks(config)
     addr2line_checks = _addr2line_single_file_checks(config, run_dir)
@@ -249,6 +252,20 @@ def _load_cases() -> dict[str, dict[str, Any]]:
     return {str(value.get("job_id") or key): value for key, value in payload.items() if isinstance(value, dict)}
 
 
+def _resolve_case(cases: dict[str, dict[str, Any]], source_job_id: str, bug_id: str) -> dict[str, Any] | None:
+    """Resolve the historical case backing a scenario.
+
+    cases.json is a rolling state file: pinned job_ids age out while the same
+    bug gets re-analyzed under a new job_id. Look up by the pinned source_job_id
+    first, then fall back to any case whose bug_url still carries this bug_id, so
+    the validation does not hard-crash when state has been pruned/rotated.
+    """
+    case = cases.get(source_job_id)
+    if case is not None:
+        return case
+    return next((c for c in cases.values() if bug_id in str(c.get("bug_url") or "")), None)
+
+
 def _run_bug_scenario(
     config: Any,
     run_dir: Path,
@@ -257,7 +274,7 @@ def _run_bug_scenario(
 ) -> dict[str, Any]:
     bug_id = str(scenario["bug_id"])
     source_job_id = str(scenario["source_job_id"])
-    case = cases[source_job_id]
+    case = _resolve_case(cases, source_job_id, bug_id) or {}
     source_job_dir = DATA_DIR / "jobs" / source_job_id
     copied_job_id = f"{bug_id}_{source_job_id[:8]}"
     job_dir = run_dir / "jobs" / copied_job_id

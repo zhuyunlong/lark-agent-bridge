@@ -12,6 +12,8 @@ import subprocess
 import sys
 import time
 from typing import Any
+import urllib.error
+import urllib.request
 import zipfile
 
 from ..downloader import DownloadError, LogDownloader
@@ -53,6 +55,14 @@ _SCENE_SO_HINT_TERMS = (
     "gplatform",
     "gbl",
 )
+_NAVI_SYMBOL_SO_NAMES = {
+    "libRenderExtend.so",
+    "libxdata_sdk.so",
+    "libxdata_client.so",
+    "libxdata_native.so",
+}
+_BUILTIN_UNITY_SO_NAMES = {"libunity.so", "libmain.so"}
+_NAPA5_SYMBOL_SO_NAMES = {"libil2cpp.so", "libunity.so", "libmain.so"}
 
 
 @dataclass(slots=True)
@@ -86,6 +96,14 @@ class _PreparedResolveRequest:
     addr_source: str = ""
     prop_source: str = ""
     inferred_rom_version: str = ""
+
+
+@dataclass(slots=True)
+class _SymbolSourceSelection:
+    so_name: str
+    addresses: list[str]
+    source: str
+    symbol_path: Path | None = None
 
 
 @dataclass(slots=True)
@@ -130,6 +148,9 @@ class Addr2LineRunner:
         prepared = self._prepare_request(request, context=context, event=event)
         if isinstance(prepared, TaskResult):
             return prepared
+        request = prepared.request
+        if self._should_use_integrated_symbol_resolve(request):
+            return self._run_integrated_symbol_resolve(request, prepared=prepared, context=context)
         script = self._script_path()
         if script is None:
             return TaskResult(
@@ -140,13 +161,19 @@ class Addr2LineRunner:
                 error_code="addr2line_skill_missing",
                 details={"mode": "addr2line_resolve"},
             )
-        request = prepared.request
-        addr_text = request.addr_text.strip()
+        return self._run_external_resolve(request, script=script, prepared=prepared, context=context)
+
+    def _run_external_resolve(
+        self,
+        request: Addr2LineRequest,
+        *,
+        script: Path,
+        prepared: _PreparedResolveRequest,
+        context,
+    ) -> TaskResult:
         addr_source = prepared.addr_source
-        command = [sys.executable, str(script)]
         version_kind, version_value = self._version_arg(request)
-        command.extend([version_kind, version_value])
-        command.extend(["--target", request.target or "auto", "--addr", addr_text, "--json"])
+        command = self._external_command(request, script)
         started = time.monotonic()
         if self.config.dry_run:
             return TaskResult(
@@ -161,6 +188,8 @@ class Addr2LineRunner:
                     "symbol_version": version_value,
                     "symbol_version_kind": version_kind.lstrip("-"),
                     "target": request.target or "auto",
+                    **({"symbol_table_url": request.symbol_table_url} if request.symbol_table_url else {}),
+                    **({"napa5_download_url": request.napa5_download_url} if request.napa5_download_url else {}),
                     **({"addr_source": addr_source} if addr_source else {}),
                     **({"prop_source": prepared.prop_source} if prepared.prop_source else {}),
                     **({"inferred_rom_version": prepared.inferred_rom_version} if prepared.inferred_rom_version else {}),
@@ -232,7 +261,9 @@ class Addr2LineRunner:
                 details={"mode": "addr2line_resolve", "symbol_version": version_value},
             )
         output_path = context.output_dir / "addr2line_resolve.json"
+        self._annotate_payload_symbol_sources(payload, request)
         output_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        symbol_sources = payload.get("symbol_sources") if isinstance(payload.get("symbol_sources"), dict) else {}
         return TaskResult(
             success=True,
             message=self._format_message(version_value, payload),
@@ -249,11 +280,263 @@ class Addr2LineRunner:
                 "symbol_version_kind": version_kind.lstrip("-"),
                 "target": request.target or "auto",
                 "result_count": len(payload.get("results", [])) if isinstance(payload.get("results"), list) else 0,
+                **({"symbol_sources": symbol_sources} if symbol_sources else {}),
+                **({"symbol_table_url": request.symbol_table_url} if request.symbol_table_url else {}),
+                **({"napa5_download_url": request.napa5_download_url} if request.napa5_download_url else {}),
                 **({"addr_source": addr_source} if addr_source else {}),
                 **({"prop_source": prepared.prop_source} if prepared.prop_source else {}),
                 **({"inferred_rom_version": prepared.inferred_rom_version} if prepared.inferred_rom_version else {}),
             },
         )
+
+    def _external_command(self, request: Addr2LineRequest, script: Path) -> list[str]:
+        version_kind, version_value = self._version_arg(request)
+        command = [sys.executable, str(script)]
+        command.extend([version_kind, version_value])
+        command.extend(["--target", request.target or "auto", "--addr", request.addr_text.strip(), "--json"])
+        return command
+
+    def _should_use_integrated_symbol_resolve(self, request: Addr2LineRequest) -> bool:
+        if (request.target or "auto") != "auto":
+            return False
+        if not request.symbol_table_url.strip() and not request.napa5_download_url.strip():
+            return False
+        return bool(self._addr_groups_by_so(request.addr_text))
+
+    def _run_integrated_symbol_resolve(
+        self,
+        request: Addr2LineRequest,
+        *,
+        prepared: _PreparedResolveRequest,
+        context,
+    ) -> TaskResult:
+        started = time.monotonic()
+        groups = self._addr_groups_by_so(request.addr_text)
+        selections = self._symbol_source_selections(groups, request)
+        combined_results: list[dict[str, Any]] = []
+        symbol_sources = {selection.so_name: selection.source for selection in selections}
+        command: list[str] | None = None
+        stdout_parts: list[str] = []
+        stderr_parts: list[str] = []
+
+        if self.config.dry_run:
+            version_kind, version_value = self._version_arg(request)
+            external_so_names = {selection.so_name for selection in selections if selection.source in {"navi", "addr2line_script"}}
+            external_addr_text = self._addr_text_for_so_names(request.addr_text, external_so_names)
+            if external_addr_text.strip():
+                script = self._script_path()
+                if script is None:
+                    return TaskResult(
+                        success=False,
+                        message="addr2line-resolve skill 不可用：没有找到 addr2line_resolve.py。",
+                        job_id=context.job_id,
+                        job_dir=context.job_dir,
+                        error_code="addr2line_skill_missing",
+                        details={"mode": "addr2line_resolve"},
+                    )
+                command = self._external_command(self._copy_request(request, addr_text=external_addr_text), script)
+            return TaskResult(
+                success=True,
+                message="dry-run: addr2line 符号源分发已规划",
+                skipped=False,
+                job_id=context.job_id,
+                job_dir=context.job_dir,
+                command=command,
+                duration_seconds=time.monotonic() - started,
+                details={
+                    "mode": "addr2line_resolve",
+                    "symbol_version": version_value,
+                    "symbol_version_kind": version_kind.lstrip("-"),
+                    "target": request.target or "auto",
+                    "result_count": 0,
+                    "symbol_sources": symbol_sources,
+                    **({"symbol_table_url": request.symbol_table_url} if request.symbol_table_url else {}),
+                    **({"napa5_download_url": request.napa5_download_url} if request.napa5_download_url else {}),
+                    **({"addr_source": prepared.addr_source} if prepared.addr_source else {}),
+                    **({"prop_source": prepared.prop_source} if prepared.prop_source else {}),
+                    **({"inferred_rom_version": prepared.inferred_rom_version} if prepared.inferred_rom_version else {}),
+                },
+            )
+
+        external_so_names = {selection.so_name for selection in selections if selection.source in {"navi", "addr2line_script"}}
+        external_addr_text = self._addr_text_for_so_names(request.addr_text, external_so_names)
+        if external_addr_text.strip():
+            script = self._script_path()
+            if script is None:
+                return TaskResult(
+                    success=False,
+                    message="addr2line-resolve skill 不可用：没有找到 addr2line_resolve.py。",
+                    job_id=context.job_id,
+                    job_dir=context.job_dir,
+                    error_code="addr2line_skill_missing",
+                    details={"mode": "addr2line_resolve"},
+                )
+            external_request = self._copy_request(request, addr_text=external_addr_text)
+            external_result = self._run_external_resolve(external_request, script=script, prepared=prepared, context=context)
+            if not external_result.success:
+                return external_result
+            command = external_result.command
+            stdout_parts.append(external_result.stdout)
+            stderr_parts.append(external_result.stderr)
+            external_payload = self._payload_from_result(external_result)
+            for item in self._payload_results(external_payload):
+                combined_results.append(item)
+                so_name = str(item.get("so") or "")
+                if so_name:
+                    symbol_sources.setdefault(so_name, self._symbol_source_for_result_so(so_name, request))
+
+        local_selections = [selection for selection in selections if selection.source in {"builtin_unity", "napa5"}]
+        if local_selections:
+            llvm_path = self._find_llvm_addr2line_binary()
+            if not llvm_path:
+                return TaskResult(
+                    success=False,
+                    message="addr2line 反解失败：未找到 llvm-addr2line，无法反解本地符号表。",
+                    job_id=context.job_id,
+                    job_dir=context.job_dir,
+                    duration_seconds=time.monotonic() - started,
+                    error_code="addr2line_llvm_missing",
+                    details={"mode": "addr2line_resolve", "so": [selection.so_name for selection in local_selections]},
+                )
+            for selection in local_selections:
+                try:
+                    sym_path = self._symbol_path_for_selection(selection, request, context)
+                except OSError as exc:
+                    return TaskResult(
+                        success=False,
+                        message=f"addr2line 反解失败：{selection.so_name} 符号表获取失败: {exc}",
+                        job_id=context.job_id,
+                        job_dir=context.job_dir,
+                        duration_seconds=time.monotonic() - started,
+                        error_code="addr2line_symbol_download_failed",
+                        stderr=str(exc),
+                        details={
+                            "mode": "addr2line_resolve",
+                            "so": selection.so_name,
+                            **({"napa5_download_url": request.napa5_download_url} if selection.source == "napa5" else {}),
+                        },
+                    )
+                resolved = self._run_local_addr2line(llvm_path, sym_path, selection.addresses)
+                for item in resolved:
+                    combined_results.append(
+                        {
+                            "so": selection.so_name,
+                            "addr": item.get("addr", ""),
+                            "function": item.get("function", "??"),
+                            "location": item.get("location", "??:0"),
+                        }
+                    )
+                symbol_sources[selection.so_name] = selection.source
+
+        self._sort_results_by_input_order(combined_results, groups)
+
+        version_kind, version_value = self._version_arg(request)
+        payload = {
+            "apk_version": request.apk_version or version_value,
+            "so_artifact": "mixed",
+            "symbol_sources": symbol_sources,
+            "results": combined_results,
+        }
+        output_path = context.output_dir / "addr2line_resolve.json"
+        output_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return TaskResult(
+            success=True,
+            message=self._format_message(version_value, payload),
+            job_id=context.job_id,
+            job_dir=context.job_dir,
+            json_report=output_path,
+            command=command,
+            duration_seconds=time.monotonic() - started,
+            stdout="\n".join(part for part in stdout_parts if part),
+            stderr="\n".join(part for part in stderr_parts if part),
+            details={
+                "mode": "addr2line_resolve",
+                "symbol_version": version_value,
+                "symbol_version_kind": version_kind.lstrip("-"),
+                "target": request.target or "auto",
+                "result_count": len(combined_results),
+                "symbol_sources": symbol_sources,
+                **({"symbol_table_url": request.symbol_table_url} if request.symbol_table_url else {}),
+                **({"napa5_download_url": request.napa5_download_url} if request.napa5_download_url else {}),
+                **({"addr_source": prepared.addr_source} if prepared.addr_source else {}),
+                **({"prop_source": prepared.prop_source} if prepared.prop_source else {}),
+                **({"inferred_rom_version": prepared.inferred_rom_version} if prepared.inferred_rom_version else {}),
+            },
+        )
+
+    def _symbol_source_selections(
+        self,
+        groups: dict[str, list[str]],
+        request: Addr2LineRequest,
+    ) -> list[_SymbolSourceSelection]:
+        selections: list[_SymbolSourceSelection] = []
+        for so_name, addresses in groups.items():
+            builtin_path = self._find_builtin_unity_symbol_path(so_name) if so_name in _BUILTIN_UNITY_SO_NAMES else None
+            if builtin_path is not None:
+                selections.append(
+                    _SymbolSourceSelection(
+                        so_name=so_name,
+                        addresses=addresses,
+                        source="builtin_unity",
+                        symbol_path=builtin_path,
+                    )
+                )
+                continue
+            if so_name in _NAPA5_SYMBOL_SO_NAMES and request.napa5_download_url.strip():
+                selections.append(_SymbolSourceSelection(so_name=so_name, addresses=addresses, source="napa5"))
+                continue
+            if so_name in _NAVI_SYMBOL_SO_NAMES:
+                selections.append(_SymbolSourceSelection(so_name=so_name, addresses=addresses, source="navi"))
+                continue
+            selections.append(_SymbolSourceSelection(so_name=so_name, addresses=addresses, source="addr2line_script"))
+        return selections
+
+    def _symbol_path_for_selection(
+        self,
+        selection: _SymbolSourceSelection,
+        request: Addr2LineRequest,
+        context,
+    ) -> Path:
+        if selection.source == "builtin_unity":
+            if selection.symbol_path is None:
+                raise OSError("missing builtin unity symbol")
+            return selection.symbol_path
+        if selection.source == "napa5":
+            return self._download_napa_so(request.napa5_download_url, selection.so_name, context)
+        raise OSError(f"unsupported local symbol source: {selection.source}")
+
+    def _sort_results_by_input_order(self, results: list[dict[str, Any]], groups: dict[str, list[str]]) -> None:
+        order: dict[tuple[str, str], int] = {}
+        index = 0
+        for so_name, addresses in groups.items():
+            for addr in addresses:
+                order[(so_name, addr.lower())] = index
+                index += 1
+        results.sort(
+            key=lambda item: order.get(
+                (str(item.get("so") or ""), str(item.get("addr") or "").lower()),
+                index,
+            )
+        )
+
+    def _annotate_payload_symbol_sources(self, payload: dict[str, Any], request: Addr2LineRequest) -> None:
+        raw_sources = payload.get("symbol_sources")
+        symbol_sources = raw_sources if isinstance(raw_sources, dict) else {}
+        for item in self._payload_results(payload):
+            so_name = str(item.get("so") or "")
+            if so_name:
+                symbol_sources.setdefault(so_name, self._symbol_source_for_result_so(so_name, request))
+        if symbol_sources:
+            payload["symbol_sources"] = symbol_sources
+
+    def _symbol_source_for_result_so(self, so_name: str, request: Addr2LineRequest) -> str:
+        if so_name in _NAVI_SYMBOL_SO_NAMES:
+            return "navi"
+        if so_name in _BUILTIN_UNITY_SO_NAMES:
+            return "builtin_unity"
+        if so_name in _NAPA5_SYMBOL_SO_NAMES and request.napa5_download_url.strip():
+            return "napa5"
+        return "addr2line_script"
 
     def _script_path(self) -> Path | None:
         candidates = [
@@ -282,6 +565,43 @@ class Addr2LineRunner:
         except json.JSONDecodeError:
             return None
         return payload if isinstance(payload, dict) else None
+
+    def _payload_from_result(self, result: TaskResult) -> dict[str, Any]:
+        if result.json_report and result.json_report.exists():
+            try:
+                payload = json.loads(result.json_report.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                payload = None
+            if isinstance(payload, dict):
+                return payload
+        return self._parse_json(result.stdout) or {}
+
+    def _payload_results(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
+        raw = payload.get("results")
+        if not isinstance(raw, list):
+            return []
+        return [item for item in raw if isinstance(item, dict)]
+
+    def _addr_groups_by_so(self, text: str) -> dict[str, list[str]]:
+        groups: dict[str, list[str]] = {}
+        for line in text.splitlines():
+            match = re.search(r"#\d+\s+pc\s+([0-9a-fA-F]{8,16})\s+(\S*lib[\w.-]+\.so)\b", line)
+            if match is None:
+                continue
+            so_name = Path(match.group(2)).name
+            addr = "0x" + (match.group(1).lstrip("0") or "0")
+            groups.setdefault(so_name, []).append(addr)
+        return groups
+
+    def _addr_text_for_so_names(self, text: str, so_names: set[str]) -> str:
+        if not so_names:
+            return ""
+        kept: list[str] = []
+        for line in text.splitlines():
+            match = re.search(r"\S*lib[\w.-]+\.so\b", line)
+            if match is not None and Path(match.group(0)).name in so_names:
+                kept.append(line)
+        return "\n".join(kept)
 
     def _prepare_request(
         self,
@@ -360,11 +680,17 @@ class Addr2LineRunner:
             effective_request = self._copy_request(request, addr_text=addr_text)
 
         if inferred_rom_version and not effective_request.apk_version.strip() and not effective_request.napa_version.strip():
-            navigation_version = self._resolve_navigation_version_from_rom(inferred_rom_version, event=event)
-            if isinstance(navigation_version, TaskResult):
-                return navigation_version
+            symbol_outputs = self._resolve_navigation_symbol_outputs_from_rom(inferred_rom_version, event=event)
+            if isinstance(symbol_outputs, TaskResult):
+                return symbol_outputs
+            navigation_version = str(symbol_outputs.get("navigation_version") or "").strip()
             if navigation_version:
-                effective_request = self._copy_request(effective_request, apk_version=navigation_version)
+                effective_request = self._copy_request(
+                    effective_request,
+                    apk_version=navigation_version,
+                    symbol_table_url=str(symbol_outputs.get("symbol_table_url") or "").strip(),
+                    napa5_download_url=str(symbol_outputs.get("napa5_download_url") or "").strip(),
+                )
 
         if not self._has_symbol_version(effective_request):
             trace_report = self._build_subrealitytrace_thread_report(
@@ -1094,6 +1420,38 @@ class Addr2LineRunner:
                 return path
         return None
 
+    def _download_napa_so(self, download_url: str, so_name: str, context) -> Path:
+        base_url = download_url.strip().rstrip("/")
+        if not base_url:
+            raise OSError("missing napa5_download_url")
+        target_dir = context.input_dir / "napa5_symbols"
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target = target_dir / so_name
+        if target.exists() and target.stat().st_size > 0:
+            return target
+        url = f"{base_url}/{so_name}"
+        request = urllib.request.Request(url, headers={"User-Agent": "lark-agent-bridge/addr2line"})
+        try:
+            with self._open_internal_url(request, timeout=self._timeout_seconds()) as response, target.open("wb") as dst:
+                shutil.copyfileobj(response, dst)
+        except (urllib.error.URLError, OSError) as exc:
+            try:
+                target.unlink()
+            except OSError:
+                pass
+            raise OSError(str(exc)) from exc
+        return target
+
+    def _open_internal_url(self, request: urllib.request.Request, *, timeout: int):
+        env = build_internal_network_env(self.config.internal_network_env)
+        proxies: dict[str, str] = {}
+        for scheme in ("http", "https"):
+            value = env.get(f"{scheme}_proxy") or env.get(f"{scheme.upper()}_PROXY")
+            if value:
+                proxies[scheme] = value
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler(proxies))
+        return opener.open(request, timeout=timeout)
+
     def _run_local_addr2line(self, llvm_path: str, sym_path: Path, addresses: list[str]) -> list[dict[str, str]]:
         if not addresses:
             return []
@@ -1230,6 +1588,8 @@ class Addr2LineRunner:
             rom_version=overrides.get("rom_version", request.rom_version),
             napa_version=overrides.get("napa_version", request.napa_version),
             apk_version=overrides.get("apk_version", request.apk_version),
+            symbol_table_url=overrides.get("symbol_table_url", request.symbol_table_url),
+            napa5_download_url=overrides.get("napa5_download_url", request.napa5_download_url),
             log_folder=overrides.get("log_folder", request.log_folder),
             fault_time=overrides.get("fault_time", request.fault_time),
             target=overrides.get("target", request.target),
@@ -1241,9 +1601,9 @@ class Addr2LineRunner:
     def _has_symbol_version(self, request: Addr2LineRequest) -> bool:
         return bool(request.rom_version.strip() or request.napa_version.strip() or request.apk_version.strip())
 
-    def _resolve_navigation_version_from_rom(self, rom_version: str, *, event: LarkEvent | None) -> str | TaskResult:
+    def _resolve_navigation_symbol_outputs_from_rom(self, rom_version: str, *, event: LarkEvent | None) -> dict[str, object] | TaskResult:
         if self.rom_version_runner is None:
-            return ""
+            return {}
         lookup_result = self.rom_version_runner.run_lookup(
             RomVersionLookupRequest(
                 rom_version=rom_version,
@@ -1276,7 +1636,7 @@ class Addr2LineRunner:
         if isinstance(required_outputs, dict):
             navigation_version = str(required_outputs.get("navigation_version") or "").strip()
         if navigation_version:
-            return navigation_version
+            return required_outputs if isinstance(required_outputs, dict) else {}
         return TaskResult(
             success=False,
             message=(
@@ -1374,9 +1734,23 @@ class Addr2LineRunner:
             f"符号产物: {payload.get('so_artifact') or 'N/A'}",
             "说明: 地址反解只定位函数/源码位置，不等同于完整 crash 根因分析。",
         ]
+        symbol_sources = payload.get("symbol_sources")
+        if isinstance(symbol_sources, dict) and symbol_sources:
+            source_labels = {
+                "navi": "navi/envirodrive_so 符号表",
+                "builtin_unity": "内置 libunity/libmain 符号表",
+                "napa5": "Napa5 下载目录符号表",
+                "addr2line_script": "addr2line 脚本兜底",
+            }
+            rendered_sources = [
+                f"{so}: {source_labels.get(str(source), str(source))}"
+                for so, source in sorted(symbol_sources.items())
+            ]
+            lines.append("符号来源: " + "; ".join(rendered_sources))
         if not results:
             lines.append("结果: 未反解到有效函数，请检查符号版本是否匹配。")
             return "\n".join(lines)
+        lines.append("结论: 已按 so 类型选择对应符号来源完成反解；源码行只能说明 crash 位置，根因仍需结合寄存器、反汇编和源码上下文确认。")
         lines.append("反解结果:")
         for item in results[:20]:
             if not isinstance(item, dict):

@@ -24,12 +24,14 @@ class _FakeClient:
         stderr_lines: list[str] | None = None,
         turn_start_error: Exception | None = None,
         alive: bool = True,
+        server_request_delay_polls: int = 0,
     ) -> None:
         self.notifications = deque(notifications or [])
         self.server_requests = deque(server_requests or [])
         self.stderr_lines = list(stderr_lines or [])
         self.turn_start_error = turn_start_error
         self.alive = alive
+        self.server_request_delay_polls = server_request_delay_polls
         self.closed = False
         self.responses: list[tuple[object, dict]] = []
         self.error_responses: list[tuple[object, int, str]] = []
@@ -59,6 +61,9 @@ class _FakeClient:
 
     def take_server_request(self, timeout: float = 0.0):
         del timeout
+        if self.server_request_delay_polls > 0:
+            self.server_request_delay_polls -= 1
+            return None
         if self.server_requests:
             return self.server_requests.popleft()
         return None
@@ -268,6 +273,61 @@ class CodexAppServerRuntimeTests(unittest.TestCase):
 
         self.assertTrue(result.ok)
         self.assertEqual(client.responses, [(99, {"decision": "decline"})])
+
+    def test_runtime_approves_bridge_codegraph_mcp_permission_request(self):
+        client = _FakeClient(
+            notifications=[
+                {
+                    "method": "item/started",
+                    "params": {
+                        "item": {
+                            "type": "mcpToolCall",
+                            "id": "call-codegraph",
+                            "server": "bridge_codegraph",
+                            "tool": "codegraph_status",
+                        }
+                    },
+                },
+                {
+                    "method": "item/completed",
+                    "params": {
+                        "item": {
+                            "type": "agentMessage",
+                            "phase": "final_answer",
+                            "text": "## 结论摘要\n- done\n\n## 关键证据\n- L1\n",
+                        }
+                    },
+                },
+                {
+                    "method": "turn/completed",
+                    "params": {"turn": {"status": "completed"}},
+                },
+            ],
+            server_requests=[
+                {
+                    "id": 100,
+                    "method": "item/permissions/requestApproval",
+                    "params": {},
+                }
+            ],
+            server_request_delay_polls=1,
+        )
+        runtime = CodexAppServerRuntime(
+            command="codex",
+            cwd="/tmp/project",
+            startup_timeout_seconds=1.0,
+            turn_timeout_seconds=1.0,
+            post_tool_quiet_timeout_seconds=1.0,
+            notification_poll_seconds=0.0,
+            max_event_audit=20,
+            sandbox_mode="read-only",
+            client_factory=lambda **_kwargs: client,
+        )
+
+        result = runtime.run_turn("分析")
+
+        self.assertTrue(result.ok)
+        self.assertEqual(client.responses, [(100, {"decision": "approve"})])
 
     def test_runtime_without_completion_event_is_partial(self):
         client = _FakeClient(

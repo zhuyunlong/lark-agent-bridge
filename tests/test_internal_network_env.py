@@ -1,4 +1,5 @@
 import importlib
+import io
 import os
 from pathlib import Path
 import subprocess
@@ -75,6 +76,49 @@ class InternalNetworkEnvTests(unittest.TestCase):
         self.assertNotIn("HTTPS_PROXY", env)
         self.assertNotIn("NO_PROXY", env)
         self.assertNotIn("SHOULD_DROP", env)
+
+    def test_addr2line_runner_napa_download_uses_configured_internal_network_env(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = Addr2LineRunner(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    internal_network_env=InternalNetworkEnvOptions(
+                        inherit_env=["PATH"],
+                        unset_env=["HTTP_PROXY", "HTTPS_PROXY"],
+                    ),
+                )
+            )
+            context = type("Context", (), {"input_dir": Path(tmp) / "input"})()
+            captured: dict[str, object] = {}
+
+            class FakeOpener:
+                def open(self, request, timeout):
+                    captured["url"] = request.full_url
+                    captured["timeout"] = timeout
+                    return io.BytesIO(b"\x7fELF")
+
+            def fake_build_opener(handler):
+                captured["proxies"] = handler.proxies
+                return FakeOpener()
+
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {
+                        "PATH": "/usr/bin:/bin",
+                        "HTTP_PROXY": "http://127.0.0.1:7897",
+                        "HTTPS_PROXY": "http://127.0.0.1:7897",
+                    },
+                    clear=True,
+                ),
+                mock.patch.object(addr2line_runner_module.urllib.request, "build_opener", side_effect=fake_build_opener),
+            ):
+                path = runner._download_napa_so("http://napa.example/6.1.0-test", "libil2cpp.so", context)
+
+            self.assertEqual(path.read_bytes(), b"\x7fELF")
+            self.assertEqual(captured["url"], "http://napa.example/6.1.0-test/libil2cpp.so")
+            self.assertEqual(captured["proxies"], {})
 
     def test_addr2line_runner_uses_apk_version_and_configured_internal_network_env(self):
         with tempfile.TemporaryDirectory() as tmp:

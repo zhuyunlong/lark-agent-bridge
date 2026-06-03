@@ -815,7 +815,8 @@ class _ResultBugMixin:
                     "lookup_error_code": lookup_result.error_code,
                 },
             )
-        navigation_version = self._navigation_version_from_lookup_result(lookup_result)
+        required_outputs = self._required_outputs_from_lookup_result(lookup_result)
+        navigation_version = self._navigation_version_from_required_outputs(required_outputs)
         if not navigation_version:
             return TaskResult(
                 success=False,
@@ -838,6 +839,8 @@ class _ResultBugMixin:
             event=event,
             rom_version=request.rom_version,
             apk_version=navigation_version,
+            symbol_table_url=str(required_outputs.get("symbol_table_url") or "").strip(),
+            napa5_download_url=str(required_outputs.get("napa5_download_url") or "").strip(),
         )
         return Addr2LineRequest(
             addr_text=request.addr_text,
@@ -846,6 +849,8 @@ class _ResultBugMixin:
             rom_version=request.rom_version,
             napa_version=request.napa_version,
             apk_version=navigation_version,
+            symbol_table_url=str(required_outputs.get("symbol_table_url") or "").strip(),
+            napa5_download_url=str(required_outputs.get("napa5_download_url") or "").strip(),
             log_folder=request.log_folder,
             fault_time=request.fault_time,
             target=request.target,

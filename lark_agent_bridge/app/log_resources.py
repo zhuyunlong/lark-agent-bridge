@@ -720,6 +720,8 @@ class _LogResourcesMixin:
                 rom_version=request.rom_version,
                 napa_version=request.napa_version,
                 apk_version=request.apk_version,
+                symbol_table_url=request.symbol_table_url,
+                napa5_download_url=request.napa5_download_url,
                 log_folder=request.log_folder,
                 fault_time=request.fault_time,
                 target=request.target,
@@ -730,7 +732,8 @@ class _LogResourcesMixin:
         if not request.triggered:
             return request
         if request.rom_version and not request.apk_version and not request.napa_version:
-            recent_apk = self._recent_navigation_version_for_chat(event, request.rom_version)
+            recent_required = self._recent_required_outputs_for_chat(event, request.rom_version)
+            recent_apk = self._navigation_version_from_required_outputs(recent_required)
             if recent_apk:
                 request = Addr2LineRequest(
                     addr_text=request.addr_text,
@@ -739,6 +742,8 @@ class _LogResourcesMixin:
                     rom_version=request.rom_version,
                     napa_version=request.napa_version,
                     apk_version=recent_apk,
+                    symbol_table_url=request.symbol_table_url or str(recent_required.get("symbol_table_url") or "").strip(),
+                    napa5_download_url=request.napa5_download_url or str(recent_required.get("napa5_download_url") or "").strip(),
                     log_folder=request.log_folder,
                     fault_time=request.fault_time,
                     target=request.target,
@@ -751,7 +756,8 @@ class _LogResourcesMixin:
         inherited_rom = self._recent_rom_version_for_chat(event)
         if not inherited_rom:
             return request
-        inherited_apk = self._recent_navigation_version_for_chat(event, inherited_rom)
+        inherited_required = self._recent_required_outputs_for_chat(event, inherited_rom)
+        inherited_apk = self._navigation_version_from_required_outputs(inherited_required)
         return Addr2LineRequest(
             addr_text=request.addr_text,
             resources=request.resources,
@@ -759,6 +765,8 @@ class _LogResourcesMixin:
             rom_version=inherited_rom,
             napa_version=request.napa_version,
             apk_version=inherited_apk or request.apk_version,
+            symbol_table_url=request.symbol_table_url or str(inherited_required.get("symbol_table_url") or "").strip(),
+            napa5_download_url=request.napa5_download_url or str(inherited_required.get("napa5_download_url") or "").strip(),
             log_folder=request.log_folder,
             fault_time=request.fault_time,
             target=request.target,
@@ -795,6 +803,7 @@ class _LogResourcesMixin:
                 rom_version = session_symbol
         if not apk_version and rom_version:
             apk_version = self._recent_navigation_version_for_chat(ctx.event, rom_version) or apk_version
+        recent_required = self._recent_required_outputs_for_chat(ctx.event, rom_version) if rom_version else {}
         return Addr2LineRequest(
             addr_text=previous_request.addr_text,
             resources=resources,
@@ -802,6 +811,8 @@ class _LogResourcesMixin:
             rom_version=rom_version,
             napa_version=napa_version,
             apk_version=apk_version,
+            symbol_table_url=previous_request.symbol_table_url or str(recent_required.get("symbol_table_url") or "").strip(),
+            napa5_download_url=previous_request.napa5_download_url or str(recent_required.get("napa5_download_url") or "").strip(),
             log_folder=previous_request.log_folder,
             fault_time=previous_request.fault_time,
             target=previous_request.target or "auto",
@@ -834,24 +845,30 @@ class _LogResourcesMixin:
         return candidate.rom_version
 
     def _recent_navigation_version_for_chat(self, event: LarkEvent, rom_version: str = "") -> str:
+        return self._navigation_version_from_required_outputs(self._recent_required_outputs_for_chat(event, rom_version=rom_version))
+
+    def _recent_required_outputs_for_chat(self, event: LarkEvent, rom_version: str = "") -> dict[str, object]:
         session = self._recent_rom_lookup_session_for_chat(event, rom_version=rom_version)
         if not session:
-            return ""
+            return {}
         details = session.get("details")
         if not isinstance(details, dict):
-            return ""
+            return {}
         required = details.get("required_outputs")
         if not isinstance(required, dict):
-            return ""
-        return self._navigation_version_from_required_outputs(required)
+            return {}
+        return required
 
     def _navigation_version_from_lookup_result(self, result: TaskResult) -> str:
+        return self._navigation_version_from_required_outputs(self._required_outputs_from_lookup_result(result))
+
+    def _required_outputs_from_lookup_result(self, result: TaskResult) -> dict[str, object]:
         if not result.success or not isinstance(result.details, dict):
-            return ""
+            return {}
         required = result.details.get("required_outputs")
         if not isinstance(required, dict):
-            return ""
-        return self._navigation_version_from_required_outputs(required)
+            return {}
+        return required
 
     def _navigation_version_from_required_outputs(self, required: dict[str, object]) -> str:
         navigation_version = str(required.get("navigation_version") or "").strip()

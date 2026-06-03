@@ -1,5 +1,12 @@
+import importlib
+import subprocess
+from unittest import mock
+
 from _app_base import *  # noqa: F401,F403
 from _app_base import _AppTestBase
+
+
+addr2line_runner_module = importlib.import_module("lark_agent_bridge.agents.addr2line_runner")
 
 
 class AppAddr2lineRunnerTests(_AppTestBase):
@@ -205,6 +212,15 @@ class AppAddr2lineRunnerTests(_AppTestBase):
             fake_addr2line.requests[0].rom_version,
             "XMARTQGZHE29E5_V6.1.0.8810_20260327200937.9_REV01_USER_Release",
         )
+        self.assertEqual(
+            fake_addr2line.requests[0].symbol_table_url,
+            "http://maven.xiaopeng.local/service/rest/repository/browse/"
+            "xp_android_release/com/xiaopeng/lib/envirodrive_so/V6.1.0_20260327175820_Release/",
+        )
+        self.assertEqual(
+            fake_addr2line.requests[0].napa5_download_url,
+            "http://10.99.26.55/rom/napa/lib_napa5/6.1.0-test",
+        )
         self.assertEqual(fake_addr2line.requests[0].apk_version, "V6.1.0_20260327175820_Release")
     def test_rom_plus_symbol_table_phrase_without_stack_routes_to_rom_lookup(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -258,6 +274,230 @@ class AppAddr2lineRunnerTests(_AppTestBase):
         self.assertEqual(len(fake_addr2line.requests), 1)
         self.assertEqual(fake_addr2line.requests[0].rom_version, rom)
         self.assertEqual(fake_addr2line.requests[0].apk_version, "V6.1.0_20260327175820_Release")
+        self.assertEqual(
+            fake_addr2line.requests[0].symbol_table_url,
+            "http://maven.xiaopeng.local/service/rest/repository/browse/"
+            "xp_android_release/com/xiaopeng/lib/envirodrive_so/V6.1.0_20260327175820_Release/",
+        )
+        self.assertEqual(
+            fake_addr2line.requests[0].napa5_download_url,
+            "http://10.99.26.55/rom/napa/lib_napa5/6.1.0-test",
+        )
+
+    def test_addr2line_runner_routes_navi_and_napa5_symbol_sources(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script = root / ".ai/skills/addr2line-resolve/scripts/addr2line_resolve.py"
+            script.parent.mkdir(parents=True)
+            script.write_text("# fake script\n", encoding="utf-8")
+            runner = Addr2LineRunner(
+                BridgeConfig(dry_run=False, data_dir=root / "data", workspace_root=root, guideengine_repo=root)
+            )
+            captured_script_commands = []
+            captured_il2cpp = []
+
+            def fake_run_tracked(command, **kwargs):
+                captured_script_commands.append(command)
+                payload = {
+                    "apk_version": "V6.1.0_20260327175820_Release",
+                    "so_artifact": "envirodrive_so",
+                    "results": [
+                        {
+                            "so": "libxdata_sdk.so",
+                            "addr": "0x338a3c",
+                            "function": "X3D_Protocol::DrivingSensorPullOverParser::Parse",
+                            "location": "driving_sensor_pullover_parser.cpp:14",
+                        }
+                    ],
+                }
+                return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
+
+            def fake_download_napa_so(download_url, so_name, context):
+                self.assertEqual(download_url, "http://napa.example/6.1.0-test")
+                self.assertEqual(so_name, "libil2cpp.so")
+                path = root / "libil2cpp.so"
+                path.write_bytes(b"\x7fELF")
+                return path
+
+            def fake_local_addr2line(llvm_path, sym_path, addresses):
+                captured_il2cpp.append((llvm_path, sym_path, addresses))
+                return [
+                    {
+                        "addr": "0x1234",
+                        "function": "Il2CppCrashFunction",
+                        "location": "il2cppOutput/Assembly-CSharp.cpp:88",
+                    }
+                ]
+
+            with (
+                mock.patch.object(runner, "_script_path", return_value=script),
+                mock.patch.object(runner, "_find_llvm_addr2line_binary", return_value="/ndk/llvm-addr2line"),
+                mock.patch.object(runner, "_download_napa_so", side_effect=fake_download_napa_so),
+                mock.patch.object(runner, "_run_local_addr2line", side_effect=fake_local_addr2line),
+                mock.patch.object(addr2line_runner_module, "run_tracked_process", side_effect=fake_run_tracked),
+            ):
+                result = runner.run_resolve(
+                    Addr2LineRequest(
+                        addr_text="\n".join(
+                            [
+                                "#00 pc 0000000000338a3c /system/app/xp_envirodrive-mainland/lib/arm64/libxdata_sdk.so",
+                                "#01 pc 0000000000001234 /system/app/xp_envirodrive-mainland/lib/arm64/libil2cpp.so",
+                            ]
+                        ),
+                        rom_version="ROM",
+                        apk_version="V6.1.0_20260327175820_Release",
+                        symbol_table_url="http://maven.example/envirodrive_so/V6.1.0_20260327175820_Release/",
+                        napa5_download_url="http://napa.example/6.1.0-test",
+                        triggered=True,
+                    )
+                )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.details["result_count"], 2)
+        self.assertEqual(result.details["symbol_sources"]["libxdata_sdk.so"], "navi")
+        self.assertEqual(result.details["symbol_sources"]["libil2cpp.so"], "napa5")
+        self.assertEqual(len(captured_script_commands), 1)
+        self.assertIn("libxdata_sdk.so", " ".join(captured_script_commands[0]))
+        self.assertNotIn("libil2cpp.so", " ".join(captured_script_commands[0]))
+        self.assertEqual(captured_il2cpp[0][2], ["0x1234"])
+        self.assertIn("libxdata_sdk.so 0x338a3c -> X3D_Protocol::DrivingSensorPullOverParser::Parse", result.message)
+        self.assertIn("libil2cpp.so 0x1234 -> Il2CppCrashFunction", result.message)
+
+    def test_addr2line_runner_dry_run_plans_all_symbol_sources_without_download(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script = root / ".ai/skills/addr2line-resolve/scripts/addr2line_resolve.py"
+            script.parent.mkdir(parents=True)
+            script.write_text("# fake script\n", encoding="utf-8")
+            unity_symbol = root / "libunity.sym.so"
+            unity_symbol.write_bytes(b"\x7fELF")
+            runner = Addr2LineRunner(
+                BridgeConfig(dry_run=True, data_dir=root / "data", workspace_root=root, guideengine_repo=root)
+            )
+
+            with (
+                mock.patch.object(runner, "_script_path", return_value=script),
+                mock.patch.object(runner, "_find_builtin_unity_symbol_path", return_value=unity_symbol),
+                mock.patch.object(runner, "_find_llvm_addr2line_binary", side_effect=AssertionError("dry-run should not resolve")),
+                mock.patch.object(runner, "_download_napa_so", side_effect=AssertionError("dry-run should not download")),
+            ):
+                result = runner.run_resolve(
+                    Addr2LineRequest(
+                        addr_text="\n".join(
+                            [
+                                "#00 pc 0000000000f385e4 /system/app/xp_envirodrive-mainland/lib/arm64/libunity.so",
+                                "#01 pc 0000000000338a3c /system/app/xp_envirodrive-mainland/lib/arm64/libxdata_sdk.so",
+                                "#02 pc 0000000000001234 /system/app/xp_envirodrive-mainland/lib/arm64/libil2cpp.so",
+                            ]
+                        ),
+                        apk_version="V6.1.0_20260327175820_Release",
+                        symbol_table_url="http://maven.example/envirodrive_so/V6.1.0_20260327175820_Release/",
+                        napa5_download_url="http://napa.example/6.1.0-test",
+                        triggered=True,
+                    )
+                )
+
+        self.assertTrue(result.success)
+        self.assertEqual(
+            result.details["symbol_sources"],
+            {
+                "libil2cpp.so": "napa5",
+                "libunity.so": "builtin_unity",
+                "libxdata_sdk.so": "navi",
+            },
+        )
+        self.assertEqual(result.details["result_count"], 0)
+        self.assertIn("dry-run", result.message)
+
+    def test_addr2line_runner_resolves_unity_navi_and_napa5_sources(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script = root / ".ai/skills/addr2line-resolve/scripts/addr2line_resolve.py"
+            script.parent.mkdir(parents=True)
+            script.write_text("# fake script\n", encoding="utf-8")
+            unity_symbol = root / "libunity.sym.so"
+            unity_symbol.write_bytes(b"\x7fELF")
+            napa_symbol = root / "libil2cpp.so"
+            napa_symbol.write_bytes(b"\x7fELF")
+            runner = Addr2LineRunner(
+                BridgeConfig(dry_run=False, data_dir=root / "data", workspace_root=root, guideengine_repo=root)
+            )
+            captured_script_commands = []
+            captured_local = []
+
+            def fake_run_tracked(command, **kwargs):
+                captured_script_commands.append(command)
+                payload = {
+                    "apk_version": "V6.1.0_20260327175820_Release",
+                    "so_artifact": "envirodrive_so",
+                    "results": [
+                        {
+                            "so": "libxdata_sdk.so",
+                            "addr": "0x338a3c",
+                            "function": "X3D_Protocol::DrivingSensorPullOverParser::Parse",
+                            "location": "driving_sensor_pullover_parser.cpp:14",
+                        }
+                    ],
+                }
+                return subprocess.CompletedProcess(command, 0, json.dumps(payload), "")
+
+            def fake_run_local(llvm_path, sym_path, addresses):
+                captured_local.append((sym_path.name, addresses))
+                if sym_path.name == "libunity.sym.so":
+                    return [
+                        {
+                            "addr": "0xf385e4",
+                            "function": "UnityBuiltinFunction",
+                            "location": "Runtime/Unity.cpp:42",
+                        }
+                    ]
+                return [
+                    {
+                        "addr": "0x1234",
+                        "function": "Il2CppCrashFunction",
+                        "location": "il2cppOutput/Assembly-CSharp.cpp:88",
+                    }
+                ]
+
+            with (
+                mock.patch.object(runner, "_script_path", return_value=script),
+                mock.patch.object(runner, "_find_builtin_unity_symbol_path", return_value=unity_symbol),
+                mock.patch.object(runner, "_find_llvm_addr2line_binary", return_value="/ndk/llvm-addr2line"),
+                mock.patch.object(runner, "_download_napa_so", return_value=napa_symbol),
+                mock.patch.object(runner, "_run_local_addr2line", side_effect=fake_run_local),
+                mock.patch.object(addr2line_runner_module, "run_tracked_process", side_effect=fake_run_tracked),
+            ):
+                result = runner.run_resolve(
+                    Addr2LineRequest(
+                        addr_text="\n".join(
+                            [
+                                "#00 pc 0000000000f385e4 /system/app/xp_envirodrive-mainland/lib/arm64/libunity.so",
+                                "#01 pc 0000000000338a3c /system/app/xp_envirodrive-mainland/lib/arm64/libxdata_sdk.so",
+                                "#02 pc 0000000000001234 /system/app/xp_envirodrive-mainland/lib/arm64/libil2cpp.so",
+                            ]
+                        ),
+                        apk_version="V6.1.0_20260327175820_Release",
+                        symbol_table_url="http://maven.example/envirodrive_so/V6.1.0_20260327175820_Release/",
+                        napa5_download_url="http://napa.example/6.1.0-test",
+                        triggered=True,
+                    )
+                )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.details["result_count"], 3)
+        self.assertEqual(result.details["symbol_sources"]["libunity.so"], "builtin_unity")
+        self.assertEqual(result.details["symbol_sources"]["libxdata_sdk.so"], "navi")
+        self.assertEqual(result.details["symbol_sources"]["libil2cpp.so"], "napa5")
+        self.assertEqual(len(captured_script_commands), 1)
+        command_text = " ".join(captured_script_commands[0])
+        self.assertIn("libxdata_sdk.so", command_text)
+        self.assertNotIn("libunity.so", command_text)
+        self.assertNotIn("libil2cpp.so", command_text)
+        self.assertIn(("libunity.sym.so", ["0xf385e4"]), captured_local)
+        self.assertIn(("libil2cpp.so", ["0x1234"]), captured_local)
+        self.assertIn("libunity.so 0xf385e4 -> UnityBuiltinFunction", result.message)
+        self.assertIn("libxdata_sdk.so 0x338a3c -> X3D_Protocol::DrivingSensorPullOverParser::Parse", result.message)
+        self.assertIn("libil2cpp.so 0x1234 -> Il2CppCrashFunction", result.message)
     def test_addr2line_request_fails_when_rom_lookup_cannot_resolve_navigation_version(self):
         with tempfile.TemporaryDirectory() as tmp:
             fake_lark = FakeLarkClient()
@@ -356,6 +596,15 @@ class AppAddr2lineRunnerTests(_AppTestBase):
         self.assertEqual(
             fake_addr2line.requests[0].rom_version,
             "XMARTQGZHE29E5_V6.1.0.8810_20260327200937.9_REV01_USER_Release",
+        )
+        self.assertEqual(
+            fake_addr2line.requests[0].symbol_table_url,
+            "http://maven.xiaopeng.local/service/rest/repository/browse/"
+            "xp_android_release/com/xiaopeng/lib/envirodrive_so/V6.1.0_20260327175820_Release/",
+        )
+        self.assertEqual(
+            fake_addr2line.requests[0].napa5_download_url,
+            "http://10.99.26.55/rom/napa/lib_napa5/6.1.0-test",
         )
     def test_addr2line_file_reply_routes_with_referenced_file_resource(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -20,6 +20,8 @@ _APPROVAL_METHODS = {
     "item/fileChange/requestApproval",
     "item/permissions/requestApproval",
 }
+_PERMISSIONS_APPROVAL_METHOD = "item/permissions/requestApproval"
+_ALLOWED_MCP_APPROVAL_SERVERS = {"bridge_codegraph"}
 _TOOL_ITEM_TYPES = {"commandExecution", "fileChange", "dynamicToolCall", "mcpToolCall"}
 _PARTIAL_ERROR_CODES = {"codex_app_server_no_event_timeout", "codex_app_server_turn_timeout"}
 
@@ -485,6 +487,7 @@ class CodexAppServerRuntime:
         final_answer_text = ""
         agent_message_phases: dict[str, str] = {}
         agent_message_buffers: dict[str, list[str]] = {}
+        allowed_mcp_approval_items: set[str] = set()
         usage: dict[str, object] = {}
         preview_lines: list[str] = []
         events: list[dict[str, object]] = []
@@ -544,7 +547,11 @@ class CodexAppServerRuntime:
 
                 server_request = client.take_server_request(timeout=0.0)
                 if server_request is not None:
-                    self._handle_server_request(client, server_request)
+                    self._handle_server_request(
+                        client,
+                        server_request,
+                        has_allowed_mcp_approval_item=bool(allowed_mcp_approval_items),
+                    )
                     last_progress_at = time.monotonic()
                     continue
 
@@ -569,15 +576,22 @@ class CodexAppServerRuntime:
                 if not isinstance(item, dict):
                     item = {}
 
-                if method == "item/started" and str(item.get("type") or "") == "agentMessage":
-                    item_id = str(item.get("id") or "")
-                    if item_id:
-                        agent_message_phases[item_id] = str(item.get("phase") or "")
-                        initial_text = str(item.get("text") or "")
-                        if initial_text:
-                            agent_message_buffers[item_id] = [initial_text]
-                        else:
-                            agent_message_buffers.setdefault(item_id, [])
+                if method == "item/started":
+                    item_type = str(item.get("type") or "")
+                    if item_type == "agentMessage":
+                        item_id = str(item.get("id") or "")
+                        if item_id:
+                            agent_message_phases[item_id] = str(item.get("phase") or "")
+                            initial_text = str(item.get("text") or "")
+                            if initial_text:
+                                agent_message_buffers[item_id] = [initial_text]
+                            else:
+                                agent_message_buffers.setdefault(item_id, [])
+                    elif item_type == "mcpToolCall":
+                        item_id = str(item.get("id") or "")
+                        server = str(item.get("server") or "")
+                        if item_id and server in _ALLOWED_MCP_APPROVAL_SERVERS:
+                            allowed_mcp_approval_items.add(item_id)
                 elif method == "item/agentMessage/delta":
                     item_id = str(params.get("itemId") or "")
                     delta = str(params.get("delta") or "")
@@ -608,6 +622,10 @@ class CodexAppServerRuntime:
                             final_text = text
                             if phase == "final_answer":
                                 final_answer_text = text
+                    elif item_type == "mcpToolCall":
+                        item_id = str(item.get("id") or "")
+                        if item_id:
+                            allowed_mcp_approval_items.discard(item_id)
                 elif method == "turn/completed":
                     turn = params.get("turn") or {}
                     turn_completed = True
@@ -658,9 +676,21 @@ class CodexAppServerRuntime:
             except Exception:
                 pass
 
-    def _handle_server_request(self, client: Any, request: dict[str, object]) -> None:
+    def _handle_server_request(
+        self,
+        client: Any,
+        request: dict[str, object],
+        *,
+        has_allowed_mcp_approval_item: bool = False,
+    ) -> None:
         method = str(request.get("method") or "")
         request_id = request.get("id")
+        if method == _PERMISSIONS_APPROVAL_METHOD:
+            if has_allowed_mcp_approval_item or _request_mentions_allowed_mcp_server(request):
+                client.respond(request_id, {"decision": "approve"})
+                return
+            client.respond(request_id, {"decision": "decline"})
+            return
         if method in _APPROVAL_METHODS:
             client.respond(request_id, {"decision": "decline"})
             return
@@ -696,6 +726,18 @@ def _extract_turn_id(result: dict[str, object]) -> str:
     if isinstance(turn, dict):
         return str(turn.get("id") or "")
     return str(result.get("turnId") or "")
+
+
+def _request_mentions_allowed_mcp_server(value: object) -> bool:
+    if isinstance(value, dict):
+        for key in ("server", "serverName", "name"):
+            server = value.get(key)
+            if isinstance(server, str) and server in _ALLOWED_MCP_APPROVAL_SERVERS:
+                return True
+        return any(_request_mentions_allowed_mcp_server(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_request_mentions_allowed_mcp_server(item) for item in value)
+    return False
 
 
 def _unwrap_shell_command(command: str) -> str:

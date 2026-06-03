@@ -800,6 +800,8 @@ class Addr2LineRequest:
     rom_version: str = ""
     napa_version: str = ""
     apk_version: str = ""
+    symbol_table_url: str = ""
+    napa5_download_url: str = ""
     log_folder: str = ""
     fault_time: str = ""
     target: str = "auto"

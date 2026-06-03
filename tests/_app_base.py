@@ -477,6 +477,11 @@ class FakeRomVersionRunner:
                 "rom_version": request.rom_version,
                 "required_outputs": {
                     "navigation_version": "V6.1.0_20260327175820_Release",
+                    "symbol_table_url": (
+                        "http://maven.xiaopeng.local/service/rest/repository/browse/"
+                        "xp_android_release/com/xiaopeng/lib/envirodrive_so/V6.1.0_20260327175820_Release/"
+                    ),
+                    "napa5_download_url": "http://10.99.26.55/rom/napa/lib_napa5/6.1.0-test",
                 },
             },
         )
