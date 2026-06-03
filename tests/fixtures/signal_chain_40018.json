@@ -1,0 +1,838 @@
+{
+  "signal": {
+    "code": "40018",
+    "name": "SIGNAL_VCU_ELECTRICIT_PERCENT",
+    "comment": "电池电量值（一般业务显示  int型）"
+  },
+  "summary": "日志中已命中 Android datacenter 相关阶段或业务消费端日志，可结合源码确认 provider、DataCenter 分发与消费端是否一致。",
+  "warnings": [],
+  "sources": [
+    "ANDROID_BIZ:VCU_ELECTRICIT_PERCENT",
+    "CARSERVICE:ID_VCU_ELECTRICIT_PERCENT",
+    "UNITY:Unity message"
+  ],
+  "derived": [
+    "ANDROID:DataCenter Flow/Observer"
+  ],
+  "same_source_derived": [],
+  "chain_edges": [
+    {
+      "source": "40018",
+      "target": "ANDROID:DataCenter Flow/Observer",
+      "kind": "Kotlin 信号分发",
+      "file": "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/center/DataCenter.kt",
+      "line": 311,
+      "note": "DataCenter.dispatchSignal 会依次写缓存、更新 flow/noReplayFlow、notifyObservers，并在非 nativeSignals 时录制",
+      "confidence": "medium"
+    },
+    {
+      "source": "ANDROID:DataCenter Flow/Observer",
+      "target": "ANDROID_CONSUMER:CarSceneBatteryAction",
+      "kind": "Android 业务消费",
+      "file": "module_core/manager_carscene/src/main/java/com/xiaopeng/manager_carscene/base/action/CarSceneBatteryAction.kt",
+      "line": 39,
+      "note": "CarSceneBatteryAction 订阅或处理 SIGNAL_VCU_ELECTRICIT_PERCENT (40018)",
+      "confidence": "medium"
+    },
+    {
+      "source": "ANDROID:DataCenter Flow/Observer",
+      "target": "ANDROID_CONSUMER:CarWashBatteryAction",
+      "kind": "Android 业务消费",
+      "file": "module_core/manager_carscene/src/main/java/com/xiaopeng/manager_carscene/carwash/action/CarWashBatteryAction.kt",
+      "line": 21,
+      "note": "CarWashBatteryAction 订阅或处理 SIGNAL_VCU_ELECTRICIT_PERCENT (40018)",
+      "confidence": "medium"
+    },
+    {
+      "source": "ANDROID:DataCenter Flow/Observer",
+      "target": "ANDROID_CONSUMER:ElecInfoConfig",
+      "kind": "Android 业务消费",
+      "file": "module_core/manager_car/src/main/java/com/xiaopeng/montecarlo/manager/car/core/elec/ElecInfoConfig.kt",
+      "line": 6,
+      "note": "ElecInfoConfig 订阅或处理 SIGNAL_VCU_ELECTRICIT_PERCENT (40018)",
+      "confidence": "medium"
+    },
+    {
+      "source": "ANDROID:DataCenter Flow/Observer",
+      "target": "ANDROID_CONSUMER:HmiCarStateReceiver",
+      "kind": "Android 业务消费",
+      "file": "module_display/launcher_base/src/main/java/root/receiver/HmiCarStateReceiver.kt",
+      "line": 26,
+      "note": "HmiCarStateReceiver 订阅或处理 SIGNAL_VCU_ELECTRICIT_PERCENT (40018)",
+      "confidence": "medium"
+    },
+    {
+      "source": "ANDROID:DataCenter Flow/Observer",
+      "target": "ANDROID_CONSUMER:XpRemainDistanceHelper",
+      "kind": "Android 业务消费",
+      "file": "module_core/manager_car/src/main/java/com/xiaopeng/montecarlo/manager/car/core/range/XpRemainDistanceHelper.kt",
+      "line": 180,
+      "note": "XpRemainDistanceHelper 订阅或处理 SIGNAL_VCU_ELECTRICIT_PERCENT (40018)",
+      "confidence": "medium"
+    },
+    {
+      "source": "ANDROID_BIZ:VCU_ELECTRICIT_PERCENT",
+      "target": "40018",
+      "kind": "Android BizCode 映射",
+      "file": "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/define/mapping/code/SignalMapping.kt",
+      "line": 398,
+      "note": "SignalMapping 将业务码 VCU_ELECTRICIT_PERCENT 归一到 SIGNAL_VCU_ELECTRICIT_PERCENT",
+      "confidence": "high"
+    },
+    {
+      "source": "CARSERVICE:ID_VCU_ELECTRICIT_PERCENT",
+      "target": "40018",
+      "kind": "CarService 属性映射",
+      "file": "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/helper/carservice/CarVcuHelper.kt",
+      "line": 31,
+      "note": "CarVcuHelper 将 ID_VCU_ELECTRICIT_PERCENT 映射为 SIGNAL_VCU_ELECTRICIT_PERCENT",
+      "confidence": "high"
+    },
+    {
+      "source": "UNITY:Unity message",
+      "target": "40018",
+      "kind": "Unity 上行映射",
+      "file": "module_core/unity_service/src/main/java/com/xiaopeng/guideengine/unity_service/channel/from_unity/UnitySignalCodeMapping.kt",
+      "line": 45,
+      "note": "UnitySignalCodeMapping 将 SIGNAL_VCU_ELECTRICIT_PERCENT 还原为旧 msgCode PowerCenterMsgCode.POWERCENTER_MSG_SOC_CHANGED",
+      "confidence": "high"
+    }
+  ],
+  "log_report": {
+    "scanned_files": 52,
+    "scanned_lines": 372719,
+    "truncated": false,
+    "stages": {
+      "vhal": {
+        "title": "VHAL / CarService 输入",
+        "hits": 0,
+        "codes": {},
+        "examples": [],
+        "metrics": []
+      },
+      "datacenter": {
+        "title": "Android DataCenter 分发",
+        "hits": 2,
+        "codes": {
+          "40018": 2
+        },
+        "examples": [
+          {
+            "code": "40018",
+            "file": "/Users/zhuyl/Documents/workspace/tools/lark-agent-bridge/data/bug_cache/xpfailuremgmt_6998811703/logs/app/com.xiaopeng.montecarlo/user0_main_2026-05-25_16-00.alog.log",
+            "line": 2982,
+            "text": "05-25 16:37:35.239 2488 6665 20906 I NAV_DataCenter: getSignalFlow: signalCode=SIGNAL_VCU_ELECTRICIT_PERCENT, isNeedCache=true, hasProvider=true"
+          },
+          {
+            "code": "40018",
+            "file": "/Users/zhuyl/Documents/workspace/tools/lark-agent-bridge/data/bug_cache/xpfailuremgmt_6998811703/logs/app/com.xiaopeng.montecarlo/user0_main_2026-05-25_16-00.alog.log",
+            "line": 5685,
+            "text": "05-25 16:37:38.234 2488 7363 23900 I NAV_DataCenter: getSignalFlow: signalCode=SIGNAL_VCU_ELECTRICIT_PERCENT, isNeedCache=true, hasProvider=true"
+          }
+        ],
+        "metrics": []
+      },
+      "android_business": {
+        "title": "Android 业务消费日志",
+        "hits": 278,
+        "codes": {
+          "40018": 278
+        },
+        "examples": [
+          {
+            "code": "40018",
+            "file": "/Users/zhuyl/Documents/workspace/tools/lark-agent-bridge/data/bug_cache/xpfailuremgmt_6998811703/logs/app/com.xiaopeng.montecarlo/user0_main_2026-05-25_16-00.alog.log",
+            "line": 350,
+            "text": "05-25 16:37:02.345 11619 12523 438926 I NAV_XpRemainDistanceHelper: cltcRemainDistanceProperty: 289.2, enduranceMileageMode: 1"
+          },
+          {
+            "code": "40018",
+            "file": "/Users/zhuyl/Documents/workspace/tools/lark-agent-bridge/data/bug_cache/xpfailuremgmt_6998811703/logs/app/com.xiaopeng.montecarlo/user0_main_2026-05-25_16-00.alog.log",
+            "line": 351,
+            "text": "05-25 16:37:02.345 11619 12523 438926 I NAV_XpRemainDistanceHelper: wltpRemainDistanceProperty: 234.2, enduranceMileageMode: 1"
+          },
+          {
+            "code": "40018",
+            "file": "/Users/zhuyl/Documents/workspace/tools/lark-agent-bridge/data/bug_cache/xpfailuremgmt_6998811703/logs/app/com.xiaopeng.montecarlo/user0_main_2026-05-25_16-00.alog.log",
+            "line": 352,
+            "text": "05-25 16:37:02.345 11619 12523 438926 I NAV_XpRemainDistanceHelper: getCarRemainDistance mode=1, distance=234.2"
+          },
+          {
+            "code": "40018",
+            "file": "/Users/zhuyl/Documents/workspace/tools/lark-agent-bridge/data/bug_cache/xpfailuremgmt_6998811703/logs/app/com.xiaopeng.montecarlo/user0_main_2026-05-25_16-00.alog.log",
+            "line": 387,
+            "text": "05-25 16:37:02.394 11619 12530 438975 I NAV_XpRemainDistanceHelper: cltcCombinedRemainDisProperty: 289.2, mode: 1"
+          },
+          {
+            "code": "40018",
+            "file": "/Users/zhuyl/Documents/workspace/tools/lark-agent-bridge/data/bug_cache/xpfailuremgmt_6998811703/logs/app/com.xiaopeng.montecarlo/user0_main_2026-05-25_16-00.alog.log",
+            "line": 388,
+            "text": "05-25 16:37:02.394 11619 12530 438976 I NAV_XpRemainDistanceHelper: wltpCombinedRemainDisProperty: 234.2, mode: 1"
+          },
+          {
+            "code": "40018",
+            "file": "/Users/zhuyl/Documents/workspace/tools/lark-agent-bridge/data/bug_cache/xpfailuremgmt_6998811703/logs/app/com.xiaopeng.montecarlo/user0_main_2026-05-25_16-00.alog.log",
+            "line": 389,
+            "text": "05-25 16:37:02.394 11619 12530 438976 I NAV_XpRemainDistanceHelper: getCarCombinedRemainDistance mode=1, distance=234.2"
+          },
+          {
+            "code": "40018",
+            "file": "/Users/zhuyl/Documents/workspace/tools/lark-agent-bridge/data/bug_cache/xpfailuremgmt_6998811703/logs/app/com.xiaopeng.montecarlo/user0_main_2026-05-25_16-00.alog.log",
+            "line": 2914,
+            "text": "05-25 16:37:35.215 2488 3989 20882 I NAV_XpRemainDistanceHelper: init XpRemainDistanceHelper"
+          },
+          {
+            "code": "40018",
+            "file": "/Users/zhuyl/Documents/workspace/tools/lark-agent-bridge/data/bug_cache/xpfailuremgmt_6998811703/logs/app/com.xiaopeng.montecarlo/user0_main_2026-05-25_16-00.alog.log",
+            "line": 3225,
+            "text": "05-25 16:37:35.320 2488 6694 20986 I NAV_XpRemainDistanceHelper: enduranceMileageMode = -1, mode = 1"
+          }
+        ],
+        "metrics": []
+      },
+      "baidu_ld": {
+        "title": "百度 LD SDK 输入",
+        "hits": 0,
+        "codes": {},
+        "examples": [],
+        "metrics": []
+      },
+      "dispatcher": {
+        "title": "SignalDispatcher 分发",
+        "hits": 2,
+        "codes": {
+          "40018": 2
+        },
+        "examples": [
+          {
+            "code": "40018",
+            "file": "/Users/zhuyl/Documents/workspace/tools/lark-agent-bridge/data/bug_cache/xpfailuremgmt_6998811703/logs/app/com.xiaopeng.montecarlo/user0_main_2026-05-25_16-00.alog.log",
+            "line": 824,
+            "text": "05-25 16:37:31.807 2488 4180 17473 I XPD_SignalDispatcher: [registerSignalObserver][57]: registerSignal 40018 size 1"
+          },
+          {
+            "code": "40018",
+            "file": "/Users/zhuyl/Documents/workspace/tools/lark-agent-bridge/data/bug_cache/xpfailuremgmt_6998811703/logs/app/com.xiaopeng.montecarlo/user0_main_2026-05-25_16-00.alog.log",
+            "line": 68386,
+            "text": "05-25 16:47:10.560 2488 6395 596227 I XPD_SignalDispatcher: [record-40018][2|575264ms|575s]SignalCode:40018 length:4 source:2"
+          }
+        ],
+        "metrics": []
+      },
+      "parser": {
+        "title": "X3D Parser 处理",
+        "hits": 0,
+        "codes": {},
+        "examples": [],
+        "metrics": []
+      },
+      "android_unity": {
+        "title": "AndroidUnityProxy / Android 侧转发",
+        "hits": 0,
+        "codes": {},
+        "examples": [],
+        "metrics": []
+      },
+      "unity_transport": {
+        "title": "Native → Unity / X3DCB",
+        "hits": 0,
+        "codes": {},
+        "examples": [],
+        "metrics": []
+      },
+      "unity_received": {
+        "title": "Unity 收到统计",
+        "hits": 0,
+        "codes": {},
+        "examples": [],
+        "metrics": []
+      },
+      "other": {
+        "title": "其他命中",
+        "hits": 5,
+        "codes": {
+          "40018": 5
+        },
+        "examples": [
+          {
+            "code": "40018",
+            "file": "/Users/zhuyl/Documents/workspace/tools/lark-agent-bridge/data/bug_cache/xpfailuremgmt_6998811703/logs/app/com.xiaopeng.montecarlo/user0_main_2026-05-25_16-00.alog.log",
+            "line": 9389,
+            "text": "05-25 16:37:42.526 2488 7903 28193 I NAV_GetMeterDataMsg: send cacheValue key:SIGNAL_VCU_ELECTRICIT_PERCENT format:Int32 value:95"
+          },
+          {
+            "code": "40018",
+            "file": "/Users/zhuyl/Documents/workspace/tools/lark-agent-bridge/data/bug_cache/xpfailuremgmt_6998811703/logs/app/com.xiaopeng.montecarlo/user0_main_2026-05-25_16-00.alog.log",
+            "line": 14012,
+            "text": "05-25 16:38:09.158 2488 7903 54824 I NAV_GetMeterDataMsg: send cacheValue key:SIGNAL_VCU_ELECTRICIT_PERCENT format:Int32 value:95"
+          },
+          {
+            "code": "40018",
+            "file": "/Users/zhuyl/Documents/workspace/tools/lark-agent-bridge/data/bug_cache/xpfailuremgmt_6998811703/logs/app/com.xiaopeng.montecarlo/user0_main_2026-05-25_16-00.alog.log",
+            "line": 68387,
+            "text": "05-25 16:47:10.560 2488 6395 596227 I XPD_SignalFileRecorder: [noticeAnySignal-4001][2|575264ms|575s]SignalCode:40018 length:4 format:3"
+          },
+          {
+            "code": "40018",
+            "file": "/Users/zhuyl/Documents/workspace/tools/lark-agent-bridge/data/bug_cache/xpfailuremgmt_6998811703/logs/app/com.xiaopeng.montecarlo/user0_main_2026-05-25_16-00.alog.log",
+            "line": 68388,
+            "text": "05-25 16:47:10.560 2488 6395 596227 I XPD_SignalFileCoder: [record-binary-40018][2|575264ms|575s]SignalCode:40018 length:4 format:3"
+          },
+          {
+            "code": "40018",
+            "file": "/Users/zhuyl/Documents/workspace/tools/lark-agent-bridge/data/bug_cache/xpfailuremgmt_6998811703/logs/app/com.xiaopeng.montecarlo/user0_main_2026-05-25_16-00.alog.log",
+            "line": 68393,
+            "text": "05-25 16:47:10.561 2488 6398 596227 I XPD_SignalFileRecorder: [writeBuffer-40018][2|575264ms|575s]write buffer: 40018, 3, 4, 2, 1779698830558, 28, 28"
+          }
+        ],
+        "metrics": []
+      }
+    }
+  },
+  "source_references": [
+    {
+      "file": "module_floorcenter/module_proto/src/main/proto/signal.proto",
+      "line": 414,
+      "text": "SIGNAL_VCU_ELECTRICIT_PERCENT = 40018;// 电池电量值（一般业务显示  int型）"
+    },
+    {
+      "file": "module_core/unity_service/src/main/java/com/xiaopeng/guideengine/unity_service/channel/from_unity/UnitySignalCodeMapping.kt",
+      "line": 45,
+      "text": "SignalCode.SIGNAL_VCU_ELECTRICIT_PERCENT to PowerCenterMsgCode.POWERCENTER_MSG_SOC_CHANGED,"
+    },
+    {
+      "file": "module_core/unity_service/src/main/java/com/xiaopeng/guideengine/unity_service/channel/from_unity/msg/powercenter/SocChangedMsg.java",
+      "line": 27,
+      "text": "getService().sendMsgToUnity(Signal.SignalCode.SIGNAL_VCU_ELECTRICIT_PERCENT, Signal.SignalFormat.Int32, bmsActualSocValue);"
+    },
+    {
+      "file": "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/helper/carservice/CarVcuHelper.kt",
+      "line": 31,
+      "text": "put(CarVcuManager.ID_VCU_ELECTRICIT_PERCENT, SignalCode.SIGNAL_VCU_ELECTRICIT_PERCENT)"
+    },
+    {
+      "file": "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/helper/carservice/CarVcuHelper.kt",
+      "line": 104,
+      "text": "SignalCode.SIGNAL_VCU_ELECTRICIT_PERCENT,"
+    },
+    {
+      "file": "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/define/mapping/code/SignalMapping.kt",
+      "line": 398,
+      "text": "put(PowerCenterBizCode.VCU_ELECTRICIT_PERCENT.value(), SignalCode.SIGNAL_VCU_ELECTRICIT_PERCENT)"
+    },
+    {
+      "file": "module_core/manager_car/src/main/java/com/xiaopeng/montecarlo/manager/car/core/elec/ElecInfoConfig.kt",
+      "line": 6,
+      "text": "import XData.Signal.SignalCode.SIGNAL_VCU_ELECTRICIT_PERCENT"
+    },
+    {
+      "file": "module_core/manager_car/src/main/java/com/xiaopeng/montecarlo/manager/car/core/elec/ElecInfoConfig.kt",
+      "line": 97,
+      "text": "FloorCenterManager.instance.dataCenter.getSignalFlow(SIGNAL_VCU_ELECTRICIT_PERCENT).collect {"
+    },
+    {
+      "file": "module_core/manager_car/src/main/java/com/xiaopeng/montecarlo/manager/car/core/elec/ElecInfoConfig.kt",
+      "line": 98,
+      "text": "L.i(TAG, \"SIGNAL_VCU_ELECTRICIT_PERCENT it.value=${it.value}\")"
+    },
+    {
+      "file": "module_core/manager_car/src/main/java/com/xiaopeng/montecarlo/manager/car/core/range/XpRemainDistanceHelper.kt",
+      "line": 180,
+      "text": "FloorCenterManager.instance.dataCenter.getSignalFlow(Signal.SignalCode.SIGNAL_VCU_ELECTRICIT_PERCENT).collect {"
+    },
+    {
+      "file": "module_core/manager_carscene/src/main/java/com/xiaopeng/manager_carscene/base/action/CarSceneBatteryAction.kt",
+      "line": 39,
+      "text": "return mutableSetOf(SignalCode.SIGNAL_VCU_ELECTRICIT_PERCENT)"
+    },
+    {
+      "file": "module_core/manager_carscene/src/main/java/com/xiaopeng/manager_carscene/base/action/CarSceneBatteryAction.kt",
+      "line": 43,
+      "text": "if (xDataPropertyValue.code == SignalCode.SIGNAL_VCU_ELECTRICIT_PERCENT) {"
+    },
+    {
+      "file": "module_core/manager_carscene/src/main/java/com/xiaopeng/manager_carscene/carwash/action/CarWashBatteryAction.kt",
+      "line": 21,
+      "text": "if (xDataPropertyValue.code == SignalCode.SIGNAL_VCU_ELECTRICIT_PERCENT) {"
+    },
+    {
+      "file": "module_core/unity_service/src/main/java/com/xiaopeng/guideengine/unity_service/channel/from_unity/UnitySignalCodeMapping.kt",
+      "line": 45,
+      "text": "SignalCode.SIGNAL_VCU_ELECTRICIT_PERCENT to PowerCenterMsgCode.POWERCENTER_MSG_SOC_CHANGED,"
+    },
+    {
+      "file": "module_core/unity_service/src/main/java/com/xiaopeng/guideengine/unity_service/channel/from_unity/msg/powercenter/SocChangedMsg.java",
+      "line": 27,
+      "text": "getService().sendMsgToUnity(Signal.SignalCode.SIGNAL_VCU_ELECTRICIT_PERCENT, Signal.SignalFormat.Int32, bmsActualSocValue);"
+    },
+    {
+      "file": "module_core/unity_service/build/extracted-include-protos/release/signal.proto",
+      "line": 414,
+      "text": "SIGNAL_VCU_ELECTRICIT_PERCENT = 40018;// 电池电量值（一般业务显示  int型）"
+    },
+    {
+      "file": "module_display/launcher_base/src/main/java/root/receiver/HmiCarStateReceiver.kt",
+      "line": 26,
+      "text": "SignalCode.SIGNAL_VCU_ELECTRICIT_PERCENT,"
+    },
+    {
+      "file": "module_display/launcher_base/src/main/java/root/receiver/HmiCarStateReceiver.kt",
+      "line": 81,
+      "text": "SignalCode.SIGNAL_VCU_ELECTRICIT_PERCENT -> {"
+    }
+  ],
+  "lifecycle_report": {
+    "context": {
+      "category": "carservice",
+      "provider_type": "CarService",
+      "helper_class": "CarVcuHelper",
+      "helper_file": "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/helper/carservice/CarVcuHelper.kt",
+      "controller_class": "CarServiceController",
+      "controller_file": "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/helper/carservice/CarServiceController.kt",
+      "signal_mapping_file": "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/define/mapping/code/SignalMapping.kt",
+      "source_edge": {
+        "source": "CARSERVICE:ID_VCU_ELECTRICIT_PERCENT",
+        "target": "40018",
+        "kind": "CarService 属性映射",
+        "file": "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/helper/carservice/CarVcuHelper.kt",
+        "line": 31,
+        "note": "CarVcuHelper 将 ID_VCU_ELECTRICIT_PERCENT 映射为 SIGNAL_VCU_ELECTRICIT_PERCENT",
+        "confidence": "high"
+      }
+    },
+    "source_references": [
+      {
+        "file": "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/FloorCenterManager.kt",
+        "line": 36,
+        "text": "fun init() {"
+      },
+      {
+        "file": "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/FloorCenterManager.kt",
+        "line": 42,
+        "text": "helperManager.init(app)"
+      },
+      {
+        "file": "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/FloorCenterManager.kt",
+        "line": 44,
+        "text": "isInit = true"
+      },
+      {
+        "file": "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/FloorCenterManager.kt",
+        "line": 48,
+        "text": "fun release() {"
+      },
+      {
+        "file": "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/helper/SignalHelperManager.kt",
+        "line": 37,
+        "text": "fun init(context: Context?) {"
+      },
+      {
+        "file": "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/helper/SignalHelperManager.kt",
+        "line": 55,
+        "text": "fun release() {"
+      },
+      {
+        "file": "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/helper/SignalHelperManager.kt",
+        "line": 63,
+        "text": "fun addHelper(provider: ISignalProvider) {"
+      },
+      {
+        "file": "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/helper/SignalHelperManager.kt",
+        "line": 70,
+        "text": "fun getHelpers(): Collection<ISignalProvider> {"
+      },
+      {
+        "file": "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/helper/carservice/CarServiceController.kt",
+        "line": 96,
+        "text": "override fun init() {"
+      },
+      {
+        "file": "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/helper/carservice/CarServiceController.kt",
+        "line": 105,
+        "text": "override fun onServiceConnected(name: ComponentName?, service: IBinder?) {"
+      },
+      {
+        "file": "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/helper/carservice/CarServiceController.kt",
+        "line": 109,
+        "text": "handler.post(Runnable { connect() })"
+      },
+      {
+        "file": "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/helper/carservice/CarServiceController.kt",
+        "line": 121,
+        "text": "carApiClient!!.connect()"
+      },
+      {
+        "file": "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/helper/carservice/CarVcuHelper.kt",
+        "line": 31,
+        "text": "put(CarVcuManager.ID_VCU_ELECTRICIT_PERCENT, SignalCode.SIGNAL_VCU_ELECTRICIT_PERCENT)"
+      },
+      {
+        "file": "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/helper/carservice/CarVcuHelper.kt",
+        "line": 73,
+        "text": "override fun onChangeEvent(carPropertyValue: CarPropertyValue<*>) {"
+      },
+      {
+        "file": "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/helper/carservice/CarVcuHelper.kt",
+        "line": 87,
+        "text": "injectSignalProvider()"
+      },
+      {
+        "file": "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/helper/carservice/CarVcuHelper.kt",
+        "line": 90,
+        "text": "public override fun initHelper() {"
+      },
+      {
+        "file": "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/center/DataCenter.kt",
+        "line": 73,
+        "text": "override fun registerObserver("
+      },
+      {
+        "file": "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/center/DataCenter.kt",
+        "line": 168,
+        "text": "fun getSignalFlow(signalCode: SignalCode, isNeedCache: Boolean = true): SharedFlow<XDataPropertyValue> {"
+      },
+      {
+        "file": "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/center/DataCenter.kt",
+        "line": 186,
+        "text": "@Deprecated(\"Use getSignalFlow(signalCode, isNeedCache)\")"
+      },
+      {
+        "file": "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/center/DataCenter.kt",
+        "line": 187,
+        "text": "fun getSignalFlow(signalCode: SignalCode): SharedFlow<XDataPropertyValue> { // 兼容旧二进制: 仅 SignalCode 入参"
+      },
+      {
+        "file": "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/base/XBaseSignalHelper.kt",
+        "line": 43,
+        "text": "protected fun injectSignalProvider() {"
+      },
+      {
+        "file": "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/base/XBaseSignalHelper.kt",
+        "line": 88,
+        "text": "protected fun disposeFirstRegisterSignalCallback(signalCode: SignalCode) {"
+      },
+      {
+        "file": "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/base/XBaseSignalHelper.kt",
+        "line": 90,
+        "text": "L.w(TAG,\"disposeFirstRegisterSignalCallback  signalCodeGetMap not contains $signalCode\")"
+      },
+      {
+        "file": "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/base/XBaseSignalHelper.kt",
+        "line": 95,
+        "text": "L.w(TAG,\"disposeFirstRegisterSignalCallback  function is null\")"
+      },
+      {
+        "file": "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/define/mapping/code/SignalMapping.kt",
+        "line": 17,
+        "text": "put(CarCrlBizCode.set_gear.value(), SignalCode.SIGNAL_VCU_GEAR_LEVEL)"
+      },
+      {
+        "file": "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/define/mapping/code/SignalMapping.kt",
+        "line": 18,
+        "text": "put(CarCrlBizCode.set_RawSpeed.value(), SignalCode.SIGNAL_VCU_RAW_CAR_SPEED)"
+      },
+      {
+        "file": "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/define/mapping/code/SignalMapping.kt",
+        "line": 19,
+        "text": "put(CarCrlBizCode.set_doorLeftFrontOpen.value(), SignalCode.SIGNAL_CTL_BODY_DOOR_LF_OPEN)"
+      },
+      {
+        "file": "module_floorcenter/module_datacenter/src/main/java/com/xiaopeng/guideengine/define/mapping/code/SignalMapping.kt",
+        "line": 20,
+        "text": "put(CarCrlBizCode.set_doorLeftRearOpen.value(), SignalCode.SIGNAL_CTL_BODY_DOOR_LR_OPEN)"
+      }
+    ],
+    "runtime": {
+      "hits": 79,
+      "scanned_lines": 372719,
+      "truncated": false,
+      "events": [
+        {
+          "label": "进程启动",
+          "time": "05-25 16:37:28.000",
+          "delta": "+0ms",
+          "file": "/Users/zhuyl/Documents/workspace/tools/lark-agent-bridge/data/bug_cache/xpfailuremgmt_6998811703/logs/app/com.android.car/main_2026-05-25_16-00.alog.log",
+          "line": 6,
+          "text": "process begin^^^^^^^^^^May 13 2026^^^18:15:34^^^^^^^^^^[1549,1603][2026-05-25 +0800 16:37:28]"
+        },
+        {
+          "label": "进程启动",
+          "time": "05-25 16:37:29.000",
+          "delta": "+1.000s",
+          "file": "/Users/zhuyl/Documents/workspace/tools/lark-agent-bridge/data/bug_cache/xpfailuremgmt_6998811703/logs/app/com.xiaopeng.aicabinservice/user0_main_2026-05-25_16-00.alog.log",
+          "line": 1,
+          "text": "process begin^^^^^^^^^^May 21 2026^^^14:47:31^^^^^^^^^^[2728,3824][2026-05-25 +0800 16:37:29]"
+        },
+        {
+          "label": "进程启动",
+          "time": "05-25 16:37:29.000",
+          "delta": "+1.000s",
+          "file": "/Users/zhuyl/Documents/workspace/tools/lark-agent-bridge/data/bug_cache/xpfailuremgmt_6998811703/logs/app/com.xiaopeng.aicapsule/main_2026-05-25_16-00.alog.log",
+          "line": 1397,
+          "text": "process begin^^^^^^^^^^May 13 2026^^^18:15:34^^^^^^^^^^[2510,3738][2026-05-25 +0800 16:37:29]"
+        },
+        {
+          "label": "DataCenter 注入 CarVcuHelper",
+          "time": "05-25 16:37:30.229",
+          "delta": "+2.229s",
+          "file": "/Users/zhuyl/Documents/workspace/tools/lark-agent-bridge/data/bug_cache/xpfailuremgmt_6998811703/logs/app/com.xiaopeng.montecarlo/user0_main_2026-05-25_16-00.alog.log",
+          "line": 1484,
+          "text": "05-25 16:37:30.229 2488 4142 15896 I NAV_DataCenter: injectSignalProvider[com.xiaopeng.guideengine.helper.carservice.CarVcuHelper@ed2777], number[36]"
+        },
+        {
+          "label": "SignalHelperManager 添加 CarVcuHelper",
+          "time": "05-25 16:37:30.259",
+          "delta": "+2.259s",
+          "file": "/Users/zhuyl/Documents/workspace/tools/lark-agent-bridge/data/bug_cache/xpfailuremgmt_6998811703/logs/app/com.xiaopeng.montecarlo/user0_main_2026-05-25_16-00.alog.log",
+          "line": 1501,
+          "text": "05-25 16:37:30.259 2488 4142 15926 I NAV_SignalHelperManager: add provider:com.xiaopeng.guideengine.helper.carservice.CarVcuHelper@ed2777"
+        },
+        {
+          "label": "XData/Unity 注册 40018",
+          "time": "05-25 16:37:31.807",
+          "delta": "+3.807s",
+          "file": "/Users/zhuyl/Documents/workspace/tools/lark-agent-bridge/data/bug_cache/xpfailuremgmt_6998811703/logs/app/com.xiaopeng.montecarlo/user0_main_2026-05-25_16-00.alog.log",
+          "line": 824,
+          "text": "05-25 16:37:31.807 2488 4180 17473 I XPD_SignalDispatcher: [registerSignalObserver][57]: registerSignal 40018 size 1"
+        },
+        {
+          "label": "CarServiceController 已连上 CarService",
+          "time": "05-25 16:37:31.860",
+          "delta": "+3.860s",
+          "file": "/Users/zhuyl/Documents/workspace/tools/lark-agent-bridge/data/bug_cache/xpfailuremgmt_6998811703/logs/app/com.xiaopeng.montecarlo/user0_main_2026-05-25_16-00.alog.log",
+          "line": 1793,
+          "text": "05-25 16:37:31.860 2488 2488 17526 I NAV_CarServiceController: onCarApiServiceConnected"
+        },
+        {
+          "label": "CarServiceController.connect",
+          "time": "05-25 16:37:31.860",
+          "delta": "+3.860s",
+          "file": "/Users/zhuyl/Documents/workspace/tools/lark-agent-bridge/data/bug_cache/xpfailuremgmt_6998811703/logs/app/com.xiaopeng.montecarlo/user0_main_2026-05-25_16-00.alog.log",
+          "line": 1794,
+          "text": "05-25 16:37:31.860 2488 4267 17527 I NAV_CarServiceController: connect."
+        },
+        {
+          "label": "CarVcuHelper 注册底层回调",
+          "time": "05-25 16:37:33.975",
+          "delta": "+5.975s",
+          "file": "/Users/zhuyl/Documents/workspace/tools/lark-agent-bridge/data/bug_cache/xpfailuremgmt_6998811703/logs/app/com.xiaopeng.montecarlo/user0_main_2026-05-25_16-00.alog.log",
+          "line": 2060,
+          "text": "05-25 16:37:33.975 2488 4267 19641 I NAV_CarVcuHelper: register 559944229 indeed"
+        },
+        {
+          "label": "CarVcuHelper 注册底层回调",
+          "time": "05-25 16:37:33.993",
+          "delta": "+5.993s",
+          "file": "/Users/zhuyl/Documents/workspace/tools/lark-agent-bridge/data/bug_cache/xpfailuremgmt_6998811703/logs/app/com.xiaopeng.montecarlo/user0_main_2026-05-25_16-00.alog.log",
+          "line": 2064,
+          "text": "05-25 16:37:33.993 2488 4267 19659 I NAV_CarVcuHelper: register 557847045 indeed"
+        },
+        {
+          "label": "CarVcuHelper 注册底层回调",
+          "time": "05-25 16:37:34.813",
+          "delta": "+6.813s",
+          "file": "/Users/zhuyl/Documents/workspace/tools/lark-agent-bridge/data/bug_cache/xpfailuremgmt_6998811703/logs/app/com.xiaopeng.montecarlo/user0_main_2026-05-25_16-00.alog.log",
+          "line": 2617,
+          "text": "05-25 16:37:34.813 2488 4267 20480 I NAV_CarVcuHelper: register 557847217 indeed"
+        },
+        {
+          "label": "CarVcuHelper 注册底层回调",
+          "time": "05-25 16:37:35.239",
+          "delta": "+7.239s",
+          "file": "/Users/zhuyl/Documents/workspace/tools/lark-agent-bridge/data/bug_cache/xpfailuremgmt_6998811703/logs/app/com.xiaopeng.montecarlo/user0_main_2026-05-25_16-00.alog.log",
+          "line": 2981,
+          "text": "05-25 16:37:35.239 2488 4267 20906 I NAV_CarVcuHelper: register 557847127 indeed"
+        },
+        {
+          "label": "业务订阅 SIGNAL_VCU_ELECTRICIT_PERCENT",
+          "time": "05-25 16:37:35.239",
+          "delta": "+7.239s",
+          "file": "/Users/zhuyl/Documents/workspace/tools/lark-agent-bridge/data/bug_cache/xpfailuremgmt_6998811703/logs/app/com.xiaopeng.montecarlo/user0_main_2026-05-25_16-00.alog.log",
+          "line": 2982,
+          "text": "05-25 16:37:35.239 2488 6665 20906 I NAV_DataCenter: getSignalFlow: signalCode=SIGNAL_VCU_ELECTRICIT_PERCENT, isNeedCache=true, hasProvider=true"
+        },
+        {
+          "label": "CarVcuHelper 注册底层回调",
+          "time": "05-25 16:37:35.252",
+          "delta": "+7.252s",
+          "file": "/Users/zhuyl/Documents/workspace/tools/lark-agent-bridge/data/bug_cache/xpfailuremgmt_6998811703/logs/app/com.xiaopeng.montecarlo/user0_main_2026-05-25_16-00.alog.log",
+          "line": 2995,
+          "text": "05-25 16:37:35.252 2488 4267 20919 I NAV_CarVcuHelper: register 557847042 indeed"
+        },
+        {
+          "label": "进程启动",
+          "time": "05-25 16:37:38.000",
+          "delta": "+10.000s",
+          "file": "/Users/zhuyl/Documents/workspace/tools/lark-agent-bridge/data/bug_cache/xpfailuremgmt_6998811703/logs/app/com.xiaopeng.aiot.coreservice/main_2026-05-25_16-00.alog.log",
+          "line": 1,
+          "text": "process begin^^^^^^^^^^May 13 2026^^^18:15:34^^^^^^^^^^[7260,7345][2026-05-25 +0800 16:37:38]"
+        },
+        {
+          "label": "业务侧消费日志",
+          "time": "05-25 16:37:38.234",
+          "delta": "+10.234s",
+          "file": "/Users/zhuyl/Documents/workspace/tools/lark-agent-bridge/data/bug_cache/xpfailuremgmt_6998811703/logs/app/com.xiaopeng.montecarlo/user0_main_2026-05-25_16-00.alog.log",
+          "line": 5686,
+          "text": "05-25 16:37:38.234 2488 7363 23901 I NAV_ElecConfigInfo: SIGNAL_VCU_ELECTRICIT_PERCENT it.value=95"
+        },
+        {
+          "label": "HMI 侧电量仍为 -1",
+          "time": "05-25 16:37:38.289",
+          "delta": "+10.289s",
+          "file": "/Users/zhuyl/Documents/workspace/tools/lark-agent-bridge/data/bug_cache/xpfailuremgmt_6998811703/logs/app/com.xiaopeng.montecarlo/user0_main_2026-05-25_16-00.alog.log",
+          "line": 6322,
+          "text": "05-25 16:37:38.289 2488 6473 23955 I NAV_HmiSignalReceiverHelper: HmiCarStateReceiver combineFlow collect : HmiCarStateSignal(batteryLevel=-1, trailerMode=false)"
+        },
+        {
+          "label": "业务侧消费日志",
+          "time": "05-25 16:37:38.289",
+          "delta": "+10.289s",
+          "file": "/Users/zhuyl/Documents/workspace/tools/lark-agent-bridge/data/bug_cache/xpfailuremgmt_6998811703/logs/app/com.xiaopeng.montecarlo/user0_main_2026-05-25_16-00.alog.log",
+          "line": 6325,
+          "text": "05-25 16:37:38.289 2488 4267 23956 I NAV_HmiSignalReceiverHelper: update battery level : 95"
+        },
+        {
+          "label": "SIGNAL_VCU_ELECTRICIT_PERCENT 缓存回放",
+          "time": "05-25 16:37:42.526",
+          "delta": "+14.526s",
+          "file": "/Users/zhuyl/Documents/workspace/tools/lark-agent-bridge/data/bug_cache/xpfailuremgmt_6998811703/logs/app/com.xiaopeng.montecarlo/user0_main_2026-05-25_16-00.alog.log",
+          "line": 9389,
+          "text": "05-25 16:37:42.526 2488 7903 28193 I NAV_GetMeterDataMsg: send cacheValue key:SIGNAL_VCU_ELECTRICIT_PERCENT format:Int32 value:95"
+        },
+        {
+          "label": "进程启动",
+          "time": "05-25 16:37:50.000",
+          "delta": "+22.000s",
+          "file": "/Users/zhuyl/Documents/workspace/tools/lark-agent-bridge/data/bug_cache/xpfailuremgmt_6998811703/logs/app/com.xiaopeng.applist.ivi/main_2026-05-25_16-00.alog.log",
+          "line": 1,
+          "text": "process begin^^^^^^^^^^May 13 2026^^^18:15:34^^^^^^^^^^[8683,8797][2026-05-25 +0800 16:37:50]"
+        },
+        {
+          "label": "进程启动",
+          "time": "05-25 16:37:51.000",
+          "delta": "+23.000s",
+          "file": "/Users/zhuyl/Documents/workspace/tools/lark-agent-bridge/data/bug_cache/xpfailuremgmt_6998811703/logs/app/com.xiaopeng.applist.cnsl/main_2026-05-25_16-00.alog.log",
+          "line": 1,
+          "text": "process begin^^^^^^^^^^May 13 2026^^^18:15:34^^^^^^^^^^[8809,8905][2026-05-25 +0800 16:37:51]"
+        },
+        {
+          "label": "SIGNAL_VCU_ELECTRICIT_PERCENT 缓存回放",
+          "time": "05-25 16:38:09.158",
+          "delta": "+41.158s",
+          "file": "/Users/zhuyl/Documents/workspace/tools/lark-agent-bridge/data/bug_cache/xpfailuremgmt_6998811703/logs/app/com.xiaopeng.montecarlo/user0_main_2026-05-25_16-00.alog.log",
+          "line": 14012,
+          "text": "05-25 16:38:09.158 2488 7903 54824 I NAV_GetMeterDataMsg: send cacheValue key:SIGNAL_VCU_ELECTRICIT_PERCENT format:Int32 value:95"
+        },
+        {
+          "label": "业务侧消费日志",
+          "time": "05-25 16:47:10.559",
+          "delta": "+582.559s",
+          "file": "/Users/zhuyl/Documents/workspace/tools/lark-agent-bridge/data/bug_cache/xpfailuremgmt_6998811703/logs/app/com.xiaopeng.montecarlo/user0_main_2026-05-25_16-00.alog.log",
+          "line": 68384,
+          "text": "05-25 16:47:10.559 2488 10952 596225 I NAV_ElecConfigInfo: SIGNAL_VCU_ELECTRICIT_PERCENT it.value=94"
+        },
+        {
+          "label": "业务侧消费日志",
+          "time": "05-25 16:47:10.559",
+          "delta": "+582.559s",
+          "file": "/Users/zhuyl/Documents/workspace/tools/lark-agent-bridge/data/bug_cache/xpfailuremgmt_6998811703/logs/app/com.xiaopeng.montecarlo/user0_main_2026-05-25_16-00.alog.log",
+          "line": 68385,
+          "text": "05-25 16:47:10.559 2488 4267 596225 I NAV_HmiSignalReceiverHelper: update battery level : 94"
+        }
+      ],
+      "label_counts": {
+        "进程启动": 38,
+        "XData/Unity 注册 40018": 1,
+        "DataCenter 注入 CarVcuHelper": 1,
+        "SignalHelperManager 添加 CarVcuHelper": 1,
+        "FloorCenterManager.init start": 1,
+        "CarServiceController.init": 4,
+        "CarServiceController 已连上 CarService": 1,
+        "CarServiceController.connect": 1,
+        "FloorCenterManager.init end": 1,
+        "CarVcuHelper.init": 1,
+        "CarVcuHelper 注册底层回调": 20,
+        "业务订阅 SIGNAL_VCU_ELECTRICIT_PERCENT": 2,
+        "业务侧消费日志": 4,
+        "HMI 侧电量仍为 -1": 1,
+        "SIGNAL_VCU_ELECTRICIT_PERCENT 缓存回放": 2
+      },
+      "registration_checks": [
+        {
+          "name": "XData/Unity 注册",
+          "status": "success",
+          "detail": "XData/Unity 注册 40018",
+          "count": 1
+        },
+        {
+          "name": "Helper 属性注册",
+          "status": "success",
+          "detail": "CarVcuHelper 注册底层回调",
+          "count": 20
+        },
+        {
+          "name": "业务订阅",
+          "status": "success",
+          "detail": "业务订阅 SIGNAL_VCU_ELECTRICIT_PERCENT",
+          "count": 2
+        }
+      ],
+      "value_samples": [
+        {
+          "time": "05-25 16:37:38.234",
+          "delta": "+10.234s",
+          "label": "业务侧消费日志",
+          "value": "95",
+          "source": "信号数据"
+        },
+        {
+          "time": "05-25 16:37:38.289",
+          "delta": "+10.289s",
+          "label": "HMI 侧电量仍为 -1",
+          "value": "-1",
+          "source": "HMI"
+        },
+        {
+          "time": "05-25 16:37:42.526",
+          "delta": "+14.526s",
+          "label": "SIGNAL_VCU_ELECTRICIT_PERCENT 缓存回放",
+          "value": "95",
+          "source": "缓存"
+        },
+        {
+          "time": "05-25 16:38:09.158",
+          "delta": "+41.158s",
+          "label": "SIGNAL_VCU_ELECTRICIT_PERCENT 缓存回放",
+          "value": "95",
+          "source": "缓存"
+        },
+        {
+          "time": "05-25 16:47:10.559",
+          "delta": "+582.559s",
+          "label": "业务侧消费日志",
+          "value": "94",
+          "source": "信号数据"
+        }
+      ]
+    }
+  },
+  "outputs": {
+    "html": "/Users/zhuyl/Documents/workspace/tools/lark-agent-bridge/data/jobs/63a847cb555b58b410029f4c9d2de39c/output/bug_signal_chain_report.html",
+    "json": "/Users/zhuyl/Documents/workspace/tools/lark-agent-bridge/data/jobs/63a847cb555b58b410029f4c9d2de39c/output/bug_signal_chain_report.json"
+  },
+  "detailed_stats": {
+    "40018": {
+      "vhal": 0,
+      "dispatcher": 2,
+      "x3dcb": 0,
+      "unity_recv_windows": 0,
+      "unity_recv_total": 0,
+      "unity_drop_total": 0,
+      "unity_drop_nonzero_windows": 0,
+      "unity_drop_max": 0,
+      "datacenter": 2,
+      "android_business": 278,
+      "android_unity": 0
+    }
+  }
+}
