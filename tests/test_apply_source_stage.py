@@ -40,3 +40,28 @@ def test_apply_illegal_status_is_skipped():
     apply_source_stage(g, {"node_status": {"DataCenter.kt": "正常"}, "findings": []})
     assert dc.status == orig
     assert validate(g) == []
+
+
+def test_apply_overrides_verdict():
+    g = _graph()
+    apply_source_stage(g, {"node_status": {}, "findings": [], "verdict": {
+        "status": "ok", "headline": "电量链路正常、非3D断点", "next_step": "转查 X3D ready"}})
+    assert g.verdict.headline == "电量链路正常、非3D断点"
+    assert g.verdict.next_step == "转查 X3D ready"
+    assert g.verdict.status == "ok"
+    assert validate(g) == []
+
+
+def test_apply_verdict_illegal_status_kept():
+    g = _graph()
+    orig = g.verdict.status
+    apply_source_stage(g, {"verdict": {"status": "正常", "headline": "X"}})
+    assert g.verdict.status == orig      # 非法 status 跳过
+    assert g.verdict.headline == "X"     # headline 仍覆盖
+
+
+def test_apply_no_verdict_keeps_original():
+    g = _graph()
+    orig = g.verdict.headline
+    apply_source_stage(g, {"node_status": {}, "findings": []})
+    assert g.verdict.headline == orig

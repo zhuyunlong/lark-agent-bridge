@@ -1080,6 +1080,14 @@ class _LdExecutorMixin:
             extra_payload={
                 "node_status": getattr(result.output, "node_status", {}),
                 "findings": getattr(result.output, "findings", []),
+                "verdict": (
+                    {
+                        "headline": getattr(result.output, "conclusion", "") or "",
+                        "next_step": (getattr(result.output, "suggested_actions", None) or [""])[0],
+                    }
+                    if getattr(result.output, "conclusion", "")
+                    else {}
+                ),
             },
         )
 

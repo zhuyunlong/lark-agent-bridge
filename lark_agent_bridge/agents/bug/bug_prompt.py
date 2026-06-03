@@ -14,10 +14,11 @@ def parse_node_status_block(text: str) -> dict:
     for raw in reversed(blocks):
         try:
             obj = _json.loads(raw)
-            if isinstance(obj, dict) and ("node_status" in obj or "findings" in obj):
+            if isinstance(obj, dict) and ("node_status" in obj or "findings" in obj or "verdict" in obj):
                 return {
                     "node_status": obj.get("node_status") or {},
                     "findings": obj.get("findings") or [],
+                    "verdict": obj.get("verdict") or {},
                 }
         except Exception:
             continue
@@ -649,15 +650,15 @@ class _BugPromptMixin:
             payload.update(extra_payload)
         # Merge structured node_status/findings: extra_payload takes priority (pydantic-ai path);
         # fall back to parsing the json fence in the analysis text (file_agent path).
-        if "node_status" not in payload or "findings" not in payload:
+        if "node_status" not in payload or "findings" not in payload or "verdict" not in payload:
             parsed = parse_node_status_block(analysis_text)
             if parsed:
                 payload.setdefault("node_status", parsed.get("node_status", {}))
                 payload.setdefault("findings", parsed.get("findings", []))
-        if "node_status" not in payload:
-            payload["node_status"] = {}
-        if "findings" not in payload:
-            payload["findings"] = []
+                payload.setdefault("verdict", parsed.get("verdict", {}))
+        payload.setdefault("node_status", {})
+        payload.setdefault("findings", [])
+        payload.setdefault("verdict", {})
         if render_html:
             html_path.write_text(
                 combined_bug_html.render_report_shell(**composition_to_renderer_payload(composition)),

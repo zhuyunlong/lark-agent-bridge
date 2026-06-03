@@ -45,6 +45,17 @@ def apply_source_stage(graph: ReportGraph, source_stage_data: "dict | None") -> 
                     evidence_refs=[str(f.get("file"))] if f.get("file") else [],
                     kind=str(f.get("kind") or "risk"),
                 ))
+        verdict = source_stage_data.get("verdict") or {}
+        if isinstance(verdict, dict):
+            headline = str(verdict.get("headline") or "").strip()
+            next_step = str(verdict.get("next_step") or "").strip()
+            status = str(verdict.get("status") or "").strip()
+            if headline:
+                graph.verdict.headline = headline
+            if next_step:
+                graph.verdict.next_step = next_step
+            if status in {"ok", "broken", "inconclusive"}:
+                graph.verdict.status = status
     except Exception:
         return
 

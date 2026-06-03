@@ -108,3 +108,15 @@ class TestParseNodeStatusBlock(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_parse_node_status_block_carries_verdict():
+    from lark_agent_bridge.agents.bug.bug_prompt import parse_node_status_block
+    md = ('结论...\n```json\n{"node_status": {"DataCenter.kt": "ok"}, '
+          '"findings": [], "verdict": {"status": "ok", "headline": "链路正常", "next_step": "查X3D"}}\n```')
+    out = parse_node_status_block(md)
+    assert out["verdict"]["headline"] == "链路正常"
+    assert out["verdict"]["status"] == "ok"
+    # 无 verdict 的旧格式仍可解析
+    md2 = '正文\n```json\n{"node_status": {}, "findings": []}\n```'
+    assert parse_node_status_block(md2)["verdict"] == {}

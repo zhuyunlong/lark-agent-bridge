@@ -423,8 +423,9 @@ class _CustomSkillMixin:
             output_section.append(
                 "- 在正文之后追加一个 json 围栏(```json ... ```)，内容为 "
                 "{\"node_status\": {\"<源码文件名>\": \"ok|suspect|broken|unknown\"}, "
-                "\"findings\": [{\"file\":..., \"severity\":..., \"title\":...}]}，"
-                "标注每个链路节点是否打通。"
+                "\"findings\": [{\"file\":..., \"severity\":..., \"title\":...}], "
+                "\"verdict\": {\"status\":\"ok|broken|inconclusive\", \"headline\":\"一句话结论\", \"next_step\":\"下一步建议\"}}，"
+                "标注每个链路节点是否打通，并在 verdict 给出整体结论。"
             )
         lines.extend(
             output_section
@@ -614,8 +615,9 @@ class _CustomSkillMixin:
         node_status_rule = (
             "9. 在正文之后追加一个 json 围栏(```json ... ```)，内容为 "
             "{\"node_status\": {\"<源码文件名>\": \"ok|suspect|broken|unknown\"}, "
-            "\"findings\": [{\"file\":..., \"severity\":..., \"title\":...}]}，"
-            "标注每个链路节点是否打通。"
+            "\"findings\": [{\"file\":..., \"severity\":..., \"title\":...}], "
+            "\"verdict\": {\"status\":\"ok|broken|inconclusive\", \"headline\":\"一句话结论\", \"next_step\":\"下一步建议\"}}，"
+            "标注每个链路节点是否打通，并在 verdict 给出整体结论。"
             if emit_node_status
             else None
         )

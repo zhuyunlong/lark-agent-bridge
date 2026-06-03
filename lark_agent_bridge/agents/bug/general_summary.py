@@ -612,6 +612,7 @@ class _GeneralSummaryMixin:
                     source_stage_data = {
                         "node_status": ss_payload.get("node_status") or {},
                         "findings": ss_payload.get("findings") or [],
+                        "verdict": ss_payload.get("verdict") or {},
                     }
                 except Exception:
                     source_stage_data = None
