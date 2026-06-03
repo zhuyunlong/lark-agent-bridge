@@ -57,7 +57,9 @@ def signal_json_to_graph(payload: Mapping[str, object]) -> ReportGraph:
             anchors=[],
             note=f"helper: {_short_file(str(context.get('helper_file') or ''))}" if context.get("helper_file") else "",
         ))
-        edges.append(GraphEdge(**{"from": "carservice", "to": "helper", "kind": "属性回调", "status": "ok"}))
+        # 仅当上游节点确实存在时才连边，保证 validate(graph) 恒为空（契约始终有效）。
+        if any(n.id == "carservice" for n in nodes):
+            edges.append(GraphEdge(**{"from": "carservice", "to": "helper", "kind": "属性回调", "status": "ok"}))
 
     # --- datacenter node ---
     # Find chain edge whose kind contains "分发" (Kotlin 信号分发 matches)
@@ -70,7 +72,8 @@ def signal_json_to_graph(payload: Mapping[str, object]) -> ReportGraph:
             anchors=[Anchor(file=_short_file(str(dispatch_edge.get("file") or "")), line=int(dispatch_edge.get("line") or 0))],
             note=str(dispatch_edge.get("note") or ""),
         ))
-        edges.append(GraphEdge(**{"from": "helper", "to": "datacenter", "kind": "onNextData", "status": "ok"}))
+        if any(n.id == "helper" for n in nodes):
+            edges.append(GraphEdge(**{"from": "helper", "to": "datacenter", "kind": "onNextData", "status": "ok"}))
 
     # --- business nodes ---
     # Use edges with kind "Android 业务消费" (more precise than filename substring)

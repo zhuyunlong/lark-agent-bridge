@@ -416,7 +416,7 @@ def render_status_lane_graph(
     node_list = [dict(n) for n in nodes if str(n.get("label", "")).strip()]
     if not node_list:
         return f'<p class="muted">{H(empty_text)}</p>'
-    outer_x, outer_y = 28, 18
+    outer_x = 28
     lane_w, lane_gap = 220, 28
     card_y, card_h = 70, 132
     total_w = outer_x * 2 + len(node_list) * lane_w + max(0, len(node_list) - 1) * lane_gap

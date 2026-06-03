@@ -20,6 +20,8 @@ _EXTRA_CSS = (
     ".cv-table td,.cv-table th{border:1px solid #e2e8f0;padding:6px 8px;text-align:left}"
     ".cv-table tr.abn td{color:#dc2626;font-weight:700}"
     ".tl{line-height:1.9}.issue{padding:8px 12px;border-radius:8px;margin:6px 0;background:#f8fafc}"
+    ".fold{border:1px solid #e2e8f0;border-radius:8px;padding:6px 10px;margin:6px 0;background:#fbfcfe}"
+    ".fold>summary{cursor:pointer;font-weight:600}"
 )
 
 
