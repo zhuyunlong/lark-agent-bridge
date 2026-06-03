@@ -14,7 +14,7 @@ def test_minimal_graph_validates_clean():
                          status="ok", anchors=[Anchor(file="DataCenter.kt", line=311)],
                          logs=[LogRef(ts="16:37:35", file="main.alog.log", line=2982, text="hasProvider=true")],
                          note="")],
-        edges=[GraphEdge(**{"from": "src", "to": "dc", "kind": "dispatch", "status": "ok", "note": ""})],
+        edges=[GraphEdge(**{"from": "dc", "to": "dc", "kind": "dispatch", "status": "ok", "note": ""})],
         timeline=[TimelineEvent(t_offset="+2.2s", event="注入", status="ok", node_ref="dc")],
         values=[ValueSample(ts="16:37:38", value="95", source="real", abnormal=False, log_ref="line 5686")],
         findings=[Finding(severity="info", title="链路连通", evidence_refs=["dc"], kind="ok")],
@@ -47,3 +47,16 @@ def test_validate_flags_bad_status():
         edges=[], timeline=[], values=[], findings=[],
     )
     assert any("status" in e for e in validate(g))
+
+
+def test_validate_flags_dangling_edge():
+    g = ReportGraph(
+        intent="diagnose", has_logs=True,
+        verdict=Verdict(status="ok", headline="", next_step=""),
+        lanes=[{"id": "a", "title": "A"}],
+        nodes=[GraphNode(id="n1", lane="a", label="x", status="ok",
+                         anchors=[], logs=[], note="")],
+        edges=[GraphEdge(**{"from": "n1", "to": "ghost", "kind": "x", "status": "ok"})],
+        timeline=[], values=[], findings=[],
+    )
+    assert any("ghost" in e for e in validate(g))

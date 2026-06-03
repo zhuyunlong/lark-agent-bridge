@@ -121,4 +121,8 @@ def validate(graph: ReportGraph) -> list[str]:
             errors.append(f"node {node.id} status 非法: {node.status}")
         if node.lane not in lane_ids:
             errors.append(f"node {node.id} lane 不在 lanes 中: {node.lane}")
+    for edge in graph.edges:
+        for end in (edge.from_, edge.to):
+            if end and end not in node_ids:
+                errors.append(f"edge 端点不存在: {end}")
     return errors
