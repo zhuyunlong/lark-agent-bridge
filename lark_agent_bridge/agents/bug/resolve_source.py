@@ -369,6 +369,13 @@ class _ResolveSourceMixin:
             time_context=time_context,
         )
         selection = self._normalize_agent_bug_selection(selection, prompt_text=prompt_text)
+        if selection is not None:
+            selection = self._downgrade_lifecycle_stuck_conflict(
+                selection,
+                prompt_text=prompt_text,
+                title=title,
+                description=description,
+            )
         if selection is not None and any(
             plan.kind == "signal" and not plan.signal_code for plan in selection.plans
         ):
@@ -676,6 +683,8 @@ class _ResolveSourceMixin:
         return fallback
 
     def _skill_label_for_name(self, skill_name: str, fallback_kind: str = "general") -> str:
+        if skill_name == "startup+stuck":
+            return "3D启动卡顿综合分析"
         route = self.skill_manager.primary_skill_map().get(skill_name)
         if route is not None:
             return route[1]
@@ -967,6 +976,12 @@ class _ResolveSourceMixin:
                 )
             return None
 
+        if self._has_explicit_3d_lifecycle_intent(followup_text):
+            return self.selection_for_skill_name(
+                "unity-startup-lifecycle-check",
+                source="deterministic_fallback",
+                reason="用户在续聊中明确要求重新分析 3D 生命周期。",
+            )
         if not self._followup_has_explicit_bug_route(followup_text):
             return _scene_signal_source_followup_selection()
         selection = self._manual_bug_selection(
@@ -1168,6 +1183,94 @@ class _ResolveSourceMixin:
             return selection
         return None
 
+    def _has_explicit_3d_lifecycle_intent(self, text: str) -> bool:
+        lowered = (text or "").casefold().replace(" ", "")
+        return any(
+            term in lowered
+            for term in (
+                "3d生命周期",
+                "unity生命周期",
+                "surface生命周期",
+                "sr生命周期",
+            )
+        )
+
+    def _downgrade_lifecycle_stuck_conflict(
+        self,
+        selection: "BugAnalysisSelection",
+        *,
+        prompt_text: str,
+        title: str,
+        description: str,
+    ) -> "BugAnalysisSelection":
+        if not self._has_explicit_3d_lifecycle_intent(prompt_text):
+            return selection
+        has_lifecycle_or_stuck_plan = any(plan.kind in {"startup", "stuck"} for plan in selection.plans)
+        if not has_lifecycle_or_stuck_plan:
+            return selection
+        if not any(term in f"{title}\n{description}".casefold() for term in ("黑屏", "不显示", "卡顿", "卡住")):
+            return selection
+        selection.confidence = "low"
+        reason = selection.reason.strip()
+        suffix = "用户明确要求 3D 生命周期，但标题/描述也包含黑屏/不显示/卡顿，存在 lifecycle 与 stuck skill 冲突，需要用户确认。"
+        selection.reason = f"{reason}；{suffix}" if reason else suffix
+        return selection
+
+    def _bug_skill_confirmation_options(
+        self,
+        selection: "BugAnalysisSelection",
+        *,
+        request_text: str = "",
+    ) -> list[dict[str, object]]:
+        if self._has_explicit_3d_lifecycle_intent(request_text):
+            options: list[dict[str, object]] = []
+
+            def add_skill(index: int, skill_name: str, label: str, aliases: list[str]) -> None:
+                options.append(
+                    {
+                        "index": index,
+                        "type": "skill",
+                        "skill_name": skill_name,
+                        "label": label,
+                        "aliases": aliases,
+                    }
+                )
+
+            add_skill(
+                1,
+                "unity-startup-lifecycle-check",
+                "3D启动/Surface生命周期分析",
+                ["3D启动时序分析", "生命周期", "3D生命周期", "启动时序", "Surface生命周期"],
+            )
+            add_skill(
+                2,
+                "3d-stuck-investigate",
+                "3D卡顿/黑屏渲染分析",
+                ["3D卡顿分析", "卡顿", "黑屏", "渲染黑屏"],
+            )
+            options.append(
+                {
+                    "index": 3,
+                    "type": "plans",
+                    "label": "两个方向都跑",
+                    "plan_kinds": ["startup", "stuck"],
+                    "skill_name": "startup+stuck",
+                    "aliases": ["都跑", "两个都跑", "全部", "两个方向都跑", "启动和卡顿"],
+                }
+            )
+            return options
+
+        label = selection.skill_label or selection.skill_name
+        return [
+            {
+                "index": 1,
+                "type": "skill",
+                "skill_name": selection.skill_name,
+                "label": label,
+                "aliases": [label],
+            }
+        ]
+
     def _needs_skill_confirmation(self, selection: "BugAnalysisSelection") -> bool:
         """Gate a low-confidence specific-skill pick before the expensive run."""
         if not self.config.bug_analysis.confirm_low_confidence_skill:
@@ -1201,13 +1304,17 @@ class _ResolveSourceMixin:
             classification_reason=selection.reason,
         )
         label = selection.skill_label or selection.skill_name
+        options = self._bug_skill_confirmation_options(selection, request_text=request_text)
+        option_lines = "\n".join(
+            f"{option['index']}. {option['label']}" for option in options
+        )
         message = (
             f"我初步判定使用 **{label}** 分析"
             + (f"（理由：{selection.reason}）" if selection.reason else "")
             + "，但置信度偏低、可能选错预设。\n"
-            "为避免错跑较久的分析，先请你确认方向：\n"
-            f"- 如果同意，回复 `{label}` 或你认可的方向即可继续\n"
-            "- 如果不对，回复期望方向，例如：场景信号 / 主题切换 / 启动时序 / 卡顿黑屏 / 闪退 / 车道级 / 信号链路 / 感知数据"
+            "为避免错跑较久的分析，先请你确认方向。\n"
+            "请直接回复下面任一选项的序号，或直接回复对应文本：\n"
+            f"{option_lines}"
         )
         return TaskResult(
             success=True,
@@ -1228,6 +1335,7 @@ class _ResolveSourceMixin:
                 "classification_confidence": selection.confidence,
                 "bug_url": bug_url,
                 "user_request_text": request_text,
+                "intent_options": options,
                 "needs_user_direction": True,
                 "supported_bug_skills": self.supported_primary_bug_skills(),
             },

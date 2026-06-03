@@ -1,8 +1,519 @@
 from _app_base import *  # noqa: F401,F403
 from _app_base import _AppTestBase
+from lark_agent_bridge.models import CardActionEvent
 
 
 class AppBugRequestTests(_AppTestBase):
+    def test_bug_skill_confirmation_result_sends_skill_choice_card(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_lark = FakeLarkClient()
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    allowed_chats=["oc_denied"],
+                    event_consumer=EventConsumerOptions(event_key="card.action.trigger"),
+                ),
+                lark_client=fake_lark,
+            )
+            original = event(
+                event_id="evt_bug_confirm_root",
+                message_id="om_bug_confirm_root",
+                content="@bot https://project.feishu.cn/xpfailuremgmt/buglo/detail/6995380113 3D生命周期",
+                chat_type="group",
+            )
+            result = TaskResult(
+                success=True,
+                skipped=True,
+                message="请确认分析方向\n1. 3D启动/Surface生命周期分析\n2. 3D卡顿/黑屏渲染分析",
+                job_id="job_confirm",
+                details={
+                    "mode": "bug_skill_confirmation",
+                    "needs_user_direction": True,
+                    "bug_url": "https://project.feishu.cn/xpfailuremgmt/buglo/detail/6995380113",
+                    "user_request_text": "https://project.feishu.cn/xpfailuremgmt/buglo/detail/6995380113 3D生命周期",
+                    "analysis_skill": "3d-stuck-investigate",
+                    "analysis_skill_label": "3D卡顿分析",
+                    "classification_source": "agent",
+                    "supported_bug_skills": app.bug_runner.supported_primary_bug_skills(),
+                    "intent_options": [
+                        {
+                            "index": 1,
+                            "type": "skill",
+                            "skill_name": "unity-startup-lifecycle-check",
+                            "label": "3D启动/Surface生命周期分析",
+                        },
+                        {
+                            "index": 2,
+                            "type": "skill",
+                            "skill_name": "3d-stuck-investigate",
+                            "label": "3D卡顿/黑屏渲染分析",
+                        },
+                    ],
+                },
+            )
+
+            finalized = app._deliver_result(original, result, request_text=result.details["user_request_text"])
+
+        self.assertTrue(finalized.success)
+        self.assertEqual(len(fake_lark.card_replies), 1)
+        self.assertIn("Bug Skill 确认", fake_lark.card_replies[0]["card_json"])
+        self.assertIn("select_bug_skill", fake_lark.card_replies[0]["card_json"])
+
+    def test_bug_skill_confirmation_is_threaded_reply_context_mode(self):
+        app = BridgeApp(BridgeConfig())
+
+        self.assertIn("bug_skill_confirmation", app._threaded_reply_context_modes())
+
+    def test_bug_skill_confirmation_option_matcher_accepts_index_label_alias_and_plan_group(self):
+        app = BridgeApp(BridgeConfig())
+        previous_session = {
+            "details": {
+                "intent_options": [
+                    {
+                        "index": 1,
+                        "type": "skill",
+                        "skill_name": "unity-startup-lifecycle-check",
+                        "label": "3D启动/Surface生命周期分析",
+                        "aliases": ["生命周期", "3D生命周期"],
+                    },
+                    {
+                        "index": 2,
+                        "type": "skill",
+                        "skill_name": "3d-stuck-investigate",
+                        "label": "3D卡顿/黑屏渲染分析",
+                        "aliases": ["卡顿", "黑屏"],
+                    },
+                    {
+                        "index": 3,
+                        "type": "plans",
+                        "skill_name": "startup+stuck",
+                        "label": "两个方向都跑",
+                        "plan_kinds": ["startup", "stuck"],
+                        "aliases": ["都跑", "两个都跑"],
+                    },
+                ]
+            }
+        }
+
+        self.assertEqual(
+            app._match_bug_skill_confirmation_option("1", previous_session)["skill_name"],
+            "unity-startup-lifecycle-check",
+        )
+        self.assertEqual(
+            app._match_bug_skill_confirmation_option("3D启动/Surface生命周期分析", previous_session)["skill_name"],
+            "unity-startup-lifecycle-check",
+        )
+        self.assertEqual(
+            app._match_bug_skill_confirmation_option("生命周期", previous_session)["skill_name"],
+            "unity-startup-lifecycle-check",
+        )
+        self.assertEqual(
+            app._match_bug_skill_confirmation_option("都跑", previous_session)["plan_kinds"],
+            ["startup", "stuck"],
+        )
+
+    def test_bug_skill_confirmation_empty_plan_group_is_invalid(self):
+        app = BridgeApp(BridgeConfig())
+        bug_url = "https://project.feishu.cn/xpfailuremgmt/buglo/detail/6995380113"
+
+        result = app._execute_bug_skill_confirmation_choice(
+            event(
+                event_id="evt_empty_plan_group",
+                message_id="om_empty_plan_group",
+                content="@bot 3",
+                chat_type="group",
+            ),
+            SimpleNamespace(request_text=f"{bug_url} 3D生命周期"),
+            {
+                "details": {
+                    "bug_url": bug_url,
+                    "user_request_text": f"{bug_url} 3D生命周期",
+                }
+            },
+            {
+                "type": "plans",
+                "skill_name": "startup+stuck",
+                "plan_kinds": [],
+            },
+            source="user_selected_reply",
+            reason="test",
+        )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, "invalid_bug_skill_confirmation_option")
+
+    def test_bug_skill_confirmation_reply_recovers_original_bug_and_selected_skill(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = Path(tmp) / "bug_metadata.md"
+            html = Path(tmp) / "bug_report.html"
+            metadata.write_text("bug", encoding="utf-8")
+            html.write_text("<html></html>", encoding="utf-8")
+            fake_lark = FakeLarkClient()
+            fake_bug = FakeBugRunner(metadata, html)
+            fake_lark.fetched_messages["om_followup_choice"] = json.dumps(
+                {"data": {"messages": [{"message_id": "om_followup_choice", "reply_to": "om_confirm_root"}]}},
+                ensure_ascii=False,
+            )
+            app = BridgeApp(
+                BridgeConfig(dry_run=False, data_dir=Path(tmp), allowed_chats=["oc_denied"]),
+                lark_client=fake_lark,
+                bug_runner=fake_bug,
+            )
+            root_event = event(
+                event_id="evt_confirm_root",
+                message_id="om_confirm_root",
+                content="@bot https://project.feishu.cn/xpfailuremgmt/buglo/detail/6995380113 3D生命周期",
+                chat_type="group",
+            )
+            app.activity_store.record_event(root_event)
+            app.activity_store.record_result(
+                root_event,
+                TaskResult(
+                    success=True,
+                    skipped=True,
+                    message="请确认分析方向",
+                    details={
+                        "mode": "bug_skill_confirmation",
+                        "conversation_root_message_id": "om_confirm_root",
+                        "bug_url": "https://project.feishu.cn/xpfailuremgmt/buglo/detail/6995380113",
+                        "user_request_text": "https://project.feishu.cn/xpfailuremgmt/buglo/detail/6995380113 3D生命周期",
+                        "needs_user_direction": True,
+                        "intent_options": [
+                            {
+                                "index": 1,
+                                "type": "skill",
+                                "skill_name": "unity-startup-lifecycle-check",
+                                "label": "3D启动/Surface生命周期分析",
+                                "aliases": ["生命周期"],
+                            },
+                            {
+                                "index": 2,
+                                "type": "skill",
+                                "skill_name": "3d-stuck-investigate",
+                                "label": "3D卡顿/黑屏渲染分析",
+                                "aliases": ["卡顿"],
+                            },
+                        ],
+                    },
+                ),
+            )
+
+            result = app.handle_event(
+                event(
+                    event_id="evt_followup_choice",
+                    message_id="om_followup_choice",
+                    content="@bot 1",
+                    chat_type="group",
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.details["mode"], "bug_analysis")
+        self.assertEqual(len(fake_bug.analysis_calls), 1)
+        call = fake_bug.analysis_calls[0]
+        self.assertEqual(call["request"].bug_url, "https://project.feishu.cn/xpfailuremgmt/buglo/detail/6995380113")
+        self.assertEqual(call["request"].prompt, "3D生命周期")
+        self.assertEqual([plan.kind for plan in call["plans_override"]], ["startup"])
+        self.assertEqual(call["classification_skill"], "unity-startup-lifecycle-check")
+        self.assertEqual(call["classification_source"], "user_selected_reply")
+
+    def test_bug_skill_confirmation_invalid_reply_is_sent_back_to_user(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = Path(tmp) / "bug_metadata.md"
+            html = Path(tmp) / "bug_report.html"
+            metadata.write_text("bug", encoding="utf-8")
+            html.write_text("<html></html>", encoding="utf-8")
+            fake_lark = FakeLarkClient()
+            fake_bug = FakeBugRunner(metadata, html)
+            fake_lark.fetched_messages["om_bad_reply"] = json.dumps(
+                {"data": {"messages": [{"message_id": "om_bad_reply", "reply_to": "om_confirm_root"}]}},
+                ensure_ascii=False,
+            )
+            app = BridgeApp(
+                BridgeConfig(dry_run=False, data_dir=Path(tmp), allowed_chats=["oc_denied"]),
+                lark_client=fake_lark,
+                bug_runner=fake_bug,
+            )
+            root_event = event(
+                event_id="evt_confirm_root",
+                message_id="om_confirm_root",
+                content="@bot https://project.feishu.cn/xpfailuremgmt/buglo/detail/6995380113 3D生命周期",
+                chat_type="group",
+            )
+            app.activity_store.record_event(root_event)
+            app.activity_store.record_result(
+                root_event,
+                TaskResult(
+                    success=True,
+                    skipped=True,
+                    message="请确认分析方向",
+                    details={
+                        "mode": "bug_skill_confirmation",
+                        "conversation_root_message_id": "om_confirm_root",
+                        "bug_url": "https://project.feishu.cn/xpfailuremgmt/buglo/detail/6995380113",
+                        "user_request_text": "https://project.feishu.cn/xpfailuremgmt/buglo/detail/6995380113 3D生命周期",
+                        "needs_user_direction": True,
+                        "intent_options": [
+                            {
+                                "index": 1,
+                                "type": "skill",
+                                "skill_name": "unity-startup-lifecycle-check",
+                                "label": "3D启动/Surface生命周期分析",
+                            }
+                        ],
+                    },
+                ),
+            )
+
+            result = app.handle_event(
+                event(
+                    event_id="evt_bad_reply",
+                    message_id="om_bad_reply",
+                    content="@bot 不知道",
+                    chat_type="group",
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertTrue(result.skipped)
+        self.assertIn("没有识别到确认选项", result.message)
+        self.assertEqual(len(fake_lark.replies), 1)
+        self.assertEqual(fake_lark.replies[0]["message_id"], "om_bad_reply")
+        self.assertIn("没有识别到确认选项", fake_lark.replies[0]["text"])
+        self.assertEqual(len(fake_bug.analysis_calls), 0)
+        self.assertEqual(len(fake_bug.reanalysis_calls), 0)
+
+    def test_bug_skill_confirmation_card_skill_action_runs_initial_bug_analysis_not_reanalysis(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = Path(tmp) / "bug_metadata.md"
+            html = Path(tmp) / "bug_report.html"
+            metadata.write_text("bug", encoding="utf-8")
+            html.write_text("<html></html>", encoding="utf-8")
+            fake_lark = FakeLarkClient()
+            fake_bug = FakeBugRunner(metadata, html)
+            app = BridgeApp(
+                BridgeConfig(dry_run=False, data_dir=Path(tmp), allowed_chats=["oc_denied"]),
+                lark_client=fake_lark,
+                bug_runner=fake_bug,
+            )
+            root_event = event(
+                event_id="evt_confirm_root",
+                message_id="om_confirm_root",
+                content="@bot https://project.feishu.cn/xpfailuremgmt/buglo/detail/6995380113 3D生命周期",
+                chat_type="group",
+            )
+            app.activity_store.record_event(root_event)
+            app.activity_store.record_result(
+                root_event,
+                TaskResult(
+                    success=True,
+                    skipped=True,
+                    message="请确认分析方向",
+                    job_id="job_confirm",
+                    details={
+                        "mode": "bug_skill_confirmation",
+                        "conversation_root_message_id": "om_confirm_root",
+                        "bug_url": "https://project.feishu.cn/xpfailuremgmt/buglo/detail/6995380113",
+                        "user_request_text": "https://project.feishu.cn/xpfailuremgmt/buglo/detail/6995380113 3D生命周期",
+                        "needs_user_direction": True,
+                        "intent_options": [
+                            {
+                                "index": 1,
+                                "type": "skill",
+                                "skill_name": "unity-startup-lifecycle-check",
+                                "label": "3D启动/Surface生命周期分析",
+                            },
+                        ],
+                    },
+                ),
+            )
+
+            result = app.handle_card_action(
+                CardActionEvent(
+                    event_id="evt_card_select_startup",
+                    action="select_bug_skill",
+                    root_message_id="om_confirm_root",
+                    skill_name="unity-startup-lifecycle-check",
+                    message_id="om_confirm_card",
+                    chat_id="oc_denied",
+                    chat_type="group",
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.details["mode"], "bug_analysis")
+        self.assertEqual(len(fake_bug.analysis_calls), 1)
+        self.assertEqual(len(fake_bug.reanalysis_calls), 0)
+        call = fake_bug.analysis_calls[0]
+        self.assertEqual([plan.kind for plan in call["plans_override"]], ["startup"])
+        self.assertEqual(call["classification_source"], "user_selected_card")
+
+    def test_group_chat_bug_skill_confirmation_card_then_text_reply_simulation(self):
+        class ConfirmThenRunBugRunner(FakeBugRunner):
+            def __init__(self, metadata_path, html_path):
+                super().__init__(metadata_path, html_path)
+                self.first = True
+
+            def run_bug_analysis(self, request, **kwargs):
+                if self.first:
+                    self.first = False
+                    return TaskResult(
+                        success=True,
+                        skipped=True,
+                        message="请确认分析方向\n1. 3D启动/Surface生命周期分析\n2. 3D卡顿/黑屏渲染分析",
+                        job_id="job_confirm",
+                        details={
+                            "mode": "bug_skill_confirmation",
+                            "needs_user_direction": True,
+                            "bug_url": request.bug_url,
+                            "user_request_text": request.raw_text,
+                            "analysis_skill": "3d-stuck-investigate",
+                            "analysis_skill_label": "3D卡顿分析",
+                            "classification_source": "agent",
+                            "supported_bug_skills": self.supported_primary_bug_skills(),
+                            "intent_options": [
+                                {
+                                    "index": 1,
+                                    "type": "skill",
+                                    "skill_name": "unity-startup-lifecycle-check",
+                                    "label": "3D启动/Surface生命周期分析",
+                                    "aliases": ["生命周期"],
+                                },
+                                {
+                                    "index": 2,
+                                    "type": "skill",
+                                    "skill_name": "3d-stuck-investigate",
+                                    "label": "3D卡顿/黑屏渲染分析",
+                                    "aliases": ["卡顿"],
+                                },
+                            ],
+                        },
+                    )
+                return super().run_bug_analysis(request, **kwargs)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = Path(tmp) / "bug_metadata.md"
+            html = Path(tmp) / "bug_report.html"
+            metadata.write_text("bug", encoding="utf-8")
+            html.write_text("<html></html>", encoding="utf-8")
+            fake_lark = FakeLarkClient()
+            fake_bug = ConfirmThenRunBugRunner(metadata, html)
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    allowed_chats=["oc_denied"],
+                    event_consumer=EventConsumerOptions(event_key="card.action.trigger"),
+                ),
+                lark_client=fake_lark,
+                bug_runner=fake_bug,
+            )
+
+            first = app.handle_event(
+                event(
+                    event_id="evt_group_bug_confirm_start",
+                    message_id="om_group_bug_confirm_start",
+                    chat_type="group",
+                    chat_id="oc_denied",
+                    content="@bot https://project.feishu.cn/xpfailuremgmt/buglo/detail/6995380113 3D生命周期",
+                )
+            )
+            card_message_id = fake_lark.card_replies[-1]["card_message_id"]
+            followup = app.handle_event(
+                event(
+                    event_id="evt_group_bug_confirm_reply",
+                    message_id="om_group_bug_confirm_reply",
+                    chat_type="group",
+                    chat_id="oc_denied",
+                    reply_to=card_message_id,
+                    content="@bot 1",
+                )
+            )
+
+        self.assertEqual(first.details["mode"], "bug_skill_confirmation")
+        self.assertTrue(followup.success)
+        self.assertEqual(followup.details["mode"], "bug_analysis")
+        self.assertEqual(len(fake_bug.analysis_calls), 1)
+        self.assertEqual([plan.kind for plan in fake_bug.analysis_calls[0]["plans_override"]], ["startup"])
+
+    def test_group_chat_bug_skill_confirmation_card_button_simulation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = Path(tmp) / "bug_metadata.md"
+            html = Path(tmp) / "bug_report.html"
+            metadata.write_text("bug", encoding="utf-8")
+            html.write_text("<html></html>", encoding="utf-8")
+            fake_lark = FakeLarkClient()
+            fake_bug = FakeBugRunner(metadata, html)
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    allowed_chats=["oc_denied"],
+                    event_consumer=EventConsumerOptions(event_key="card.action.trigger"),
+                ),
+                lark_client=fake_lark,
+                bug_runner=fake_bug,
+            )
+            root_event = event(
+                event_id="evt_group_card_button_root",
+                message_id="om_group_card_button_root",
+                chat_type="group",
+                chat_id="oc_denied",
+                content="@bot https://project.feishu.cn/xpfailuremgmt/buglo/detail/6995380113 3D生命周期",
+            )
+            app.activity_store.record_event(root_event)
+            app.activity_store.record_result(
+                root_event,
+                TaskResult(
+                    success=True,
+                    skipped=True,
+                    message="请确认分析方向",
+                    job_id="job_confirm",
+                    details={
+                        "mode": "bug_skill_confirmation",
+                        "conversation_root_message_id": "om_group_card_button_root",
+                        "bug_url": "https://project.feishu.cn/xpfailuremgmt/buglo/detail/6995380113",
+                        "user_request_text": "https://project.feishu.cn/xpfailuremgmt/buglo/detail/6995380113 3D生命周期",
+                        "needs_user_direction": True,
+                        "intent_options": [
+                            {
+                                "index": 1,
+                                "type": "skill",
+                                "skill_name": "unity-startup-lifecycle-check",
+                                "label": "3D启动/Surface生命周期分析",
+                            },
+                        ],
+                    },
+                ),
+            )
+
+            result = app.handle_card_action_payload(
+                {
+                    "event_id": "evt_group_card_button_select",
+                    "event": {
+                        "action": {
+                            "value": {
+                                "action": "select_bug_skill",
+                                "root_message_id": "om_group_card_button_root",
+                                "skill_name": "unity-startup-lifecycle-check",
+                            }
+                        },
+                        "context": {
+                            "open_message_id": "om_group_card_button_card",
+                            "open_chat_id": "oc_denied",
+                            "chat_type": "group",
+                        },
+                    },
+                }
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.details["mode"], "bug_analysis")
+        self.assertEqual(len(fake_bug.analysis_calls), 1)
+        self.assertEqual(len(fake_bug.reanalysis_calls), 0)
+        self.assertEqual([plan.kind for plan in fake_bug.analysis_calls[0]["plans_override"]], ["startup"])
+
     def test_progress_token_usage_normalizes_prompt_completion_aliases(self):
         with tempfile.TemporaryDirectory() as tmp:
             app = BridgeApp(BridgeConfig(data_dir=Path(tmp)))

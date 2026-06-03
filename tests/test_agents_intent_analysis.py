@@ -3,6 +3,28 @@ from _agents_base import _AgentTestBase
 
 
 class AgentsIntentAnalysisTests(_AgentTestBase):
+    def test_classify_3d_lifecycle_routes_to_startup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=True, data_dir=Path(tmp), workspace_root=Path(tmp))
+            runner = BugAnalysisRunner(config)
+
+            plans = runner.classify_requests(prompt_text="3D生命周期", title="", description="")
+
+        assert [plan.kind for plan in plans] == ["startup"]
+
+    def test_classify_3d_lifecycle_with_black_screen_returns_startup_and_stuck(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=True, data_dir=Path(tmp), workspace_root=Path(tmp))
+            runner = BugAnalysisRunner(config)
+
+            plans = runner.classify_requests(
+                prompt_text="3D生命周期",
+                title="sr底图黑屏，不显示内容",
+                description="问题时间：05-19 14:33",
+            )
+
+        assert [plan.kind for plan in plans] == ["startup", "stuck"]
+
     def test_bug_analysis_subprocess_gets_default_debug_log_path(self):
         with tempfile.TemporaryDirectory() as tmp:
             runner = BugAnalysisRunner(

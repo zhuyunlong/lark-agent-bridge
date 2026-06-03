@@ -209,12 +209,34 @@ class FakeBugRunner:
         self.metadata_path = metadata_path
         self.html_path = html_path
         self.requests = []
+        self.analysis_calls = []
         self.reanalysis_calls = []
         self.agent_followup_calls = []
         self.progress_callbacks = []
 
-    def run_bug_analysis(self, request, *, event=None, progress_callback=None):
+    def run_bug_analysis(
+        self,
+        request,
+        *,
+        event=None,
+        progress_callback=None,
+        plans_override=None,
+        classification_skill="",
+        classification_source="",
+        classification_reason="",
+        classification_provider="",
+    ):
         self.requests.append(request)
+        self.analysis_calls.append(
+            {
+                "request": request,
+                "plans_override": plans_override or [],
+                "classification_skill": classification_skill,
+                "classification_source": classification_source,
+                "classification_reason": classification_reason,
+                "classification_provider": classification_provider,
+            }
+        )
         self.progress_callbacks.append(progress_callback)
         if progress_callback is not None:
             progress_callback({"stage": "bug_fetch_data", "message": "拉取 bug 详情", "details": {"bug_url": request.bug_url}})
@@ -227,6 +249,7 @@ class FakeBugRunner:
     def selection_for_skill_name(self, skill_name, *, source, reason="", provider=""):
         mapping = {
             "xtheme-analyzer": ("xtheme", "XTheme时光主题分析"),
+            "unity-startup-lifecycle-check": ("startup", "3D启动时序分析"),
             "3d-stuck-investigate": ("stuck", "3D卡顿分析"),
             "perception-data-summary": ("perception", "当前感知数据总结"),
         }
@@ -251,6 +274,14 @@ class FakeBugRunner:
                 "requires_logs": True,
                 "role": "primary",
                 "description": "分析主题切换、UI mode、日出日落等问题。",
+            },
+            {
+                "name": "unity-startup-lifecycle-check",
+                "kind": "startup",
+                "label": "3D启动时序分析",
+                "requires_logs": True,
+                "role": "primary",
+                "description": "分析 3D 启动、Surface、UnityReady、首帧生命周期。",
             },
             {
                 "name": "3d-stuck-investigate",
@@ -283,7 +314,7 @@ class FakeBugRunner:
 
     def _skill_name_for_kind(self, kind: str) -> str:
         mapping = {
-            "startup": "3d-stuck-investigate",
+            "startup": "unity-startup-lifecycle-check",
             "stuck": "3d-stuck-investigate",
             "perception": "perception-data-summary",
             "signal": "signal-chain-analyzer",

@@ -625,6 +625,7 @@ class _LogResourcesMixin:
         return {
             *self._analysis_context_modes(),
             "bug_clarification",
+            "bug_skill_confirmation",
             "bug_time_clarification",
             "knowledge_qa",
             "knowledge_probe",

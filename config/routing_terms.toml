@@ -9,6 +9,10 @@ terms = [
     "startrender", "surfacecreated", "surfacechanged",
     "createunityplayeronmainthread", "onunityready",
     "unitymainfirstframereadyrendermsg",
+    "3d生命周期", "3d 生命周期",
+    "unity生命周期", "unity 生命周期",
+    "surface生命周期", "surface 生命周期",
+    "sr生命周期", "sr 生命周期",
 ]
 
 [startup_block]

@@ -1,8 +1,36 @@
 from _agents_base import *  # noqa: F401,F403
 from _agents_base import _AgentTestBase
+import time
+
+from lark_agent_bridge.models import create_job_context
 
 
 class AgentsRecentRefactorTests(_AgentTestBase):
+    def test_confirmed_startup_stuck_plan_group_uses_combined_skill_label(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=True, data_dir=Path(tmp), workspace_root=Path(tmp))
+            runner = BugAnalysisRunner(config)
+
+            result = runner.run_bug_analysis(
+                BugRequest(
+                    bug_url="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6995380113",
+                    prompt="3D生命周期",
+                    raw_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6995380113 3D生命周期",
+                    triggered=True,
+                ),
+                plans_override=[
+                    BugAnalysisPlan(kind="startup"),
+                    BugAnalysisPlan(kind="stuck"),
+                ],
+                classification_skill="startup+stuck",
+                classification_source="user_selected_reply",
+                classification_reason="用户选择两个方向都跑。",
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.details["analysis_skill"], "startup+stuck")
+        self.assertEqual(result.details["analysis_skill_label"], "3D启动卡顿综合分析")
+
     def test_bug_analysis_agent_signal_selection_requires_explicit_signal_target(self):
         runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
 
@@ -207,6 +235,114 @@ class AgentsRecentRefactorTests(_AgentTestBase):
             sel.confidence = "low"
             config.bug_analysis.confirm_low_confidence_skill = False
             self.assertFalse(runner._needs_skill_confirmation(sel))  # flag off disables gate
+
+    def test_lifecycle_stuck_conflict_requires_skill_confirmation_with_options(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(data_dir=Path(tmp), workspace_root=Path(tmp))
+            runner = BugAnalysisRunner(config)
+            selection = runner._selection_from_plans(
+                [BugAnalysisPlan(kind="stuck")],
+                source="agent",
+                reason="SR底图黑屏/不显示内容属于3D渲染黑屏问题",
+                provider="claude",
+            )
+            selection.confidence = "high"
+
+            normalized = runner._downgrade_lifecycle_stuck_conflict(
+                selection,
+                prompt_text="3D生命周期",
+                title="sr底图黑屏，不显示内容",
+                description="问题时间：05-19 14:33",
+            )
+            options = runner._bug_skill_confirmation_options(normalized, request_text="3D生命周期")
+
+        assert normalized.confidence == "low"
+        assert "生命周期" in normalized.reason
+        assert runner._needs_skill_confirmation(normalized)
+        assert options[0]["skill_name"] == "unity-startup-lifecycle-check"
+        assert options[1]["skill_name"] == "3d-stuck-investigate"
+        assert options[2]["type"] == "plans"
+        assert options[2]["plan_kinds"] == ["startup", "stuck"]
+
+    def test_lifecycle_startup_with_stuck_description_requires_skill_confirmation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(data_dir=Path(tmp), workspace_root=Path(tmp))
+            runner = BugAnalysisRunner(config)
+            selection = runner._selection_from_plans(
+                [BugAnalysisPlan(kind="startup")],
+                source="agent",
+                reason="用户明确要求 3D 生命周期。",
+                provider="claude",
+            )
+            selection.confidence = "high"
+
+            normalized = runner._downgrade_lifecycle_stuck_conflict(
+                selection,
+                prompt_text="3D生命周期",
+                title="sr底图黑屏，不显示内容",
+                description="问题时间：05-19 14:33",
+            )
+
+        assert normalized.confidence == "low"
+        assert runner._needs_skill_confirmation(normalized)
+
+    def test_skill_confirmation_result_contains_intent_options(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(data_dir=Path(tmp), workspace_root=Path(tmp))
+            runner = BugAnalysisRunner(config)
+            context = create_job_context(Path(tmp))
+            selection = runner.selection_for_skill_name(
+                "3d-stuck-investigate",
+                source="agent",
+                reason="黑屏描述命中卡顿 skill，但用户要求 3D 生命周期。",
+            )
+            assert selection is not None
+            selection.confidence = "low"
+
+            result = runner._skill_confirmation_needed_result(
+                context=context,
+                selection=selection,
+                started=time.monotonic(),
+                request_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6995380113 3D生命周期",
+                bug_url="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6995380113",
+                title="sr底图黑屏，不显示内容",
+                progress_callback=None,
+            )
+
+        assert result.details["mode"] == "bug_skill_confirmation"
+        assert result.details["needs_user_direction"] is True
+        assert result.details["intent_options"]
+        assert "1." in result.message
+        assert "3D启动" in result.message
+
+    def test_non_lifecycle_low_confidence_confirmation_does_not_show_3d_options(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(data_dir=Path(tmp), workspace_root=Path(tmp))
+            runner = BugAnalysisRunner(config)
+            context = create_job_context(Path(tmp))
+            selection = runner.selection_for_skill_name(
+                "xtheme-analyzer",
+                source="agent",
+                reason="Agent 认为该请求可能是主题切换问题，但置信度偏低。",
+            )
+            assert selection is not None
+            selection.confidence = "low"
+
+            result = runner._skill_confirmation_needed_result(
+                context=context,
+                selection=selection,
+                started=time.monotonic(),
+                request_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/7000000001 主题切换后界面异常",
+                bug_url="https://project.feishu.cn/xpfailuremgmt/buglo/detail/7000000001",
+                title="主题切换后界面异常",
+                progress_callback=None,
+            )
+
+        assert result.details["mode"] == "bug_skill_confirmation"
+        assert "3D启动/Surface生命周期分析" not in result.message
+        assert "两个方向都跑" not in result.message
+        assert result.details["intent_options"][0]["skill_name"] == "xtheme-analyzer"
+        assert result.details["intent_options"][0]["label"] == "XTheme时光主题分析"
 
     def test_replay_decision_parser_returns_replay_decision(self):
         config = BridgeConfig(dry_run=False)

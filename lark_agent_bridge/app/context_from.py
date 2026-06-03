@@ -117,6 +117,23 @@ class _ContextFromMixin:
         had_previous_session_before_followup = (
             self.activity_store.get_session(followup_context.root_message_id) is not None
         )
+        bug_skill_confirmation_result = self._maybe_handle_bug_skill_confirmation_followup(
+            event,
+            followup_context,
+            route_content,
+        )
+        if bug_skill_confirmation_result is not None:
+            result_mode = str(bug_skill_confirmation_result.details.get("mode") or "")
+            if result_mode == "bug_skill_confirmation" and (
+                bug_skill_confirmation_result.skipped or not bug_skill_confirmation_result.success
+            ):
+                return self._finalize_followup_reply(
+                    event,
+                    bug_skill_confirmation_result,
+                    followup_context,
+                    route_content,
+                )
+            return bug_skill_confirmation_result
         direct_followup_result = self._maybe_handle_direct_analysis_followup(event, followup_context, route_content)
         if direct_followup_result is not None:
             return direct_followup_result
@@ -463,6 +480,32 @@ class _ContextFromMixin:
                 classification_reason="用户补充了文件分析方向，继续恢复原始文件请求执行。",
             )
         return None
+
+    def _maybe_handle_bug_skill_confirmation_followup(
+        self,
+        event: LarkEvent,
+        followup_context,
+        route_content: str,
+    ) -> TaskResult | None:
+        if str(getattr(followup_context, "mode", "") or "") != "bug_skill_confirmation":
+            return None
+        previous_session = self.activity_store.get_session(followup_context.root_message_id) or {}
+        selected_option = self._match_bug_skill_confirmation_option(route_content, previous_session)
+        if selected_option is None:
+            return TaskResult(
+                success=True,
+                skipped=True,
+                message="没有识别到确认选项，请回复序号 1/2/3，或回复对应方向文本。",
+                details={"mode": "bug_skill_confirmation", "needs_user_direction": True},
+            )
+        return self._execute_bug_skill_confirmation_choice(
+            event,
+            followup_context,
+            previous_session,
+            selected_option,
+            source="user_selected_reply",
+            reason="用户通过文本回复确认 bug 分析 skill。",
+        )
 
     def _send_followup_ack(self, event: LarkEvent, message: str, *, root_message_id: str | None = None) -> None:
         if self.config.dry_run or event.chat_type not in {"group", "p2p"}:

@@ -1207,7 +1207,17 @@ class _HandleEventMixin:
         """Attempt to send a result card. Returns True if card was sent."""
         report_url = str(result.details.get("published_report_url") or result.details.get("report_url") or "").strip()
         mode = str(result.details.get("mode", ""))
-        is_skill_clarification = mode == "bug_clarification" and bool(result.details.get("needs_user_direction"))
+        needs_user_direction = bool(result.details.get("needs_user_direction"))
+        intent_options = result.details.get("intent_options")
+        is_skill_clarification = (
+            (mode == "bug_clarification" and needs_user_direction)
+            or (
+                mode == "bug_skill_confirmation"
+                and needs_user_direction
+                and isinstance(intent_options, list)
+                and bool(intent_options)
+            )
+        )
         # Most result cards need a published report; skill clarification and knowledge QA are card-only decision points.
         if not report_url and not is_skill_clarification and mode != "knowledge_qa":
             return False
@@ -1215,6 +1225,7 @@ class _HandleEventMixin:
         mode_labels = {
             "bug_analysis": "Bug 分析",
             "bug_clarification": "Bug 分析分诊",
+            "bug_skill_confirmation": "Bug Skill 确认",
             "bug_reanalysis": "Bug 重新分析",
             "bug_followup_existing_answer": "Bug 追问",
             "bug_agent_followup": "Bug 追问",

@@ -559,6 +559,48 @@ class AppBugFollowupTests(_AppTestBase):
         self.assertIn("当前命中：当前感知数据总结", rendered)
         self.assertIn("select_bug_skill", rendered)
         self.assertIn("命中 Skill", rendered)
+
+    def test_finished_progress_card_overrides_initial_classification_source(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = BridgeApp(
+                BridgeConfig(dry_run=False, data_dir=Path(tmp), allowed_chats=["oc_denied"]),
+                lark_client=FakeLarkClient(),
+                bug_runner=FakeBugRunner(Path(tmp) / "bug_metadata.md", Path(tmp) / "bug_report.html"),
+                chat_client=FakeOmlxChatClient(),
+            )
+            app._progress_cards["om_bug_reply"] = {
+                "title": "Bug 分析",
+                "status": "analyzing",
+                "details": {"分类来源": "preflight_rules", "命中 Skill": "3D启动时序分析"},
+                "started_at": datetime.now(timezone.utc),
+                "message_id": "om_card_1",
+            }
+            result = TaskResult(
+                success=True,
+                message="Bug 分析完成",
+                job_id="job_bug_reply",
+                details={
+                    "mode": "bug_analysis",
+                    "analysis_skill": "startup+stuck",
+                    "analysis_skill_label": "3D启动卡顿综合分析",
+                    "classification_source": "user_selected_reply",
+                },
+            )
+
+            card = app._build_progress_card(
+                event(message_id="om_bug_reply"),
+                key="om_bug_reply",
+                status="completed",
+                result=result,
+                note=result.message,
+            )
+
+        rendered = str(card)
+        self.assertIn("user_selected_reply", rendered)
+        self.assertNotIn("preflight_rules", rendered)
+        self.assertIn("3D启动卡顿综合分析", rendered)
+        self.assertNotIn("3D启动时序分析", rendered)
+
     def test_continue_agent_card_action_explicitly_resumes_saved_agent_session(self):
         with tempfile.TemporaryDirectory() as tmp:
             fake_bug = FakeBugRunner(Path(tmp) / "bug_metadata.md", Path(tmp) / "bug_report.html")

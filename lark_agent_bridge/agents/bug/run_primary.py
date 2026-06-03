@@ -10,6 +10,11 @@ class _RunPrimaryMixin:
         *,
         event: LarkEvent | None = None,
         progress_callback: Callable[[dict[str, object]], None] | None = None,
+        plans_override: list["BugAnalysisPlan"] | None = None,
+        classification_skill: str = "",
+        classification_source: str = "",
+        classification_reason: str = "",
+        classification_provider: str = "",
     ) -> TaskResult:
         options = self.config.bug_analysis
         if not options.enabled:
@@ -41,7 +46,32 @@ class _RunPrimaryMixin:
         bridge_kwargs = {"bridge_session_id": bridge_session_id} if bridge_session_id else {}
         metadata_path = context.output_dir / "bug_metadata.md"
         request_text = self._request_text(raw_text=request.raw_text, prompt_text=prompt_text, bug_url=request.bug_url)
-        plans = self.classify_requests(prompt_text=prompt_text, title="", description="")
+        plans = (
+            list(plans_override)
+            if plans_override is not None
+            else self.classify_requests(prompt_text=prompt_text, title="", description="")
+        )
+        if not plans:
+            plans = [BugAnalysisPlan(kind="general")]
+        if plans_override is not None:
+            selection = self._selection_from_plans(
+                plans,
+                source=classification_source or "user_selected_reply",
+                reason=classification_reason or "用户确认后按指定 Bug skill 执行。",
+                provider=classification_provider,
+            )
+            if classification_skill:
+                selection.skill_name = classification_skill
+                selection.skill_label = self._skill_label_for_name(
+                    classification_skill,
+                    plans[0].kind if plans else "general",
+                )
+        else:
+            selection = self._selection_from_plans(
+                plans,
+                source="preflight_rules",
+                reason="",
+            )
         plan = plans[0]
         time_context = self._resolve_bug_time_context(
             request_text=request_text,
@@ -119,6 +149,11 @@ class _RunPrimaryMixin:
                     "mode": "bug_analysis",
                     "analysis_kind": plan.kind,
                     "analysis_kinds": [item.kind for item in plans],
+                    "analysis_skill": selection.skill_name,
+                    "analysis_skill_label": selection.skill_label,
+                    "classification_source": selection.source,
+                    "classification_reason": selection.reason,
+                    "classification_provider": selection.provider,
                     "signal_code": plan.signal_code,
                     "user_request_text": request_text,
                     "agent_request_file": str(request_artifact),
@@ -202,36 +237,67 @@ class _RunPrimaryMixin:
                 description=description,
                 reference_time=self._bug_reference_time(fetched, full_item),
             )
-            decision = self._unified_classify_and_decide(
-                request_text=request_text,
-                prompt_text=prompt_text,
-                title=title,
-                description=description,
-                attachments=fetched.get("attachments", []),
-                time_context=time_context,
-            )
-            selection = decision.selection
-            source_decision = decision.source_decision
-            if self._needs_general_direction(selection, prompt_text=prompt_text):
-                return self._general_direction_needed_result(
-                    context=context,
-                    selection=selection,
-                    started=started,
+            if plans_override is not None:
+                if selection.source not in {"user_selected_reply", "user_selected_card"}:
+                    selection = self._downgrade_lifecycle_stuck_conflict(
+                        selection,
+                        prompt_text=prompt_text,
+                        title=title,
+                        description=description,
+                    )
+                source_decision = self._decide_source_analysis_request(
                     request_text=request_text,
-                    bug_url=request.bug_url,
+                    prompt_text=prompt_text,
                     title=title,
-                    progress_callback=progress_callback,
+                    description=description,
+                    plans=plans,
+                    skill_name=selection.skill_name,
                 )
-            if self._needs_skill_confirmation(selection):
-                return self._skill_confirmation_needed_result(
-                    context=context,
-                    selection=selection,
-                    started=started,
+                selection.plans = self._augment_plans_for_source_analysis(
+                    selection.plans,
+                    source_decision=source_decision,
+                )
+                if self._needs_skill_confirmation(selection):
+                    return self._skill_confirmation_needed_result(
+                        context=context,
+                        selection=selection,
+                        started=started,
+                        request_text=request_text,
+                        bug_url=request.bug_url,
+                        title=title,
+                        progress_callback=progress_callback,
+                    )
+            else:
+                decision = self._unified_classify_and_decide(
                     request_text=request_text,
-                    bug_url=request.bug_url,
+                    prompt_text=prompt_text,
                     title=title,
-                    progress_callback=progress_callback,
+                    description=description,
+                    attachments=fetched.get("attachments", []),
+                    time_context=time_context,
                 )
+                selection = decision.selection
+                source_decision = decision.source_decision
+                if self._needs_general_direction(selection, prompt_text=prompt_text):
+                    return self._general_direction_needed_result(
+                        context=context,
+                        selection=selection,
+                        started=started,
+                        request_text=request_text,
+                        bug_url=request.bug_url,
+                        title=title,
+                        progress_callback=progress_callback,
+                    )
+                if self._needs_skill_confirmation(selection):
+                    return self._skill_confirmation_needed_result(
+                        context=context,
+                        selection=selection,
+                        started=started,
+                        request_text=request_text,
+                        bug_url=request.bug_url,
+                        title=title,
+                        progress_callback=progress_callback,
+                    )
             plans = selection.plans
             if not time_context.has_full_datetime:
                 return self._bug_time_clarification_result(

@@ -1,5 +1,6 @@
 from _agents_base import *  # noqa: F401,F403
 from _agents_base import _AgentTestBase
+from types import SimpleNamespace
 
 
 class AgentsBugReanalysisTests(_AgentTestBase):
@@ -54,6 +55,141 @@ class AgentsBugReanalysisTests(_AgentTestBase):
 
         self.assertTrue(result.success)
         self.assertEqual(executed_plans, ["startup"])
+
+    def test_reanalysis_3d_lifecycle_followup_selects_startup_not_previous_stuck(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(data_dir=Path(tmp), workspace_root=Path(tmp))
+            runner = BugAnalysisRunner(config)
+            previous_context = SimpleNamespace(
+                request_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6995380113 3D生命周期",
+                summary_text="上一轮误跑 stuck",
+                report_excerpt="",
+            )
+            previous_session = {
+                "details": {
+                    "analysis_kinds": ["stuck"],
+                    "analysis_skill": "3d-stuck-investigate",
+                    "prepared_log_input": "/tmp/logs",
+                    "selected_log_input": "/tmp/logs",
+                }
+            }
+
+            decision = runner.decide_bug_followup(
+                followup_text="重新分析 3D生命周期问题",
+                previous_context=previous_context,
+                previous_session=previous_session,
+            )
+
+        assert decision is not None
+        assert decision.should_reanalyze is True
+        assert decision.force_rerun is True
+        assert [plan.kind for plan in decision.plans] == ["startup"]
+        assert decision.skill_name == "unity-startup-lifecycle-check"
+
+    def test_bug_analysis_respects_plans_override_after_skill_confirmation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=True, data_dir=Path(tmp), workspace_root=Path(tmp))
+            runner = BugAnalysisRunner(config)
+
+            with mock.patch.object(
+                runner,
+                "classify_requests",
+                side_effect=AssertionError("classify_requests should not run when plans_override is provided"),
+            ):
+                result = runner.run_bug_analysis(
+                    BugRequest(
+                        bug_url="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6995380113",
+                        prompt="3D生命周期",
+                        raw_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6995380113 3D生命周期",
+                        triggered=True,
+                    ),
+                    plans_override=[BugAnalysisPlan(kind="startup")],
+                    classification_skill="unity-startup-lifecycle-check",
+                    classification_source="user_selected_reply",
+                    classification_reason="用户通过确认回复选择 3D 生命周期分析。",
+                )
+
+        assert result.success
+        assert result.details["analysis_kind"] == "startup"
+        assert result.details["analysis_skill"] == "unity-startup-lifecycle-check"
+        assert result.details["classification_source"] == "user_selected_reply"
+
+    def test_preflight_lifecycle_override_with_stuck_bug_context_requires_confirmation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=False, data_dir=Path(tmp), workspace_root=Path(tmp))
+            runner = BugAnalysisRunner(config)
+            log_root = Path(tmp) / "logs"
+            self._write_matching_log(log_root, "2026-05-19 14:33:00")
+
+            def fake_run_json_command(command, timeout):
+                if "check-env" in command:
+                    return {"meegle_installed": True, "auth_ok": True}
+                if "resolve-url" in command:
+                    return {"project_key": "xpfailuremgmt", "work_item_id": "6995380113"}
+                if "fetch-data" in command:
+                    return {
+                        "title": "sr底图黑屏，不显示内容",
+                        "status": "处理中",
+                        "create_time": "2026-05-19 14:33",
+                        "create_by": "tester",
+                        "fields": {},
+                        "attachments": [],
+                        "description": "问题时间: 2026-05-19 14:33\nSR底图黑屏，不显示内容",
+                    }
+                if command[:3] == ["meegle", "workitem", "get"]:
+                    return {"work_item_current_node": []}
+                raise AssertionError(f"unexpected command: {command}")
+
+            def fake_run_analysis(**kwargs):
+                kwargs["html_path"].write_text("<html>startup</html>", encoding="utf-8")
+                kwargs["json_path"].write_text("{}", encoding="utf-8")
+                return subprocess.CompletedProcess(args=["startup"], returncode=0, stdout="", stderr="")
+
+            with (
+                mock.patch.object(runner, "_run_json_command", side_effect=fake_run_json_command),
+                mock.patch.object(runner, "_load_option_map", return_value={}),
+                mock.patch.object(runner, "_download_bug_attachments", return_value={"downloaded": [], "unzipped": [], "errors": [], "skipped": [], "ok": True}),
+                mock.patch.object(runner, "_select_log_input", return_value=log_root),
+                mock.patch.object(runner, "_prepare_log_input", return_value=log_root),
+                mock.patch.object(runner, "_run_analysis", side_effect=fake_run_analysis),
+                mock.patch.object(runner, "_build_combined_report_artifacts", return_value=None),
+                mock.patch.object(
+                    runner,
+                    "_run_bug_agent_summary",
+                    return_value={
+                        "message": "agent summary",
+                        "command": ["mock-summary"],
+                        "error": "",
+                        "provider": "direct_api",
+                        "model": "test",
+                        "session_id": "",
+                        "resumed": False,
+                        "duration_seconds": 0.1,
+                        "usage": {},
+                        "usage_scope": "",
+                    },
+                ),
+            ):
+                result = runner.run_bug_analysis(
+                    BugRequest(
+                        bug_url="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6995380113",
+                        prompt="3D生命周期",
+                        raw_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6995380113 3D生命周期",
+                        triggered=True,
+                    ),
+                    plans_override=[BugAnalysisPlan(kind="startup")],
+                    classification_skill="unity-startup-lifecycle-check",
+                    classification_source="preflight_rules",
+                    classification_reason="preflight recognized lifecycle",
+                )
+
+        assert result.success
+        assert result.skipped
+        assert result.details["mode"] == "bug_skill_confirmation"
+        assert result.details["classification_source"] == "preflight_rules"
+        assert result.details["intent_options"][0]["skill_name"] == "unity-startup-lifecycle-check"
+        assert result.details["intent_options"][1]["skill_name"] == "3d-stuck-investigate"
+
     def test_direct_analysis_custom_skill_executor_not_ready_skips_summary(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = BridgeConfig(dry_run=False, data_dir=Path(tmp), workspace_root=Path(tmp))

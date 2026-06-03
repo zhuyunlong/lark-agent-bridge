@@ -69,6 +69,28 @@ class _ResultBugMixin:
             return []
         if not (result.details.get("needs_user_direction") or self._result_is_bug_report_mode(result)):
             return []
+        current_skill = str(result.details.get("analysis_skill") or "").strip()
+        if str(result.details.get("mode") or "").strip() == "bug_skill_confirmation":
+            raw_options = result.details.get("intent_options")
+            if isinstance(raw_options, list):
+                choices: list[dict[str, object]] = []
+                for option in raw_options:
+                    if not isinstance(option, dict) or str(option.get("type") or "").strip() != "skill":
+                        continue
+                    name = str(option.get("skill_name") or "").strip()
+                    label = str(option.get("label") or name).strip()
+                    if not name or not label:
+                        continue
+                    choices.append(
+                        {
+                            "name": name,
+                            "label": label,
+                            "description": str(option.get("description") or "").strip(),
+                            "selected": bool(name == current_skill),
+                        }
+                    )
+                if choices:
+                    return choices
         raw = result.details.get("supported_bug_skills")
         if not isinstance(raw, list):
             provider = getattr(self.bug_runner, "supported_primary_bug_skills", None)
@@ -79,7 +101,6 @@ class _ResultBugMixin:
                     raw = []
         if not isinstance(raw, list):
             return []
-        current_skill = str(result.details.get("analysis_skill") or "").strip()
         choices: list[dict[str, object]] = []
         for item in raw:
             if not isinstance(item, dict):
@@ -100,6 +121,9 @@ class _ResultBugMixin:
     def _result_bug_skill_choice_note(self, result: TaskResult | None) -> str | None:
         if result is None:
             return None
+        mode = str(result.details.get("mode") or "").strip()
+        if mode == "bug_skill_confirmation":
+            return "当前 Skill 分类存在冲突。可以直接回复序号/方向，也可以点击下面的 Skill 按钮继续；若要两个方向都跑，请文本回复“3”或“都跑”。"
         if result.details.get("needs_user_direction"):
             return "当前未自动命中专用 Skill。可以先补充分析要求，再从 Skill 按钮选一个方向继续。"
         skill_label = str(result.details.get("analysis_skill_label") or result.details.get("analysis_skill") or "").strip()
@@ -213,6 +237,123 @@ class _ResultBugMixin:
                 if isinstance(option, dict) and str(option.get("type") or "") == "source_analysis":
                     return option
         return None
+
+    def _match_bug_skill_confirmation_option(
+        self,
+        followup_text: str,
+        previous_session: dict[str, object],
+    ) -> dict[str, object] | None:
+        details = previous_session.get("details", {})
+        if not isinstance(details, dict):
+            return None
+        raw_options = details.get("intent_options")
+        if not isinstance(raw_options, list):
+            return None
+        normalized = followup_text.strip()
+        if not normalized:
+            return None
+        folded = normalized.casefold()
+        for option in raw_options:
+            if not isinstance(option, dict):
+                continue
+            candidates = [
+                str(option.get("index") or "").strip(),
+                str(option.get("label") or "").strip(),
+                str(option.get("skill_name") or "").strip(),
+            ]
+            aliases = option.get("aliases")
+            if isinstance(aliases, list):
+                candidates.extend(str(item or "").strip() for item in aliases)
+            if any(candidate and folded == candidate.casefold() for candidate in candidates):
+                return option
+        return None
+
+    def _execute_bug_skill_confirmation_choice(
+        self,
+        event: LarkEvent,
+        followup_context,
+        previous_session: dict[str, object],
+        selected_option: dict[str, object],
+        *,
+        source: str,
+        reason: str,
+    ) -> TaskResult:
+        details = previous_session.get("details", {}) if isinstance(previous_session, dict) else {}
+        if not isinstance(details, dict):
+            details = {}
+        request_text = str(
+            details.get("user_request_text")
+            or getattr(followup_context, "request_text", "")
+            or ""
+        ).strip()
+        bug_url = str(details.get("bug_url") or self._bug_url_from_request_text(request_text)).strip()
+        if not bug_url:
+            return TaskResult(
+                success=False,
+                message="找不到原始 Bug 链接，请重新发送 Bug 链接和分析方向。",
+                error_code="missing_bug_url_for_skill_confirmation",
+                details={"mode": "bug_skill_confirmation"},
+            )
+
+        parsed = parse_bug_request(request_text, bug_url_re=self.bug_url_re)
+        prompt = parsed.prompt if parsed.triggered else request_text
+        option_type = str(selected_option.get("type") or "").strip()
+        if option_type == "skill":
+            selected = self.bug_runner.selection_for_skill_name(
+                str(selected_option.get("skill_name") or "").strip(),
+                source=source,
+                reason=reason,
+            )
+            if selected is None:
+                return TaskResult(
+                    success=False,
+                    message="回复中的 Skill 选项无效，请重新选择。",
+                    error_code="invalid_bug_skill_selection",
+                    details={"mode": "bug_skill_confirmation"},
+                )
+            plans = selected.plans
+            classification_skill = selected.skill_name
+            classification_reason = selected.reason
+        elif option_type == "plans":
+            raw_plan_kinds = selected_option.get("plan_kinds", [])
+            plan_kinds = [
+                str(item or "").strip()
+                for item in (raw_plan_kinds if isinstance(raw_plan_kinds, list) else [])
+                if str(item or "").strip()
+            ]
+            plans = [BugAnalysisPlan(kind=kind) for kind in plan_kinds]
+            if not plans:
+                return TaskResult(
+                    success=False,
+                    message="回复中的组合分析选项无效，请重新选择。",
+                    error_code="invalid_bug_skill_confirmation_option",
+                    details={"mode": "bug_skill_confirmation"},
+                )
+            classification_skill = str(selected_option.get("skill_name") or "startup+stuck")
+            classification_reason = reason
+        else:
+            return TaskResult(
+                success=False,
+                message="回复中的选项类型无效，请重新选择。",
+                error_code="invalid_bug_skill_confirmation_option",
+                details={"mode": "bug_skill_confirmation"},
+            )
+
+        bug_request = BugRequest(
+            bug_url=bug_url,
+            prompt=prompt,
+            raw_text=request_text,
+            triggered=True,
+        )
+        return self._run_bug_request(
+            event,
+            bug_request,
+            bug_request.raw_text,
+            plans_override=plans,
+            classification_skill=classification_skill,
+            classification_source=source,
+            classification_reason=classification_reason,
+        )
 
     def _direct_analysis_preflight(self, request: DirectAnalysisRequest) -> _IntentPreflightDecision:
         prompt = request.prompt.strip()
@@ -402,10 +543,10 @@ class _ResultBugMixin:
                 details.setdefault("任务ID", result.job_id[:20])
             skill_label = str(result.details.get("analysis_skill_label") or result.details.get("analysis_skill") or "").strip()
             if skill_label:
-                details.setdefault("命中 Skill", skill_label)
+                details["命中 Skill"] = skill_label
             classification_source = str(result.details.get("classification_source") or "").strip()
             if classification_source:
-                details.setdefault("分类来源", classification_source)
+                details["分类来源"] = classification_source
             agent_model = str(result.details.get("agent_summary_model") or "").strip()
             if agent_model:
                 details.setdefault("Agent 模型", agent_model)
@@ -480,6 +621,7 @@ class _ResultBugMixin:
         labels = {
             "bug_analysis": "Bug 分析",
             "bug_clarification": "Bug 分析分诊",
+            "bug_skill_confirmation": "Bug Skill 确认",
             "bug_reanalysis": "Bug 重新分析",
             "bug_agent_followup": "Bug 追问",
             "direct_analysis": "直传文件分析",
@@ -609,7 +751,18 @@ class _ResultBugMixin:
         result = self.handler.handle(request, event=event)
         return self._deliver_result(event, result, request_text=request.raw_text or route_content)
 
-    def _run_bug_request(self, event: LarkEvent, bug_request, route_content: str) -> TaskResult:
+    def _run_bug_request(
+        self,
+        event: LarkEvent,
+        bug_request,
+        route_content: str,
+        *,
+        plans_override: list[BugAnalysisPlan] | None = None,
+        classification_skill: str = "",
+        classification_source: str = "",
+        classification_reason: str = "",
+        classification_provider: str = "",
+    ) -> TaskResult:
         self._send_intent_preflight_card(
             event,
             _IntentPreflightDecision(
@@ -635,11 +788,21 @@ class _ResultBugMixin:
             details={"Bug 链接": bug_request.bug_url[:60], "分析提示": bug_request.prompt or "默认"},
             note="分析进行中，请稍候…",
         )
-        result = self.bug_runner.run_bug_analysis(
-            bug_request,
-            event=event,
-            progress_callback=self._event_progress_callback(event),
-        )
+        runner_kwargs: dict[str, object] = {
+            "event": event,
+            "progress_callback": self._event_progress_callback(event),
+        }
+        if plans_override is not None:
+            runner_kwargs["plans_override"] = plans_override
+        if classification_skill:
+            runner_kwargs["classification_skill"] = classification_skill
+        if classification_source:
+            runner_kwargs["classification_source"] = classification_source
+        if classification_reason:
+            runner_kwargs["classification_reason"] = classification_reason
+        if classification_provider:
+            runner_kwargs["classification_provider"] = classification_provider
+        result = self.bug_runner.run_bug_analysis(bug_request, **runner_kwargs)
         self._ensure_result_bug_url(result, bug_request.bug_url)
         return self._deliver_result(event, result, request_text=bug_request.raw_text or route_content)
 
@@ -1049,15 +1212,34 @@ class _ResultBugMixin:
         root_message_id = action_event.root_message_id or action_event.message_id
         followup_context = self.conversation_store.lookup(root_message_id) if root_message_id else None
         previous_session: dict[str, object] = {}
+        if followup_context is None and root_message_id:
+            event = self._event_from_card_action(
+                action_event,
+                root_message_id=root_message_id,
+                fallback_chat_id=action_event.chat_id,
+                fallback_chat_type=action_event.chat_type,
+            )
+            followup_context = self._context_from_activity_session(root_message_id, event=event)
         if followup_context is None and action_event.job_id:
             previous_session = self.activity_store.find_session_by_job_id(action_event.job_id) or {}
             root_message_id = str(previous_session.get("session_id") or root_message_id or "")
             followup_context = self.conversation_store.lookup(root_message_id) if root_message_id else None
+            if followup_context is None and root_message_id:
+                event = self._event_from_card_action(
+                    action_event,
+                    root_message_id=root_message_id,
+                    fallback_chat_id=action_event.chat_id,
+                    fallback_chat_type=action_event.chat_type,
+                )
+                followup_context = self._context_from_activity_session(root_message_id, event=event)
         if followup_context is not None and not previous_session:
             previous_session = self.activity_store.get_session(followup_context.root_message_id) or {}
         if followup_context is not None and not previous_session and action_event.job_id:
             previous_session = self.activity_store.find_session_by_job_id(action_event.job_id) or {}
         return root_message_id, followup_context, previous_session
+
+    def _chat_type_from_previous_session(self, previous_session: dict[str, object]) -> str:
+        return str(previous_session.get("chat_type") or "")
 
     def _missing_card_followup_prompt_result(
         self,
@@ -1209,6 +1391,8 @@ class _ResultBugMixin:
                 error_code="missing_followup_context",
                 details={"mode": "card_action", "action": "select_bug_skill"},
             )
+        if not previous_session:
+            previous_session = self.activity_store.get_session(followup_context.root_message_id) or {}
         chat_id = self._card_action_chat_id(action_event, followup_context)
         if not chat_id:
             return TaskResult(
@@ -1217,8 +1401,27 @@ class _ResultBugMixin:
                 error_code="invalid_card_action_context",
                 details={"mode": "card_action", "action": "select_bug_skill"},
             )
-        if not previous_session:
-            previous_session = self.activity_store.get_session(followup_context.root_message_id) or {}
+        if str(getattr(followup_context, "mode", "") or "") == "bug_skill_confirmation":
+            event = self._event_from_card_action(
+                action_event,
+                root_message_id=followup_context.root_message_id,
+                fallback_chat_id=chat_id,
+                fallback_chat_type=self._chat_type_from_previous_session(previous_session),
+            )
+            if not self.state_store.mark_seen(event):
+                return TaskResult(True, f"duplicate event skipped: {event.event_id}", skipped=True)
+            return self._execute_bug_skill_confirmation_choice(
+                event,
+                followup_context,
+                previous_session,
+                {
+                    "type": "skill",
+                    "skill_name": selected.skill_name,
+                    "label": selected.skill_label,
+                },
+                source="user_selected_card",
+                reason="用户通过卡片按钮确认 bug 分析 skill。",
+            )
         prompt = action_event.followup_text.strip()
         route_content = f"按专用 skill「{selected.skill_label}」继续分析"
         if prompt:
