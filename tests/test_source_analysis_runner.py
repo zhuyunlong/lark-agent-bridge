@@ -143,6 +143,7 @@ class SourceAnalysisRunnerTests(unittest.TestCase):
                 target="车道级相关信号",
                 raw_text="@bot 基于源码分析车道级相关信号",
                 triggered=True,
+                source_mode="requirement_source",
                 diagram_kinds=["swimlane"],
             )
 

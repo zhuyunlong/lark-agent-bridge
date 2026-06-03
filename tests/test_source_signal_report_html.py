@@ -129,3 +129,16 @@ def test_consult_with_logs_gets_consult_emphasis():
     html = _render_with("consult", True)
     assert "链路咨询" in html
     assert html.index("生命周期") < html.index("根因判读")
+
+
+def test_render_keeps_agent_prose():
+    import json
+    from pathlib import Path as _P
+    from lark_agent_bridge.reporting.graph_adapters import signal_json_to_graph
+    from lark_agent_bridge.reporting.source_signal_report_html import render_signal_source_report
+    g = signal_json_to_graph(json.load(open(_P(__file__).parent / "fixtures" / "signal_chain_40018.json")))
+    g.intent = "consult"; g.has_logs = False
+    html = render_signal_source_report(g, request_text="x", backend="codegraph",
+                                       analysis_markdown="## 结论摘要\n- 这是 agent 的源码分析说明")
+    assert "源码分析说明" in html
+    assert "agent 的源码分析说明" in html

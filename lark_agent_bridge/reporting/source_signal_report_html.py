@@ -85,7 +85,7 @@ def _verdict_block(graph: ReportGraph) -> str:
     )
 
 
-def render_signal_source_report(graph: ReportGraph, *, request_text: str, backend: str) -> str:
+def render_signal_source_report(graph: ReportGraph, *, request_text: str, backend: str, analysis_markdown: str = "") -> str:
     node_payload = [
         {
             "id": n.id,
@@ -108,10 +108,15 @@ def render_signal_source_report(graph: ReportGraph, *, request_text: str, backen
         "values": ("值变化轨道", _value_track(graph)),
         "findings": ("根因判读 / 风险 / 待确认", _findings(graph)),
     }
+    if analysis_markdown:
+        sections["prose"] = (
+            "源码分析说明",
+            f'<details class="fold"><summary>展开 agent 源码分析</summary><pre>{H(analysis_markdown)}</pre></details>',
+        )
     if graph.intent == "consult":
-        order = ["swimlane", "timeline", "values", "findings"]
+        order = ["swimlane", "timeline", "values", "findings"] + (["prose"] if analysis_markdown else [])
     else:
-        order = ["swimlane", "findings", "timeline", "values"]
+        order = ["swimlane", "findings", "timeline", "values"] + (["prose"] if analysis_markdown else [])
     sections_html = "".join(
         f'<div class="section"><h2>{H(sections[key][0])}</h2>{sections[key][1]}</div>'
         for key in order

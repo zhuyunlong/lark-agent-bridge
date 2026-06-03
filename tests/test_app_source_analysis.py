@@ -275,5 +275,69 @@ class AppSourceAnalysisTests(unittest.TestCase):
         self.assertGreaterEqual(len(fake_lark.files), 2)
 
 
+class ConsultRenderPathTests(unittest.TestCase):
+    """Part B: consult path renders via render_signal_source_report (not old shell)."""
+
+    def test_consult_render_produces_codegraph_graph_html(self):
+        """Consult path should produce render_signal_source_report output.
+
+        In CI there is no codegraph CLI, so build_consult_graph_from_codegraph
+        returns the inconclusive fallback graph.  We assert:
+        - HTML contains "源码分析说明" (prose kept)
+        - HTML contains "未建立静态调用图" OR "<svg" (fallback finding OR real graph)
+        - HTML does NOT contain "v-green" in the body (no fake green verdict)
+        """
+        import tempfile
+        from lark_agent_bridge.knowledge.source_investigation import SourceInvestigationResult
+        from lark_agent_bridge.models import SourceAnalysisRequest
+        from lark_agent_bridge.source_analysis import RepositorySourceAnalysisRunner
+
+        class _FakeSourceRunner:
+            def run(self, question, *, hits=None):
+                return SourceInvestigationResult(
+                    success=True,
+                    answer="## 结论摘要\n- 这是 agent 的源码分析说明",
+                    canonical_key="UnityReady",
+                    confidence=0.85,
+                    source_evidence=[{"file": "Foo.kt", "line": 1, "text": "def foo"}],
+                    coverage_boundary="only source",
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = RepositorySourceAnalysisRunner(
+                BridgeConfig(dry_run=False, data_dir=Path(tmp)),
+                source_runner=_FakeSourceRunner(),
+            )
+            request = SourceAnalysisRequest(
+                prompt="基于源码分析 UnityReady 信号链路",
+                target="UnityReady",
+                raw_text="@bot 基于源码分析 UnityReady 信号链路",
+                triggered=True,
+                source_mode="repository_only",
+                diagram_kinds=["swimlane"],
+            )
+            result = runner.run(request)
+
+            self.assertTrue(result.success)
+            html_path = Path(result.html_report)
+            html = html_path.read_text(encoding="utf-8")
+
+        # prose must be kept
+        self.assertIn("源码分析说明", html)
+        self.assertIn("agent 的源码分析说明", html)
+
+        # must use graph-rendered HTML (ReportGraph path):
+        # - real graph: <svg swimlane present
+        # - no codegraph binary: "未建立静态调用图" fallback finding
+        # - codegraph indexed but seed unresolved: "未从 codegraph 解析到种子符号"
+        body = html.split("</style>")[-1]
+        has_svg = "<svg" in body
+        has_fallback = "未建立静态调用图" in html or "未从 codegraph 解析到种子符号" in html
+        self.assertTrue(has_svg or has_fallback, "expected <svg or fallback finding in consult HTML")
+
+        # must NOT claim green verdict
+        self.assertNotIn("v-green", body)
+
+
 if __name__ == "__main__":
     unittest.main()

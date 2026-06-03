@@ -11,6 +11,28 @@ from .models import BridgeConfig, LarkEvent, SourceAnalysisRequest, TaskResult, 
 from .reporting.source_report_html import render_source_analysis_report
 
 
+def _make_cg_client(config: BridgeConfig):
+    """Construct a CodeGraphClient from config; returns None if unavailable."""
+    try:
+        from .knowledge.codegraph_client import CodeGraphClient
+    except ImportError:
+        return None
+    opts = config.source_investigation
+    return CodeGraphClient(
+        command=opts.codegraph_command,
+        timeout=opts.codegraph_timeout_seconds,
+    )
+
+
+def _consult_repo(config: BridgeConfig) -> Path:
+    """Resolve the primary repo root for consult graph building."""
+    opts = config.source_investigation
+    roots = [p.expanduser() for p in (opts.repo_roots or [])]
+    if roots:
+        return roots[0]
+    return config.guideengine_repo.expanduser()
+
+
 class RepositorySourceAnalysisRunner:
     def __init__(
         self,
@@ -76,20 +98,39 @@ class RepositorySourceAnalysisRunner:
                 },
             )
 
-        html_path.write_text(
-            render_source_analysis_report(
-                title=f"{request.target or '源码'} 源码分析",
-                request_text=request.prompt,
-                answer=result.answer,
-                target=request.target or result.canonical_key,
-                source_evidence=result.source_evidence,
-                coverage_boundary=result.coverage_boundary,
-                diagram_kinds=request.diagram_kinds,
-                backend="source_investigation",
-                success=bool(result.source_evidence),
-            ),
-            encoding="utf-8",
-        )
+        if request.source_mode == "repository_only":
+            from .reporting.graph_adapters import build_consult_graph_from_codegraph
+            from .reporting.source_signal_report_html import render_signal_source_report
+            seeds = [request.target] if request.target else []
+            cg_client = _make_cg_client(self.config)
+            repo = _consult_repo(self.config)
+            graph = build_consult_graph_from_codegraph(
+                seeds, cg_client, repo, request_text=request.prompt
+            )
+            html_path.write_text(
+                render_signal_source_report(
+                    graph,
+                    request_text=request.prompt,
+                    backend="codegraph",
+                    analysis_markdown=result.answer or "",
+                ),
+                encoding="utf-8",
+            )
+        else:
+            html_path.write_text(
+                render_source_analysis_report(
+                    title=f"{request.target or '源码'} 源码分析",
+                    request_text=request.prompt,
+                    answer=result.answer,
+                    target=request.target or result.canonical_key,
+                    source_evidence=result.source_evidence,
+                    coverage_boundary=result.coverage_boundary,
+                    diagram_kinds=request.diagram_kinds,
+                    backend="source_investigation",
+                    success=bool(result.source_evidence),
+                ),
+                encoding="utf-8",
+            )
         message = _summary_message(result)
         self._emit(progress_callback, "source_analysis_completed", "源码调查完成", target=request.target)
         return TaskResult(
@@ -130,6 +171,9 @@ class RepositorySourceAnalysisRunner:
         started: float,
     ) -> TaskResult | None:
         options = self.config.codex_app_server
+        # Consult (no-log, repository_only) requests go through the codegraph main path.
+        if request.source_mode == "repository_only":
+            return None
         if not (options.enabled and options.use_for_file_agent and self.bug_runner is not None):
             return None
         runner = self.bug_runner
