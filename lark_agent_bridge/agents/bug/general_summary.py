@@ -604,12 +604,24 @@ class _GeneralSummaryMixin:
             signal_json_path = report_jsons.get("signal")
             if signal_json_path is None or not signal_json_path.exists():
                 return None
+            source_stage_data = None
+            ss_json = report_jsons.get("source_stage")
+            if ss_json is not None and ss_json.exists():
+                try:
+                    ss_payload = json.loads(ss_json.read_text(encoding="utf-8"))
+                    source_stage_data = {
+                        "node_status": ss_payload.get("node_status") or {},
+                        "findings": ss_payload.get("findings") or [],
+                    }
+                except Exception:
+                    source_stage_data = None
             from ...reporting.source_signal_report_html import build_combined_from_signal_json
             html, graph_dict = build_combined_from_signal_json(
                 signal_json_path,
                 request_text=prompt_text,
                 has_logs=selected_input is not None,
                 intent=intent,
+                source_stage_data=source_stage_data,
             )
             html_path = output_dir / self._combined_report_name("html")
             json_path = output_dir / self._combined_report_name("json")

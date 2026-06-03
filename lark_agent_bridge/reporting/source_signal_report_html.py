@@ -134,17 +134,19 @@ def build_combined_from_signal_json(
     has_logs: bool,
     backend: str = "signal-chain-analyzer",
     intent: str = "",
+    source_stage_data: "dict | None" = None,
 ) -> tuple[str, dict]:
     """读取 signal 链路脚本 JSON，构造图优先合并报告。
 
     返回 (html, graph_dict)。graph_dict 适合写成合并报告的 JSON 旁路。
     """
-    from .graph_adapters import signal_json_to_graph
+    from .graph_adapters import signal_json_to_graph, apply_source_stage
 
     payload = _json.loads(Path(signal_json_path).read_text(encoding="utf-8"))
     graph = signal_json_to_graph(payload)
     graph.has_logs = bool(has_logs)
     if intent:
         graph.intent = intent
+    apply_source_stage(graph, source_stage_data)
     html = render_signal_source_report(graph, request_text=request_text, backend=backend)
     return html, graph.to_dict()

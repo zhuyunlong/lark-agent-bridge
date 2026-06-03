@@ -13,6 +13,42 @@ def _short_file(path: str) -> str:
     return path.rsplit("/", 1)[-1] if path else ""
 
 
+_VALID_STATUS = {"ok", "suspect", "broken", "unknown"}
+
+
+def apply_source_stage(graph: ReportGraph, source_stage_data: "dict | None") -> None:
+    """把 source_stage agent 的 node_status/findings 合并入 graph（按文件名/label 匹配）。
+    防御式：任何缺失/损坏/非法 → 保留确定性 status，绝不抛、绝不写非法值。"""
+    if not source_stage_data:
+        return
+    try:
+        node_status = source_stage_data.get("node_status") or {}
+        findings = source_stage_data.get("findings") or []
+        if isinstance(node_status, dict):
+            for node in graph.nodes:
+                keys = {node.label} | {a.file for a in node.anchors}
+                for fname, status in node_status.items():
+                    if str(status) not in _VALID_STATUS:
+                        continue
+                    if fname and (fname in keys or any(fname in k for k in keys)):
+                        node.status = str(status)
+        if isinstance(findings, list):
+            for f in findings:
+                if not isinstance(f, dict):
+                    continue
+                title = str(f.get("title") or "").strip()
+                if not title:
+                    continue
+                graph.findings.append(Finding(
+                    severity=str(f.get("severity") or "warn"),
+                    title=f"[源码] {title}",
+                    evidence_refs=[str(f.get("file"))] if f.get("file") else [],
+                    kind=str(f.get("kind") or "risk"),
+                ))
+    except Exception:
+        return
+
+
 def signal_json_to_graph(payload: Mapping[str, object]) -> ReportGraph:
     signal = payload.get("signal") or {}
     code = str(signal.get("code") or "")
