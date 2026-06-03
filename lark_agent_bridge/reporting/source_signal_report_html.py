@@ -71,8 +71,21 @@ def _findings(graph: ReportGraph) -> str:
     )
 
 
-def render_signal_source_report(graph: ReportGraph, *, request_text: str, backend: str) -> str:
+def _verdict_block(graph: ReportGraph) -> str:
     sev = _VERDICT_CLASS.get(graph.verdict.status, "yellow")
+    label = "故障诊断" if graph.intent == "diagnose" else "链路咨询" if graph.intent == "consult" else "源码分析"
+    runtime_note = "" if graph.has_logs else ' <span class="muted">（未结合运行态：基于源码/缓存推断）</span>'
+    next_step = (
+        f'<div class="muted">下一步：{H(graph.verdict.next_step)}</div>'
+        if graph.verdict.next_step else ""
+    )
+    return (
+        f'<div class="verdict v-{sev}"><b>[{H(label)}]</b> {H(graph.verdict.headline)}{runtime_note}</div>'
+        f'{next_step}'
+    )
+
+
+def render_signal_source_report(graph: ReportGraph, *, request_text: str, backend: str) -> str:
     node_payload = [
         {
             "id": n.id,
@@ -84,21 +97,31 @@ def render_signal_source_report(graph: ReportGraph, *, request_text: str, backen
         for i, n in enumerate(graph.nodes, 1)
     ]
     edge_payload = [{"from": e.from_, "to": e.to} for e in graph.edges]
-    next_step = (
-        f'<div class="muted">下一步：{H(graph.verdict.next_step)}</div>'
-        if graph.verdict.next_step else ""
+    swimlane_html = (
+        f'{render_status_lane_graph(node_payload, edge_payload)}'
+        '<div class="muted">节点描边色：绿=ok 橙=待确认 红=断开。展开看源码锚点与原始日志：</div>'
+        f'{_evidence_cards(graph)}'
+    )
+    sections = {
+        "swimlane": ("数据流泳道图", swimlane_html),
+        "timeline": ("生命周期时间线", _timeline(graph)),
+        "values": ("值变化轨道", _value_track(graph)),
+        "findings": ("根因判读 / 风险 / 待确认", _findings(graph)),
+    }
+    if graph.intent == "consult":
+        order = ["swimlane", "timeline", "values", "findings"]
+    else:
+        order = ["swimlane", "findings", "timeline", "values"]
+    sections_html = "".join(
+        f'<div class="section"><h2>{H(sections[key][0])}</h2>{sections[key][1]}</div>'
+        for key in order
     )
     body = (
         '<div class="container">'
         "<h1>源码/信号调查报告</h1>"
         f'<div class="sub">请求：{H(request_text)} · 后端：{H(backend)}</div>'
-        f'<div class="verdict v-{sev}">{H(graph.verdict.headline)}</div>{next_step}'
-        f'<div class="section"><h2>① 数据流泳道图</h2>{render_status_lane_graph(node_payload, edge_payload)}'
-        '<div class="muted">节点描边色：绿=ok 橙=待确认 红=断开。展开看源码锚点与原始日志：</div>'
-        f'{_evidence_cards(graph)}</div>'
-        f'<div class="section"><h2>② 生命周期时间线</h2>{_timeline(graph)}</div>'
-        f'<div class="section"><h2>③ 值变化轨道</h2>{_value_track(graph)}</div>'
-        f'<div class="section"><h2>④ 根因判读 / 风险 / 待确认</h2>{_findings(graph)}</div>'
+        f'{_verdict_block(graph)}'
+        f'{sections_html}'
         "</div>"
     )
     return render_document("源码/信号调查报告", body, css=BASE_REPORT_CSS + _EXTRA_CSS)

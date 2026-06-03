@@ -92,3 +92,40 @@ def test_build_combined_threads_intent(tmp_path):
     assert gd_consult["intent"] == "consult"
     _, gd_default = build_combined_from_signal_json(dst, request_text="x", has_logs=True)
     assert gd_default["intent"] == "diagnose"  # adapter default; empty intent must NOT override
+
+
+def _render_with(intent, has_logs):
+    import json
+    from pathlib import Path as _P
+    from lark_agent_bridge.reporting.graph_adapters import signal_json_to_graph
+    from lark_agent_bridge.reporting.source_signal_report_html import render_signal_source_report
+    g = signal_json_to_graph(json.load(open(_P(__file__).parent / "fixtures" / "signal_chain_40018.json")))
+    g.intent = intent
+    g.has_logs = has_logs
+    return render_signal_source_report(g, request_text="x", backend="y")
+
+
+def test_diagnose_puts_rootcause_before_lifecycle():
+    html = _render_with("diagnose", True)
+    assert html.index("根因判读") < html.index("生命周期")
+
+
+def test_consult_puts_lifecycle_before_rootcause():
+    html = _render_with("consult", True)
+    assert html.index("生命周期") < html.index("根因判读")
+
+
+def test_verdict_labels_intent():
+    assert "故障诊断" in _render_with("diagnose", True)
+    assert "链路咨询" in _render_with("consult", True)
+
+
+def test_no_logs_annotates_verdict():
+    assert "未结合运行态" in _render_with("consult", False)
+
+
+def test_consult_with_logs_gets_consult_emphasis():
+    # decision-3b: 带日志的咨询仍是咨询侧重（劫持修复的可观察结果），无路由改动。
+    html = _render_with("consult", True)
+    assert "链路咨询" in html
+    assert html.index("生命周期") < html.index("根因判读")
