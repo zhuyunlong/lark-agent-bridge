@@ -628,6 +628,8 @@ class BugFollowupSelection:
 
 
 __all__ = [
+    'infer_intent_from_text',
+    'resolve_effective_intent',
     'concurrent',
     'dataclass',
     'field',
