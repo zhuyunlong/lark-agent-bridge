@@ -12,6 +12,25 @@
 
 ---
 
+## 执行状态（2026-06-03，subagent-driven 执行）
+
+**已完成并提交（分支 `pydantic_xpdev`，就地执行，targeted commit 保护用户 WIP）：**
+- Task 1 ReportGraph 契约 — `b90fa6b` + `eba9726`（评审后补 edge 端点校验）
+- Task 2 真实 fixture — `0e67c03`
+- Task 3 signal→graph 适配器 — `cdd3dcd` + `b7e1f51`（评审：时间线按 label 去重以保住关键的「HMI …-1」诊断事件；去掉 helper line=0 误导锚点）
+- Task 4 状态染色泳道 SVG 原语 — `62184c9`
+- Task 5 图优先渲染器 — `04d7fa5`
+- Task 6a bridge 合并接线（`[signal, source_stage]` → 单份） — `4a2d0b7`
+- 终审清理（守卫边保证 `validate()` 恒空、`.fold` 样式、删未用变量） — `bb37797`
+
+**验证：** L1 新增 21 测试全过；全量回归 1162 passed，仅 2 个预先存在的 `pydantic_ai` 缺失失败（与本改动无关）；终审 ship-ready。
+
+**本阶段刻意 carry-forward（已与用户确认）：**
+- **决策点 1 的完整「不生成」未做完**：合并报告已是唯一外发产物，但两个中间 HTML（signal 脚本写的 + source_stage 渲染的）仍写入 job 目录。**6b（run_primary 跳过个体渲染 + signal 脚本 `--json-only`，后者需 RED 基线）折叠进 L2 一起做**（L2 本就要碰 source_stage skill 输出格式[需 RED] 与 run_primary[透传 intent]，合批避免重复 RED/重复改同文件）。
+- **28 条 `lifecycle.source_references`（"完整源码锚点"素材）本阶段未消费**：节点锚点已带关键 file:line；折叠区的全量源码骨架留待 L2 由 source_stage agent 标注时补。
+
+---
+
 ## File Structure
 
 - Create `lark_agent_bridge/reporting/report_graph.py` — `ReportGraph` 及子结构 dataclass + `validate()`。纯数据，无依赖。
