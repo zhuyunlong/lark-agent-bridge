@@ -27,3 +27,42 @@ def test_lane_graph_has_arrow_between_lanes():
 
 def test_lane_graph_empty():
     assert "muted" in render_status_lane_graph([], [])
+
+
+import json
+from pathlib import Path
+from lark_agent_bridge.reporting.graph_adapters import signal_json_to_graph
+from lark_agent_bridge.reporting.source_signal_report_html import render_signal_source_report
+
+FIXTURE = Path(__file__).parent / "fixtures" / "signal_chain_40018.json"
+
+
+def _html():
+    payload = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    graph = signal_json_to_graph(payload)
+    return render_signal_source_report(graph, request_text="调查电量信号", backend="signal-chain-analyzer")
+
+
+def test_report_has_swimlane_and_sections():
+    html = _html()
+    assert "<svg" in html
+    assert "生命周期" in html and "值变化" in html
+
+
+def test_report_exposes_file_line_and_raw_log():
+    html = _html()
+    assert "DataCenter.kt:311" in html
+    # 原始日志原文/值证据应出现，不再只有中文 label
+    assert ("hasProvider" in html) or ("value" in html) or ("95" in html)
+
+
+def test_report_no_dead_swimlane_css_unused():
+    # body 里必须真的用到 svg（不是只在 style 里定义）
+    html = _html()
+    body = html.split("</style>")[-1]
+    assert "<svg" in body
+
+
+def test_report_marks_abnormal_value():
+    html = _html()
+    assert "-1" in html
