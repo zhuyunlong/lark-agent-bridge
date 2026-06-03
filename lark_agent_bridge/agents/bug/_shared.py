@@ -549,6 +549,35 @@ class LogCoverage:
     reason: str = ""
 
 
+_DIAGNOSE_TERMS: tuple[str, ...] = (
+    "收不到", "没收到", "看不到", "不显示", "没显示", "不展示", "没展示",
+    "为什么没", "为啥没", "为何没", "黑屏", "卡住", "卡死", "闪退", "崩溃",
+    "掉帧", "不刷新", "报错", "异常", "ANR", "无法", "失败", "没反应", "丢失", "不生效",
+)
+_CONSULT_TERMS: tuple[str, ...] = (
+    "了解", "怎么接入", "如何接入", "涉及哪些模块", "涉及哪些", "链路怎么走",
+    "怎么走", "数据怎么来", "从哪来", "从哪里来", "怎么分发", "如何分发",
+    "注册在哪", "在哪注册", "梳理", "讲解", "说明", "介绍", "怎么实现", "如何实现",
+)
+
+
+def infer_intent_from_text(text: str) -> str:
+    """纯文本启发式意图初判：diagnose / consult / ""（不确定）。"""
+    blob = text or ""
+    if any(term in blob for term in _DIAGNOSE_TERMS):
+        return "diagnose"
+    if any(term in blob for term in _CONSULT_TERMS):
+        return "consult"
+    return ""
+
+
+def resolve_effective_intent(text_intent: str, *, has_logs: bool) -> str:
+    """最终裁决：显式初判优先；不确定时按是否有日志兜底（有日志→诊断，无→咨询）。"""
+    if text_intent in {"consult", "diagnose"}:
+        return text_intent
+    return "diagnose" if has_logs else "consult"
+
+
 @dataclass(slots=True)
 class SourceAnalysisDecision:
     requested: bool
@@ -560,6 +589,7 @@ class SourceAnalysisDecision:
     source_mode: str = "off"
     context_profile: str = ""
     stage_kinds: list[str] = field(default_factory=list)
+    intent: str = ""
 
 
 @dataclass(slots=True)

@@ -319,6 +319,7 @@ class _ResolveSourceMixin:
             source_mode=analysis_decision.source_mode,
             context_profile=analysis_decision.context_profile,
             stage_kinds=[stage.kind for stage in analysis_plan.stages],
+            intent=infer_intent_from_text(f"{prompt_text} {request_text}"),
         )
 
     def _augment_plans_for_source_analysis(
