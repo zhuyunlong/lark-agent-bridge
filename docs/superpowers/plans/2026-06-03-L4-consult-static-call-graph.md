@@ -17,6 +17,18 @@
 - **种子（默认）**：`SourceAnalysisRequest.target` 先 `cg.search_symbol` 映射成真实符号；回退 `_extract_query_symbols`。
 - **方向/规模（默认）**：双向 BFS（callees 主=如何接入/分发/消费，callers 辅=谁触发），max_depth=2，max_nodes=30，max_per_node=8；超限在 findings 记 todo「图已截断」。
 
+## 执行状态（2026-06-03，subagent-driven）
+
+- **L4-1 空壳标绿修复** — `eea88d3`。`source_report_html.py` severity 无证据→red；`source_analysis.py` success 由 `bool(result.source_evidence)` 驱动、app-server 旁路 success=False。（断言收窄到 body 避免 CSS 里 `.v-green` 误判。）
+- **L4-2 build_consult_graph_from_codegraph** — `2e30f33`。DI cg_client + 有界 BFS（双向，depth2/nodes30）+ 模块→lane/函数→node/调用→edge/status=unknown；codegraph 不可用→inconclusive 兜底（不伪 green）。getattr 键经核对与真实 `CgSymbolHit{name,kind,qualified_name,path,line}`/`CgCallerHit{name,kind,path,line}` 一致。
+- **L4-3 咨询路径接入** — `b082f7d`。`render_signal_source_report` 加 `analysis_markdown` 折叠章节（保留 agent prose）；`source_analysis.py` 按 `source_mode=="repository_only"`(=consult) 走 codegraph 建图 + 图优先渲染，并在 `_run_via_app_server_if_configured` 顶部 `repository_only` 时 return None（**禁旁路，consult-scoped**，不影响 `requirement_source`）。
+
+**路径更正（重要）**：codegraph 客户端真实路径是 `lark_agent_bridge/knowledge/codegraph_client.py`（非本文早先写的 top-level）；`source_investigation.py` 也在 `knowledge/` 下。
+
+**验证**：全套回归 **1196 passed**，仅 2 个预先存在 `pydantic_ai` 失败；端到端确认咨询图（3 模块/4 函数/7 调用）渲染为图优先报告——SVG 泳道 + 「链路咨询」+「未结合运行态」+ 保留 prose + 不伪 green + 咨询侧重。
+
+---
+
 ## File Structure
 - Modify `lark_agent_bridge/source_analysis.py`（L4-1 success；L4-3 禁旁路+建图+渲染）
 - Modify `lark_agent_bridge/reporting/source_report_html.py:176`（L4-1 severity）
