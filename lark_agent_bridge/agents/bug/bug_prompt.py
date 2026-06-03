@@ -3,6 +3,27 @@ from __future__ import annotations
 from ._shared import *  # noqa: F401,F403
 
 
+def parse_node_status_block(text: str) -> dict:
+    """从 markdown 末尾的 ```json 围栏抽取 {node_status, findings}；失败返回 {}。"""
+    import json as _json
+    import re as _re
+
+    if not text:
+        return {}
+    blocks = _re.findall(r"```json\s*(\{.*?\})\s*```", text, _re.DOTALL)
+    for raw in reversed(blocks):
+        try:
+            obj = _json.loads(raw)
+            if isinstance(obj, dict) and ("node_status" in obj or "findings" in obj):
+                return {
+                    "node_status": obj.get("node_status") or {},
+                    "findings": obj.get("findings") or [],
+                }
+        except Exception:
+            continue
+    return {}
+
+
 class _BugPromptMixin:
     def _run_ld_direct_api_analysis(
         self,
@@ -626,6 +647,17 @@ class _BugPromptMixin:
         }
         if extra_payload:
             payload.update(extra_payload)
+        # Merge structured node_status/findings: extra_payload takes priority (pydantic-ai path);
+        # fall back to parsing the json fence in the analysis text (file_agent path).
+        if "node_status" not in payload or "findings" not in payload:
+            parsed = parse_node_status_block(analysis_text)
+            if parsed:
+                payload.setdefault("node_status", parsed.get("node_status", {}))
+                payload.setdefault("findings", parsed.get("findings", []))
+        if "node_status" not in payload:
+            payload["node_status"] = {}
+        if "findings" not in payload:
+            payload["findings"] = []
         if render_html:
             html_path.write_text(
                 combined_bug_html.render_report_shell(**composition_to_renderer_payload(composition)),

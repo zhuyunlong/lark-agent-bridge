@@ -941,6 +941,8 @@ class _LdExecutorMixin:
             "6. 每条 evidence 必须包含具体的 file 路径和 line 号\n"
             "7. 证据不足时明确写待确认，不要编造\n"
             "8. 输出中文\n"
+            "9. 必须在 node_status 字段中，为每个分析涉及的源码文件名填写状态值（ok/suspect/broken/unknown），"
+            "标注该链路节点是否打通；在 findings 中列出每个关键发现（每项含 file/severity/title）\n"
         )
 
         user_prompt = (
@@ -1075,6 +1077,10 @@ class _LdExecutorMixin:
             duration_seconds=result.duration_seconds,
             executor=provider_tag,
             render_html=render_html,
+            extra_payload={
+                "node_status": getattr(result.output, "node_status", {}),
+                "findings": getattr(result.output, "findings", []),
+            },
         )
 
         self._emit_progress(

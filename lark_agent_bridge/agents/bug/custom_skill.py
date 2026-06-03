@@ -405,19 +405,30 @@ class _CustomSkillMixin:
             for label, kind, verdict in prior_findings:
                 lines.append(f"- **{label}** (`{kind}`): {verdict}")
             lines.append("- 以上结论来自其他专用 Skill，请在此基础上做源码级深入分析。")
+        emit_node_status = _kind_spec(analysis_kind).is_source_stage
         output_rule = (
             "- 输出中文 Markdown 正文，不要输出 HTML；本轮 prompt 明确要求结构化 JSON fenced block，允许在末尾输出该 JSON 代码块。"
             if _prompt_requires_json_fence(prompt_text)
             else "- 只输出 Markdown 正文，不要输出代码块围栏，不要输出 HTML。"
         )
+        output_section = [
+            "",
+            "## 输出要求",
+            output_rule,
+            "- 必须包含这些二级标题：`## 结论摘要`、`## 关键证据`、`## 最可能原因`、`## 待确认项`、`## 建议动作`。",
+            "- `## 关键证据` 不能为空，每条证据都要能回指到日志文件+时间，或源码文件+行号，或 bridge 生成的工具结果文件。",
+            f"- 最终正文会由 bridge 保存到 `{analysis_markdown_path}`。",
+        ]
+        if emit_node_status:
+            output_section.append(
+                "- 在正文之后追加一个 json 围栏(```json ... ```)，内容为 "
+                "{\"node_status\": {\"<源码文件名>\": \"ok|suspect|broken|unknown\"}, "
+                "\"findings\": [{\"file\":..., \"severity\":..., \"title\":...}]}，"
+                "标注每个链路节点是否打通。"
+            )
         lines.extend(
-            [
-                "",
-                "## 输出要求",
-                output_rule,
-                "- 必须包含这些二级标题：`## 结论摘要`、`## 关键证据`、`## 最可能原因`、`## 待确认项`、`## 建议动作`。",
-                "- `## 关键证据` 不能为空，每条证据都要能回指到日志文件+时间，或源码文件+行号，或 bridge 生成的工具结果文件。",
-                f"- 最终正文会由 bridge 保存到 `{analysis_markdown_path}`。",
+            output_section
+            + [
                 "",
                 "## 执行约束",
                 "- 本次只读分析，不可修改源码内容，不可修改任何本地文件。",
@@ -594,10 +605,19 @@ class _CustomSkillMixin:
             for label, kind, verdict in prior_findings:
                 lines.append(f"- {label}: {verdict}")
             lines.extend(["", "请在以上结论基础上，做源码级深入分析，补充日志和源码证据。", ""])
+        emit_node_status = _kind_spec(analysis_kind).is_source_stage
         output_rule = (
             "3. 输出中文 Markdown，不要输出 HTML；本轮 prompt 明确要求结构化 JSON fenced block，允许在末尾输出该 JSON 代码块。除此之外不要输出额外解释。"
             if _prompt_requires_json_fence(prompt_text)
             else "3. 输出中文 Markdown，不要输出代码块围栏或额外解释。"
+        )
+        node_status_rule = (
+            "9. 在正文之后追加一个 json 围栏(```json ... ```)，内容为 "
+            "{\"node_status\": {\"<源码文件名>\": \"ok|suspect|broken|unknown\"}, "
+            "\"findings\": [{\"file\":..., \"severity\":..., \"title\":...}]}，"
+            "标注每个链路节点是否打通。"
+            if emit_node_status
+            else None
         )
         lines.extend(
             [
@@ -610,6 +630,7 @@ class _CustomSkillMixin:
                 "6. 不要重复输出 bug 链接；该信息已经结构化。",
                 "7. 不要无边界递归扫描整个日志树；先看上下文列出的聚焦日志目录和清单，再按需扩展。",
                 "8. 分析完成后必须输出最终 Markdown 正文，不能只执行工具调用而不输出结论。",
+                *([node_status_rule] if node_status_rule else []),
                 "",
                 "检索预算：",
                 *[f"- {rule}" for rule in self._file_agent_search_budget_rules()],

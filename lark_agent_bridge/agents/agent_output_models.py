@@ -58,6 +58,14 @@ class SourceAnalysisOutput(BaseModel):
         default_factory=list,
         description="工具调用记录",
     )
+    node_status: dict[str, str] = Field(
+        default_factory=dict,
+        description="源码文件名→ok/suspect/broken/unknown：标注链路节点是否打通",
+    )
+    findings: list[dict] = Field(
+        default_factory=list,
+        description="每项含 file/severity/title/kind",
+    )
 
     def to_markdown(self) -> str:
         """Render as Markdown report."""
