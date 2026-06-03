@@ -44,3 +44,22 @@ def test_timeline_has_registration_events():
     g = _graph()
     events = [e.event for e in g.timeline]
     assert any("注册" in e or "注入" in e or "订阅" in e for e in events)
+
+
+def test_timeline_dedupes_and_keeps_key_diagnostic_event():
+    # 重复 label(底层注册回调×20)必须去重为单条带计数，
+    # 且关键诊断事件 "HMI 侧电量仍为 -1" 不能被挤掉。
+    g = _graph()
+    events = [e.event for e in g.timeline]
+    assert any("HMI" in e and "-1" in e for e in events), f"key event dropped: {events}"
+    # 去重：底层注册回调只出现一条（可能带 ×N 计数）
+    reg = [e for e in events if "注册底层回调" in e]
+    assert len(reg) == 1, f"repeated label not deduped: {reg}"
+    assert "×" in reg[0]
+
+
+def test_helper_node_has_no_bogus_zero_line_anchor():
+    g = _graph()
+    helper = next((n for n in g.nodes if n.lane == "helper"), None)
+    assert helper is not None
+    assert all(a.line != 0 for a in helper.anchors)

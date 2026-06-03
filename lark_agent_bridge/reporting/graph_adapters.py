@@ -53,7 +53,9 @@ def signal_json_to_graph(payload: Mapping[str, object]) -> ReportGraph:
             id="helper", lane="helper",
             label=f"{context.get('helper_class')}.onChangeEvent",
             status="ok" if int(stats.get("datacenter", 0)) > 0 else "suspect",
-            anchors=[Anchor(file=_short_file(str(context.get("helper_file") or "")), line=0)] if context.get("helper_file") else [],
+            # context 无 helper_line，不发出误导性的 line=0 锚点；helper_file 放进 note。
+            anchors=[],
+            note=f"helper: {_short_file(str(context.get('helper_file') or ''))}" if context.get("helper_file") else "",
         ))
         edges.append(GraphEdge(**{"from": "carservice", "to": "helper", "kind": "属性回调", "status": "ok"}))
 
@@ -113,13 +115,30 @@ def signal_json_to_graph(payload: Mapping[str, object]) -> ReportGraph:
             if _short_file(str(ev.get("file") or "")) in node_files
         ][:3]
 
-    # --- timeline: skip 进程启动, cap at 12 ---
-    timeline = [
-        TimelineEvent(t_offset=str(ev.get("delta") or ev.get("time") or ""),
-                      event=str(ev.get("label") or ""), status="ok")
-        for ev in events
-        if str(ev.get("label") or "") not in {"进程启动"}
-    ][:12]
+    # --- timeline: skip 进程启动, dedupe repeated labels (keep ×count), cap 16 ---
+    # 去重很关键：底层注册回调等会重复 20 次，若不去重会挤掉 "HMI 侧电量仍为 -1"
+    # 这类单次出现的关键诊断事件。
+    timeline: list[TimelineEvent] = []
+    _seen_labels: dict[str, TimelineEvent] = {}
+    _counts: dict[str, int] = {}
+    for ev in events:
+        label = str(ev.get("label") or "")
+        if not label or label == "进程启动":
+            continue
+        if label in _seen_labels:
+            _counts[label] += 1
+            continue
+        te = TimelineEvent(
+            t_offset=str(ev.get("delta") or ev.get("time") or ""),
+            event=label, status="ok",
+        )
+        _seen_labels[label] = te
+        _counts[label] = 1
+        timeline.append(te)
+    for label, te in _seen_labels.items():
+        if _counts[label] > 1:
+            te.event = f"{label} ×{_counts[label]}"
+    timeline = timeline[:16]
 
     # --- values ---
     values = [
