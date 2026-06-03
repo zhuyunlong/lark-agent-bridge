@@ -1,0 +1,57 @@
+lark_agent_bridge/agents/bug/custom_skill.py
+  27fa4e7175d04a78 408,414-428,430-431,608,614-621,633
+lark_agent_bridge/agents/bug/bug_prompt.py
+  27fa4e7175d04a78 6-26,650-660
+tests/test_source_stage_structured.py
+  27fa4e7175d04a78 1-110
+lark_agent_bridge/agents/bug/ld_executor.py
+  27fa4e7175d04a78 944-945,1080-1083
+lark_agent_bridge/agents/agent_output_models.py
+  27fa4e7175d04a78 61-68
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.22",
+  "base_commit_sha": "48ef98ad258fa6f9bfa3387bafb2a2271ec2cfe1",
+  "prompts": {
+    "27fa4e7175d04a78": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "5248003e-9b50-40a4-bb1a-6ebe46622b9d",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 186,
+      "total_deletions": 9,
+      "accepted_lines": 184,
+      "overriden_lines": 0
+    },
+    "6492f767ca8007cc": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e86bd-618b-70a0-8adf-bf403bf7981c",
+        "model": "gpt-5.5"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 2456,
+      "overriden_lines": 0
+    },
+    "9020c2c22bd74959": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "36d375b4-cf7d-4c66-bf50-1c4e44728324",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 18,
+      "overriden_lines": 0
+    }
+  }
+}
