@@ -399,6 +399,70 @@ def render_swimlane_rows(
     return "".join(chunks)
 
 
+_STATUS_FILL = {
+    "ok": "#16a34a",
+    "suspect": "#f59e0b",
+    "broken": "#dc2626",
+    "unknown": "#94a3b8",
+}
+
+
+def render_status_lane_graph(
+    nodes: Sequence[Mapping[str, object]],
+    edges: Sequence[Mapping[str, object]],
+    *,
+    empty_text: str = "未提取到链路节点。",
+) -> str:
+    node_list = [dict(n) for n in nodes if str(n.get("label", "")).strip()]
+    if not node_list:
+        return f'<p class="muted">{H(empty_text)}</p>'
+    outer_x, outer_y = 28, 18
+    lane_w, lane_gap = 220, 28
+    card_y, card_h = 70, 132
+    total_w = outer_x * 2 + len(node_list) * lane_w + max(0, len(node_list) - 1) * lane_gap
+    total_h = card_y + card_h + 36
+    pos = {n["id"]: outer_x + i * (lane_w + lane_gap) for i, n in enumerate(node_list)}
+
+    chunks: list[str] = [
+        '<div class="swimlane-svg-wrap">',
+        (f'<svg class="swimlane-svg" viewBox="0 0 {total_w} {total_h}" '
+         'xmlns="http://www.w3.org/2000/svg" role="img" aria-label="链路泳道图">'),
+        '<defs><marker id="laneArrow" viewBox="0 0 10 10" refX="8" refY="5" '
+        'markerWidth="7" markerHeight="7" orient="auto-start-reverse">'
+        '<path d="M 0 0 L 10 5 L 0 10 z" fill="#7c8db0"/></marker></defs>',
+    ]
+    arrow_y = card_y + card_h / 2
+    for edge in edges:
+        a, b = pos.get(str(edge.get("from"))), pos.get(str(edge.get("to")))
+        if a is None or b is None or b <= a:
+            continue
+        start_x, end_x = a + lane_w, b
+        chunks.append(
+            f'<line x1="{start_x}" y1="{arrow_y}" x2="{end_x - 6}" y2="{arrow_y}" '
+            'stroke="#94a3b8" stroke-width="2" marker-end="url(#laneArrow)"/>'
+        )
+    for n in node_list:
+        x = pos[n["id"]]
+        fill = _STATUS_FILL.get(str(n.get("status", "unknown")), "#94a3b8")
+        lane_lines = _wrap_svg_text(str(n.get("lane_title", "")), 14)
+        label_lines = _wrap_svg_text(str(n.get("label", "")), 18)
+        chunks.append(
+            f'<rect x="{x}" y="{card_y}" width="{lane_w}" height="{card_h}" rx="16" '
+            f'fill="#ffffff" stroke="{fill}" stroke-width="2.5"/>'
+        )
+        chunks.append(f'<circle cx="{x + 26}" cy="{card_y + 26}" r="14" fill="{fill}"/>')
+        chunks.append(
+            f'<text x="{x + 26}" y="{card_y + 30}" text-anchor="middle" fill="#fff" '
+            f'font-size="12" font-weight="700">{H(str(n.get("num", "")))}</text>'
+        )
+        chunks.extend(_svg_text_block(x + 50, card_y + 24, lane_lines, fill="#64748b",
+                                      font_size=11, font_weight=700, line_height=14))
+        chunks.extend(_svg_text_block(x + 16, card_y + 70, label_lines, fill="#1f2937",
+                                      font_size=13, font_weight=600, line_height=18))
+    chunks.extend(["</svg>", "</div>"])
+    return "".join(chunks)
+
+
 def _svg_text_block(
     x: int,
     y: int,
