@@ -1,6 +1,9 @@
 """图优先源码/信号调查报告渲染器：消费 ReportGraph，产出单份 HTML。"""
 from __future__ import annotations
 
+import json as _json
+from pathlib import Path
+
 from .report_graph import ReportGraph
 from .combined_bug_html import render_status_lane_graph
 from .source_report_html import H, render_document, BASE_REPORT_CSS
@@ -97,3 +100,23 @@ def render_signal_source_report(graph: ReportGraph, *, request_text: str, backen
         "</div>"
     )
     return render_document("源码/信号调查报告", body, css=BASE_REPORT_CSS + _EXTRA_CSS)
+
+
+def build_combined_from_signal_json(
+    signal_json_path: Path,
+    *,
+    request_text: str,
+    has_logs: bool,
+    backend: str = "signal-chain-analyzer",
+) -> tuple[str, dict]:
+    """读取 signal 链路脚本 JSON，构造图优先合并报告。
+
+    返回 (html, graph_dict)。graph_dict 适合写成合并报告的 JSON 旁路。
+    """
+    from .graph_adapters import signal_json_to_graph
+
+    payload = _json.loads(Path(signal_json_path).read_text(encoding="utf-8"))
+    graph = signal_json_to_graph(payload)
+    graph.has_logs = bool(has_logs)
+    html = render_signal_source_report(graph, request_text=request_text, backend=backend)
+    return html, graph.to_dict()

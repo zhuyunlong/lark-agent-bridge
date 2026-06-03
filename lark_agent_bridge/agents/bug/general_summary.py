@@ -599,6 +599,26 @@ class _GeneralSummaryMixin:
                 "summary": summary,
             }
 
+        if "source_stage" in kinds and "signal" in kinds:
+            signal_json_path = report_jsons.get("signal")
+            if signal_json_path is None or not signal_json_path.exists():
+                return None
+            from ...reporting.source_signal_report_html import build_combined_from_signal_json
+            html, graph_dict = build_combined_from_signal_json(
+                signal_json_path,
+                request_text=prompt_text,
+                has_logs=selected_input is not None,
+            )
+            html_path = output_dir / self._combined_report_name("html")
+            json_path = output_dir / self._combined_report_name("json")
+            html_path.write_text(html, encoding="utf-8")
+            json_path.write_text(json.dumps(graph_dict, ensure_ascii=False, indent=2), encoding="utf-8")
+            return {
+                "html_path": html_path,
+                "json_path": json_path,
+                "summary": graph_dict.get("verdict", {}).get("headline", ""),
+            }
+
         if kinds == ["signal"]:
             signal_json_path = report_jsons.get("signal")
             if signal_json_path is None or not signal_json_path.exists():

@@ -66,3 +66,16 @@ def test_report_no_dead_swimlane_css_unused():
 def test_report_marks_abnormal_value():
     html = _html()
     assert "-1" in html
+
+
+def test_build_combined_from_signal_json(tmp_path):
+    import shutil
+    from lark_agent_bridge.reporting.source_signal_report_html import build_combined_from_signal_json
+    src = Path(__file__).parent / "fixtures" / "signal_chain_40018.json"
+    dst = tmp_path / "bug_signal_chain_report.json"
+    shutil.copy(src, dst)
+    html, graph_dict = build_combined_from_signal_json(dst, request_text="调查电量信号", has_logs=True)
+    assert "<svg" in html.split("</style>")[-1]
+    assert graph_dict["has_logs"] is True
+    assert graph_dict["verdict"]["status"] in {"ok", "broken", "inconclusive"}
+    assert any(n["lane"] == "datacenter" for n in graph_dict["nodes"])
