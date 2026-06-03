@@ -556,6 +556,7 @@ class _GeneralSummaryMixin:
         report_jsons: dict[str, Path | None],
         selected_input: Path | None,
         source_evidence_path: Path | None = None,
+        intent: str = "",
     ) -> dict[str, object] | None:
         kinds = [plan.kind for plan in plans]
         if kinds == ["startup", "stuck"]:
@@ -608,6 +609,7 @@ class _GeneralSummaryMixin:
                 signal_json_path,
                 request_text=prompt_text,
                 has_logs=selected_input is not None,
+                intent=intent,
             )
             html_path = output_dir / self._combined_report_name("html")
             json_path = output_dir / self._combined_report_name("json")

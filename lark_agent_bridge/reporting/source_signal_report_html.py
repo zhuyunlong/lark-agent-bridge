@@ -110,6 +110,7 @@ def build_combined_from_signal_json(
     request_text: str,
     has_logs: bool,
     backend: str = "signal-chain-analyzer",
+    intent: str = "",
 ) -> tuple[str, dict]:
     """读取 signal 链路脚本 JSON，构造图优先合并报告。
 
@@ -120,5 +121,7 @@ def build_combined_from_signal_json(
     payload = _json.loads(Path(signal_json_path).read_text(encoding="utf-8"))
     graph = signal_json_to_graph(payload)
     graph.has_logs = bool(has_logs)
+    if intent:
+        graph.intent = intent
     html = render_signal_source_report(graph, request_text=request_text, backend=backend)
     return html, graph.to_dict()

@@ -795,6 +795,10 @@ class _RunPrimaryMixin:
                 report_jsons=report_jsons,
                 selected_input=selected_input,
                 source_evidence_path=source_evidence_path,
+                intent=resolve_effective_intent(
+                    getattr(source_decision, "intent", ""),
+                    has_logs=selected_input is not None,
+                ),
             )
             agent_summary_path = context.output_dir / "bug_agent_summary.md"
             agent_summary_result = self._run_bug_agent_summary(

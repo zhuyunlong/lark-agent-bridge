@@ -79,3 +79,16 @@ def test_build_combined_from_signal_json(tmp_path):
     assert graph_dict["has_logs"] is True
     assert graph_dict["verdict"]["status"] in {"ok", "broken", "inconclusive"}
     assert any(n["lane"] == "datacenter" for n in graph_dict["nodes"])
+
+
+def test_build_combined_threads_intent(tmp_path):
+    import shutil
+    from pathlib import Path as _P
+    from lark_agent_bridge.reporting.source_signal_report_html import build_combined_from_signal_json
+    src = _P(__file__).parent / "fixtures" / "signal_chain_40018.json"
+    dst = tmp_path / "bug_signal_chain_report.json"
+    shutil.copy(src, dst)
+    _, gd_consult = build_combined_from_signal_json(dst, request_text="x", has_logs=True, intent="consult")
+    assert gd_consult["intent"] == "consult"
+    _, gd_default = build_combined_from_signal_json(dst, request_text="x", has_logs=True)
+    assert gd_default["intent"] == "diagnose"  # adapter default; empty intent must NOT override
