@@ -537,6 +537,7 @@ class _BugPromptMixin:
         duration_seconds: float,
         executor: str = "file_agent",
         extra_payload: dict[str, object] | None = None,
+        render_html: bool = True,
     ) -> None:
         analysis_text = analysis_markdown_path.read_text(encoding="utf-8", errors="replace")
         analysis_file_name = analysis_markdown_path.name
@@ -625,10 +626,11 @@ class _BugPromptMixin:
         }
         if extra_payload:
             payload.update(extra_payload)
-        html_path.write_text(
-            combined_bug_html.render_report_shell(**composition_to_renderer_payload(composition)),
-            encoding="utf-8",
-        )
+        if render_html:
+            html_path.write_text(
+                combined_bug_html.render_report_shell(**composition_to_renderer_payload(composition)),
+                encoding="utf-8",
+            )
         json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
     def _skill_file_agent_execution_details(self, analysis_kind: str, result: dict[str, object]) -> dict[str, object]:

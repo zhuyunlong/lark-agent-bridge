@@ -367,6 +367,8 @@ class _RunPrimaryMixin:
             html_paths: list[Path] = []
             report_jsons: dict[str, Path | None] = {}
             skill_file_agent_execution_result: dict[str, object] | None = None
+            kinds = [p.kind for p in plans]
+            will_merge = "source_stage" in kinds and "signal" in kinds
             for current_plan in plans:
                 current_html = context.output_dir / self._report_name(current_plan.kind, "html")
                 current_json = context.output_dir / self._report_name(current_plan.kind, "json")
@@ -563,6 +565,7 @@ class _RunPrimaryMixin:
                                     context_profile=execution_skill_name,
                                     provider_override="codex",
                                     command_override=self.config.codex_app_server.command,
+                                    render_html=not will_merge,
                                 )
                             else:
                                 custom_result = self._run_source_stage_pydantic_ai(
@@ -582,6 +585,7 @@ class _RunPrimaryMixin:
                                     progress_callback=progress_callback,
                                     context_profile=getattr(source_decision, "context_profile", ""),
                                     prior_findings=self._summarize_prior_report_jsons(report_jsons),
+                                    render_html=not will_merge,
                                 )
                                 if custom_result.get("ok"):
                                     logger.info("source_stage pydantic-ai succeeded, skipping file_agent")
@@ -617,6 +621,7 @@ class _RunPrimaryMixin:
                                         bridge_session_id=bridge_session_id,
                                         prior_findings=self._summarize_prior_report_jsons(report_jsons),
                                         context_profile=getattr(source_decision, "context_profile", ""),
+                                        render_html=not will_merge,
                                     )
                         else:
                             custom_result = self._run_custom_skill_agent_analysis(
@@ -716,7 +721,9 @@ class _RunPrimaryMixin:
                             "prepared_log_input": str(prepared_input or ""),
                         },
                     )
-                if not current_html.exists():
+                if not current_html.exists() and not (
+                    will_merge and current_plan.kind in ("signal", "source_stage")
+                ):
                     return self._failure(
                         context=context,
                         command=current_command,
@@ -735,7 +742,8 @@ class _RunPrimaryMixin:
                             "prepared_log_input": str(prepared_input or ""),
                         },
                     )
-                html_paths.append(current_html)
+                if not (will_merge and current_plan.kind in ("signal", "source_stage")):
+                    html_paths.append(current_html)
                 report_jsons[current_plan.kind] = current_json if current_json.exists() else None
                 if current_plan is plan:
                     command = current_command

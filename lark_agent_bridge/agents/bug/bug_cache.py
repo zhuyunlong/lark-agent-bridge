@@ -796,6 +796,7 @@ class _BugCacheMixin:
         ]
         if input_path.exists():
             command.extend(["--log-path", str(input_path)])
+        command.append("--json-only")
         return command
 
     def _working_dir(self) -> Path:

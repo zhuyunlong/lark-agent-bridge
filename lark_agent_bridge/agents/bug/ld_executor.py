@@ -29,6 +29,7 @@ class _LdExecutorMixin:
         context_profile: str = "",
         provider_override: str = "",
         command_override: str = "",
+        render_html: bool = True,
     ) -> dict[str, object]:
         started = time.monotonic()
         effective_label = analysis_label or self._analysis_label(analysis_kind)
@@ -480,6 +481,7 @@ class _LdExecutorMixin:
                 "turn_id": turn_id,
                 "app_server_version": app_server_version,
             },
+            render_html=render_html,
         )
         return {
             "ok": True,
@@ -809,6 +811,7 @@ class _LdExecutorMixin:
         progress_callback: Callable[[dict[str, object]], None] | None,
         context_profile: str = "",
         prior_findings: list[tuple[str, str, str]] | None = None,
+        render_html: bool = True,
     ) -> dict[str, object]:
         """Run source analysis via pydantic-ai agent runtime (fast path).
 
@@ -1071,6 +1074,7 @@ class _LdExecutorMixin:
             evidence_count=evidence_count,
             duration_seconds=result.duration_seconds,
             executor=provider_tag,
+            render_html=render_html,
         )
 
         self._emit_progress(
