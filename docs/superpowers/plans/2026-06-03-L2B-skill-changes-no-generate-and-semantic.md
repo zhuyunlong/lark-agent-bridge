@@ -12,6 +12,18 @@
 
 依据 spec：`...2026-06-03-source-analysis-intent-aware-diagram-report-design.md`（C8、决策点 1/2）。承接 L2A（已交付）。
 
+## 执行状态（2026-06-03，subagent-driven，用户显式跳过 RED→强 TDD+防御式回退兜底）
+
+- **G1 不生成两份** — bridge `5bdc8f4` + .ai 仓 `6dd6ea4`（signal `--json-only` 在独立 `.ai` git 仓）。`will_merge` 与 `general_summary.py:603` 逐字一致；`missing_html` 校验放宽、`html_paths.append` 守卫、`render_html` 透传链均经直读确认。
+- **G2 source_stage 结构化输出** — `48ef98a`。两路（pydantic-ai `SourceAnalysisOutput.node_status/findings` + file_agent `parse_node_status_block` 解析 JSON 围栏）字段名一致；`emit_node_status=_kind_spec(kind).is_source_stage`；未动 `_prompt_requires_json_fence`。
+- **G3 apply_source_stage** — `2033582`。按文件名/label 匹配覆盖 status、注入 `[源码]` findings、渲染前改图；防御式回退（None/损坏/非法值→保留确定性 status，`validate(graph)==[]`）。
+
+**验证**：L2B 新增测试全过；全量回归 **1190 passed**，仅 2 个预先存在的 `pydantic_ai` 失败；端到端确认 AI node_status 覆盖（unity→broken 红色上图）+ findings 注入真实反映到 HTML+JSON。
+
+**收尾事项（非阻塞）**：`.ai` 的 4 份镜像副本（.claude/.codex/.github/.qoder）需用 `.ai/tools` 同步工具再生 `--json-only`（bridge 只调 `.ai` 故功能已生效）。
+
+---
+
 ## Non-Goals
 - 不改路由（沿 L2A）。
 - 不改 `_prompt_requires_json_fence`（custom_skill.py:1077）的全局判定——B2 用独立 `emit_node_status` 标志，仅 source_stage 注入 JSON 围栏，绝不误开其它 kind 的 JSON 输出。
