@@ -21,6 +21,10 @@ class EventStateStore:
     def __init__(self, state_file: str | Path) -> None:
         self.state_file = Path(state_file)
         self._seen = self._load_seen()
+        # Guards the test-and-set in mark_seen so concurrent workers cannot both
+        # claim the same event_id. has_seen stays lock-free (set membership is
+        # atomic) — it is only a best-effort pre-check, not the dedup guarantee.
+        self._lock = threading.Lock()
 
     def has_seen(self, event_id: str) -> bool:
         return bool(event_id) and event_id in self._seen
@@ -28,21 +32,22 @@ class EventStateStore:
     def mark_seen(self, event: LarkEvent) -> bool:
         if not event.event_id:
             return True
-        if event.event_id in self._seen:
-            return False
-        self.state_file.parent.mkdir(parents=True, exist_ok=True)
-        record = {
-            "event_id": event.event_id,
-            "message_id": event.message_id,
-            "sender_id": event.sender_id,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        }
-        with self.state_file.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
-        self._seen.add(event.event_id)
-        if len(self._seen) > self._MAX_SEEN_EVENTS * 2:
-            self._compact()
-        return True
+        with self._lock:
+            if event.event_id in self._seen:
+                return False
+            self.state_file.parent.mkdir(parents=True, exist_ok=True)
+            record = {
+                "event_id": event.event_id,
+                "message_id": event.message_id,
+                "sender_id": event.sender_id,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+            with self.state_file.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+            self._seen.add(event.event_id)
+            if len(self._seen) > self._MAX_SEEN_EVENTS * 2:
+                self._compact()
+            return True
 
     def _load_seen(self) -> set[str]:
         if not self.state_file.exists():
@@ -124,47 +129,55 @@ class ConversationContextStore:
         self.state_file = Path(state_file)
         self.max_history_turns = max(0, int(max_history_turns))
         self._contexts = self._load_contexts()
+        # RLock (not Lock): find/delete/remember_alias call lookup internally,
+        # so the lock must be re-entrant. lookup returns a LIVE reference
+        # (never a deepcopy) because append_exchange/rewrite_branch mutate the
+        # stored object in place; all external callers only read.
+        self._lock = threading.RLock()
 
     def find(self, event: LarkEvent) -> ConversationContext | None:
-        for key in self._candidate_keys(event):
-            context = self.lookup(key)
-            if context is not None:
-                return context
-        return None
+        with self._lock:
+            for key in self._candidate_keys(event):
+                context = self.lookup(key)
+                if context is not None:
+                    return context
+            return None
 
     def lookup(self, key: str) -> ConversationContext | None:
         normalized = key.strip() if key else ""
         if not normalized:
             return None
-        context = self._contexts.get(normalized)
-        if context is None:
-            return None
-        context.context_key = normalized
-        return context
+        with self._lock:
+            context = self._contexts.get(normalized)
+            if context is None:
+                return None
+            context.context_key = normalized
+            return context
 
     def remember_alias(self, *, alias_message_id: str, root_message_id: str) -> ConversationContext | None:
-        alias = alias_message_id.strip()
-        root = root_message_id.strip()
-        if not alias or not root or alias == root:
-            return self.lookup(root)
-        context = self.lookup(root)
-        if context is None:
-            return None
-        self._contexts[alias] = ConversationContext(
-            context_key=alias,
-            root_message_id=context.root_message_id,
-            chat_id=context.chat_id,
-            mode=context.mode,
-            request_text=context.request_text,
-            summary_text=context.summary_text,
-            report_url=context.report_url,
-            report_excerpt=context.report_excerpt,
-            history=list(context.history),
-            created_at=context.created_at,
-            updated_at=context.updated_at,
-        )
-        self._save()
-        return context
+        with self._lock:
+            alias = alias_message_id.strip()
+            root = root_message_id.strip()
+            if not alias or not root or alias == root:
+                return self.lookup(root)
+            context = self.lookup(root)
+            if context is None:
+                return None
+            self._contexts[alias] = ConversationContext(
+                context_key=alias,
+                root_message_id=context.root_message_id,
+                chat_id=context.chat_id,
+                mode=context.mode,
+                request_text=context.request_text,
+                summary_text=context.summary_text,
+                report_url=context.report_url,
+                report_excerpt=context.report_excerpt,
+                history=list(context.history),
+                created_at=context.created_at,
+                updated_at=context.updated_at,
+            )
+            self._save()
+            return context
 
     def remember(
         self,
@@ -180,38 +193,40 @@ class ConversationContextStore:
         context_profile: str = "",
         classification_source: str = "",
     ) -> ConversationContext | None:
-        key = root_message_id.strip()
-        if not key:
-            return None
-        now = datetime.now(timezone.utc).isoformat()
-        previous = self._contexts.get(key)
-        context = ConversationContext(
-            context_key=key,
-            root_message_id=key,
-            chat_id=chat_id,
-            mode=mode,
-            request_text=request_text,
-            summary_text=summary_text,
-            report_url=report_url,
-            report_excerpt=report_excerpt,
-            history=list(previous.history) if previous is not None else [],
-            created_at=previous.created_at if previous is not None and previous.created_at else now,
-            updated_at=now,
-            source_mode=source_mode or (previous.source_mode if previous else ""),
-            context_profile=context_profile or (previous.context_profile if previous else ""),
-            classification_source=classification_source or (previous.classification_source if previous else ""),
-        )
-        self._contexts[key] = context
-        self._save()
-        return context
+        with self._lock:
+            key = root_message_id.strip()
+            if not key:
+                return None
+            now = datetime.now(timezone.utc).isoformat()
+            previous = self._contexts.get(key)
+            context = ConversationContext(
+                context_key=key,
+                root_message_id=key,
+                chat_id=chat_id,
+                mode=mode,
+                request_text=request_text,
+                summary_text=summary_text,
+                report_url=report_url,
+                report_excerpt=report_excerpt,
+                history=list(previous.history) if previous is not None else [],
+                created_at=previous.created_at if previous is not None and previous.created_at else now,
+                updated_at=now,
+                source_mode=source_mode or (previous.source_mode if previous else ""),
+                context_profile=context_profile or (previous.context_profile if previous else ""),
+                classification_source=classification_source or (previous.classification_source if previous else ""),
+            )
+            self._contexts[key] = context
+            self._save()
+            return context
 
     def append_exchange(self, root_message_id: str, *, user_text: str, assistant_text: str) -> None:
-        context = self._contexts.get(root_message_id)
-        if context is None:
-            return
-        context.history = self._history_with_exchange(context.history, user_text=user_text, assistant_text=assistant_text)
-        context.updated_at = datetime.now(timezone.utc).isoformat()
-        self._save()
+        with self._lock:
+            context = self._contexts.get(root_message_id)
+            if context is None:
+                return
+            context.history = self._history_with_exchange(context.history, user_text=user_text, assistant_text=assistant_text)
+            context.updated_at = datetime.now(timezone.utc).isoformat()
+            self._save()
 
     def rewrite_branch(
         self,
@@ -221,13 +236,14 @@ class ConversationContextStore:
         user_text: str,
         assistant_text: str,
     ) -> None:
-        context = self._contexts.get(root_message_id)
-        if context is None:
-            return
-        now = datetime.now(timezone.utc).isoformat()
-        context.history = self._history_with_exchange(base_history, user_text=user_text, assistant_text=assistant_text)
-        context.updated_at = now
-        self._save()
+        with self._lock:
+            context = self._contexts.get(root_message_id)
+            if context is None:
+                return
+            now = datetime.now(timezone.utc).isoformat()
+            context.history = self._history_with_exchange(base_history, user_text=user_text, assistant_text=assistant_text)
+            context.updated_at = now
+            self._save()
 
     def _history_with_exchange(
         self,
@@ -247,63 +263,67 @@ class ConversationContextStore:
         return []
 
     def clear(self) -> int:
-        count = len(self._contexts)
-        self._contexts = {}
-        try:
-            self.state_file.unlink()
-        except FileNotFoundError:
-            pass
-        return count
+        with self._lock:
+            count = len(self._contexts)
+            self._contexts = {}
+            try:
+                self.state_file.unlink()
+            except FileNotFoundError:
+                pass
+            return count
 
     def delete(self, root_message_id: str) -> int:
-        normalized = root_message_id.strip()
-        if not normalized:
-            return 0
-        context = self.lookup(normalized)
-        root = context.root_message_id.strip() if context is not None else normalized
-        removed = 0
-        for key, item in list(self._contexts.items()):
-            if key == normalized or key == root or item.root_message_id == normalized or item.root_message_id == root:
-                self._contexts.pop(key, None)
-                removed += 1
-        if removed:
-            self._save()
-        return removed
+        with self._lock:
+            normalized = root_message_id.strip()
+            if not normalized:
+                return 0
+            context = self.lookup(normalized)
+            root = context.root_message_id.strip() if context is not None else normalized
+            removed = 0
+            for key, item in list(self._contexts.items()):
+                if key == normalized or key == root or item.root_message_id == normalized or item.root_message_id == root:
+                    self._contexts.pop(key, None)
+                    removed += 1
+            if removed:
+                self._save()
+            return removed
 
     def prune_expired(self, *, max_age_hours: int, now: datetime | None = None) -> int:
-        if max_age_hours <= 0:
-            return 0
-        reference_time = now or datetime.now(timezone.utc)
-        removed = 0
-        cutoff_seconds = max_age_hours * 3600
-        for key, context in list(self._contexts.items()):
-            updated_at = _parse_timestamp(context.updated_at)
-            if updated_at is None:
-                continue
-            age_seconds = reference_time.timestamp() - updated_at.timestamp()
-            if age_seconds <= cutoff_seconds:
-                continue
-            self._contexts.pop(key, None)
-            removed += 1
-        if removed:
-            self._save()
-        return removed
+        with self._lock:
+            if max_age_hours <= 0:
+                return 0
+            reference_time = now or datetime.now(timezone.utc)
+            removed = 0
+            cutoff_seconds = max_age_hours * 3600
+            for key, context in list(self._contexts.items()):
+                updated_at = _parse_timestamp(context.updated_at)
+                if updated_at is None:
+                    continue
+                age_seconds = reference_time.timestamp() - updated_at.timestamp()
+                if age_seconds <= cutoff_seconds:
+                    continue
+                self._contexts.pop(key, None)
+                removed += 1
+            if removed:
+                self._save()
+            return removed
 
     def latest_for_chat(self, chat_id: str, *, modes: set[str] | None = None) -> ConversationContext | None:
-        chat = chat_id.strip()
-        if not chat:
-            return None
-        candidates = [
-            context
-            for key, context in self._contexts.items()
-            if context.chat_id == chat
-            and (modes is None or context.mode in modes)
-            and (context.root_message_id == key or context.root_message_id not in self._contexts)
-        ]
-        if not candidates:
-            return None
-        candidates.sort(key=lambda item: item.updated_at or item.created_at, reverse=True)
-        return candidates[0]
+        with self._lock:
+            chat = chat_id.strip()
+            if not chat:
+                return None
+            candidates = [
+                context
+                for key, context in self._contexts.items()
+                if context.chat_id == chat
+                and (modes is None or context.mode in modes)
+                and (context.root_message_id == key or context.root_message_id not in self._contexts)
+            ]
+            if not candidates:
+                return None
+            candidates.sort(key=lambda item: item.updated_at or item.created_at, reverse=True)
+            return candidates[0]
 
     def _candidate_keys(self, event: LarkEvent) -> list[str]:
         values = [event.reply_to, event.root_id, event.parent_id, event.message_id]

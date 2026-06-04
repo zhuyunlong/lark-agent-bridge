@@ -10,6 +10,7 @@ import threading
 
 from .app import BridgeApp
 from .config import load_config, with_cli_overrides
+from .dispatcher import EventDispatcher
 from .knowledge import KnowledgeService
 from .log import get_logger, setup_logging
 
@@ -141,10 +142,22 @@ def main(argv: list[str] | None = None) -> int:
             app.cleanup_expired_jobs()
             app.start_report_server()
             stop_cleanup = _start_cleanup_loop(app)
+            ec = config.event_consumer
+            dispatcher = EventDispatcher(
+                app,
+                max_workers=ec.max_concurrent_jobs,
+                max_queue_size=ec.max_queue_size,
+                heavy_timeout_seconds=ec.heavy_job_timeout_seconds,
+                light_inline=ec.light_inline,
+                on_result=lambda result: _print_json(result.to_dict()),
+            )
+            dispatcher.start()
+            app.report_http_server.set_dispatcher_metrics_provider(dispatcher.metrics)
             try:
                 for payload in app.lark_client.consume_payloads(status_callback=app.record_daemon_status):
-                    _print_json(app.handle_payload(payload).to_dict())
+                    dispatcher.dispatch(payload)
             finally:
+                dispatcher.shutdown()
                 app.stop_report_server()
                 if stop_cleanup is not None:
                     stop_cleanup.set()

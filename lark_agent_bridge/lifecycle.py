@@ -19,6 +19,7 @@ tracking, status queries, and cross-type operations.
 
 from __future__ import annotations
 
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -136,6 +137,12 @@ class AnalysisLifecycle:
             self.created_at = time.time()
         if not self.updated_at:
             self.updated_at = self.created_at
+        # Per-object lock: a lifecycle is transitioned by the producer thread
+        # (QUEUED) then a worker thread (ANALYZING/COMPLETED/FAILED), and read by
+        # the health endpoint. Guards the multi-field mutation in transition_to
+        # (state + updated_at + transitions.append) so it is atomic. RLock so
+        # mark_*/retry (which call transition_to) stay safe under nesting.
+        self._lock = threading.RLock()
 
     @property
     def is_terminal(self) -> bool:
@@ -166,21 +173,22 @@ class AnalysisLifecycle:
 
         Raises ``ValueError`` if the transition is invalid.
         """
-        if not self.can_transition_to(target):
-            raise ValueError(
-                f"Invalid transition: {self.state.value} → {target.value}"
+        with self._lock:
+            if not self.can_transition_to(target):
+                raise ValueError(
+                    f"Invalid transition: {self.state.value} → {target.value}"
+                )
+            now = time.time()
+            transition = StateTransition(
+                from_state=self.state.value,
+                to_state=target.value,
+                timestamp=now,
+                reason=reason,
             )
-        now = time.time()
-        transition = StateTransition(
-            from_state=self.state.value,
-            to_state=target.value,
-            timestamp=now,
-            reason=reason,
-        )
-        self.transitions.append(transition)
-        self.state = target
-        self.updated_at = now
-        return transition
+            self.transitions.append(transition)
+            self.state = target
+            self.updated_at = now
+            return transition
 
     def mark_completed(
         self,
@@ -269,6 +277,9 @@ class LifecycleStore:
     def __init__(self, *, max_active: int = 500) -> None:
         self.max_active = max(10, max_active)
         self._lifecycles: dict[str, AnalysisLifecycle] = {}
+        # RLock: create() calls _enforce_limit() internally. Guards the
+        # _lifecycles dict against concurrent dispatcher/worker/health threads.
+        self._lock = threading.RLock()
 
     def create(
         self,
@@ -281,75 +292,87 @@ class LifecycleStore:
         **metadata: Any,
     ) -> AnalysisLifecycle:
         """Create a new analysis lifecycle in CREATED state."""
-        lc = AnalysisLifecycle(
-            analysis_type=analysis_type,
-            request_text=request_text,
-            requester_id=requester_id,
-            chat_id=chat_id,
-            message_id=message_id,
-            metadata=dict(metadata),
-        )
-        self._lifecycles[lc.lifecycle_id] = lc
-        self._enforce_limit()
-        return lc
+        with self._lock:
+            lc = AnalysisLifecycle(
+                analysis_type=analysis_type,
+                request_text=request_text,
+                requester_id=requester_id,
+                chat_id=chat_id,
+                message_id=message_id,
+                metadata=dict(metadata),
+            )
+            self._lifecycles[lc.lifecycle_id] = lc
+            self._enforce_limit()
+            return lc
 
     def get(self, lifecycle_id: str) -> AnalysisLifecycle | None:
-        return self._lifecycles.get(lifecycle_id)
+        with self._lock:
+            return self._lifecycles.get(lifecycle_id)
 
     def find_by_job_id(self, job_id: str) -> AnalysisLifecycle | None:
         """Find a lifecycle by its job_id."""
-        for lc in self._lifecycles.values():
-            if lc.job_id == job_id:
-                return lc
-        return None
+        with self._lock:
+            for lc in self._lifecycles.values():
+                if lc.job_id == job_id:
+                    return lc
+            return None
 
     def find_by_message_id(self, message_id: str) -> AnalysisLifecycle | None:
         """Find a lifecycle by the originating message_id."""
-        for lc in self._lifecycles.values():
-            if lc.message_id == message_id:
-                return lc
-        return None
+        with self._lock:
+            for lc in self._lifecycles.values():
+                if lc.message_id == message_id:
+                    return lc
+            return None
 
     def list_active(self) -> list[AnalysisLifecycle]:
         """Return all non-terminal lifecycles."""
-        return [lc for lc in self._lifecycles.values() if not lc.is_terminal]
+        with self._lock:
+            return [lc for lc in self._lifecycles.values() if not lc.is_terminal]
 
     def list_recent(self, *, limit: int = 20) -> list[AnalysisLifecycle]:
         """Return most recently updated lifecycles."""
-        sorted_lcs = sorted(
-            self._lifecycles.values(),
-            key=lambda lc: lc.updated_at,
-            reverse=True,
-        )
-        return sorted_lcs[:limit]
+        with self._lock:
+            sorted_lcs = sorted(
+                self._lifecycles.values(),
+                key=lambda lc: lc.updated_at,
+                reverse=True,
+            )
+            return sorted_lcs[:limit]
 
     def remove(self, lifecycle_id: str) -> bool:
-        if lifecycle_id in self._lifecycles:
-            del self._lifecycles[lifecycle_id]
-            return True
-        return False
+        with self._lock:
+            if lifecycle_id in self._lifecycles:
+                del self._lifecycles[lifecycle_id]
+                return True
+            return False
 
     @property
     def count(self) -> int:
-        return len(self._lifecycles)
+        with self._lock:
+            return len(self._lifecycles)
 
     @property
     def active_count(self) -> int:
-        return sum(1 for lc in self._lifecycles.values() if not lc.is_terminal)
+        with self._lock:
+            return sum(1 for lc in self._lifecycles.values() if not lc.is_terminal)
 
     def cleanup_terminal(self, *, max_age_seconds: float = 3600) -> int:
         """Remove terminal lifecycles older than max_age."""
-        now = time.time()
-        to_remove = [
-            lid
-            for lid, lc in self._lifecycles.items()
-            if lc.is_terminal and now - lc.updated_at > max_age_seconds
-        ]
-        for lid in to_remove:
-            del self._lifecycles[lid]
-        return len(to_remove)
+        with self._lock:
+            now = time.time()
+            to_remove = [
+                lid
+                for lid, lc in self._lifecycles.items()
+                if lc.is_terminal and now - lc.updated_at > max_age_seconds
+            ]
+            for lid in to_remove:
+                del self._lifecycles[lid]
+            return len(to_remove)
 
     def _enforce_limit(self) -> None:
+        # Private helper — caller must hold self._lock (only invoked from
+        # create(), which does). Mirrors CaseStore._enforce_limit's contract.
         if len(self._lifecycles) <= self.max_active:
             return
         # Remove oldest terminal first

@@ -50,6 +50,11 @@ class EventConsumerOptions:
     restart_max_delay_seconds: float = 60
     drop_stale_light_interactions: bool = True
     stale_light_interaction_grace_seconds: float = 120
+    # Concurrency dispatcher (Phase 2): worker pool + heavy-task queue.
+    max_concurrent_jobs: int = 3
+    max_queue_size: int = 32
+    heavy_job_timeout_seconds: float = 1800
+    light_inline: bool = True
 
 
 @dataclass(slots=True)

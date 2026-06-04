@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import html
 from pathlib import Path
 import re
+import threading
 from typing import Callable
 
 from ._shared import *  # noqa: F401,F403
@@ -45,6 +46,10 @@ class _HandleEventMixin:
         self.activity_store = activity_store or AgentActivityStore(config.data_dir / "state" / "agent_activity.json")
         self.progress_callback = progress_callback
         self._progress_cards: dict[str, dict[str, object]] = {}
+        # Guards _progress_cards dict structure (get/setitem/pop/iterate) against
+        # concurrent worker threads and the daemon cleanup loop. Held only around
+        # dict access — never while sending cards over the network.
+        self._progress_cards_lock = threading.Lock()
         self._progress_cards_max_age_seconds = 7200  # 2 hour TTL (must exceed bug_analysis timeout)
         self._progress_card_stream_update_interval_seconds = 5.0
         self.process_watchdog = ProcessWatchdog()
@@ -81,6 +86,7 @@ class _HandleEventMixin:
             conversation_store=self.conversation_store,
             version_store=self.version_store,
             knowledge_service=self.knowledge_service,
+            lifecycle_store=self.lifecycle_store,
         )
         runner = SignalChainRunner(config, process_watchdog=self.process_watchdog)
         downloader = LogDownloader(config, self.lark_client)
@@ -1645,24 +1651,28 @@ class _HandleEventMixin:
             return
         self._prune_stale_progress_cards()
         key = self._progress_card_key(event, session_id=session_id)
-        existing = self._progress_cards.get(key)
-        if existing and existing.get("message_id"):
-            existing["title"] = title
-            existing["status"] = status
-            existing["details"] = {
-                **dict(existing.get("details") or {}),
-                **dict(details or {}),
-            }
-            existing["last_active_at"] = datetime.now(timezone.utc)
+        with self._progress_cards_lock:
+            existing = self._progress_cards.get(key)
+            has_existing = bool(existing and existing.get("message_id"))
+            if has_existing:
+                existing["title"] = title
+                existing["status"] = status
+                existing["details"] = {
+                    **dict(existing.get("details") or {}),
+                    **dict(details or {}),
+                }
+                existing["last_active_at"] = datetime.now(timezone.utc)
+            else:
+                self._progress_cards[key] = {
+                    "title": title,
+                    "status": status,
+                    "details": dict(details or {}),
+                    "started_at": datetime.now(timezone.utc),
+                    "message_id": "",
+                }
+        if has_existing:
             self._update_progress_card(event, status=status, note=note, session_id=session_id)
             return
-        self._progress_cards[key] = {
-            "title": title,
-            "status": status,
-            "details": dict(details or {}),
-            "started_at": datetime.now(timezone.utc),
-            "message_id": "",
-        }
         card = self._build_progress_card(event, key=key, status=status, note=note)
         card_json_str = card_to_json(card)
         if event.message_id:
@@ -1671,10 +1681,13 @@ class _HandleEventMixin:
             send_result = self.lark_client.send_card_response(event, card_json_str)
         card_message_id = self._card_message_id_from_result(send_result)
         if card_message_id:
-            self._progress_cards[key]["message_id"] = card_message_id
+            with self._progress_cards_lock:
+                if key in self._progress_cards:
+                    self._progress_cards[key]["message_id"] = card_message_id
             self._remember_conversation_alias(card_message_id, key)
         else:
-            self._progress_cards.pop(key, None)
+            with self._progress_cards_lock:
+                self._progress_cards.pop(key, None)
             self._notify_progress(
                 "status_card_send_failed",
                 "进度卡发送失败，退回文字确认",
@@ -1704,14 +1717,16 @@ class _HandleEventMixin:
             event.message_id,
             event.event_id,
         ]
-        for candidate in candidates:
-            if candidate and candidate in self._progress_cards:
-                return candidate
+        with self._progress_cards_lock:
+            for candidate in candidates:
+                if candidate and candidate in self._progress_cards:
+                    return candidate
         return candidates[0] if candidates else ""
 
     def _has_progress_card(self, event: LarkEvent, *, session_id: str | None = None) -> bool:
         key = self._progress_card_state_key(event, session_id=session_id)
-        card_state = self._progress_cards.get(key)
+        with self._progress_cards_lock:
+            card_state = self._progress_cards.get(key)
         return bool(card_state and card_state.get("message_id"))
 
     def _should_update_progress_card_from_progress(
@@ -1722,20 +1737,21 @@ class _HandleEventMixin:
         session_id: str | None = None,
     ) -> bool:
         key = self._progress_card_state_key(event, session_id=session_id)
-        card_state = self._progress_cards.get(key)
-        if not card_state or not card_state.get("message_id"):
-            return False
-        now = datetime.now(timezone.utc)
-        card_state["last_active_at"] = now
-        # Throttle only the known high-frequency streaming families (Codex
-        # app-server deltas + agent summary stream), not every "*_stream" stage.
-        if not stage.endswith(_THROTTLED_PROGRESS_STAGE_SUFFIXES):
-            return True
-        last_update = card_state.get("last_card_update_at")
-        if isinstance(last_update, datetime):
-            if (now - last_update).total_seconds() < self._progress_card_stream_update_interval_seconds:
+        with self._progress_cards_lock:
+            card_state = self._progress_cards.get(key)
+            if not card_state or not card_state.get("message_id"):
                 return False
-        return True
+            now = datetime.now(timezone.utc)
+            card_state["last_active_at"] = now
+            # Throttle only the known high-frequency streaming families (Codex
+            # app-server deltas + agent summary stream), not every "*_stream" stage.
+            if not stage.endswith(_THROTTLED_PROGRESS_STAGE_SUFFIXES):
+                return True
+            last_update = card_state.get("last_card_update_at")
+            if isinstance(last_update, datetime):
+                if (now - last_update).total_seconds() < self._progress_card_stream_update_interval_seconds:
+                    return False
+            return True
 
     def _update_progress_card(
         self,
@@ -1747,10 +1763,11 @@ class _HandleEventMixin:
         note: str | None = None,
     ) -> bool:
         key = self._progress_card_state_key(event, session_id=session_id)
-        card_state = self._progress_cards.get(key)
+        with self._progress_cards_lock:
+            card_state = self._progress_cards.get(key)
+            message_id = str(card_state.get("message_id") or "") if card_state else ""
         if not card_state:
             return False
-        message_id = str(card_state.get("message_id") or "")
         if not message_id:
             return False
         try:
@@ -1762,6 +1779,13 @@ class _HandleEventMixin:
             return False
         if send_result.returncode == 0:
             now = datetime.now(timezone.utc)
-            card_state["last_card_update_at"] = now
-            card_state["last_active_at"] = now
+            with self._progress_cards_lock:
+                # Re-fetch under the lock: the entry may have been pruned/popped
+                # by another thread during the (unlocked) network call above.
+                # Writing the stale `card_state` reference would land on an
+                # orphaned dict and silently miss the TTL refresh.
+                current = self._progress_cards.get(key)
+                if current is not None:
+                    current["last_card_update_at"] = now
+                    current["last_active_at"] = now
         return send_result.returncode == 0

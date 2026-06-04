@@ -40,6 +40,7 @@ from __future__ import annotations
 import json
 import re
 import hashlib
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -136,24 +137,31 @@ class CaseStore:
         self.state_file = Path(state_file)
         self.max_cases = max(0, int(max_cases))
         self._cases: dict[str, CaseRecord] = self._load()
+        # RLock (not Lock): save_from_result calls save internally. Private
+        # helpers (_persist/_enforce_limit) are only invoked from a lock-holding
+        # public method, so they stay unlocked.
+        self._lock = threading.RLock()
 
     @property
     def count(self) -> int:
-        return len(self._cases)
+        with self._lock:
+            return len(self._cases)
 
     def get(self, case_id: str) -> CaseRecord | None:
-        return self._cases.get(case_id.strip())
+        with self._lock:
+            return self._cases.get(case_id.strip())
 
     def save(self, case: CaseRecord) -> CaseRecord:
         """Save or update a case record."""
-        now = datetime.now(timezone.utc).isoformat()
-        if not case.created_at:
-            case.created_at = now
-        case.updated_at = now
-        self._cases[case.case_id] = case
-        self._enforce_limit()
-        self._persist()
-        return case
+        with self._lock:
+            now = datetime.now(timezone.utc).isoformat()
+            if not case.created_at:
+                case.created_at = now
+            case.updated_at = now
+            self._cases[case.case_id] = case
+            self._enforce_limit()
+            self._persist()
+            return case
 
     def save_from_result(
         self,
@@ -168,55 +176,56 @@ class CaseStore:
         Returns None if the result is not suitable for archival (skipped, no
         job_id, etc.).
         """
-        if not hasattr(result, "success") or not hasattr(result, "details"):
-            return None
-        if getattr(result, "skipped", False):
-            return None
-        job_id = getattr(result, "job_id", "") or ""
-        if not job_id:
-            return None
+        with self._lock:
+            if not hasattr(result, "success") or not hasattr(result, "details"):
+                return None
+            if getattr(result, "skipped", False):
+                return None
+            job_id = getattr(result, "job_id", "") or ""
+            if not job_id:
+                return None
 
-        details = getattr(result, "details", {}) or {}
-        mode = str(details.get("mode", ""))
-        if not mode:
-            return None
+            details = getattr(result, "details", {}) or {}
+            mode = str(details.get("mode", ""))
+            if not mode:
+                return None
 
-        message = getattr(result, "message", "") or ""
-        report_url = str(details.get("published_report_url", ""))
-        normalized_bug_url = (bug_url or str(details.get("bug_url", ""))).strip()
-        problem_type = _infer_problem_type(message, mode)
-        root_cause_tags = _extract_root_cause_tags(message)
-        conclusion_confidence = _infer_confidence(message)
-        case_id = _stable_case_id(normalized_bug_url) if normalized_bug_url else job_id
-        previous = self._cases.get(case_id)
+            message = getattr(result, "message", "") or ""
+            report_url = str(details.get("published_report_url", ""))
+            normalized_bug_url = (bug_url or str(details.get("bug_url", ""))).strip()
+            problem_type = _infer_problem_type(message, mode)
+            root_cause_tags = _extract_root_cause_tags(message)
+            conclusion_confidence = _infer_confidence(message)
+            case_id = _stable_case_id(normalized_bug_url) if normalized_bug_url else job_id
+            previous = self._cases.get(case_id)
 
-        case = CaseRecord(
-            case_id=case_id,
-            problem_type=problem_type,
-            analysis_mode=mode,
-            conclusion=_truncate(message, 4000),
-            conclusion_confidence=conclusion_confidence,
-            report_url=report_url,
-            bug_url=normalized_bug_url,
-            root_cause_tags=root_cause_tags,
-            agent_provider=str(details.get("provider", "")),
-            duration_seconds=getattr(result, "duration_seconds", None),
-            request_text=_truncate(request_text, 2000),
-            job_id=job_id,
-            created_at=previous.created_at if previous is not None else "",
-        )
-        if previous is not None:
-            case.human_confirmed = previous.human_confirmed
-            case.reproduced = previous.reproduced
-            case.chat_id = previous.chat_id
-            case.sender_id = previous.sender_id
-            case.extra = dict(previous.extra)
+            case = CaseRecord(
+                case_id=case_id,
+                problem_type=problem_type,
+                analysis_mode=mode,
+                conclusion=_truncate(message, 4000),
+                conclusion_confidence=conclusion_confidence,
+                report_url=report_url,
+                bug_url=normalized_bug_url,
+                root_cause_tags=root_cause_tags,
+                agent_provider=str(details.get("provider", "")),
+                duration_seconds=getattr(result, "duration_seconds", None),
+                request_text=_truncate(request_text, 2000),
+                job_id=job_id,
+                created_at=previous.created_at if previous is not None else "",
+            )
+            if previous is not None:
+                case.human_confirmed = previous.human_confirmed
+                case.reproduced = previous.reproduced
+                case.chat_id = previous.chat_id
+                case.sender_id = previous.sender_id
+                case.extra = dict(previous.extra)
 
-        if event is not None:
-            case.chat_id = getattr(event, "chat_id", "")
-            case.sender_id = getattr(event, "sender_id", "")
+            if event is not None:
+                case.chat_id = getattr(event, "chat_id", "")
+                case.sender_id = getattr(event, "sender_id", "")
 
-        return self.save(case)
+            return self.save(case)
 
     def search(
         self,
@@ -228,38 +237,41 @@ class CaseStore:
         limit: int = 50,
     ) -> list[CaseRecord]:
         """Search cases by various criteria."""
-        results: list[CaseRecord] = []
-        for case in self._cases.values():
-            if problem_type and problem_type.lower() not in case.problem_type.lower():
-                continue
-            if analysis_mode and case.analysis_mode != analysis_mode:
-                continue
-            if root_cause_tag and root_cause_tag not in case.root_cause_tags:
-                continue
-            if keyword and keyword.lower() not in _case_text(case).lower():
-                continue
-            results.append(case)
+        with self._lock:
+            results: list[CaseRecord] = []
+            for case in self._cases.values():
+                if problem_type and problem_type.lower() not in case.problem_type.lower():
+                    continue
+                if analysis_mode and case.analysis_mode != analysis_mode:
+                    continue
+                if root_cause_tag and root_cause_tag not in case.root_cause_tags:
+                    continue
+                if keyword and keyword.lower() not in _case_text(case).lower():
+                    continue
+                results.append(case)
 
-        results.sort(key=lambda c: c.updated_at or c.created_at, reverse=True)
-        return results[:limit]
+            results.sort(key=lambda c: c.updated_at or c.created_at, reverse=True)
+            return results[:limit]
 
     def update_human_confirmation(self, case_id: str, *, confirmed: bool, notes: str = "") -> CaseRecord | None:
         """Mark a case as human-confirmed or not."""
-        case = self._cases.get(case_id)
-        if case is None:
-            return None
-        case.human_confirmed = confirmed
-        if notes:
-            case.extra["human_notes"] = notes
-        case.updated_at = datetime.now(timezone.utc).isoformat()
-        self._persist()
-        return case
+        with self._lock:
+            case = self._cases.get(case_id)
+            if case is None:
+                return None
+            case.human_confirmed = confirmed
+            if notes:
+                case.extra["human_notes"] = notes
+            case.updated_at = datetime.now(timezone.utc).isoformat()
+            self._persist()
+            return case
 
     def list_recent(self, *, limit: int = 20) -> list[CaseRecord]:
         """List most recent cases."""
-        cases = list(self._cases.values())
-        cases.sort(key=lambda c: c.updated_at or c.created_at, reverse=True)
-        return cases[:limit]
+        with self._lock:
+            cases = list(self._cases.values())
+            cases.sort(key=lambda c: c.updated_at or c.created_at, reverse=True)
+            return cases[:limit]
 
     def list_latest_by_bug(self, *, limit: int = 20) -> list[CaseRecord]:
         """List the latest visible record for each bug URL.
@@ -267,68 +279,73 @@ class CaseStore:
         Newer records with a bug URL already share a stable case_id. This
         grouping also keeps older job-id-based records tidy in the admin UI.
         """
-        grouped: dict[str, CaseRecord] = {}
-        for case in self._cases.values():
-            group_key = case.bug_url.strip() or case.case_id
-            previous = grouped.get(group_key)
-            if previous is None or (case.updated_at or case.created_at) > (
-                previous.updated_at or previous.created_at
-            ):
-                grouped[group_key] = case
-        cases = list(grouped.values())
-        cases.sort(key=lambda c: c.updated_at or c.created_at, reverse=True)
-        return cases[:limit]
+        with self._lock:
+            grouped: dict[str, CaseRecord] = {}
+            for case in self._cases.values():
+                group_key = case.bug_url.strip() or case.case_id
+                previous = grouped.get(group_key)
+                if previous is None or (case.updated_at or case.created_at) > (
+                    previous.updated_at or previous.created_at
+                ):
+                    grouped[group_key] = case
+            cases = list(grouped.values())
+            cases.sort(key=lambda c: c.updated_at or c.created_at, reverse=True)
+            return cases[:limit]
 
     def delete(self, case_id: str) -> CaseRecord | None:
         """Delete one case by id and return the deleted record."""
-        normalized = case_id.strip()
-        if not normalized:
-            return None
-        case = self._cases.pop(normalized, None)
-        if case is None:
-            return None
-        self._persist()
-        return case
+        with self._lock:
+            normalized = case_id.strip()
+            if not normalized:
+                return None
+            case = self._cases.pop(normalized, None)
+            if case is None:
+                return None
+            self._persist()
+            return case
 
     def delete_by_job_id(self, job_id: str) -> CaseRecord | None:
         """Delete the case that points at a job id."""
-        normalized = job_id.strip()
-        if not normalized:
+        with self._lock:
+            normalized = job_id.strip()
+            if not normalized:
+                return None
+            for case_id, case in list(self._cases.items()):
+                if case.job_id != normalized:
+                    continue
+                del self._cases[case_id]
+                self._persist()
+                return case
             return None
-        for case_id, case in list(self._cases.items()):
-            if case.job_id != normalized:
-                continue
-            del self._cases[case_id]
-            self._persist()
-            return case
-        return None
 
     def clear(self) -> int:
-        count = len(self._cases)
-        self._cases = {}
-        try:
-            self.state_file.unlink()
-        except FileNotFoundError:
-            pass
-        return count
+        with self._lock:
+            count = len(self._cases)
+            self._cases = {}
+            try:
+                self.state_file.unlink()
+            except FileNotFoundError:
+                pass
+            return count
 
     def prune_expired(self, *, max_age_hours: int, now: datetime | None = None) -> int:
-        if max_age_hours <= 0:
-            return 0
-        reference = now or datetime.now(timezone.utc)
-        cutoff = max_age_hours * 3600
-        removed = 0
-        for case_id in list(self._cases):
-            case = self._cases[case_id]
-            ts = _parse_timestamp(case.updated_at or case.created_at)
-            if ts is None:
-                continue
-            if reference.timestamp() - ts.timestamp() > cutoff:
-                del self._cases[case_id]
-                removed += 1
-        if removed:
-            self._persist()
-        return removed
+        with self._lock:
+            if max_age_hours <= 0:
+                return 0
+            reference = now or datetime.now(timezone.utc)
+            cutoff = max_age_hours * 3600
+            removed = 0
+            for case_id in list(self._cases):
+                case = self._cases[case_id]
+                ts = _parse_timestamp(case.updated_at or case.created_at)
+                if ts is None:
+                    continue
+                if reference.timestamp() - ts.timestamp() > cutoff:
+                    del self._cases[case_id]
+                    removed += 1
+            if removed:
+                self._persist()
+            return removed
 
     def _enforce_limit(self) -> None:
         if self.max_cases <= 0:

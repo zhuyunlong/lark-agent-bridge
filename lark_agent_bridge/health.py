@@ -522,13 +522,20 @@ class HealthMonitor:
         self._max_event_lag_seconds = max_event_lag_seconds
         self._max_disk_usage_percent = max_disk_usage_percent
         self._last_event_time: float | None = None
+        # Guards the small mutable fields (_event_consumer_pid, _last_event_time)
+        # touched concurrently by worker threads (record_event_processed) and the
+        # health endpoint (check_health). check_health itself stays lock-free; the
+        # leaf readers below grab the lock so there is no nested acquisition.
+        self._lock = threading.Lock()
 
     def set_event_consumer_pid(self, pid: int | None) -> None:
-        self._event_consumer_pid = pid
+        with self._lock:
+            self._event_consumer_pid = pid
 
     def record_event_processed(self) -> None:
         """Record that an event was just processed."""
-        self._last_event_time = time.time()
+        with self._lock:
+            self._last_event_time = time.time()
 
     def check_health(self) -> HealthStatus:
         """Run all health checks and return a status snapshot."""
@@ -589,17 +596,21 @@ class HealthMonitor:
         return status
 
     def _check_event_consumer(self) -> dict[str, Any]:
-        if self._event_consumer_pid is None:
+        with self._lock:
+            pid = self._event_consumer_pid
+        if pid is None:
             return {"pid": None, "alive": True, "note": "no PID tracked"}
-        alive = _process_alive(self._event_consumer_pid)
-        return {"pid": self._event_consumer_pid, "alive": alive}
+        alive = _process_alive(pid)
+        return {"pid": pid, "alive": alive}
 
     def _check_event_lag(self, now: float) -> dict[str, Any]:
-        if self._last_event_time is None:
+        with self._lock:
+            last_event_time = self._last_event_time
+        if last_event_time is None:
             return {"last_event_time": None, "lag_seconds": 0, "lag_exceeded": False}
-        lag = now - self._last_event_time
+        lag = now - last_event_time
         return {
-            "last_event_time": self._last_event_time,
+            "last_event_time": last_event_time,
             "lag_seconds": lag,
             "lag_exceeded": lag > self._max_event_lag_seconds,
         }

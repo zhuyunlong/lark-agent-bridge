@@ -299,6 +299,7 @@ class ReportHttpServer:
         conversation_store: ConversationContextStore | None = None,
         version_store: ReportVersionStore | None = None,
         knowledge_service: KnowledgeService | None = None,
+        lifecycle_store: object | None = None,
     ) -> None:
         self.config = config
         self.activity_store = activity_store
@@ -309,9 +310,17 @@ class ReportHttpServer:
         self.conversation_store = conversation_store
         self.version_store = version_store
         self.knowledge_service = knowledge_service
+        self.lifecycle_store = lifecycle_store
+        # Set by cli after the dispatcher starts (the report server is created
+        # earlier, in BridgeApp.__init__, so this can't be a constructor arg).
+        self._dispatcher_metrics_provider = None
         self._admin_auth: AdminAuth | None = None
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
+
+    def set_dispatcher_metrics_provider(self, provider) -> None:
+        """Wire the live EventDispatcher.metrics callable for /api/health."""
+        self._dispatcher_metrics_provider = provider
 
     def start(self) -> None:
         if not self.config.report_server.enabled or self._server is not None:
@@ -342,6 +351,8 @@ class ReportHttpServer:
             self.version_store,
             self.knowledge_service,
             self._admin_auth,
+            self.lifecycle_store,
+            lambda: (self._dispatcher_metrics_provider() if self._dispatcher_metrics_provider else None),
         )
         self._server = ThreadingHTTPServer(
             (resolve_bind_host(self.config.report_server.bind_host), self.config.report_server.port),
@@ -393,6 +404,8 @@ def _build_handler(
     version_store: ReportVersionStore | None = None,
     knowledge_service: KnowledgeService | None = None,
     admin_auth: AdminAuth | None = None,
+    lifecycle_store: object | None = None,
+    get_dispatcher_metrics=None,
 ):
     class _ReportHandler(SimpleHTTPRequestHandler):
         def __init__(self, *args, **kwargs):
@@ -885,15 +898,45 @@ def _build_handler(
 
         def _get_health(self) -> dict[str, object]:
             if health_monitor is None:
-                return {"healthy": True, "note": "health monitor not configured"}
-            check_method = getattr(health_monitor, "check_health", None)
-            if check_method is None:
-                return {"healthy": True, "note": "health monitor has no check_health method"}
-            status = check_method()
-            to_dict = getattr(status, "to_dict", None)
-            if to_dict is not None:
-                return to_dict()
-            return {"healthy": True}
+                result = {"healthy": True, "note": "health monitor not configured"}
+            else:
+                check_method = getattr(health_monitor, "check_health", None)
+                if check_method is None:
+                    result = {"healthy": True, "note": "health monitor has no check_health method"}
+                else:
+                    status = check_method()
+                    to_dict = getattr(status, "to_dict", None)
+                    result = to_dict() if to_dict is not None else {"healthy": True}
+            components = result.setdefault("components", {})
+            # Concurrency dispatcher metrics (Phase 3) — read live via provider.
+            if get_dispatcher_metrics is not None:
+                try:
+                    metrics = get_dispatcher_metrics()
+                    if metrics is not None:
+                        components["dispatcher"] = metrics
+                except Exception:
+                    pass
+            # Active job lifecycles (Phase 4) — summary only, no transitions list
+            # (avoids iterating a list a worker thread may be appending to).
+            if lifecycle_store is not None:
+                try:
+                    active = lifecycle_store.list_active()
+                    components["lifecycle"] = {
+                        "active_count": len(active),
+                        "active_jobs": [
+                            {
+                                "lifecycle_id": lc.lifecycle_id,
+                                "state": lc.state.value,
+                                "chat_id": lc.chat_id,
+                                "request_text": lc.request_text,
+                                "elapsed_seconds": round(lc.elapsed_seconds, 1),
+                            }
+                            for lc in active[:20]
+                        ],
+                    }
+                except Exception:
+                    pass
+            return result
 
         def _knowledge_sources(self) -> list[dict[str, object]]:
             if knowledge_service is None:

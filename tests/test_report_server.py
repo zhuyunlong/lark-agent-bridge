@@ -440,6 +440,55 @@ class ReportServerTests(unittest.TestCase):
         self.assertIsNone(case_store.get("case_1"))
         self.assertEqual(missing_history.exception.code, 404)
 
+    def test_http_server_health_exposes_dispatcher_and_lifecycle(self):
+        from lark_agent_bridge.health import HealthMonitor
+        from lark_agent_bridge.lifecycle import LifecycleStore, AnalysisType, AnalysisState
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            config = BridgeConfig(
+                dry_run=False,
+                data_dir=data_dir,
+                workspace_root=data_dir,
+                report_server=ReportServerOptions(
+                    enabled=True,
+                    bind_host="127.0.0.1",
+                    port=0,
+                    public_base_url="http://127.0.0.1:0/reports",
+                ),
+            )
+            lifecycle_store = LifecycleStore()
+            lc = lifecycle_store.create(AnalysisType.UNKNOWN, chat_id="oc_1", request_text="分析 bug")
+            lc.transition_to(AnalysisState.QUEUED)
+            server = ReportHttpServer(
+                config,
+                health_monitor=HealthMonitor(data_dir=data_dir),
+                lifecycle_store=lifecycle_store,
+            )
+            server.set_dispatcher_metrics_provider(lambda: {
+                "max_workers": 3, "active_workers": 1, "queue_depth": 2,
+                "chat_locks_held": 1, "total_dispatched": 5,
+                "total_light": 2, "total_heavy": 3,
+            })
+            try:
+                server.start()
+            except (PermissionError, OSError) as exc:
+                self.skipTest(f"local HTTP bind is unavailable in this environment: {exc}")
+            assert server._server is not None
+            port = server._server.server_address[1]
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=5) as response:
+                    health = json.loads(response.read().decode("utf-8"))
+            finally:
+                server._server.shutdown()
+            comps = health.get("components", {})
+            assert comps.get("dispatcher", {}).get("max_workers") == 3
+            assert comps.get("dispatcher", {}).get("queue_depth") == 2
+            assert comps.get("lifecycle", {}).get("active_count") == 1
+            jobs = comps["lifecycle"]["active_jobs"]
+            assert jobs[0]["state"] == "queued"
+            assert jobs[0]["chat_id"] == "oc_1"
+
     def test_http_server_can_terminate_running_session(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)

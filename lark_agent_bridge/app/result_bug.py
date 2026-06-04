@@ -15,7 +15,8 @@ class _ResultBugMixin:
         updated = self._update_progress_card(event, status=status, session_id=session_id, result=result, note=note)
         key = self._progress_card_state_key(event, session_id=session_id)
         if updated:
-            self._progress_cards.pop(key, None)
+            with self._progress_cards_lock:
+                self._progress_cards.pop(key, None)
         return updated
 
     def _prune_stale_progress_cards(self) -> None:
@@ -26,14 +27,15 @@ class _ResultBugMixin:
         progress are never pruned prematurely.
         """
         now = datetime.now(timezone.utc)
-        stale_keys = [
-            key
-            for key, state in self._progress_cards.items()
-            if isinstance(state.get("last_active_at", state.get("started_at")), datetime)
-            and (now - state.get("last_active_at", state["started_at"])).total_seconds() > self._progress_cards_max_age_seconds
-        ]
-        for key in stale_keys:
-            self._progress_cards.pop(key, None)
+        with self._progress_cards_lock:
+            stale_keys = [
+                key
+                for key, state in self._progress_cards.items()
+                if isinstance(state.get("last_active_at", state.get("started_at")), datetime)
+                and (now - state.get("last_active_at", state["started_at"])).total_seconds() > self._progress_cards_max_age_seconds
+            ]
+            for key in stale_keys:
+                self._progress_cards.pop(key, None)
 
     def _progress_result_note(self, result: TaskResult) -> str | None:
         message = (result.message or "").strip()
@@ -531,7 +533,8 @@ class _ResultBugMixin:
         result: TaskResult | None = None,
         note: str | None = None,
     ) -> dict[str, object]:
-        card_state = self._progress_cards.get(key, {})
+        with self._progress_cards_lock:
+            card_state = self._progress_cards.get(key, {})
         details = dict(card_state.get("details") if isinstance(card_state.get("details"), dict) else {})
         if result is not None:
             if status in {"completed", "failed"}:

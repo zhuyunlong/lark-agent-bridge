@@ -380,7 +380,8 @@ class _LogResourcesMixin:
 
     def _remember_progress_card_aliases(self, event: LarkEvent, root_message_id: str) -> None:
         for key in (root_message_id, event.message_id, event.event_id):
-            card_state = self._progress_cards.get(str(key or ""))
+            with self._progress_cards_lock:
+                card_state = self._progress_cards.get(str(key or ""))
             if not isinstance(card_state, dict):
                 continue
             message_id = str(card_state.get("message_id") or "").strip()

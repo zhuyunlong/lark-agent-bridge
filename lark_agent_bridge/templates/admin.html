@@ -501,6 +501,7 @@
     let casesData = [];
     let skillsData = [];
     let daemonData = {};
+    let healthData = {};
     let knowledgeReportData = {};
     let knowledgeReportVersion = "";
 
@@ -624,6 +625,17 @@
       cards.appendChild(card("ready", daemonData.ready));
       cards.appendChild(card("restarts", daemonData.restart_count));
       cards.appendChild(card("updated", daemonData.updated_at));
+      const comps = (healthData && healthData.components) || {};
+      if (comps.dispatcher) {
+        const dm = comps.dispatcher;
+        cards.appendChild(card("workers", dm.active_workers + "/" + dm.max_workers));
+        cards.appendChild(card("queue", dm.queue_depth));
+        cards.appendChild(card("dispatched", dm.total_dispatched));
+        cards.appendChild(card("light/heavy", dm.total_light + "/" + dm.total_heavy));
+      }
+      if (comps.lifecycle) {
+        cards.appendChild(card("active jobs", comps.lifecycle.active_count));
+      }
       $("daemon-json").textContent = JSON.stringify(daemonData, null, 2);
     }
 
@@ -1215,6 +1227,12 @@
       const response = await authFetch("/api/daemon", { cache: "no-store" });
       const data = await response.json();
       daemonData = data.daemon || {};
+      try {
+        const healthResp = await authFetch("/api/health", { cache: "no-store" });
+        healthData = await healthResp.json();
+      } catch (e) {
+        healthData = {};
+      }
       renderDaemon();
     }
 

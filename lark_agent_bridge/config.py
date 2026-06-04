@@ -417,6 +417,27 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
                     EventConsumerOptions().stale_light_interaction_grace_seconds,
                 )
             ),
+            max_concurrent_jobs=int(
+                event_consumer_data.get(
+                    "max_concurrent_jobs", EventConsumerOptions().max_concurrent_jobs
+                )
+            ),
+            max_queue_size=int(
+                event_consumer_data.get(
+                    "max_queue_size", EventConsumerOptions().max_queue_size
+                )
+            ),
+            heavy_job_timeout_seconds=float(
+                event_consumer_data.get(
+                    "heavy_job_timeout_seconds",
+                    EventConsumerOptions().heavy_job_timeout_seconds,
+                )
+            ),
+            light_inline=bool(
+                event_consumer_data.get(
+                    "light_inline", EventConsumerOptions().light_inline
+                )
+            ),
         ),
         lark=LarkOptions(
             reply_in_thread=bool(lark_data.get("reply_in_thread", False)),
