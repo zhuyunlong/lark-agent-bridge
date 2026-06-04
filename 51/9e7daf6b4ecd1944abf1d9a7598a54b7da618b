@@ -1,0 +1,68 @@
+lark_agent_bridge/dispatcher.py
+  dcc0652082c956c2 1-278
+lark_agent_bridge/templates/admin.html
+  dcc0652082c956c2 504,628-638,1230-1235
+lark_agent_bridge/lifecycle.py
+  dcc0652082c956c2 22,140-145,176-186,188-191,280-282,295-306,309-310,314-318,322-326,330-331,335-341,344-348,352-353,357-358,362-371,374-375
+lark_agent_bridge/state.py
+  dcc0652082c956c2 24-27,35-50,132-136,139-144,150-155,158-180,196-220,223-229,239-246,266-273,276-289,292-309,312-326
+lark_agent_bridge/app/log_resources.py
+  dcc0652082c956c2 383-384
+lark_agent_bridge/config.py
+  dcc0652082c956c2 420-440
+lark_agent_bridge/health.py
+  dcc0652082c956c2 525-529,532-533,537-538,599-601,603-604,607-609,611,613
+docs/concurrency-design-plan.md
+  dcc0652082c956c2 10-25,28,30,33,44,48-49,52,54-56,58-80,82-83,89,99,101,106,108,111-115,117-123,127,129,133-142,144,146,149,151,153,156-183,185,187,190-202,205-209,211,213,215,217,219,221-223,225,227,229,231-233,235,237,239,241,245,247,253-254,257-258,261,263,267,271-272,275-279,295,297,300,302-307,313,315,318-319,322-328,333,335,337-338,340,342,348,350-354,362-366,374-379,385,387,389,391,393-395,399,402-406,408-411,413-414,416,422,425-429,432,435-438,441,444-446,448-464
+lark_agent_bridge/app/handle_event.py
+  dcc0652082c956c2 7,49-52,89,1654-1673,1684-1686,1689-1690,1720-1723,1728-1729,1740-1742,1744-1754,1766-1768,1782-1790
+tests/test_state_thread_safety.py
+  dcc0652082c956c2 1-121
+tests/test_dispatcher.py
+  dcc0652082c956c2 1-296
+lark_agent_bridge/app/result_bug.py
+  dcc0652082c956c2 18-19,30-38,536-537
+lark_agent_bridge/cli.py
+  dcc0652082c956c2 13,145-155,158,160
+tests/test_report_server.py
+  dcc0652082c956c2 443-491
+lark_agent_bridge/models.py
+  dcc0652082c956c2 53-57
+lark_agent_bridge/report_server.py
+  dcc0652082c956c2 302,313-316,321-323,354-355,407-408,901-939
+lark_agent_bridge/case_store.py
+  dcc0652082c956c2 43,140-143,147-148,151-152,156-164,179-186,188-191,193-200,202-222,224-226,228,240-251,253-254,258-267,271-274,282-293,297-305,309-318,322-329,332-348
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.22",
+  "base_commit_sha": "519e7daf6b4ecd1944abf1d9a7598a54b7da618b",
+  "prompts": {
+    "6492f767ca8007cc": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e86bd-618b-70a0-8adf-bf403bf7981c",
+        "model": "gpt-5.5"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 2456,
+      "overriden_lines": 0
+    },
+    "dcc0652082c956c2": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6cd6bef5-64d1-4714-ba70-c4fe3c222bb6",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 1636,
+      "total_deletions": 937,
+      "accepted_lines": 1604,
+      "overriden_lines": 0
+    }
+  }
+}
