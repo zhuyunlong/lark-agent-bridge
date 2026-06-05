@@ -1,0 +1,194 @@
+tests/test_parser.py
+  a438b8a5f77ebb96 174-191
+lark_agent_bridge/config.py
+  59eb7c892de884b2 441-446
+  a718a01dd440d2e6 558-569
+lark_agent_bridge/app/log_resources.py
+  a718a01dd440d2e6 1089-1098
+tests/test_app_server_investigation_runner.py
+  a718a01dd440d2e6 34-35,45-46,162-233
+tests/test_agent_runtime.py
+  59eb7c892de884b2 356-358,375-377
+tests/test_report_version.py
+  59eb7c892de884b2 6,168-245
+lark_agent_bridge/report_version.py
+  59eb7c892de884b2 16,115-119,143-165,167-168,170-175,178-179,182-186,189-195,200-206,214-226,240-244,246-252,254-260,264-265,268-272,277-286,292-293,296-297,301
+lark_agent_bridge/app_server_investigation.py
+  a718a01dd440d2e6 455-456
+  ba4e9e69ea825b62 15,690-697,699-722,761-777
+tests/test_app_followup_reply.py
+  a438b8a5f77ebb96 6-29,435-533
+  d4a387bebecc2499 30-252
+docs/superpowers/plans/2026-06-04-group-chat-chain-fix.md
+  d4a387bebecc2499 4,64,74-77,79-82,84,86-87,95-98
+  a438b8a5f77ebb96 1-3,5-63,65-73,78,83,85,88-94
+tests/test_dispatcher.py
+  59eb7c892de884b2 59-65,73-74,78-84,92-93,149-166,192-195,197-204,208-209,214-284,286-290,296-302,304-305
+lark_agent_bridge/parser.py
+  a438b8a5f77ebb96 1155-1160
+tests/test_app_bug_request.py
+  a438b8a5f77ebb96 1442-1443,1509-1510,1543,1710,1736
+lark_agent_bridge/reporting/app_server_report_html.py
+  ba4e9e69ea825b62 1-3,6-40,45,68,99,102-161,166-221,229-255,366-367,369-372,393-394,415-442,444-445,477-809
+  823bdf3bc3137710 4-5,41-44,46-67,69-98,100-101,162-165,222-228,256-365,368,373-392,395-414,443,446-476
+tests/test_config.py
+  a718a01dd440d2e6 294-295,309-310
+tests/test_app_server_report_html.py
+  ba4e9e69ea825b62 1-4,6-99,110-122,132,136-137,139-201
+  823bdf3bc3137710 5,100-109,123-131,133-135,138
+lark_agent_bridge/app/handle_event.py
+  a718a01dd440d2e6 592-609
+  a438b8a5f77ebb96 1150-1154
+tests/test_app_server_investigation.py
+  a718a01dd440d2e6 170-214
+lark_agent_bridge/models.py
+  59eb7c892de884b2 58-61
+  a718a01dd440d2e6 108-110
+docs/superpowers/plans/2026-06-04-same-chat-concurrency.md
+  59eb7c892de884b2 1-61
+lark_agent_bridge/agents/bug/custom_skill.py
+  a718a01dd440d2e6 745,754,768,784,915-916,939,958
+lark_agent_bridge/dispatcher.py
+  59eb7c892de884b2 11-13,56-60,88,93-96,105-114,163-164,166-177,181,202-255,314-330,350-362,370,374-380
+config/config.example.toml
+  a718a01dd440d2e6 117-119
+lark_agent_bridge/cli.py
+  59eb7c892de884b2 152
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.22",
+  "base_commit_sha": "87de2cf097318758a20539de93cdaaabb5a8f929",
+  "prompts": {
+    "3b7055b462d6b0d7": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e785c-6809-7b11-979e-b5a10c2dbd84",
+        "model": "gpt-5.4"
+      },
+      "human_author": null,
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 0,
+      "overriden_lines": 0
+    },
+    "462bd152a3e603e6": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "45b74730-6d4b-488b-b279-6f4ffd9e465f",
+        "model": "mimo-v2.5-pro"
+      },
+      "human_author": null,
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 0,
+      "overriden_lines": 2
+    },
+    "59eb7c892de884b2": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "25342b16-0085-4fad-9e99-382e42561d24",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 628,
+      "total_deletions": 188,
+      "accepted_lines": 548,
+      "overriden_lines": 0
+    },
+    "654f38df490139e2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e7842-c3ea-7dc2-81d0-ac7a6a171d75",
+        "model": "gpt-5.4"
+      },
+      "human_author": null,
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 2,
+      "overriden_lines": 9
+    },
+    "8175fd987f717053": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "4173e492-19d4-4741-b4f3-0e40dc65b08c",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 12,
+      "total_deletions": 0,
+      "accepted_lines": 0,
+      "overriden_lines": 0
+    },
+    "823bdf3bc3137710": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e92cd-bbf0-7923-a885-e7370acf3e3e",
+        "model": "gpt-5.5"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 278,
+      "total_deletions": 64,
+      "accepted_lines": 278,
+      "overriden_lines": 0
+    },
+    "a438b8a5f77ebb96": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "578a40fd-2c62-40cd-a061-21bf6f5a1888",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 612,
+      "total_deletions": 22,
+      "accepted_lines": 596,
+      "overriden_lines": 0
+    },
+    "a718a01dd440d2e6": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6cb5ab39-6a65-4187-99e5-3ec911f9caca",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 266,
+      "total_deletions": 10,
+      "accepted_lines": 266,
+      "overriden_lines": 0
+    },
+    "ba4e9e69ea825b62": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "6798395c-88ae-4421-b847-511048b17c1f",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 854,
+      "total_deletions": 68,
+      "accepted_lines": 783,
+      "overriden_lines": 0
+    },
+    "d4a387bebecc2499": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e91bc-0809-7091-9e47-743a3e802da2",
+        "model": "gpt-5.5"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 240,
+      "total_deletions": 13,
+      "accepted_lines": 240,
+      "overriden_lines": 0
+    }
+  }
+}
