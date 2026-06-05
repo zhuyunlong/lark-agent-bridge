@@ -1,0 +1,34 @@
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.22",
+  "base_commit_sha": "146e697655495e025b9ccff2a22168f8baee74bf",
+  "prompts": {
+    "462bd152a3e603e6": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "45b74730-6d4b-488b-b279-6f4ffd9e465f",
+        "model": "mimo-v2.5-pro"
+      },
+      "human_author": null,
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 2,
+      "overriden_lines": 0
+    },
+    "654f38df490139e2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e7842-c3ea-7dc2-81d0-ac7a6a171d75",
+        "model": "gpt-5.4"
+      },
+      "human_author": null,
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 11,
+      "overriden_lines": 0
+    }
+  }
+}
