@@ -3,6 +3,14 @@ from __future__ import annotations
 from ._shared import *  # noqa: F401,F403
 
 
+_FOCUS_LOOKBACK_SECONDS = 3600
+_FOCUS_FORWARD_BUFFER_SECONDS = 300
+_FOCUS_MAX_LINES_PER_FILE = 15000
+_FOCUS_MIN_LINES_PER_FILE = 2000
+_FOCUS_MAX_LOOKBACK_SECONDS = 21600
+_FOCUS_EXPAND_STEP_SECONDS = 3600
+
+
 class _CustomSkillMixin:
     def _time_match_note(self, fault_time: str, sessions: object) -> str:
         if not fault_time:
@@ -217,6 +225,33 @@ class _CustomSkillMixin:
             "日志扩展也必须先限定包名、时间窗和关键词；不要对整个日志缓存做无边界递归搜索。",
             "每轮最多保留最有价值的少量源码/日志锚点，优先读具体文件行号，再产出结论；不要把大段检索结果当作分析正文。",
         ]
+
+    def _detect_dominant_pid(
+        self,
+        lines: list[str],
+        fault_dt: "datetime | None",
+        *,
+        reference_year: int,
+        window_seconds: int = 120,
+    ) -> "str | None":
+        """故障时刻 ±window_seconds 内出现最频繁的 PID（时间戳后第一个数字）。"""
+        if fault_dt is None:
+            return None
+        counts: dict[str, int] = {}
+        for line in lines:
+            line_dt = self._parse_log_line_datetime(line, reference_year=reference_year)
+            if line_dt is None:
+                continue
+            if abs((line_dt - fault_dt).total_seconds()) > window_seconds:
+                continue
+            match = re.search(r"\d{2}:\d{2}:\d{2}(?:\.\d+)?\s+(\d+)\s+\d+", line)
+            if not match:
+                continue
+            pid = match.group(1)
+            counts[pid] = counts.get(pid, 0) + 1
+        if not counts:
+            return None
+        return max(counts.items(), key=lambda kv: (kv[1], kv[0]))[0]
 
     def _file_agent_focus_candidates(
         self,
