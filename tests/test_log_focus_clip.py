@@ -134,3 +134,15 @@ def test_build_focus_dir_clips_large_main_log(tmp_path):
     dest = copied[0]
     n = sum(1 for _ in dest.open(encoding="utf-8"))
     assert n <= 15000, f"裁行后应 <= 15000，实际 {n}"
+
+
+def test_log_rules_contain_fault_time_gate_and_no_raw_reread():
+    m = _mk()
+    rules = " ".join(m._file_agent_log_rules("app_server_investigation"))
+    budget = " ".join(m._file_agent_search_budget_rules())
+    # 故障时间门槛：之后的日志不作根因/源码归因证据
+    assert "故障时间之后" in rules or "故障时刻之后" in rules
+    assert "证据" in rules
+    # 不回读原始全量 logs
+    assert "log_focus" in budget
+    assert "bug_cache" in budget or "原始日志" in budget
