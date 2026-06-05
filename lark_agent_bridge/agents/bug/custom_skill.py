@@ -351,7 +351,12 @@ class _CustomSkillMixin:
                 decoded_aux.append(path)
                 continue
             file_dt = self._parse_log_file_datetime(path.name)
-            if fault_dt is None or file_dt is None:
+            if file_dt is None:
+                # 主日志（logd/montecarlo）文件名常无时间戳；裁行阶段会按故障时间窗收窄，故此处直接纳入
+                if self._is_montecarlo_or_logd_path(path):
+                    selected.append(path)
+                continue
+            if fault_dt is None:
                 continue
             candidate_dt = datetime.fromtimestamp(time.mktime(file_dt))
             if abs((candidate_dt - fault_dt).total_seconds()) > 3600:

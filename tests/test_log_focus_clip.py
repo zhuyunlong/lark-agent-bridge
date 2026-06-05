@@ -3,9 +3,10 @@ from pathlib import Path
 
 from lark_agent_bridge.agents.bug.archive_extract import _ArchiveExtractMixin
 from lark_agent_bridge.agents.bug.custom_skill import _CustomSkillMixin
+from lark_agent_bridge.agents.bug.ld_executor import _LdExecutorMixin
 
 
-class _Mixin(_ArchiveExtractMixin, _CustomSkillMixin):
+class _Mixin(_ArchiveExtractMixin, _CustomSkillMixin, _LdExecutorMixin):
     """裸 mixin 实例，仅测纯裁行逻辑，不触发 __init__。"""
 
 
@@ -87,3 +88,22 @@ def test_clip_expands_window_when_too_few_lines():
         lines.insert(0, f"05-25 14:55:{i%60:02d}.000 2488 1 I B: older{i}")  # 故障前~1h55m
     out = m._clip_log_lines(lines, fault, is_main_log=False)
     assert len(out) >= 2000  # 扩窗后达到下限
+
+
+def test_focus_candidates_includes_logd_main_txt(tmp_path):
+    m = _mk()
+    logs = tmp_path / "logs"
+    (logs / "logd").mkdir(parents=True)
+    main_txt = logs / "logd" / "main.txt"
+    main_txt.write_text("05-25 16:50:41.000 2488 1 I A: x\n", encoding="utf-8")
+    # 一个带时间戳的普通 app 日志，确保正常路径仍工作
+    app = logs / "app" / "com.x"
+    app.mkdir(parents=True)
+    (app / "user0_main_2026-05-25_16-00.alog.log").write_text(
+        "05-25 16:50:41.000 2488 1 I B: y\n", encoding="utf-8"
+    )
+    cands = m._file_agent_focus_candidates(
+        input_path=logs, fault_time="2026-05-25 16:50:41", analysis_kind="app_server_investigation"
+    )
+    names = {p.name for p in cands}
+    assert "main.txt" in names
