@@ -253,6 +253,82 @@ class _CustomSkillMixin:
             return None
         return max(counts.items(), key=lambda kv: (kv[1], kv[0]))[0]
 
+    def _clip_log_lines(
+        self,
+        lines: list[str],
+        fault_dt: "datetime | None",
+        *,
+        is_main_log: bool,
+    ) -> list[str]:
+        """按时间窗 + 单文件上限末段 + （主日志）PID 连续性裁行。
+
+        fault_dt 为 None 时退化为「保留末段最多 _FOCUS_MAX_LINES_PER_FILE 行」。
+        """
+        if fault_dt is None:
+            return lines[-_FOCUS_MAX_LINES_PER_FILE:]
+        ref_year = fault_dt.year
+        fault_ts = fault_dt.timestamp()
+        upper = fault_ts + _FOCUS_FORWARD_BUFFER_SECONDS
+
+        parsed: list[tuple[str, "float | None", "str | None"]] = []
+        for line in lines:
+            ldt = self._parse_log_line_datetime(line, reference_year=ref_year)
+            ts = ldt.timestamp() if ldt is not None else None
+            pid = None
+            pm = re.search(r"\d{2}:\d{2}:\d{2}(?:\.\d+)?\s+(\d+)\s+\d+", line)
+            if pm:
+                pid = pm.group(1)
+            parsed.append((line, ts, pid))
+
+        target_pid = (
+            self._detect_dominant_pid(lines, fault_dt, reference_year=ref_year)
+            if is_main_log
+            else None
+        )
+
+        def _window(lookback: int) -> list[tuple[str, "float | None", "str | None"]]:
+            lower = fault_ts - lookback
+            sel = []
+            for item in parsed:
+                _, ts, pid = item
+                if ts is None:
+                    continue
+                if ts < lower or ts > upper:
+                    continue
+                if target_pid is not None and pid is not None and pid != target_pid:
+                    continue
+                sel.append(item)
+            return sel
+
+        def _expanded_range_hits_other_pid(previous_lookback: int, next_lookback: int) -> bool:
+            if target_pid is None:
+                return False
+            previous_lower = fault_ts - previous_lookback
+            next_lower = fault_ts - next_lookback
+            for _, ts, pid in parsed:
+                if ts is None or pid is None:
+                    continue
+                if next_lower <= ts < previous_lower and ts <= upper and pid != target_pid:
+                    return True
+            return False
+
+        lookback = _FOCUS_LOOKBACK_SECONDS
+        selected = _window(lookback)
+        while (
+            len(selected) < _FOCUS_MIN_LINES_PER_FILE
+            and lookback < _FOCUS_MAX_LOOKBACK_SECONDS
+        ):
+            next_lookback = min(lookback + _FOCUS_EXPAND_STEP_SECONDS, _FOCUS_MAX_LOOKBACK_SECONDS)
+            if is_main_log and _expanded_range_hits_other_pid(lookback, next_lookback):
+                break
+            lookback = next_lookback
+            selected = _window(lookback)
+
+        out = [item[0] for item in selected]
+        if len(out) > _FOCUS_MAX_LINES_PER_FILE:
+            out = out[-_FOCUS_MAX_LINES_PER_FILE:]
+        return out
+
     def _file_agent_focus_candidates(
         self,
         *,
