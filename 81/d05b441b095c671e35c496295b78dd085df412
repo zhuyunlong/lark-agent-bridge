@@ -1,0 +1,49 @@
+lark_agent_bridge/agents/bug/custom_skill.py
+  82c390f4e9a8853d 378-379
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.22",
+  "base_commit_sha": "81d05b441b095c671e35c496295b78dd085df412",
+  "prompts": {
+    "462bd152a3e603e6": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "45b74730-6d4b-488b-b279-6f4ffd9e465f",
+        "model": "mimo-v2.5-pro"
+      },
+      "human_author": null,
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 2,
+      "overriden_lines": 0
+    },
+    "654f38df490139e2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e7842-c3ea-7dc2-81d0-ac7a6a171d75",
+        "model": "gpt-5.4"
+      },
+      "human_author": null,
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 11,
+      "overriden_lines": 0
+    },
+    "82c390f4e9a8853d": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "b0364cce-be55-428a-9515-f6d03350ea01",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 2,
+      "total_deletions": 2,
+      "accepted_lines": 2,
+      "overriden_lines": 0
+    }
+  }
+}
