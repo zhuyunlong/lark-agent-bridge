@@ -395,6 +395,7 @@ class _CustomSkillMixin:
         manifest_path = analysis_dir / "log_focus.md"
         focus_dir.mkdir(parents=True, exist_ok=True)
         copied: list[Path] = []
+        fault_dt = self._parse_bug_datetime(fault_time)
         for source in candidates:
             if input_path is not None and input_path.exists() and input_path.is_dir():
                 try:
@@ -406,7 +407,17 @@ class _CustomSkillMixin:
             dest = focus_dir / relative
             dest.parent.mkdir(parents=True, exist_ok=True)
             try:
-                shutil.copy2(source, dest)
+                with source.open(encoding="utf-8", errors="replace") as handle:
+                    raw_lines = [line.rstrip("\n") for line in handle]
+            except OSError:
+                continue
+            clipped = self._clip_log_lines(
+                raw_lines,
+                fault_dt,
+                is_main_log=self._is_montecarlo_or_logd_path(source),
+            )
+            try:
+                dest.write_text("\n".join(clipped) + ("\n" if clipped else ""), encoding="utf-8")
             except OSError:
                 continue
             copied.append(dest)

@@ -107,3 +107,30 @@ def test_focus_candidates_includes_logd_main_txt(tmp_path):
     )
     names = {p.name for p in cands}
     assert "main.txt" in names
+
+
+def test_build_focus_dir_clips_large_main_log(tmp_path):
+    m = _mk()
+    logs = tmp_path / "logs"
+    mc = logs / "app" / "com.xiaopeng.montecarlo"
+    mc.mkdir(parents=True)
+    big = mc / "user0_main_2026-05-25_16-00.alog.log"
+    rows = []
+    base = datetime(2026, 5, 25, 16, 0, 0)
+    for i in range(40000):
+        d = datetime.fromtimestamp(base.timestamp() + i * 0.05)
+        rows.append(f"05-25 {d:%H:%M:%S}.000 2488 1 I L: line{i}")
+    big.write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+    analysis_dir = tmp_path / "out"
+    analysis_dir.mkdir()
+    focus_dir, manifest, copied = m._build_file_agent_focus_dir(
+        input_path=logs,
+        fault_time="2026-05-25 16:50:41",
+        analysis_kind="app_server_investigation",
+        analysis_dir=analysis_dir,
+    )
+    assert copied, "应有裁剪文件产出"
+    dest = copied[0]
+    n = sum(1 for _ in dest.open(encoding="utf-8"))
+    assert n <= 15000, f"裁行后应 <= 15000，实际 {n}"
