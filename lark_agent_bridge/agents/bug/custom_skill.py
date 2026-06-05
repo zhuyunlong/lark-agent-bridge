@@ -375,8 +375,8 @@ class _CustomSkillMixin:
                 if abs((candidate_dt - fault_dt).total_seconds()) <= 3600:
                     selected.append(path)
         ranked = sorted(
-            {path.resolve() for path in [*decoded_aux, *selected]},
-            key=lambda item: (self._log_file_priority(item), str(item)),
+            [*decoded_aux, *selected],
+            key=lambda item: (self._log_file_priority(item.resolve()), str(item.resolve())),
         )
         return ranked[:24]
 
