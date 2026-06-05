@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import html
 from pathlib import Path
 import concurrent.futures
 import json
@@ -13,7 +12,7 @@ from typing import Callable
 
 from .downloader import DownloadError, LogDownloader
 from .models import AppServerInvestigationRequest, BridgeConfig, DownloadResource, LarkEvent, TaskResult, create_job_context
-from .reporting.source_report_html import render_cards, render_details, render_document, render_issue_list, render_section, render_table
+from .reporting.app_server_report_html import render_app_server_report
 from .skill_manager import SkillManager, SkillRecord
 
 
@@ -453,6 +452,8 @@ class AppServerInvestigationRunner:
             progress_callback=progress_callback,
             timeout=int(self.config.codex_app_server.turn_timeout_seconds or self.config.bug_analysis.timeout_seconds),
             bridge_session_id=prepared.bridge_session_id,
+            model_override=self.config.bug_analysis.app_server_investigation.model,
+            reasoning_effort_override=self.config.bug_analysis.app_server_investigation.reasoning_effort,
         )
         if not result.get("ok"):
             return TaskResult(
@@ -685,61 +686,41 @@ class AppServerInvestigationRunner:
         inventory_payload: dict[str, object],
         usage_payload: dict[str, object],
     ) -> str:
-        summary = _markdown_summary(markdown) or "AI 自主分析完成。"
         sections = _markdown_sections(markdown)
-        bug_label = prepared.bug_url or (prepared.title or "直传文件")
-        cards = [
-            ("模式", "AI 自主分析", "green", "Bridge 完成前置，Codex app-server 自行选择 skill。"),
-            ("触发词", prepared.trigger_term or prepared.trigger_mode or "未知", "green", ""),
-            ("目标", bug_label, "green", ""),
-            ("故障时间", prepared.fault_time or "未识别", "green" if prepared.fault_time else "yellow", ""),
-            (
-                "AI Token",
-                _token_summary_text(
-                    {
-                        "app_server_input_tokens": usage_payload.get("input_tokens"),
-                        "app_server_cached_input_tokens": usage_payload.get("cached_input_tokens"),
-                        "app_server_output_tokens": usage_payload.get("output_tokens"),
-                        "app_server_total_tokens": usage_payload.get("total_tokens"),
-                    }
-                ),
-                "green",
-                "",
-            ),
-            ("Skill 数", str(len(inventory_payload.get("skills") or [])), "green", ""),
-        ]
-        context_rows = [
-            ("用户原始请求", prepared.request_text or "未提供"),
-            ("用户补充描述", prepared.prompt_text or "未提供"),
-            ("Bug 标题", prepared.title or "未提供"),
-            ("Bug 描述", _truncate(prepared.description, 600) or "未提供"),
-            ("解密/准备后日志目录", str(prepared.prepared_input or "")),
-            ("聚焦日志目录", str(prepared.focused_log_input or "")),
-            ("上下文文件", str(context_path)),
-            ("Skill 清单", str(skill_inventory_path)),
-        ]
-        inventory_count = len(inventory_payload.get("skills") or [])
-        causes = _section_issue_items(sections.get("最可能原因", ""))
-        pending = _section_issue_items(sections.get("待确认项", ""))
-        actions = _section_issue_items(sections.get("建议动作", ""))
-        summary_body = html.escape(sections.get("结论摘要", summary) or summary)
-        body = (
-            '<div class="container">'
-            f"<h1>AI 自主分析报告</h1>"
-            f'<div class="sub">Bridge 已完成 bug/日志前置，Codex app-server 已基于上下文与 skill 清单生成只读分析结论。</div>'
-            f'<div class="verdict v-green">{summary}</div>'
-            f'<div class="cards">{render_cards(cards)}</div>'
-            f'{render_section("结论摘要", f"<pre>{summary_body}</pre>")}'
-            f'{render_section("最可能原因", render_issue_list(causes, empty_text="未明确给出最可能原因。"))}'
-            f'{render_section("待确认项", render_issue_list(pending, empty_text="当前没有额外待确认项。"))}'
-            f'{render_section("建议动作", render_issue_list(actions, empty_text="当前没有额外建议动作。"))}'
-            f'{render_section("分析上下文", render_table(context_rows, ("字段", "内容")))}'
-            f'{render_section("Skill 清单概览", render_table([(inventory_count, self.skill_manager.root_dir)], ("技能数", "Skills 根目录")))}'
-            f'{render_details("原始 Markdown", "展开查看 app-server 返回的原始正文", markdown)}'
-            f'{render_details("结构化上下文", "展开查看上下文 JSON", json.dumps(context_payload, ensure_ascii=False, indent=2))}'
-            '</div>'
+        has_logs = bool(prepared.focused_log_input or prepared.prepared_input)
+        token_text = _token_summary_text(
+            {
+                "app_server_input_tokens": usage_payload.get("input_tokens"),
+                "app_server_cached_input_tokens": usage_payload.get("cached_input_tokens"),
+                "app_server_output_tokens": usage_payload.get("output_tokens"),
+                "app_server_total_tokens": usage_payload.get("total_tokens"),
+            }
         )
-        return render_document("AI 自主分析报告", body)
+        meta = {
+            "bug_label": prepared.bug_url or (prepared.title or "直传文件"),
+            "fault_time": prepared.fault_time,
+            "trigger_term": prepared.trigger_term or prepared.trigger_mode,
+            "selected_skill": _detect_selected_skill(markdown, context_payload),
+            "has_logs": has_logs,
+            "evidence_count": len(_section_issue_items(sections.get("关键证据", ""))),
+            "token_text": token_text,
+            "skill_count": len(inventory_payload.get("skills") or []),
+            "context_path": context_path,
+            "skill_inventory_path": skill_inventory_path,
+            "context_payload": context_payload,
+            "inventory_payload": inventory_payload,
+            "prepared_input": prepared.prepared_input or "",
+            "focused_log_input": prepared.focused_log_input or "",
+            "request_text": prepared.request_text,
+            "prompt_text": prepared.prompt_text,
+            "description": prepared.description,
+        }
+        return render_app_server_report(
+            title="AI 自主分析报告",
+            summary_markdown=sections.get("结论摘要", ""),
+            full_markdown=markdown,
+            meta=meta,
+        )
 
     def _analysis_cwd(self, prepared: PreparedAppServerInvestigation) -> Path:
         if prepared.source_roots:
@@ -777,6 +758,23 @@ class AppServerInvestigationRunner:
         }
 
 
+def _detect_selected_skill(markdown: str, context_payload: dict[str, object]) -> str:
+    """Best-effort: which skill the app-server auto-selected (for the overview card)."""
+    if isinstance(context_payload, dict):
+        for key in ("selected_skill", "skill", "chosen_skill"):
+            value = context_payload.get(key)
+            if value:
+                return str(value)
+    text = markdown or ""
+    match = re.search(r"触发\s*[`“\"']?([A-Za-z0-9._\-]+)", text)
+    if match:
+        return match.group(1)
+    match = re.search(r"(?:命中|选择|使用)\s*skill[:：]?\s*[`“\"']?([A-Za-z0-9._\-]+)", text, re.IGNORECASE)
+    if match:
+        return match.group(1)
+    return ""
+
+
 def _markdown_summary(text: str) -> str:
     for raw_line in (text or "").splitlines():
         line = raw_line.strip()
@@ -788,12 +786,6 @@ def _markdown_summary(text: str) -> str:
             continue
         return line[:1200]
     return ""
-
-
-def _truncate(text: str, limit: int) -> str:
-    if len(text) <= limit:
-        return text
-    return text[: limit - 1].rstrip() + "..."
 
 
 def _markdown_sections(markdown: str) -> dict[str, str]:

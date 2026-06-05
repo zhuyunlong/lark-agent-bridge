@@ -42,7 +42,9 @@ class RequirementReportHtmlTests(unittest.TestCase):
             warnings=["wiki 未读取"],
         )
 
-        self.assertIn("一句话结论", html)
+        self.assertIn('class="verdict-title"', html)
+        self.assertIn('class="report-meta"', html)
+        self.assertNotIn('class="cards"', html)
         self.assertIn("通用功能需求", html)
         self.assertIn("需求事实矩阵", html)
         self.assertIn("问题与未确认项", html)

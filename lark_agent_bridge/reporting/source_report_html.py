@@ -18,46 +18,79 @@ body {
   min-height: 100vh;
   overflow-wrap: anywhere;
   color: #1f2937;
-  background:
-    radial-gradient(circle at 0 0, rgba(239, 68, 68, 0.08), transparent 38%),
-    radial-gradient(circle at 100% 0, rgba(217, 119, 6, 0.06), transparent 42%),
-    #f4f6f8;
+  background: #f4f6f8;
 }
 .container { max-width: 1380px; margin: 0 auto; padding: 34px 28px 52px; }
 h1 { margin: 0 0 10px; font-size: 36px; line-height: 1.2; color: #111827; }
 .sub { max-width: 1040px; color: #6b7280; margin-bottom: 26px; font-size: 14px; line-height: 1.75; }
 .verdict {
-  padding: 22px 26px;
-  border-radius: 18px;
-  color: #fff;
-  font-size: 20px;
-  font-weight: 700;
-  box-shadow: 0 18px 42px rgba(15, 23, 42, 0.16);
-  border: 1px solid rgba(255, 255, 255, 0.24);
-  margin-bottom: 26px;
-  line-height: 1.6;
-}
-.v-red { background: linear-gradient(140deg, #ef4444, #b91c1c); }
-.v-yellow { background: linear-gradient(140deg, #f59e0b, #b45309); }
-.v-green { background: linear-gradient(140deg, #10b981, #047857); }
-.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; margin-bottom: 24px; }
-.card {
-  background: #ffffff;
-  border-radius: 12px;
-  border: 1px solid #e5e7eb;
-  border-top: 3px solid #94a3b8;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 14px;
+  align-items: flex-start;
   padding: 16px 18px;
-  box-shadow: 0 10px 26px rgba(15, 23, 42, 0.07);
+  border-radius: 8px;
+  background: #fff;
+  color: #111827;
+  border: 1px solid #e5e7eb;
+  border-left: 5px solid #94a3b8;
+  box-shadow: 0 8px 22px rgba(15, 23, 42, 0.06);
+  margin-bottom: 14px;
+  line-height: 1.55;
 }
-.card .lbl { font-size: 12px; font-weight: 700; letter-spacing: 0.02em; color: #64748b; }
-.card .val { font-size: 24px; font-weight: 700; margin-top: 4px; word-break: break-word; color: #0f172a; }
-.card .desc { color: #64748b; font-size: 13px; line-height: 1.65; margin-top: 6px; }
-.card.red { border-top-color: #dc2626; }
-.card.yellow { border-top-color: #d97706; }
-.card.green { border-top-color: #059669; }
-.card.red .val { color: #dc2626; }
-.card.yellow .val { color: #b45309; }
-.card.green .val { color: #047857; }
+.v-red { border-left-color: #dc2626; }
+.v-yellow { border-left-color: #d97706; }
+.v-green { border-left-color: #059669; }
+.verdict-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 76px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+.v-red .verdict-badge { background: #dc2626; }
+.v-yellow .verdict-badge { background: #d97706; }
+.v-green .verdict-badge { background: #059669; }
+.verdict-title { font-size: 18px; font-weight: 800; color: #111827; }
+.verdict-detail { margin-top: 4px; font-size: 14px; color: #4b5563; font-weight: 500; }
+.verdict-facts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.verdict-fact {
+  display: inline-flex;
+  gap: 6px;
+  align-items: baseline;
+  padding: 4px 9px;
+  border-radius: 999px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  color: #475569;
+  font-size: 12px;
+  font-weight: 600;
+}
+.verdict-fact b { color: #111827; }
+.report-meta {
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 20px;
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.045);
+}
+.meta-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 8px 14px; }
+.meta-cell { min-width: 0; border-left: 3px solid #94a3b8; padding: 5px 8px; }
+.meta-cell.red { border-left-color: #dc2626; }
+.meta-cell.yellow { border-left-color: #d97706; }
+.meta-cell.green { border-left-color: #059669; }
+.meta-label { color: #64748b; font-size: 11px; font-weight: 800; }
+.meta-value { margin-top: 2px; color: #111827; font-size: 14px; font-weight: 750; line-height: 1.35; overflow-wrap: anywhere; }
+.meta-cell.red .meta-value { color: #dc2626; }
+.meta-cell.yellow .meta-value { color: #b45309; }
+.meta-cell.green .meta-value { color: #047857; }
+.meta-desc { margin-top: 2px; color: #64748b; font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; }
 .section {
   background: #fff;
   border-radius: 14px;
@@ -141,7 +174,8 @@ pre {
 .muted { color: #94a3b8; }
 @media (max-width: 880px) {
   h1 { font-size: 24px; }
-  .cards { grid-template-columns: 1fr; }
+  .verdict { grid-template-columns: 1fr; }
+  .meta-grid { grid-template-columns: 1fr; }
   .container { padding: 14px; }
   table { min-width: 640px; }
 }
@@ -191,12 +225,18 @@ def render_source_analysis_report(
         ("证据条数", str(effective_evidence_count), "green" if effective_evidence_count else "yellow", "来自源码调查结果。"),
         ("后端", backend or "unknown", "green" if backend else "yellow", ""),
     ]
+    verdict_html = render_verdict_panel(
+        severity=severity,
+        title=verdict,
+        detail=_source_verdict_detail(effective_evidence_count, coverage_boundary),
+        facts=_source_verdict_facts(effective_evidence_count, backend),
+    )
     body = (
         '<div class="container">'
         f"<h1>{H(title or '源码分析报告')}</h1>"
         f'<div class="sub">请求：{H(request_text)}</div>'
-        f'<div class="verdict v-{severity}">{H(verdict)}</div>'
-        f'<div class="cards">{render_cards(cards)}</div>'
+        f"{verdict_html}"
+        f'{render_cards(cards)}'
         f'{render_section("结论摘要", summary_body)}'
         f'{render_swimlane(target=target, answer=answer, evidence=evidence, diagram_kinds=diagram_kinds, swimlane_rows=swimlane_rows)}'
         f'{render_section("最可能原因", render_issue_list(reason_items, empty_text="未明确给出最可能原因。"))}'
@@ -241,12 +281,18 @@ def render_context_diagram_report(
         }
     ]
     evidence = [{"file": "conversation_context", "line": "", "text": context_text[:500] or "无上下文摘录"}]
+    title_text = "已生成上下文泳道图/链路图报告。" if context_text.strip() else "上下文不足，仅输出边界说明报告。"
+    verdict_html = render_verdict_panel(
+        severity=severity,
+        title=title_text,
+        detail="图表复用上一轮分析上下文；重新查源码需要发起新的源码分析。",
+    )
     body = (
         '<div class="container">'
         f"<h1>{H(title or '图表报告')}</h1>"
         f'<div class="sub">原始请求：{H(request_text)}<br>追问：{H(followup_text)}</div>'
-        f'<div class="verdict v-{severity}">{H("已生成上下文泳道图/链路图报告。" if context_text.strip() else "上下文不足，仅输出边界说明报告。")}</div>'
-        f'<div class="cards">{render_cards(cards)}</div>'
+        f"{verdict_html}"
+        f'{render_cards(cards)}'
         f'{render_section("异常摘要", render_issue_list(issues))}'
         f'{render_swimlane(target="上一轮分析", answer=summary_text or report_excerpt, evidence=evidence, diagram_kinds=kinds)}'
         f'{render_flow(diagram_kinds=kinds, target="上一轮分析", evidence=evidence)}'
@@ -281,12 +327,39 @@ def render_cards(cards: Iterable[Sequence[object]]) -> str:
         value = card[1] if len(card) > 1 else ""
         severity = card[2] if len(card) > 2 else "green"
         desc = card[3] if len(card) > 3 else ""
-        desc_html = f'<div class="desc">{H(desc)}</div>' if desc else ""
+        desc_html = f'<div class="meta-desc">{H(desc)}</div>' if desc else ""
         chunks.append(
-            f'<div class="card {H(severity)}"><div class="lbl">{H(label)}</div>'
-            f'<div class="val">{H(value)}</div>{desc_html}</div>'
+            f'<div class="meta-cell {H(severity)}"><div class="meta-label">{H(label)}</div>'
+            f'<div class="meta-value">{H(value)}</div>{desc_html}</div>'
         )
-    return "".join(chunks)
+    if not chunks:
+        return ""
+    return f'<div class="report-meta"><div class="meta-grid">{"".join(chunks)}</div></div>'
+
+
+def render_verdict_panel(
+    *,
+    severity: str,
+    title: str,
+    detail: str = "",
+    badge: str = "",
+    facts: Iterable[tuple[str, str]] = (),
+) -> str:
+    fact_html = "".join(
+        f'<span class="verdict-fact"><b>{H(label)}</b>{H(text)}</span>'
+        for label, text in facts
+        if str(label).strip() or str(text).strip()
+    )
+    facts_block = f'<div class="verdict-facts">{fact_html}</div>' if fact_html else ""
+    detail_html = f'<div class="verdict-detail">{H(detail)}</div>' if detail else ""
+    return (
+        f'<div class="verdict v-{H(severity or "yellow")}">'
+        f'<div class="verdict-badge">{H(badge or _severity_badge(severity))}</div>'
+        "<div>"
+        f'<div class="verdict-title">{H(title)}</div>'
+        f"{detail_html}{facts_block}"
+        "</div></div>"
+    )
 
 
 def render_issue_list(issues: Iterable[Mapping[str, object]], empty_text: str = "未发现明显异常") -> str:
@@ -423,6 +496,29 @@ def _source_verdict(*, answer: str, evidence: Sequence[Mapping[str, object]], su
         first_line = (answer or "").strip().splitlines()[0] if answer else ""
         return first_line or "源码分析完成，报告已整理关键证据。"
     return "源码分析完成，但证据不足，需要按边界说明继续补证。"
+
+
+def _severity_badge(severity: str) -> str:
+    if severity == "green":
+        return "已闭环"
+    if severity == "red":
+        return "需补证"
+    return "待确认"
+
+
+def _source_verdict_detail(evidence_count: int, coverage_boundary: str) -> str:
+    if evidence_count:
+        return "已提取可回指源码证据；具体调用、分发和消费节点见下方证据表。"
+    return coverage_boundary or "当前输出缺少可回指源码证据，结论只能作为边界内判断。"
+
+
+def _source_verdict_facts(evidence_count: int, backend: str) -> list[tuple[str, str]]:
+    facts = [("源码证据", f"{evidence_count} 条")]
+    if backend:
+        facts.append(("后端", backend))
+    if not evidence_count:
+        facts.append(("主要缺口", "缺可回指文件/行号证据"))
+    return facts
 
 
 def _source_issues(

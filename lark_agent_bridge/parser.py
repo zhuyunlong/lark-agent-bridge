@@ -1152,6 +1152,12 @@ def _looks_like_addr2line_intent(
         return True
     if _contains_any(text, lowered, ADDR2LINE_TERMS):
         return True
+    # Explicit source-code investigation ("源码分析 找crash原因") is not a
+    # tombstone stack reverse lookup. Without a real address/backtrace payload,
+    # defer to the source/direct analysis route instead of claiming it here on
+    # the weak "分析"+"crash" heuristic below.
+    if not has_addr_payload and _contains_any(text, lowered, SOURCE_ANALYSIS_TERMS):
+        return False
 
     has_action = STACK_ANALYSIS_ACTION_RE.search(text) is not None
     has_object = STACK_ANALYSIS_OBJECT_RE.search(text) is not None

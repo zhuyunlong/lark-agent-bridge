@@ -589,6 +589,24 @@ class _HandleEventMixin:
         request = ctx.app_server_investigation_request
         if request is None or not request.triggered:
             return None
+        # 续聊场景：裸触发「自主分析」没带 bug 链接也没带附件时，从回复上下文或
+        # 本群最近一次分析继承 bug 链接，避免误判为「缺少输入」。
+        if not request.bug_url and not request.resources:
+            inherited_bug_url = self._contextual_app_server_bug_url(
+                explicit_followup_context=ctx.followup_context,
+                latest_chat_context=ctx.latest_chat_context,
+            )
+            if inherited_bug_url:
+                request = request.__class__(
+                    prompt=request.prompt,
+                    bug_url=inherited_bug_url,
+                    resources=request.resources,
+                    raw_text=request.raw_text,
+                    triggered=True,
+                    error=request.error,
+                    trigger_mode=request.trigger_mode,
+                    trigger_term=request.trigger_term,
+                )
         if not self.state_store.mark_seen(ctx.event):
             return TaskResult(True, f"duplicate event skipped: {ctx.event.event_id}", skipped=True)
         return self._run_app_server_investigation_request(ctx.event, request, ctx.route_content)
@@ -1129,7 +1147,11 @@ class _HandleEventMixin:
                 mode=result.details.get("mode", ""),
                 delivery=delivery,
             )
-            if delivery == "reply" and event.message_id:
+            # Always thread the bot's answer to the triggering message so the
+            # conversation chain stays walkable: a later "reply to the bot"
+            # can follow reply_to back to this request (and its replied-to
+            # input). Only fall back to a standalone send when no message_id.
+            if event.message_id:
                 send_result = self.lark_client.reply(event.message_id, self._reply_payload(event, result.message))
             else:
                 send_result = self.lark_client.send_response(event, result.message)

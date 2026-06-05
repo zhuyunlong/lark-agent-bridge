@@ -24,8 +24,9 @@ def test_render_cards_compacts_long_values_and_paths():
         ]
     )
 
-    assert 'class="card green">' in html
-    assert 'class="card green card-compact">' in html
+    assert 'class="report-meta"' in html
+    assert 'class="meta-cell green">' in html
+    assert 'class="meta-cell green meta-compact">' in html
     assert "20260519.7z" in html
     assert "data/bug_cache/xpfailuremgmt_6995163459" in html
 
@@ -35,5 +36,5 @@ def test_render_cards_does_not_treat_human_slash_text_as_path():
 
     html = render_cards([("进程内可见性", text, "yellow", "")])
 
-    assert '<div class="val">目标信号已进入 DataCenter' in html
-    assert '<div class="val"> PID 11311）。</div>' not in html
+    assert '<div class="meta-value">目标信号已进入 DataCenter' in html
+    assert '<div class="meta-value"> PID 11311）。</div>' not in html

@@ -171,6 +171,24 @@ class ParserTests(unittest.TestCase):
 
                 self.assertFalse(request.triggered)
 
+    def test_source_analysis_intent_with_crash_keyword_does_not_trigger_addr2line(self):
+        # "源码分析 找crash原因" is an explicit source-code investigation, not a
+        # tombstone stack reverse lookup. Even with a log resource present
+        # (allow_missing_address=True) and a "crash" keyword, addr2line must
+        # defer so the source/direct analysis route can handle the log.
+        request = parse_addr2line_request(
+            "源码分析 找出最后一次crash的原因", allow_missing_address=True
+        )
+        self.assertFalse(request.triggered)
+
+    def test_explicit_addr2line_term_still_triggers_even_with_source_keyword(self):
+        # A genuine reverse-lookup request must still trigger even if it mentions
+        # 源码, because "反解符号表" is an explicit addr2line term.
+        request = parse_addr2line_request(
+            "基于源码 反解符号表", allow_missing_address=True
+        )
+        self.assertTrue(request.triggered)
+
     def test_parse_followup_action_recognizes_generic_retry_terms(self):
         for text in ("重试一次", "再来一次", "重新跑", "再查一次", "重新分析", "重新分析下"):
             with self.subTest(text=text):

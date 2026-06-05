@@ -29,35 +29,65 @@ html { scroll-behavior: smooth; }
   --red:#dc2626;
 }
 body { font-family: -apple-system, "Helvetica Neue", "PingFang SC", "Microsoft YaHei", sans-serif;
-       margin: 0; min-height: 100vh; overflow-wrap: break-word; background:
-       radial-gradient(circle at top left, rgba(37,99,235,.10), transparent 28%),
-       radial-gradient(circle at top right, rgba(124,58,237,.10), transparent 26%),
-       linear-gradient(180deg, #f4f7ff 0%, var(--bg) 100%);
+       margin: 0; min-height: 100vh; overflow-wrap: break-word; background: #f4f7ff;
        color: var(--text); }
 body::before { content: ""; display: block; height: 5px; background: linear-gradient(90deg, var(--blue), var(--cyan), var(--green), var(--yellow)); }
 .container { max-width: 1320px; margin: 0 auto; padding: 30px 24px 44px; }
 h1 { margin: 0 0 8px; font-size: 30px; line-height: 1.25; letter-spacing: 0; }
 .sub { max-width: 980px; color: var(--muted); margin-bottom: 24px; font-size: 13px; line-height: 1.7; }
-.verdict { padding: 22px 24px; border-radius: 18px; color: #fff; font-size: 18px; font-weight: 700;
-           box-shadow: 0 18px 48px rgba(37,99,235,.18); margin-bottom: 24px; line-height: 1.6;
-           border: 1px solid rgba(255,255,255,.25); }
-.v-red { background: linear-gradient(135deg, #ef4444, #b91c1c 60%, #7f1d1d); }
-.v-yellow { background: linear-gradient(135deg, #f59e0b, #d97706 60%, #9a3412); }
-.v-green { background: linear-gradient(135deg, #10b981, #059669 60%, #047857); }
-.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; margin-bottom: 24px; }
-.card { background: linear-gradient(180deg, rgba(255,255,255,.96), rgba(248,251,255,.96)); border-radius: 16px; padding: 16px 18px;
-        box-shadow: 0 10px 28px rgba(15,23,42,.08); border: 1px solid var(--border); }
-.card .lbl { font-size: 12px; font-weight: 700; letter-spacing: .02em; color: var(--muted); }
-.card .val { font-size: 24px; font-weight: 800; margin-top: 6px; overflow-wrap: anywhere; }
-.card .desc { color: var(--muted); font-size: 12px; line-height: 1.6; margin-top: 8px; }
-.card.card-compact .val { font-size: 15px; line-height: 1.45; font-weight: 750; color: var(--text); word-break: normal; overflow-wrap: anywhere; }
-.card.card-compact .desc { font-size: 11px; line-height: 1.55; word-break: normal; overflow-wrap: anywhere; }
-.card.red .val { color: var(--red); }
-.card.yellow .val { color: var(--yellow); }
-.card.green .val { color: var(--green); }
-.card.card-compact.red .val { color: var(--red); }
-.card.card-compact.yellow .val { color: var(--yellow); }
-.card.card-compact.green .val { color: var(--green); }
+.verdict {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 14px;
+  align-items: flex-start;
+  padding: 16px 18px;
+  border-radius: 8px;
+  color: var(--text);
+  background: var(--panel);
+  box-shadow: 0 10px 28px rgba(15,23,42,.07);
+  margin-bottom: 14px;
+  line-height: 1.55;
+  border: 1px solid var(--border);
+  border-left: 5px solid #94a3b8;
+}
+.v-red { border-left-color: var(--red); }
+.v-yellow { border-left-color: var(--yellow); }
+.v-green { border-left-color: var(--green); }
+.verdict-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 76px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+.v-red .verdict-badge { background: var(--red); }
+.v-yellow .verdict-badge { background: var(--yellow); }
+.v-green .verdict-badge { background: var(--green); }
+.verdict-title { font-size: 18px; font-weight: 800; color: var(--text); }
+.verdict-detail { margin-top: 4px; color: var(--muted); font-size: 13px; font-weight: 500; }
+.verdict-facts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.verdict-fact { display: inline-flex; gap: 6px; align-items: baseline; padding: 4px 9px; border-radius: 999px;
+                background: var(--panel-2); border: 1px solid var(--border); color: #46526d; font-size: 12px; font-weight: 650; }
+.verdict-fact b { color: var(--text); }
+.report-meta { background: var(--panel); border-radius: 8px; padding: 10px 12px; margin-bottom: 20px;
+               box-shadow: 0 8px 20px rgba(15,23,42,.045); border: 1px solid var(--border); }
+.meta-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 8px 14px; }
+.meta-cell { min-width: 0; border-left: 3px solid #94a3b8; padding: 5px 8px; }
+.meta-cell.red { border-left-color: var(--red); }
+.meta-cell.yellow { border-left-color: var(--yellow); }
+.meta-cell.green { border-left-color: var(--green); }
+.meta-label { font-size: 11px; font-weight: 800; color: var(--muted); }
+.meta-value { margin-top: 2px; color: var(--text); font-size: 14px; font-weight: 760; line-height: 1.35; overflow-wrap: anywhere; }
+.meta-desc { color: var(--muted); font-size: 11px; line-height: 1.45; margin-top: 2px; overflow-wrap: anywhere; }
+.meta-cell.meta-compact .meta-value { font-size: 13px; font-weight: 730; }
+.meta-cell.red .meta-value { color: var(--red); }
+.meta-cell.yellow .meta-value { color: var(--yellow); }
+.meta-cell.green .meta-value { color: var(--green); }
 .section { background: linear-gradient(180deg, rgba(255,255,255,.96), rgba(250,252,255,.96)); border-radius: 16px; padding: 22px 24px; margin-bottom: 18px;
            box-shadow: 0 12px 30px rgba(15,23,42,.07); border: 1px solid var(--border); overflow-x: auto; }
 .section h2 { margin: 0 0 14px; font-size: 18px; border-left: 4px solid var(--blue); padding-left: 10px; }
@@ -110,7 +140,8 @@ details.fold { margin-top: 12px; border: 1px solid rgba(148,163,184,.28); border
 details.fold summary { cursor: pointer; color: var(--blue); font-weight: 700; }
 @media (max-width: 880px) {
   h1 { font-size: 24px; }
-  .cards { grid-template-columns: 1fr; }
+  .verdict { grid-template-columns: 1fr; }
+  .meta-grid { grid-template-columns: 1fr; }
   .container { padding: 14px; }
   table { min-width: 640px; }
 }
@@ -146,16 +177,69 @@ def render_cards(cards: Iterable[Sequence[object]]) -> str:
         severity = card[2] if len(card) > 2 else "green"
         desc = card[3] if len(card) > 3 else ""
         value_text, desc_text = _display_card_value(value, desc)
-        classes = f"card {H(severity)}"
+        classes = f"meta-cell {H(severity)}"
         if _is_compact_card_value(value_text, desc_text):
-            classes += " card-compact"
-        desc_html = f'<div class="desc">{H(desc_text)}</div>' if desc_text else ""
+            classes += " meta-compact"
+        desc_html = f'<div class="meta-desc">{H(desc_text)}</div>' if desc_text else ""
         chunks.append(
-            f'<div class="{classes}"><div class="lbl">{H(label)}</div>'
-            f'<div class="val">{H(value_text)}</div>'
+            f'<div class="{classes}"><div class="meta-label">{H(label)}</div>'
+            f'<div class="meta-value">{H(value_text)}</div>'
             f"{desc_html}</div>"
         )
-    return "".join(chunks)
+    if not chunks:
+        return ""
+    return f'<div class="report-meta"><div class="meta-grid">{"".join(chunks)}</div></div>'
+
+
+def render_verdict_panel(
+    *,
+    severity: str,
+    title: str,
+    detail: str = "",
+    badge: str = "",
+    facts: Iterable[tuple[str, str]] = (),
+) -> str:
+    fact_html = "".join(
+        f'<span class="verdict-fact"><b>{H(label)}</b>{H(text)}</span>'
+        for label, text in facts
+        if str(label).strip() or str(text).strip()
+    )
+    facts_block = f'<div class="verdict-facts">{fact_html}</div>' if fact_html else ""
+    detail_html = f'<div class="verdict-detail">{H(detail)}</div>' if detail else ""
+    return (
+        f'<div class="verdict v-{H(severity or "yellow")}">'
+        f'<div class="verdict-badge">{H(badge or _severity_badge(severity))}</div>'
+        "<div>"
+        f'<div class="verdict-title">{H(title)}</div>'
+        f"{detail_html}{facts_block}"
+        "</div></div>"
+    )
+
+
+def _severity_badge(severity: str) -> str:
+    if severity == "green":
+        return "已闭环"
+    if severity == "red":
+        return "高风险"
+    return "待确认"
+
+
+def _verdict_facts(verdict: Mapping[str, object]) -> list[tuple[str, str]]:
+    raw = verdict.get("facts")
+    facts: list[tuple[str, str]] = []
+    if isinstance(raw, Mapping):
+        facts.extend((str(k), str(v)) for k, v in raw.items())
+    elif isinstance(raw, (list, tuple)):
+        for item in raw:
+            if isinstance(item, Mapping):
+                facts.append((str(item.get("label") or ""), str(item.get("text") or item.get("value") or "")))
+            elif isinstance(item, (list, tuple)) and len(item) >= 2:
+                facts.append((str(item[0]), str(item[1])))
+    for key, label in (("confidence", "可信度"), ("status", "状态")):
+        value = verdict.get(key)
+        if value:
+            facts.append((label, str(value)))
+    return facts
 
 
 def _display_card_value(value: object, desc: object) -> tuple[str, str]:
@@ -613,9 +697,15 @@ def render_report_shell(
     verdict_text = str(verdict.get("text") or "")
     if verdict_text:
         severity = str(verdict.get("sev") or "green")
-        verdict_html = f'<div class="verdict v-{H(severity)}">{H(verdict_text)}</div>'
+        verdict_html = render_verdict_panel(
+            severity=severity,
+            title=verdict_text,
+            detail=str(verdict.get("detail") or ""),
+            badge=str(verdict.get("badge") or ""),
+            facts=_verdict_facts(verdict),
+        )
     cards_list = list(cards)
-    cards_html = f'<div class="cards">{render_cards(cards_list)}</div>' if cards_list else ""
+    cards_html = render_cards(cards_list) if cards_list else ""
     body_html = (
         '<div class="container">'
         f'<h1>{H(heading)}</h1>'

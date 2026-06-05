@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AI 自主分析报告</title>
+  <style>
+:root {
+  --c-bg: #f8f9fb; --c-surface: #ffffff; --c-border: #e2e5ea;
+  --c-text: #1a1d23; --c-text-2: #5a6170; --c-text-3: #8b919e;
+  --c-accent: #3b5bdb; --c-accent-light: #edf0ff;
+  --c-red: #e03131; --c-red-bg: #fff1f1; --c-red-border: #fecdd3;
+  --c-yellow: #e67700; --c-yellow-bg: #fff8eb; --c-yellow-border: #fde68a;
+  --c-green: #0ca678; --c-green-bg: #ecfdf5; --c-green-border: #a7f3d0;
+  --radius: 10px; --shadow: 0 1px 3px rgba(0,0,0,.06), 0 4px 12px rgba(0,0,0,.04);
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; -webkit-font-smoothing: antialiased; }
+body {
+  font-family: "Inter", -apple-system, "PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+  margin: 0; min-height: 100vh; overflow-wrap: anywhere;
+  color: var(--c-text); background: var(--c-bg);
+  font-size: 14px; line-height: 1.6;
+}
+.container { max-width: 1200px; margin: 0 auto; padding: 32px 28px 48px; }
+h1 { margin: 0 0 6px; font-size: 26px; font-weight: 700; letter-spacing: -0.02em; color: var(--c-text); }
+.sub { max-width: 860px; color: var(--c-text-2); margin-bottom: 28px; font-size: 13px; line-height: 1.7; }
+.verdict {
+  display: grid; grid-template-columns: 128px minmax(0, 1fr); gap: 16px;
+  padding: 18px 22px; border-radius: var(--radius); margin-bottom: 16px;
+  border: 1px solid var(--c-border); border-left: 4px solid var(--c-text-3);
+  background: var(--c-surface); box-shadow: var(--shadow);
+}
+.verdict.v-red { border-color: var(--c-red-border); border-left-color: var(--c-red); background: var(--c-red-bg); }
+.verdict.v-yellow { border-color: var(--c-yellow-border); border-left-color: var(--c-yellow); background: var(--c-yellow-bg); }
+.verdict.v-green { border-color: var(--c-green-border); border-left-color: var(--c-green); background: var(--c-green-bg); }
+.verdict-badge {
+  width: fit-content; align-self: start; padding: 4px 10px; border-radius: 999px;
+  font-size: 12px; font-weight: 700; color: #fff; background: var(--c-text-3);
+}
+.v-red .verdict-badge { background: var(--c-red); }
+.v-yellow .verdict-badge { background: var(--c-yellow); }
+.v-green .verdict-badge { background: var(--c-green); }
+.verdict-title { font-size: 18px; font-weight: 700; line-height: 1.45; color: var(--c-text); }
+.verdict-detail { margin-top: 4px; color: var(--c-text-2); font-size: 13px; line-height: 1.65; }
+.verdict-facts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.verdict-fact {
+  display: inline-flex; gap: 6px; align-items: baseline; max-width: 100%;
+  padding: 4px 8px; border-radius: 6px; background: rgba(255,255,255,.65);
+  border: 1px solid rgba(0,0,0,.06); color: var(--c-text-2); font-size: 12px;
+}
+.verdict-fact b { color: var(--c-text); font-weight: 700; white-space: nowrap; }
+.report-meta {
+  margin-bottom: 24px; background: var(--c-surface); border: 1px solid var(--c-border);
+  border-radius: var(--radius); box-shadow: var(--shadow); overflow: hidden;
+}
+.meta-grid {
+  display: grid; grid-template-columns: minmax(220px, 1.15fr) minmax(130px, .65fr)
+  minmax(130px, .65fr) minmax(220px, 1fr);
+}
+.meta-cell { min-width: 0; padding: 14px 18px; border-right: 1px solid var(--c-border); }
+.meta-cell:last-child { border-right: 0; }
+.meta-label {
+  font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em;
+  color: var(--c-text-3); margin-bottom: 4px;
+}
+.meta-value {
+  color: var(--c-text); font-size: 19px; font-weight: 700; line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+.meta-value.small { font-size: 15px; line-height: 1.45; }
+.meta-value.green { color: var(--c-green); }
+.meta-value.yellow { color: var(--c-yellow); }
+.status-value { display: flex; align-items: center; gap: 8px; }
+.status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--c-text-3); flex: 0 0 auto; }
+.status-dot.green { background: var(--c-green); }
+.status-dot.yellow { background: var(--c-yellow); }
+.meta-footer {
+  display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center;
+  padding: 10px 18px; border-top: 1px solid var(--c-border); background: #fbfcfe;
+  color: var(--c-text-2); font-size: 12px;
+}
+.meta-chip {
+  display: inline-flex; align-items: center; gap: 6px; min-height: 24px;
+  padding: 2px 8px; border-radius: 999px; border: 1px solid var(--c-border);
+  background: var(--c-surface); white-space: nowrap;
+}
+.meta-chip b, .meta-token b { color: var(--c-text); font-weight: 600; }
+.meta-token { color: var(--c-text-3); }
+.section {
+  background: var(--c-surface); border-radius: var(--radius);
+  border: 1px solid var(--c-border); padding: 20px 24px;
+  margin-bottom: 16px; box-shadow: var(--shadow); overflow-x: auto;
+}
+.section h2 { margin: 0 0 14px; font-size: 16px; font-weight: 700; border-left: 3px solid var(--c-accent); padding-left: 10px; color: var(--c-text); }
+.section h3 { margin: 18px 0 10px; font-size: 14px; font-weight: 600; }
+.prose { color: var(--c-text); font-size: 14px; line-height: 1.75; }
+.prose p { margin: 0 0 10px; }
+.prose ul, .prose ol { margin: 0 0 10px; padding-left: 22px; }
+.prose li { margin: 4px 0; }
+.prose strong { font-weight: 700; }
+.issue {
+  padding: 10px 14px; border-radius: 8px; margin-bottom: 8px;
+  border: 1px solid var(--c-border); border-left: 3px solid var(--c-text-3);
+  background: var(--c-bg);
+}
+.issue.red { border-color: var(--c-red-border); border-left-color: var(--c-red); background: var(--c-red-bg); }
+.issue.yellow { border-color: var(--c-yellow-border); border-left-color: var(--c-yellow); background: var(--c-yellow-bg); }
+.issue.green { border-color: var(--c-green-border); border-left-color: var(--c-green); background: var(--c-green-bg); }
+.issue .t { font-weight: 600; font-size: 13px; }
+.issue .d { color: var(--c-text-2); font-size: 12px; margin-top: 4px; line-height: 1.6; }
+table { width: 100%; min-width: 680px; border-collapse: collapse; font-size: 13px; }
+th, td { padding: 10px 12px; border-bottom: 1px solid var(--c-border); text-align: left; vertical-align: top; }
+th { background: var(--c-bg); font-weight: 600; color: var(--c-text-2); font-size: 12px; text-transform: uppercase; letter-spacing: .03em; }
+details { margin-top: 10px; border: 1px solid var(--c-border); border-radius: 8px; padding: 10px 14px; background: var(--c-bg); }
+summary { cursor: pointer; color: var(--c-accent); font-size: 13px; font-weight: 500; }
+code { background: var(--c-accent-light); padding: 2px 6px; border-radius: 4px; font-size: 12px; font-family: "JetBrains Mono", "SF Mono", "Fira Code", monospace; }
+pre {
+  max-height: 480px; background: #f5f6f8; padding: 12px 14px; border-radius: 8px;
+  font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-word;
+  overflow-x: auto; border: 1px solid var(--c-border);
+  font-family: "JetBrains Mono", "SF Mono", "Fira Code", monospace;
+}
+.muted { color: var(--c-text-3); }
+.chain { display: flex; flex-direction: column; align-items: stretch; gap: 0; }
+.chain-node {
+  display: flex; align-items: stretch; background: var(--c-surface);
+  border-radius: var(--radius); border: 1px solid var(--c-border);
+  border-left: 4px solid var(--c-text-3); box-shadow: var(--shadow); overflow: hidden;
+}
+.chain-node.chain-red { border-left-color: var(--c-red); }
+.chain-node.chain-yellow { border-left-color: var(--c-yellow); }
+.chain-node.chain-green { border-left-color: var(--c-green); }
+.chain-step {
+  width: 36px; min-width: 36px; display: flex; align-items: center;
+  justify-content: center; font-size: 14px; font-weight: 700;
+  color: #fff; background: var(--c-text-3);
+}
+.chain-red .chain-step { background: var(--c-red); }
+.chain-yellow .chain-step { background: var(--c-yellow); }
+.chain-green .chain-step { background: var(--c-green); }
+.chain-body { padding: 12px 16px; flex: 1; }
+.chain-title { font-weight: 700; font-size: 14px; margin-bottom: 4px; }
+.chain-evi, .chain-down { font-size: 13px; color: var(--c-text-2); line-height: 1.6; margin-top: 2px; }
+.chain-arrow { text-align: center; font-size: 18px; color: var(--c-text-3); line-height: 1; padding: 3px 0; }
+.raw-fold { margin-bottom: 16px; }
+.raw-fold > summary { font-size: 14px; font-weight: 600; }
+@media (max-width: 880px) {
+  h1 { font-size: 22px; }
+  .verdict { grid-template-columns: 1fr; gap: 10px; padding: 16px; }
+  .meta-grid { grid-template-columns: 1fr 1fr; }
+  .meta-cell:nth-child(2n) { border-right: 0; }
+  .meta-cell { border-bottom: 1px solid var(--c-border); }
+  .container { padding: 16px; }
+  table { min-width: 560px; }
+}
+</style>
+</head>
+<body>
+<div class="container"><h1>AI 自主分析报告</h1><div class="sub">Bridge 已完成 bug/日志前置，Codex app-server 已基于上下文与 skill 清单生成只读分析结论。本报告按真实结论着色，结论摘要已渲染为可读正文，结构化章节直接呈现。</div><div class="verdict v-yellow"><div class="verdict-badge">证据不足</div><div><div class="verdict-title">倾向：上电初期 P 挡 SR/P 场景链路未稳定或 P 场景显示策略差异</div><div class="verdict-detail">当前证据暂不能定性为 montecarlo / Unity 渲染线程卡死；缺目标小时 montecarlo 应用日志，Watchdog / UnityRequest / OnSceneChanged 未闭环。</div><div class="verdict-facts"><span class="verdict-fact"><b>已确认</b>上电约 1 分钟仍在 P 挡；D 挡后系统侧切换正常</span><span class="verdict-fact"><b>主要缺口</b>缺目标小时 montecarlo 应用日志；Watchdog / UnityRequest / OnSceneChanged 无法闭环</span></div></div></div><div class="report-meta"><div class="meta-grid"><div class="meta-cell"><div class="meta-label">故障时间</div><div class="meta-value green">2026-04-26 16:07</div></div><div class="meta-cell"><div class="meta-label">关键证据</div><div class="meta-value green">26</div></div><div class="meta-cell"><div class="meta-label">现场日志</div><div class="meta-value green status-value"><span class="status-dot green"></span>有</div></div><div class="meta-cell"><div class="meta-label">命中 Skill</div><div class="meta-value green small">3d-stuck-investigate</div></div></div><div class="meta-footer"><span class="meta-chip">触发词 <b>自主分析</b></span><span class="meta-token">AI Token <b>基于已有真实自主分析产物重渲染，未重新计费</b></span></div></div><div class="section"><h2>结论摘要</h2><div class="prose"><ul><li>触发 <code>3d-stuck-investigate</code>，并补充 <code>scene-signal-diagnosis</code>。</li><li>当前日志<strong>不能证明 montecarlo / Unity 渲染线程在 16:07 卡死</strong>：缺少目标小时 <code>com.xiaopeng.montecarlo</code> 应用日志，无法拿到 <code>XPEDriveSurfaceView</code>、<code>UnityRequest</code>、<code>Watchdog</code>、<code>OnSceneChanged</code> 等核心证据。</li><li>可确认的是：问题时间 <code>2026-04-26 16:07</code> 处于 <code>16:06:24</code> 本地上电后约 1 分钟内，车辆仍在 P 挡；<code>16:08:29</code> 切到 D 挡后，系统侧挡位与窗口状态正常切换。因此本次更像是<strong>上电初期 P 挡 SR/P 场景链路未稳定或 P 场景显示策略差异</strong>，不是已坐实的 Unity 卡死。</li></ul></div></div><div class="section"><h2>最可能原因</h2><div class="issue yellow"><div class="t">当前可信度：中低。</div><div class="d">最可能是本地上电初期 P 挡进入长期 P / 上电 P 场景时，SR 场景或 Unity 侧 P 场景显示未稳定；D 挡切换到 Driving_Scene 后链路恢复正常。日志支持“P/D 状态差异”和“上电初期背景”，但缺少 montecarlo 核心日志，不能定到 Unity 渲染、Android 场景信号、还是 Unity 后处理层。</div></div></div><div class="section"><h2>关键证据</h2><div class="prose"><h3>1. 目标时间处于本地上电初期</h3><ul><li><code>04-26 16:06:23.850 DiagnoseService: Mcu ig status changed:1</code></li><li><code>04-26 16:06:24.072 DiagnoseService: Mcu ig status changed:1</code></li><li><code>04-26 16:06:24.084 XAppManagerService: ID_MCU_IG_STATUS event :1</code></li></ul><p>按 3D 卡顿分析规则，本地上电后 5 分钟内的渲染异常需要降级处理；用户报障时间 <code>16:07</code> 距本地上电约 1 分钟。</p><h3>2. P 挡状态明确，D 挡切换也明确</h3><p>P 挡：</p><ul><li><code>16:06:23.855 currentGear=P</code></li><li><code>16:06:24.528 DriveModule: isGearP: true</code></li></ul><p>D 挡：</p><ul><li><code>16:08:29.244 VCU_CURRENT_GEARLEV ... mValue=1</code></li><li><code>16:08:29.244 360_StateManager: setdGear: true</code></li><li><code>16:08:29.268 SmartBootService: leave P gear</code></li></ul><p>这与用户描述“D 挡正常、P 挡异常”一致。</p><h3>3. montecarlo 进程未见系统级硬异常</h3><ul><li><code>16:07:26 DFX-SystemMonitor: Total 28%, iow 2%</code></li><li><code>16:07:26 com.xiaopeng.montecarlo(2457), CPU:8.13%</code></li><li><code>16:07:57 DFX-SystemMonitor: Total 27%, iow 0%</code></li><li><code>16:07:57 com.xiaopeng.montecarlo(2457), CPU:8.61%</code></li></ul><p>目标窗口未命中 ANR、Fatal、Input timeout、GSL/HGSL failed、page allocation failure 等硬故障证据。系统压力不高，不支持“整机资源卡死”结论。</p><h3>4. 有 GC 抖动，但不足以解释 P 挡专属问题</h3><ul><li><code>16:06:24.342 system_server NativeAlloc GC total 441.820ms</code></li><li><code>16:06:47.365 montecarlo GC total 177.451ms</code></li><li><code>16:08:01.094 montecarlo GC total 475.778ms</code></li><li><code>16:08:02.704 montecarlo GC total 490.657ms</code></li></ul><p>这些 GC 可解释上电/页面切换阶段短时顿挫，但未与 <code>XPEDriveSurfaceView Watchdog</code> 或 Unity 低帧日志闭环，不能作为根因。</p></div></div><div class="section"><h2>待确认项</h2><div class="issue green"><div class="t">当前没有额外待确认项。</div></div></div><div class="section"><h2>建议动作</h2><div class="issue green"><div class="t">补采或重新解码 com.xiaopeng.montecarlo 在 2026-04-26 16:05-16:10 的完整应用日志。</div></div><div class="issue green"><div class="t">重点搜索：</div><div class="d">XPEDriveSurfaceView；UnityRequest called；Watchdog kick；SrUnityMonitor；normalSceneTypeFLow changed；SIGNAL_SR_SCENE_TYPE；OnSceneChanged；收到场景变化</div></div><div class="issue green"><div class="t">复现时分别记录：</div><div class="d">上电后 0-5 分钟 P 挡 SR 是否异常；上电稳定 5 分钟后 P 挡是否仍异常；P -&gt; D -&gt; P 是否能恢复</div></div><div class="issue green"><div class="t">若补充日志显示 SIGNAL_SR_SCENE_TYPE=8/9 已到 Unity，但画面仍异常，应转 Napa5 Unity P 场景后处理排查。</div></div></div><div class="section"><h2>分析链路 / 归因</h2><p class="muted">按源码侧判断与证据缺口组织，列出依据与影响。</p><div class="chain"><div class="chain-node chain-yellow"><div class="chain-step">1</div><div class="chain-body"><div class="chain-title">P/D 场景映射不同</div><div class="chain-evi"><b>依据：</b>当前分支 UnitySceneTypeService.kt：</div></div></div><div class="chain-arrow">↓</div><div class="chain-node chain-yellow"><div class="chain-step">2</div><div class="chain-body"><div class="chain-title">P 档下部分 SR 元素存在显示策略差异</div><div class="chain-evi"><b>依据：</b>Napa5 中 SREntityHeatMap 初始化时，如果当前场景是 P_Gear_Scene，会关闭热力图层：</div></div></div><div class="chain-arrow">↓</div><div class="chain-node chain-red"><div class="chain-step">3</div><div class="chain-body"><div class="chain-title">证据缺口</div><div class="chain-evi"><b>依据：</b>log1/app/com.xiaopeng.montecarlo/main_2026-04-26_16-00.alog 只有 27 字节，占位内容为日志超大提示，目标小时 montecarlo 应用日志缺失。</div><div class="chain-down"><b>影响：</b>缺失核心证据，结论无法完全坐实。</div></div></div></div></div><details class="raw-fold"><summary>📂 展开原始与上下文证据</summary><h3>原始 Markdown</h3><pre>## 结论摘要
+
+- 触发 `3d-stuck-investigate`，并补充 `scene-signal-diagnosis`。
+- 当前日志**不能证明 montecarlo / Unity 渲染线程在 16:07 卡死**：缺少目标小时 `com.xiaopeng.montecarlo` 应用日志，无法拿到 `XPEDriveSurfaceView`、`UnityRequest`、`Watchdog`、`OnSceneChanged` 等核心证据。
+- 可确认的是：问题时间 `2026-04-26 16:07` 处于 `16:06:24` 本地上电后约 1 分钟内，车辆仍在 P 挡；`16:08:29` 切到 D 挡后，系统侧挡位与窗口状态正常切换。因此本次更像是**上电初期 P 挡 SR/P 场景链路未稳定或 P 场景显示策略差异**，不是已坐实的 Unity 卡死。
+
+## 关键证据
+
+### 1. 目标时间处于本地上电初期
+
+- `logd/main.txt.01:7350`：`04-26 16:06:23.850 DiagnoseService: Mcu ig status changed:1`
+- `logd/main.txt.01:8577`：`04-26 16:06:24.072 DiagnoseService: Mcu ig status changed:1`
+- `logd/main.txt.01:8602`：`04-26 16:06:24.084 XAppManagerService: ID_MCU_IG_STATUS event :1`
+
+按 3D 卡顿分析规则，本地上电后 5 分钟内的渲染异常需要降级处理；用户报障时间 `16:07` 距本地上电约 1 分钟。
+
+### 2. P 挡状态明确，D 挡切换也明确
+
+P 挡：
+
+- `com.xiaopeng.carcontrol/main_2026-04-26_16-00.alog.log:198`：`16:06:23.855 currentGear=P`
+- `com.xiaopeng.carcontrol/main_2026-04-26_16-00.alog.log:855`：`16:06:24.528 DriveModule: isGearP: true`
+
+D 挡：
+
+- `logd/main.txt.01:18760`：`16:08:29.244 VCU_CURRENT_GEARLEV ... mValue=1`
+- `logd/main.txt.01:18762`：`16:08:29.244 360_StateManager: setdGear: true`
+- `logd/main.txt.01:18893`：`16:08:29.268 SmartBootService: leave P gear`
+
+这与用户描述“D 挡正常、P 挡异常”一致。
+
+### 3. montecarlo 进程未见系统级硬异常
+
+- `logd/main.txt.01:16727`：`16:07:26 DFX-SystemMonitor: Total 28%, iow 2%`
+- `logd/main.txt.01:16812`：`16:07:26 com.xiaopeng.montecarlo(2457), CPU:8.13%`
+- `logd/main.txt.01:17263`：`16:07:57 DFX-SystemMonitor: Total 27%, iow 0%`
+- `logd/main.txt.01:17266`：`16:07:57 com.xiaopeng.montecarlo(2457), CPU:8.61%`
+
+目标窗口未命中 ANR、Fatal、Input timeout、GSL/HGSL failed、page allocation failure 等硬故障证据。系统压力不高，不支持“整机资源卡死”结论。
+
+### 4. 有 GC 抖动，但不足以解释 P 挡专属问题
+
+- `logd/main.txt.01:9974`：`16:06:24.342 system_server NativeAlloc GC total 441.820ms`
+- `logd/main.txt.01:15617`：`16:06:47.365 montecarlo GC total 177.451ms`
+- `logd/main.txt.01:17622`：`16:08:01.094 montecarlo GC total 475.778ms`
+- `logd/main.txt.01:17786`：`16:08:02.704 montecarlo GC total 490.657ms`
+
+这些 GC 可解释上电/页面切换阶段短时顿挫，但未与 `XPEDriveSurfaceView Watchdog` 或 Unity 低帧日志闭环，不能作为根因。
+
+## 源码侧判断
+
+### P/D 场景映射不同
+
+当前分支 `UnitySceneTypeService.kt`：
+
+- `transGearSignalToGearSt()` 中 P 挡按 `immersiveFlag` 映射为 `IMMERSIVE_P` 或 `TEMPORARY_P`。
+- `normalSceneTypeJob()` 中：
+  - `GearSt.IMMERSIVE_P -&gt; SceneType.P_Gear_Scene`
+  - `GearSt.TEMPORARY_P -&gt; SceneType.P_Gear_Interim_Scene`
+  - `GearSt.Gear_D -&gt; SceneType.Driving_Scene`
+
+源码位置：
+
+- `module_display/launcher_subreality_service/.../UnitySceneTypeService.kt:217`
+- `module_display/launcher_subreality_service/.../UnitySceneTypeService.kt:385`
+- `module_display/launcher_subreality_service/.../UnitySceneTypeService.kt:415`
+
+场景枚举也明确：
+
+- `Driving_Scene(1, &quot;D档下行车场景&quot;)`
+- `P_Gear_Scene(8, &quot;长期P档场景&quot;)`
+- `P_Gear_Interim_Scene(9, &quot;行车临时P档场景&quot;)`
+
+源码位置：`module_display/ai_capsule_common/.../SceneType.kt:11-18`
+
+### P 档下部分 SR 元素存在显示策略差异
+
+Napa5 中 `SREntityHeatMap` 初始化时，如果当前场景是 `P_Gear_Scene`，会关闭热力图层：
+
+- `Assets/.../SREntityHeatMap.cs:60`：`if (CarModel.Default.sceneModel.Value == ESceneModel.P_Gear_Scene) HeatMapLayeHandler(false);`
+
+这说明“P 挡 SR 画面”和“D 挡 SR 画面”本来就不是同一套显示策略；如果用户截图中的“无法正常显示”指的是 D 挡热力图/行车 SR 元素在 P 挡不显示，需要进一步区分是设计策略还是 P 场景实际未渲染。
+
+## 证据缺口
+
+- `log1/app/com.xiaopeng.montecarlo/main_2026-04-26_16-00.alog` 只有 27 字节，占位内容为日志超大提示，目标小时 montecarlo 应用日志缺失。
+- 因此无法确认：
+  - `XPEDriveSurfaceView Watchdog kick/fatal`
+  - `UnityRequest called count`
+  - `SrUnityMonitor UnityMain block`
+  - `SIGNAL_SR_SCENE_TYPE`
+  - Unity `OnSceneChanged`
+  - P/D 场景信号是否 Android 发出、Unity 是否收到
+
+## 最可能原因
+
+当前可信度：中低。
+
+最可能是**本地上电初期 P 挡进入长期 P / 上电 P 场景时，SR 场景或 Unity 侧 P 场景显示未稳定；D 挡切换到 `Driving_Scene` 后链路恢复正常**。日志支持“P/D 状态差异”和“上电初期背景”，但缺少 montecarlo 核心日志，不能定到 Unity 渲染、Android 场景信号、还是 Unity 后处理层。
+
+## 建议动作
+
+1. 补采或重新解码 `com.xiaopeng.montecarlo` 在 `2026-04-26 16:05-16:10` 的完整应用日志。
+2. 重点搜索：
+   - `XPEDriveSurfaceView`
+   - `UnityRequest called`
+   - `Watchdog kick`
+   - `SrUnityMonitor`
+   - `normalSceneTypeFLow changed`
+   - `SIGNAL_SR_SCENE_TYPE`
+   - `OnSceneChanged`
+   - `收到场景变化`
+3. 复现时分别记录：
+   - 上电后 0-5 分钟 P 挡 SR 是否异常
+   - 上电稳定 5 分钟后 P 挡是否仍异常
+   - P -&gt; D -&gt; P 是否能恢复
+4. 若补充日志显示 `SIGNAL_SR_SCENE_TYPE=8/9` 已到 Unity，但画面仍异常，应转 Napa5 Unity P 场景后处理排查。</pre><h3>分析上下文</h3><table><thead><tr><th>字段</th><th>内容</th></tr></thead><tbody><tr><td>用户原始请求</td><td>https://project.feishu.cn/xpfailuremgmt/buglo/detail/6979499593 自主分析</td></tr><tr><td>用户补充描述</td><td>未提供</td></tr><tr><td>Bug 标题</td><td>【市场反馈】【6.0.2】【F01】车机大屏在停车驻车状态下页面卡住,SR页面无法正常显示（D挡下能正常显示，P挡时无法显示如图）-SB174577</td></tr><tr><td>Bug 描述</td><td>车型：F01
+
+VIN：L1NNSGMA5SB174577
+
+问题时间：04-26 16:07
+
+问题描述：车机大屏在停车驻车状态下页面卡住,SR页面无法正常显示（D挡下能正常显示，P挡时无法显示如图）![](https://project.feishu.cn/goapi/v5/platform/file/stream/download/e7GE7ZqDIK3OVVVtPYqzHRJRJHzbzHDXpVNwTpxwFtlGAVU3hsMRMLiQATCvJ4kF1shDbxRQt7LvT4tEKyQO01FGfRTcgFtTkKwl5a1oaKt-voyBcDnbYgpLBGZiokb32H1jNPFy-XNgVx69DKCEtQ==)&lt;!-- BD4EA944-9825-470D-9DE2-CF81FAB952DA --&gt;
+</td></tr><tr><td>解密/准备后日志目录</td><td>/Users/zhuyl/Documents/workspace/tools/lark-agent-bridge/data/bug_cache/xpfailuremgmt_6979499593/logs</td></tr><tr><td>聚焦日志目录</td><td>/Users/zhuyl/Documents/workspace/tools/lark-agent-bridge/data/jobs/3e1324b2d98a993d602095023c80f2a0/output/app_server_investigation/log_focus</td></tr><tr><td>上下文文件</td><td>/Users/zhuyl/Documents/workspace/tools/lark-agent-bridge/data/jobs/3e1324b2d98a993d602095023c80f2a0/output/app_server_investigation/app_server_context.json</td></tr><tr><td>Skill 清单</td><td>/Users/zhuyl/Documents/workspace/tools/lark-agent-bridge/data/jobs/3e1324b2d98a993d602095023c80f2a0/output/app_server_investigation/skill_inventory.json</td></tr></tbody></table><h3>结构化上下文 JSON</h3><pre>{
+  &quot;trigger_mode&quot;: &quot;free&quot;,
+  &quot;trigger_term&quot;: &quot;自主分析&quot;,
+  &quot;bug_url&quot;: &quot;https://project.feishu.cn/xpfailuremgmt/buglo/detail/6979499593&quot;,
+  &quot;user_request_text&quot;: &quot;https://project.feishu.cn/xpfailuremgmt/buglo/detail/6979499593 自主分析&quot;,
+  &quot;user_prompt&quot;: &quot;&quot;,
+  &quot;bug_title&quot;: &quot;【市场反馈】【6.0.2】【F01】车机大屏在停车驻车状态下页面卡住,SR页面无法正常显示（D挡下能正常显示，P挡时无法显示如图）-SB174577&quot;,
+  &quot;bug_description&quot;: &quot;车型：F01\n\nVIN：L1NNSGMA5SB174577\n\n问题时间：04-26 16:07\n\n问题描述：车机大屏在停车驻车状态下页面卡住,SR页面无法正常显示（D挡下能正常显示，P挡时无法显示如图）![](https://project.feishu.cn/goapi/v5/platform/file/stream/download/e7GE7ZqDIK3OVVVtPYqzHRJRJHzbzHDXpVNwTpxwFtlGAVU3hsMRMLiQATCvJ4kF1shDbxRQt7LvT4tEKyQO01FGfRTcgFtTkKwl5a1oaKt-voyBcDnbYgpLBGZiokb32H1jNPFy-XNgVx69DKCEtQ==)&lt;!-- BD4EA944-9825-470D-9DE2-CF81FAB952DA --&gt;\n&quot;,
+  &quot;fault_time&quot;: &quot;2026-04-26 16:07&quot;,
+  &quot;fault_time_source&quot;: &quot;description&quot;,
+  &quot;fault_time_note&quot;: &quot;从缺陷描述提取完整问题时间。&quot;,
+  &quot;selected_log_input&quot;: &quot;/Users/zhuyl/Documents/workspace/tools/lark-agent-bridge/data/bug_cache/xpfailuremgmt_6979499593/logs&quot;,
+  &quot;prepared_log_input&quot;: &quot;/Users/zhuyl/Documents/workspace/tools/lark-agent-bridge/data/bug_cache/xpfailuremgmt_6979499593/logs&quot;,
+  &quot;focused_log_input&quot;: &quot;/Users/zhuyl/Documents/workspace/tools/lark-agent-bridge/data/jobs/3e1324b2d98a993d602095023c80f2a0/output/app_server_investigation/log_focus&quot;,
+  &quot;log_focus_manifest&quot;: &quot;/Users/zhuyl/Documents/workspace/tools/lark-agent-bridge/data/jobs/3e1324b2d98a993d602095023c80f2a0/output/app_server_investigation/log_focus.md&quot;,
+  &quot;source_roots&quot;: [
+    &quot;/Users/zhuyl/Documents/workspace/xp/guideengine/.worktrees/6.2.0_release&quot;,
+    &quot;/Users/zhuyl/Documents/workspace/xp/Napa5/.worktrees/6.2.0_release&quot;
+  ]
+}</pre><h3>Skill 清单概览（共 16 个）</h3><table><thead><tr><th>技能</th><th>描述</th></tr></thead><tbody><tr><td>3D卡顿分析</td><td>Use when 排查小鹏车机画面卡顿、卡死、掉帧、黑屏、无响应、ANR、首帧慢、页面切换慢、触摸响应慢、画面不刷新、地图/感知/3D/Unity/SR/Surface/montecarlo 卡顿等问题；用于区分 3D/Unity 渲染、启动首帧、通用 App/UI、输入响应、系统资源和数据链不刷新。</td></tr><tr><td>通用问题分析</td><td>内置路由候选；当前工作区没有对应 .ai/skills 目录。</td></tr><tr><td>LD车道级日志分析</td><td>Use when analyzing XPENG GuideEngine/Napa5 LD lane-level failures from logs, including 不进车道级、退无图、无图、LD不显示、tile没铺满、百度 normal/tile 异常, or log/source tokens such as LD, LDConf, CheckLDState, CheckTileRender, tileFull, XPD_LDTileCacheManager, LD_STATE_CHANGED, bizCode:132002, MapDataHandler.</td></tr><tr><td>当前感知数据总结</td><td>Use when 汇总 GuideEngine / MonteCarlo 当前感知数据状态，包括 VHALHelper 原始 XPU 计数、MapDataHandler 百度 LD 统计、X3DCB 发往 Unity 的计数、XDataNativeProxy Unity 收包/放弃/fps 统计，或判断感知数据频率、收发、丢弃是否正常。</td></tr><tr><td>靠边停车链路分析</td><td>Use when 排查靠边停车 / PullOver / SideParking 数据链路问题。从 VHAL XPU 接收 pullover 信号，到发送给百度 Navi LD，到接收百度回调 SideParkInfo，到 Napa5 Unity 消费渲染，全链路日志关键字分析与断点定位。</td></tr><tr><td>3D场景信号分析</td><td>Use when analyzing 小鹏 GuideEngine / Montecarlo 3D 场景、上电P、临停P、大车模、场景管理、SceneType、特殊场景、小憩、露营、洗车、充电、放电、场景选择、离车舒享、行车场景、泊车场景等日志问题。</td></tr><tr><td>信号链路分析</td><td>Use when 基于 GuideEngine 源码和日志分析 FloorCenter / Datacenter 信号全链路，用户提供 SignalCode、信号码或枚举名，并想排查信号来源、注册回调、DataCenter.dispatchSignal、getSignalFlow/registerObserver、Unity/Android 业务消费、未送达、数据源或衍生信号。</td></tr><tr><td>3D启动时序分析</td><td>Use when 排查 GuideEngine / MonteCarlo 的 3D Unity 启动生命周期、首帧慢、黑屏、UnityReady 未到、Surface 绑定异常、displayChanged/startRender 时序问题，或需要基于源码与已准备日志还原 MainActivity、XPEDriveSurfaceView、SurfaceManager、UnityPlayer、UnityReady、Unity 首帧等关键节点。</td></tr><tr><td>XTheme时光主题分析</td><td>Use when 分析 GuideEngine XTheme（时光主题、ThemeHelper、XuiConditionHelper、UI mode、日出日落、SIGNAL_SR_XTHEME、黑白夜切换异常）相关问题；匹配 NAV_ThemeType、NAV_ThemeHelper、NAV_XuiConditionHelper、NAV_XThemeStrategy、ThemeMode、TimePeriod、SrThemeSkin 等源码/日志 token。</td></tr><tr><td>addr2line-resolve</td><td>根据 ROM/Napa 版本号自动下载符号表，反解 NDK 地址为函数名和源码位置。当用户提供堆栈地址、tombstone backtrace、crash log 中的 hex 地址，需要反解 RenderExtend / XData 符号时使用。触发词：addr2line、符号表反解、堆栈解析、地址反解、crash分析、RenderExtend符号、XData符号。</td></tr><tr><td>feishu-bug-fetcher</td><td>从飞书项目拉取Bug核心信息。输入Bug详情页URL，自动校验Meegle CLI环境，查询Bug详情、附件并自动下载，结构化输出到终端和.ai/bug-analyzer/目录。Use when user provides a bug detail URL from project.feishu.cn. 触发词：拉取bug、获取bug信息、查bug详情、fetch bug、bug链接</td></tr><tr><td>log-decoder</td><td>解析小鹏导航日志的 .alog / .xlog / .xp / .xp.zip.001 二进制文件。当用户给出 .alog、.xlog、.xp、.xp.zip.001 等文件路径、日志目录、想解析某天/某时段的日志时，必须使用此 skill。触发词：解析日志、解析alog、解析xlog、解析xp、日志解析、alog转txt、xlog转log、解析这份日志等。</td></tr><tr><td>rom-version-lookup</td><td>从 ROM 版本号查询打包版本信息。解析 ROM 版本号，通过 SCM ROM 仓库 appInfo 查找实际打入的导航 APK 版本、Maven 地址、Jenkins 路径、符号表地址、Napa5 3D 库版本和下载地址。当用户提供 ROM 版本号并需要查找 APK版本、导航版本、Maven路径、Jenkins路径、lib_napa5版本、Napa5地址时使用。触发词：ROM版本号、查打包版本、查APK版本、查导航版本、查Napa版本、Maven路径、Jenkins路径、符号表地址。</td></tr><tr><td>cpp-construct-init-diagnose</td><td>Use when 排查 C++ 对象构造/初始化导致的崩溃或诡异行为：SIGSEGV/空指针解引用但崩溃点与赋值点对不上、成员未初始化读到垃圾值、release 崩 debug 不崩、判空分支&quot;被优化掉&quot;；尤其当有人提议用 `T v{}` / 空花括号&quot;清零&quot;来修复未初始化成员时（这对带用户空构造的类无效，是高频错误修法）。也用于对 struct/class 或一个代码库做&quot;构造现状审计&quot;，扫描成员是否被可靠初始化。</td></tr><tr><td>git-ai-env-check</td><td>自动分析当前项目 git-ai 环境是否正常。当用户需要检查 git-ai 状态、验证安装或排查 checkpoint/commit 问题时调用此技能。</td></tr><tr><td>source_analysis</td><td>源码导向日志分析能力，读取本地日志、源码证据和 SKILL.md 产出可定位根因的执行证据。</td></tr></tbody></table></details></div>
+</body>
+</html>

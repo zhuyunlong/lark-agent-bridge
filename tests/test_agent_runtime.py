@@ -353,6 +353,9 @@ class TestAgentRuntime(unittest.TestCase):
 
     def test_anthropic_settings_enable_prompt_cache_breakpoints(self):
         """Anthropic path must set cache_control breakpoints (system/tools/conversation)."""
+        import pytest
+
+        pytest.importorskip("pydantic_ai")  # optional extra; settings build imports it directly
         from lark_agent_bridge.agents.agent_runtime import AgentRuntime
 
         runtime = AgentRuntime(_FakeAIOptions(api_format="anthropic", base_url="http://x/anthropic"))
@@ -369,6 +372,9 @@ class TestAgentRuntime(unittest.TestCase):
 
     def test_openai_settings_use_seed_and_store(self):
         """OpenAI path relies on automatic prefix caching helped by seed + store."""
+        import pytest
+
+        pytest.importorskip("pydantic_ai")  # optional extra; settings build imports it directly
         from lark_agent_bridge.agents.agent_runtime import AgentRuntime
 
         runtime = AgentRuntime(_FakeAIOptions(api_format="openai"))

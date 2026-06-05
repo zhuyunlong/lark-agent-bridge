@@ -13,6 +13,7 @@ from .source_report_html import (
     render_issue_list,
     render_section,
     render_table,
+    render_verdict_panel,
 )
 from ..models import RequirementSourceComparison, RequirementWorkItemSnapshot
 
@@ -29,12 +30,19 @@ def render_requirement_analysis_report(
     severity = _severity(comparison.verdict)
     sections = _markdown_sections(raw_source_answer)
     summary_text = _section_text(sections, "结论摘要") or comparison.summary or "源码证据不足，详见未确认项。"
+    verdict_html = render_verdict_panel(
+        severity=severity,
+        badge=_verdict_label(comparison.verdict),
+        title=summary_text,
+        detail="需求可行性以源码证据和未确认项为准。",
+        facts=_verdict_facts(comparison, backend, warnings),
+    )
     body = (
         '<div class="container">'
         f"<h1>{H(snapshot.title or '需求源码分析报告')}</h1>"
         f'<div class="sub">请求：{H(request_text)}<br>需求链接：{H(snapshot.ref.url)}</div>'
-        f'<div class="verdict v-{severity}">一句话结论：{H(summary_text)}</div>'
-        f'<div class="cards">{render_cards(_cards(snapshot, comparison, backend, warnings))}</div>'
+        f"{verdict_html}"
+        f'{render_cards(_cards(snapshot, comparison, backend, warnings))}'
         f'{render_section("结论摘要", _text_block(summary_text))}'
         f'{render_section("最可能原因", render_issue_list(_section_issue_items(sections.get("最可能原因", ""), "yellow"), empty_text="未明确给出最可能原因。"))}'
         f'{render_section("关键证据", render_issue_list(_evidence_issues(comparison.source_evidence, sections.get("关键证据", "")), empty_text="未返回源码证据。"))}'
@@ -74,6 +82,25 @@ def _cards(
         ("处理边界", str(len(warnings)), "yellow" if warnings else "green", "需求系统/wiki/结构化解析边界。"),
         ("后端", backend or "unknown", "green" if backend else "yellow", ""),
     ]
+
+
+def _verdict_facts(
+    comparison: RequirementSourceComparison,
+    backend: str,
+    warnings: list[str],
+) -> list[tuple[str, str]]:
+    pending_count = len(comparison.gap_items) + len(comparison.unknown_items)
+    facts = [
+        ("源码证据", f"{len(comparison.source_evidence)} 条"),
+        ("待确认/缺口", f"{pending_count} 项"),
+    ]
+    if comparison.architecture_impact:
+        facts.append(("架构影响", comparison.architecture_impact))
+    if warnings:
+        facts.append(("处理边界", f"{len(warnings)} 项"))
+    if backend:
+        facts.append(("后端", backend))
+    return facts
 
 
 def _snapshot_rows(snapshot: RequirementWorkItemSnapshot) -> list[tuple[object, object]]:

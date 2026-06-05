@@ -438,6 +438,12 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
                     "light_inline", EventConsumerOptions().light_inline
                 )
             ),
+            max_concurrent_per_chat=int(
+                event_consumer_data.get(
+                    "max_concurrent_per_chat",
+                    EventConsumerOptions().max_concurrent_per_chat,
+                )
+            ),
         ),
         lark=LarkOptions(
             reply_in_thread=bool(lark_data.get("reply_in_thread", False)),
@@ -547,6 +553,18 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
                     (bug_data.get("app_server_investigation") or {}).get(
                         "prompt_template",
                         BugAnalysisOptions().app_server_investigation.prompt_template,
+                    )
+                ),
+                model=str(
+                    (bug_data.get("app_server_investigation") or {}).get(
+                        "model",
+                        BugAnalysisOptions().app_server_investigation.model,
+                    )
+                ),
+                reasoning_effort=str(
+                    (bug_data.get("app_server_investigation") or {}).get(
+                        "reasoning_effort",
+                        BugAnalysisOptions().app_server_investigation.reasoning_effort,
                     )
                 ),
             ),

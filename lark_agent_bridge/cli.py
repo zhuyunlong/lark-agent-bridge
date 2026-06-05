@@ -149,6 +149,7 @@ def main(argv: list[str] | None = None) -> int:
                 max_queue_size=ec.max_queue_size,
                 heavy_timeout_seconds=ec.heavy_job_timeout_seconds,
                 light_inline=ec.light_inline,
+                max_concurrent_per_chat=ec.max_concurrent_per_chat,
                 on_result=lambda result: _print_json(result.to_dict()),
             )
             dispatcher.start()

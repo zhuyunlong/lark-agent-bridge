@@ -114,6 +114,9 @@ prompt_template = """
 
 最终只输出 Markdown 正文，不要输出额外解释。
 """
+# 自主分析专属模型与思考深度；留空则继承 [codex_app_server] 同名配置。
+model = "gpt-5.5"
+reasoning_effort = "xhigh"
 
 [intent_analysis]
 enabled = true

@@ -55,6 +55,10 @@ class EventConsumerOptions:
     max_queue_size: int = 32
     heavy_job_timeout_seconds: float = 1800
     light_inline: bool = True
+    # Fairness cap: max heavy tasks one chat may run concurrently (0 = no cap,
+    # up to max_concurrent_jobs). Set < max_concurrent_jobs to reserve workers
+    # for other chats.
+    max_concurrent_per_chat: int = 0
 
 
 @dataclass(slots=True)
@@ -101,6 +105,9 @@ class AppServerInvestigationOptions:
     require_description_for_file_resources: bool = True
     require_time_for_file_resources: bool = True
     prompt_template: str = ""
+    # 自主分析路径专属覆盖；留空表示继承全局 [codex_app_server] 的同名配置。
+    model: str = ""
+    reasoning_effort: str = ""
 
 
 @dataclass(slots=True)

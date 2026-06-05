@@ -6,7 +6,7 @@ from pathlib import Path
 
 from .report_graph import ReportGraph
 from .combined_bug_html import render_status_lane_graph
-from .source_report_html import H, render_document, BASE_REPORT_CSS
+from .source_report_html import BASE_REPORT_CSS, H, render_cards, render_document, render_verdict_panel
 
 _VERDICT_CLASS = {"ok": "green", "broken": "red", "inconclusive": "yellow"}
 _FINDING_CLASS = {"ok": "green", "risk": "red", "todo": "yellow"}
@@ -30,7 +30,7 @@ def _evidence_cards(graph: ReportGraph) -> str:
     for idx, n in enumerate(graph.nodes, 1):
         anchors = "、".join(f"{a.file}:{a.line}" for a in n.anchors) or "—"
         logs = "".join(
-            f'<div class="logline">[{H(l.ts)}] {H(l.file)}:{l.line} — {H(l.text)}</div>'
+            f'<div class="logline">[{H(l.ts)}] {H(l.text)}</div>'
             for l in n.logs
         ) or '<div class="muted">无代表性日志行</div>'
         rows.append(
@@ -74,14 +74,21 @@ def _findings(graph: ReportGraph) -> str:
 def _verdict_block(graph: ReportGraph) -> str:
     sev = _VERDICT_CLASS.get(graph.verdict.status, "yellow")
     label = "故障诊断" if graph.intent == "diagnose" else "链路咨询" if graph.intent == "consult" else "源码分析"
-    runtime_note = "" if graph.has_logs else ' <span class="muted">（未结合运行态：基于源码/缓存推断）</span>'
-    next_step = (
-        f'<div class="muted">下一步：{H(graph.verdict.next_step)}</div>'
-        if graph.verdict.next_step else ""
-    )
-    return (
-        f'<div class="verdict v-{sev}"><b>[{H(label)}]</b> {H(graph.verdict.headline)}{runtime_note}</div>'
-        f'{next_step}'
+    detail_parts: list[str] = []
+    if not graph.has_logs:
+        detail_parts.append("未结合运行态：基于源码/缓存推断。")
+    if graph.verdict.next_step:
+        detail_parts.append(f"下一步：{graph.verdict.next_step}")
+    return render_verdict_panel(
+        severity=sev,
+        badge=label,
+        title=graph.verdict.headline,
+        detail=" ".join(detail_parts),
+        facts=[
+            ("节点", f"{len(graph.nodes)} 个"),
+            ("日志", "有" if graph.has_logs else "无"),
+            ("状态", graph.verdict.status),
+        ],
     )
 
 
@@ -117,6 +124,12 @@ def render_signal_source_report(graph: ReportGraph, *, request_text: str, backen
         order = ["swimlane", "timeline", "values", "findings"] + (["prose"] if analysis_markdown else [])
     else:
         order = ["swimlane", "findings", "timeline", "values"] + (["prose"] if analysis_markdown else [])
+    cards = [
+        ("报告类型", "源码/信号调查", "green", "按图优先结构组织链路。"),
+        ("后端", backend or "unknown", "green" if backend else "yellow", ""),
+        ("运行态日志", "有" if graph.has_logs else "无", "green" if graph.has_logs else "yellow", ""),
+        ("节点", str(len(graph.nodes)), "green" if graph.nodes else "yellow", ""),
+    ]
     sections_html = "".join(
         f'<div class="section"><h2>{H(sections[key][0])}</h2>{sections[key][1]}</div>'
         for key in order
@@ -126,6 +139,7 @@ def render_signal_source_report(graph: ReportGraph, *, request_text: str, backen
         "<h1>源码/信号调查报告</h1>"
         f'<div class="sub">请求：{H(request_text)} · 后端：{H(backend)}</div>'
         f'{_verdict_block(graph)}'
+        f'{render_cards(cards)}'
         f'{sections_html}'
         "</div>"
     )

@@ -3,6 +3,253 @@ from _app_base import _AppTestBase
 
 
 class AppFollowupReplyTests(_AppTestBase):
+    def test_failed_fresh_result_is_threaded_reply_to_triggering_message(self):
+        # A fresh request that fails before any progress card (e.g. addr2line
+        # missing_address) must be delivered as a threaded reply to the
+        # triggering message, NOT a standalone send. Otherwise the bot's reply
+        # carries no reply_to and a later "reply to the bot" cannot walk the
+        # chain back to the original input.
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_lark = FakeLarkClient()
+            app = BridgeApp(
+                BridgeConfig(dry_run=False, data_dir=Path(tmp) / "data"),
+                lark_client=fake_lark,
+            )
+            ev = event(message_id="om_fresh_fail", content="@bot 源码分析 找crash原因")
+            result = TaskResult(
+                success=False,
+                message="缺少待反解地址：未找到 crash 堆栈。",
+                error_code="missing_address",
+                details={"mode": "addr2line_resolve"},
+            )
+            app._send_result(ev, result)
+
+        self.assertIn("om_fresh_fail", [r["message_id"] for r in fake_lark.replies])
+        self.assertEqual(fake_lark.sent, [])
+
+    def test_failed_fresh_delivery_registers_bot_reply_alias_for_group_followup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_lark = FakeLarkClient()
+            app = BridgeApp(
+                BridgeConfig(dry_run=False, data_dir=Path(tmp) / "data"),
+                lark_client=fake_lark,
+            )
+            original = event(
+                event_id="evt_failed_source",
+                message_id="om_failed_source",
+                reply_to="om_file_msg",
+                content="@bot 源码分析 找出最后一次crash的原因",
+            )
+            failed = TaskResult(
+                success=False,
+                message="缺少待反解地址：未找到 crash 堆栈。",
+                error_code="missing_address",
+                details={"mode": "addr2line_resolve"},
+            )
+
+            finalized = app._deliver_result(
+                original,
+                failed,
+                request_text="源码分析 找出最后一次crash的原因",
+            )
+
+            self.assertEqual(fake_lark.replies[0]["message_id"], "om_failed_source")
+            bot_reply_id = "om_reply_1"
+            context = app._lookup_bot_alias_context(bot_reply_id)
+
+        self.assertEqual(bot_reply_id, "om_reply_1")
+        self.assertEqual(finalized.details["conversation_root_message_id"], "om_failed_source")
+        self.assertIsNotNone(context)
+        self.assertEqual(context.root_message_id, "om_failed_source")
+        self.assertEqual(context.mode, "addr2line_resolve")
+
+    def test_group_reply_without_mention_to_failed_bot_reply_routes_with_reply_chain_resources(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = Path(tmp) / "analysis.md"
+            html = Path(tmp) / "analysis.html"
+            metadata.write_text("analysis", encoding="utf-8")
+            html.write_text("<html></html>", encoding="utf-8")
+            fake_lark = FakeLarkClient()
+            fake_bug = FakeBugRunner(metadata, html)
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    allowed_chats=["oc_allowed"],
+                ),
+                lark_client=fake_lark,
+                bug_runner=fake_bug,
+            )
+            original = event(
+                event_id="evt_failed_source",
+                message_id="om_failed_source",
+                chat_id="oc_denied",
+                reply_to="om_file_msg",
+                content="@bot 源码分析 找出最后一次crash的原因",
+            )
+            app._deliver_result(
+                original,
+                TaskResult(
+                    success=False,
+                    message="缺少待反解地址：未找到 crash 堆栈。",
+                    error_code="missing_address",
+                    details={"mode": "addr2line_resolve"},
+                ),
+                request_text="源码分析 找出最后一次crash的原因",
+            )
+            self.assertEqual(fake_lark.replies[0]["message_id"], "om_failed_source")
+            bot_reply_id = "om_reply_1"
+            fake_lark.fetched_messages[bot_reply_id] = json.dumps(
+                {
+                    "data": {
+                        "messages": [
+                            {
+                                "message_id": bot_reply_id,
+                                "reply_to": "om_failed_source",
+                            }
+                        ]
+                    }
+                },
+                ensure_ascii=False,
+            )
+            fake_lark.fetched_messages["om_failed_source"] = json.dumps(
+                {
+                    "data": {
+                        "messages": [
+                            {
+                                "message_id": "om_failed_source",
+                                "reply_to": "om_file_msg",
+                                "content": "@bot 源码分析 找出最后一次crash的原因",
+                            }
+                        ]
+                    }
+                },
+                ensure_ascii=False,
+            )
+            fake_lark.fetched_messages["om_file_msg"] = json.dumps(
+                {
+                    "data": {
+                        "messages": [
+                            {
+                                "message_id": "om_file_msg",
+                                "content": '{"file_key":"file_log7z"}',
+                            }
+                        ]
+                    }
+                },
+                ensure_ascii=False,
+            )
+
+            result = app.handle_event(
+                event(
+                    event_id="evt_no_at_followup_to_failed_reply",
+                    message_id="om_no_at_followup_to_failed_reply",
+                    chat_id="oc_denied",
+                    reply_to=bot_reply_id,
+                    content="那你看下3d生命周期 时间点 15:00",
+                )
+            )
+
+        self.assertNotEqual(result.details.get("mode"), "not_addressed")
+        self.assertFalse(result.skipped and result.details.get("mode") == "not_addressed")
+        self.assertNotEqual(result.error_code, "missing_address")
+        self.assertNotEqual(result.error_code, "missing_signal")
+        self.assertNotEqual(result.details.get("mode"), "signal_lifecycle")
+        self.assertIn(result.details.get("mode"), {"direct_analysis", "bug_clarification"})
+        if fake_bug.requests:
+            self.assertEqual(fake_bug.requests[0].resources[0].value, "file_log7z")
+
+    def test_source_analysis_without_mention_after_failed_bot_reply_does_not_return_missing_address(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = Path(tmp) / "analysis.md"
+            html = Path(tmp) / "analysis.html"
+            metadata.write_text("analysis", encoding="utf-8")
+            html.write_text("<html></html>", encoding="utf-8")
+            fake_lark = FakeLarkClient()
+            fake_bug = FakeBugRunner(metadata, html)
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    allowed_chats=["oc_allowed"],
+                ),
+                lark_client=fake_lark,
+                bug_runner=fake_bug,
+            )
+            app._deliver_result(
+                event(
+                    event_id="evt_failed_source_again",
+                    message_id="om_failed_source_again",
+                    chat_id="oc_denied",
+                    reply_to="om_file_msg",
+                    content="@bot 源码分析 找出最后一次crash的原因",
+                ),
+                TaskResult(
+                    success=False,
+                    message="缺少待反解地址：未找到 crash 堆栈。",
+                    error_code="missing_address",
+                    details={"mode": "addr2line_resolve"},
+                ),
+                request_text="源码分析 找出最后一次crash的原因",
+            )
+            bot_reply_id = "om_reply_1"
+            fake_lark.fetched_messages[bot_reply_id] = json.dumps(
+                {
+                    "data": {
+                        "messages": [
+                            {
+                                "message_id": bot_reply_id,
+                                "reply_to": "om_failed_source_again",
+                            }
+                        ]
+                    }
+                },
+                ensure_ascii=False,
+            )
+            fake_lark.fetched_messages["om_failed_source_again"] = json.dumps(
+                {
+                    "data": {
+                        "messages": [
+                            {
+                                "message_id": "om_failed_source_again",
+                                "reply_to": "om_file_msg",
+                                "content": "@bot 源码分析 找出最后一次crash的原因",
+                            }
+                        ]
+                    }
+                },
+                ensure_ascii=False,
+            )
+            fake_lark.fetched_messages["om_file_msg"] = json.dumps(
+                {
+                    "data": {
+                        "messages": [
+                            {
+                                "message_id": "om_file_msg",
+                                "content": '{"file_key":"file_log7z"}',
+                            }
+                        ]
+                    }
+                },
+                ensure_ascii=False,
+            )
+
+            result = app.handle_event(
+                event(
+                    event_id="evt_no_at_source_followup_to_failed_reply",
+                    message_id="om_no_at_source_followup_to_failed_reply",
+                    chat_id="oc_denied",
+                    reply_to=bot_reply_id,
+                    content="源码分析 找出最后一次crash的原因",
+                )
+            )
+
+        self.assertNotEqual(result.details.get("mode"), "not_addressed")
+        self.assertNotEqual(result.error_code, "missing_address")
+        self.assertEqual(result.details.get("mode"), "direct_analysis")
+        self.assertEqual(len(fake_bug.requests), 1)
+        self.assertEqual(fake_bug.requests[0].resources[0].value, "file_log7z")
+
     def test_signal_request_without_reply_chain_does_not_reuse_same_chat_latest_log(self):
         with tempfile.TemporaryDirectory() as tmp:
             log_dir = Path(tmp) / "logs"
@@ -185,6 +432,105 @@ class AppFollowupReplyTests(_AppTestBase):
         self.assertEqual(fake_bug.requests[0].resources[0].kind, "file")
         self.assertEqual(fake_bug.requests[0].resources[0].value, "file_abc123")
         self.assertEqual(fake_bug.requests[0].resources[0].source_message_id, "om_file_msg")
+    def test_source_analysis_find_crash_reply_to_file_routes_to_direct_analysis(self):
+        # Regression for the group incident: "源码分析 找出最后一次crash的原因"
+        # replying to a log file must run a source/log analysis on that log,
+        # NOT be hijacked by addr2line (which would fail missing_address because
+        # the log has no #xx pc lib*.so backtrace).
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = Path(tmp) / "analysis.md"
+            html = Path(tmp) / "analysis.html"
+            metadata.write_text("analysis", encoding="utf-8")
+            html.write_text("<html></html>", encoding="utf-8")
+            fake_lark = FakeLarkClient()
+            fake_bug = FakeBugRunner(metadata, html)
+            fake_lark.fetched_messages["om_file_msg"] = """
+{
+  "ok": true,
+  "data": {
+    "messages": [
+      {
+        "message_id": "om_file_msg",
+        "content": "{\\"file_key\\":\\"file_log7z\\"}"
+      }
+    ]
+  }
+}
+"""
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    allowed_chats=["oc_allowed"],
+                ),
+                lark_client=fake_lark,
+                bug_runner=fake_bug,
+            )
+
+            result = app.handle_event(
+                event(
+                    chat_id="oc_denied",
+                    reply_to="om_file_msg",
+                    content="@bot 源码分析 找出最后一次crash的原因",
+                )
+            )
+
+        self.assertNotEqual(result.error_code, "missing_address")
+        self.assertEqual(result.details["mode"], "direct_analysis")
+        self.assertEqual(len(fake_bug.requests), 1)
+        self.assertEqual(fake_bug.requests[0].resources[0].value, "file_log7z")
+
+    def test_3d_lifecycle_reply_to_file_routes_to_direct_analysis_not_missing_signal(self):
+        # Regression for the group incident msg3: "看下3d生命周期 时间点 15:00"
+        # replying to a log file must analyse that log, NOT dead-end on
+        # signal_lifecycle's missing_signal (the user gave a timestamp, not a
+        # signal code).
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = Path(tmp) / "analysis.md"
+            html = Path(tmp) / "analysis.html"
+            metadata.write_text("analysis", encoding="utf-8")
+            html.write_text("<html></html>", encoding="utf-8")
+            fake_lark = FakeLarkClient()
+            fake_bug = FakeBugRunner(metadata, html)
+            fake_lark.fetched_messages["om_file_msg"] = """
+{
+  "ok": true,
+  "data": {
+    "messages": [
+      {
+        "message_id": "om_file_msg",
+        "content": "{\\"file_key\\":\\"file_log7z\\"}"
+      }
+    ]
+  }
+}
+"""
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    allowed_chats=["oc_allowed"],
+                ),
+                lark_client=fake_lark,
+                bug_runner=fake_bug,
+            )
+
+            result = app.handle_event(
+                event(
+                    chat_id="oc_denied",
+                    reply_to="om_file_msg",
+                    content="@bot 那你看下3d生命周期 时间点 15:00",
+                )
+            )
+
+        # Core fix: it must NOT dead-end on signal_lifecycle's missing_signal.
+        # "3d生命周期" is ambiguous (startup vs stuck), so engaging the direct
+        # log-analysis flow — running it or asking the user to clarify the
+        # direction — is the correct outcome, not a signal-code demand.
+        self.assertNotEqual(result.error_code, "missing_signal")
+        self.assertNotEqual(result.details.get("mode"), "signal_lifecycle")
+        self.assertIn(result.details.get("mode"), {"direct_analysis", "bug_clarification"})
+
     def test_reply_to_file_routes_to_direct_analysis_even_when_prompt_has_no_keyword(self):
         with tempfile.TemporaryDirectory() as tmp:
             metadata = Path(tmp) / "analysis.md"

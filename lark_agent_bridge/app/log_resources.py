@@ -275,11 +275,30 @@ class _LogResourcesMixin:
         request_text: str,
         root_message_id: str | None = None,
     ) -> TaskResult:
+        context_root_message_id = root_message_id or event.root_id or event.message_id
         if not result.success:
+            mode = str(result.details.get("mode", "") or "").strip()
+            if context_root_message_id and mode not in {"not_addressed", "stale_light_interaction"}:
+                details = dict(result.details)
+                details.setdefault("delivery", "reply")
+                details.setdefault("conversation_root_message_id", context_root_message_id)
+                result.details = details
+                self.conversation_store.remember(
+                    root_message_id=context_root_message_id,
+                    chat_id=event.chat_id,
+                    mode=mode,
+                    request_text=request_text.strip() or self._fallback_request_text(result),
+                    summary_text=result.message,
+                    report_url="",
+                    report_excerpt="",
+                    source_mode=str(details.get("source_mode", "")),
+                    context_profile=str(details.get("context_profile", "")),
+                    classification_source=str(details.get("classification_source", "")),
+                )
+                self._remember_progress_card_aliases(event, context_root_message_id)
             return result
         self._apply_dual_agent_arbitration(result)
         bug_url = str(result.details.get("bug_url") or self._bug_url_from_request_text(request_text))
-        context_root_message_id = root_message_id or event.root_id or event.message_id
         group_key = derive_group_key(
             bug_url=bug_url,
             case_id=result.job_id or "",
@@ -1066,6 +1085,16 @@ class _LogResourcesMixin:
             return resources
         _ = latest_chat_context
         return []
+
+    def _contextual_app_server_bug_url(self, *, explicit_followup_context, latest_chat_context) -> str:
+        """续聊「自主分析」缺少 bug 链接时，从回复上下文或本群最近一次分析继承。"""
+        for context in (explicit_followup_context, latest_chat_context):
+            if context is None:
+                continue
+            bug_url = self._bug_url_from_request_text(getattr(context, "request_text", "") or "")
+            if bug_url:
+                return bug_url
+        return ""
 
     def _build_perception_summary_request(self, route_content: str, referenced_resources: list[DownloadResource]):
         request = parse_perception_summary_request(route_content)

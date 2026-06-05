@@ -1,4 +1,5 @@
 from lark_agent_bridge.reporting.combined_bug_html import render_status_lane_graph
+from lark_agent_bridge.reporting.report_graph import GraphNode, LogRef, ReportGraph, Verdict
 
 NODES = [
     {"id": "carservice", "lane_title": "信号源", "label": "CarVcuManager", "status": "ok", "num": 1},
@@ -54,6 +55,44 @@ def test_report_exposes_file_line_and_raw_log():
     assert "DataCenter.kt:311" in html
     # 原始日志原文/值证据应出现，不再只有中文 label
     assert ("hasProvider" in html) or ("value" in html) or ("95" in html)
+    assert "user0_main_2026-05-25_16-00.alog.log" not in html
+
+
+def test_logline_prioritizes_log_body_over_location_prefix():
+    graph = ReportGraph(
+        intent="diagnose",
+        has_logs=True,
+        verdict=Verdict(status="inconclusive", headline="日志证据待闭环"),
+        lanes=[{"id": "datacenter", "title": "DataCenter"}],
+        nodes=[
+            GraphNode(
+                id="n1",
+                lane="datacenter",
+                label="getSignalFlow",
+                status="suspect",
+                logs=[
+                    LogRef(
+                        ts="16:37:35.239",
+                        file="/tmp/logs/user0_main_2026-05-25_16-00.alog.log",
+                        line=2982,
+                        text="NAV_DataCenter: getSignalFlow hasProvider=true",
+                    )
+                ],
+            )
+        ],
+    )
+
+    html = render_signal_source_report(graph, request_text="x", backend="y")
+
+    assert '<div class="logline">[16:37:35.239] NAV_DataCenter: getSignalFlow hasProvider=true</div>' in html
+    assert "user0_main_2026-05-25_16-00.alog.log:2982" not in html
+
+
+def test_report_uses_structured_verdict_and_compact_meta():
+    html = _html()
+    assert 'class="verdict-title"' in html
+    assert 'class="report-meta"' in html
+    assert 'class="cards"' not in html
 
 
 def test_report_no_dead_swimlane_css_unused():

@@ -1439,8 +1439,8 @@ class AppBugRequestTests(_AppTestBase):
 
         self.assertFalse(result.success)
         self.assertEqual(result.error_code, "chat_not_allowed")
-        self.assertEqual(len(fake_lark.sent), 1)
-        self.assertIn("当前群未加入允许列表", fake_lark.sent[0]["text"])
+        self.assertTrue(any(reply["message_id"] == "om_1" for reply in fake_lark.replies))
+        self.assertTrue(any("当前群未加入允许列表" in reply["text"] for reply in fake_lark.replies))
     def test_group_chat_is_allowed_by_default_without_chat_allowlist(self):
         with tempfile.TemporaryDirectory() as tmp:
             fake_chat = FakeOmlxChatClient()
@@ -1506,8 +1506,8 @@ class AppBugRequestTests(_AppTestBase):
         self.assertTrue(result.success)
         self.assertTrue(result.skipped)
         self.assertEqual(result.message, "not a handled request")
-        self.assertEqual(len(fake_lark.sent), 1)
-        self.assertEqual(fake_lark.sent[0]["text"], "not a handled request")
+        self.assertTrue(any(reply["message_id"] == "om_1" for reply in fake_lark.replies))
+        self.assertTrue(any("not a handled request" in reply["text"] for reply in fake_lark.replies))
     def test_intent_unsupported_reanalysis_without_context_prompts_for_reply(self):
         with tempfile.TemporaryDirectory() as tmp:
             fake_lark = FakeLarkClient()
@@ -1540,7 +1540,7 @@ class AppBugRequestTests(_AppTestBase):
         self.assertEqual(fake_intent.calls, [])
         self.assertEqual(fake_lark.card_replies, [])
         self.assertEqual(fake_lark.updated_cards, [])
-        self.assertTrue(any("回复对应那条分析消息" in item["text"] for item in fake_lark.sent))
+        self.assertTrue(any("回复对应那条分析消息" in item["text"] for item in fake_lark.replies))
     def test_reply_to_failed_bug_link_session_uses_activity_context_before_intent(self):
         class FailingIntentRunner(FakeIntentRunner):
             def classify(self, **kwargs):
@@ -1707,7 +1707,7 @@ class AppBugRequestTests(_AppTestBase):
         self.assertTrue(result.success)
         self.assertEqual(result.details["mode"], "claude_skill")
         self.assertEqual(fake_claude.requests[0].prompt, "分析下这个 skill 场景")
-        self.assertEqual(len(fake_lark.sent), 1)
+        self.assertEqual(len(fake_lark.replies), 1)
         self.assertEqual(len(fake_lark.files), 1)
         self.assertEqual(fake_lark.files[0]["path"], artifact)
     def test_claude_skill_request_accepts_bot_name_with_spaces(self):
@@ -1733,7 +1733,7 @@ class AppBugRequestTests(_AppTestBase):
         self.assertTrue(result.success)
         self.assertEqual(result.details["mode"], "claude_skill")
         self.assertEqual(fake_claude.requests[0].prompt, "分析下这个 skill 场景")
-        self.assertEqual(len(fake_lark.sent), 1)
+        self.assertEqual(len(fake_lark.replies), 1)
         self.assertEqual(len(fake_lark.files), 1)
     def test_claude_skill_request_accepts_prefix_without_slash(self):
         with tempfile.TemporaryDirectory() as tmp:

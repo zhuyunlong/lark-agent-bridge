@@ -742,7 +742,7 @@ class _CustomSkillMixin:
         return request_text.strip()
 
     def build_codex_app_server_execution_policy(
-        self, *, cwd: Path, timeout: int,
+        self, *, cwd: Path, timeout: int, model_override: str = "",
     ) -> CodexAppServerExecutionPolicy:
         options = self.config.codex_app_server
         env = build_internal_network_env(self.config.internal_network_env)
@@ -751,7 +751,7 @@ class _CustomSkillMixin:
         env.setdefault("RUST_LOG", "warn")
         codex_home: Path | None = None
         if options.use_minimal_home:
-            codex_home = self._prepare_codex_app_server_minimal_home()
+            codex_home = self._prepare_codex_app_server_minimal_home(model_override=model_override)
             if codex_home is not None:
                 env["CODEX_HOME"] = str(codex_home)
         # Minimal home has no node_repl section, so the disable flag is only
@@ -765,7 +765,7 @@ class _CustomSkillMixin:
             emit_node_repl_flag=emit_node_repl_flag,
         )
 
-    def _prepare_codex_app_server_minimal_home(self, *, run_id: str = "") -> Path | None:
+    def _prepare_codex_app_server_minimal_home(self, *, run_id: str = "", model_override: str = "") -> Path | None:
         source_home = Path.home() / ".codex"
         if not (source_home / "auth.json").exists():
             return None
@@ -781,7 +781,7 @@ class _CustomSkillMixin:
             except OSError:
                 continue
         config_lines = ["[analytics]", "enabled = false", ""]
-        model = self.config.codex_app_server.model.strip()
+        model = (model_override or self.config.codex_app_server.model).strip()
         if model:
             # Empty model => omit the line so Codex uses its own default.
             config_lines = [f'model = "{model}"', ""] + config_lines
@@ -912,6 +912,8 @@ class _CustomSkillMixin:
         progress_callback: Callable[[dict[str, object]], None] | None,
         timeout: int,
         bridge_session_id: str,
+        model_override: str = "",
+        reasoning_effort_override: str = "",
     ) -> dict[str, object]:
         options = self.config.codex_app_server
         ok, version_or_error = check_codex_app_server_available(options.command, options.min_version)
@@ -934,7 +936,7 @@ class _CustomSkillMixin:
                 "bridge_session_id": bridge_session_id,
             }
 
-        policy = self.build_codex_app_server_execution_policy(cwd=cwd, timeout=timeout)
+        policy = self.build_codex_app_server_execution_policy(cwd=cwd, timeout=timeout, model_override=model_override)
         subprocess_env = policy.env
         runtime = CodexAppServerRuntime(
             command=options.command,
@@ -953,7 +955,7 @@ class _CustomSkillMixin:
             disable_apps_feature=options.disable_apps_feature,
             disable_plugins_feature=options.disable_plugins_feature,
             disable_computer_use_feature=options.disable_computer_use_feature,
-            reasoning_effort=options.reasoning_effort,
+            reasoning_effort=(reasoning_effort_override or options.reasoning_effort),
             env=subprocess_env,
         )
 

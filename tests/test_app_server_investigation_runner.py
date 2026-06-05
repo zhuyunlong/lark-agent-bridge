@@ -31,6 +31,8 @@ class FakeBugRunnerForAppServer:
         progress_callback,
         timeout,
         bridge_session_id,
+        model_override="",
+        reasoning_effort_override="",
     ):
         self.prompts.append(
             {
@@ -40,6 +42,8 @@ class FakeBugRunnerForAppServer:
                 "cwd": cwd,
                 "timeout": timeout,
                 "bridge_session_id": bridge_session_id,
+                "model_override": model_override,
+                "reasoning_effort_override": reasoning_effort_override,
             }
         )
         stdout_path.write_text("stdout", encoding="utf-8")
@@ -154,6 +158,78 @@ class AppServerInvestigationRunnerTests(unittest.TestCase):
             self.assertIn("PREP=", prompt)
             self.assertIn("FOCUS=", prompt)
             self.assertEqual(bug_runner.prompts[0]["timeout"], 321)
+
+    def test_runner_passes_app_server_model_and_reasoning_override(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "workspace"
+            skills_root = root / ".ai" / "skills"
+            skills_root.mkdir(parents=True, exist_ok=True)
+            (skills_root / "3d-stuck-investigate").mkdir(parents=True, exist_ok=True)
+            (skills_root / "3d-stuck-investigate" / "SKILL.md").write_text("# skill\n", encoding="utf-8")
+            guideengine = root / "guideengine"
+            guideengine.mkdir(parents=True, exist_ok=True)
+            prepared_logs = Path(tmp) / "prepared_logs"
+            prepared_logs.mkdir(parents=True, exist_ok=True)
+
+            config = BridgeConfig(
+                dry_run=False,
+                workspace_root=root,
+                guideengine_repo=guideengine,
+                data_dir=Path(tmp) / "data",
+                source_investigation=SimpleNamespace(repo_roots=[guideengine]),
+                bug_analysis=BugAnalysisOptions(
+                    app_server_investigation=AppServerInvestigationOptions(
+                        enabled=True,
+                        prompt_template="OUT={output_path}\n",
+                        model="gpt-5.5",
+                        reasoning_effort="xhigh",
+                    )
+                ),
+                # 全局 codex 配置故意不同，证明自主分析走的是路径专属覆盖。
+                codex_app_server=CodexAppServerOptions(
+                    enabled=True, command="codex", model="gpt-5.4", reasoning_effort="medium"
+                ),
+            )
+            bug_runner = FakeBugRunnerForAppServer()
+            runner = AppServerInvestigationRunner(config, bug_runner=bug_runner, skill_manager=SkillManager(config))
+            context = create_job_context(config.data_dir, event=event(event_id="evt2", chat_id="oc", message_id="om2"))
+            analysis_dir = context.output_dir / "app_server_investigation"
+            analysis_dir.mkdir(parents=True, exist_ok=True)
+            prepared = PreparedAppServerInvestigation(
+                context=context,
+                request_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/1 自主分析",
+                prompt_text="",
+                bug_url="https://project.feishu.cn/xpfailuremgmt/buglo/detail/1",
+                title="3D 生命周期异常",
+                description="displayChanged 后没有后续回调",
+                trigger_mode="free",
+                trigger_term="自主分析",
+                source_roots=[guideengine],
+                fault_time="2026-05-25 16:50:41",
+                fault_time_source="bug_title",
+                fault_time_note="from title",
+                selected_input=prepared_logs,
+                prepared_input=prepared_logs,
+                focused_log_input=prepared_logs,
+                log_focus_manifest=analysis_dir / "log_focus.md",
+                bridge_session_id="bridge_2",
+                analysis_dir=analysis_dir,
+            )
+            runner._prepare_bug_request = lambda *args, **kwargs: prepared
+            request = AppServerInvestigationRequest(
+                prompt="",
+                bug_url="https://project.feishu.cn/xpfailuremgmt/buglo/detail/1",
+                raw_text="@bot 自主分析",
+                triggered=True,
+                trigger_mode="free",
+                trigger_term="自主分析",
+            )
+
+            result = runner.run(request, event=event(event_id="evt2", chat_id="oc", message_id="om2"))
+
+            self.assertTrue(result.success)
+            self.assertEqual(bug_runner.prompts[0]["model_override"], "gpt-5.5")
+            self.assertEqual(bug_runner.prompts[0]["reasoning_effort_override"], "xhigh")
 
 
 if __name__ == "__main__":

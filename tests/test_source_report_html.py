@@ -27,6 +27,9 @@ class SourceReportHtmlTests(unittest.TestCase):
         )
 
         self.assertIn("结论摘要", html)
+        self.assertIn('class="verdict-title"', html)
+        self.assertIn('class="report-meta"', html)
+        self.assertNotIn('class="cards"', html)
         self.assertIn("泳道图", html)
         self.assertIn("证据", html)
         self.assertIn("UnityHmiService.kt", html)
@@ -79,6 +82,8 @@ class SourceReportHtmlTests(unittest.TestCase):
         )
 
         self.assertIn("泳道图", html)
+        self.assertIn('class="verdict-title"', html)
+        self.assertIn('class="report-meta"', html)
         self.assertIn("原始分析摘要", html)
         self.assertIn("报告摘录", html)
 

@@ -291,6 +291,8 @@ free_terms = ["全技能分析", "自主分析"]
 require_description_for_file_resources = true
 require_time_for_file_resources = true
 prompt_template = "CTX={context_path}\\nINV={skill_inventory_path}\\nOUT={output_path}"
+model = "gpt-5.5"
+reasoning_effort = "xhigh"
 """,
                 encoding="utf-8",
             )
@@ -304,6 +306,8 @@ prompt_template = "CTX={context_path}\\nINV={skill_inventory_path}\\nOUT={output
         self.assertTrue(opts.require_description_for_file_resources)
         self.assertTrue(opts.require_time_for_file_resources)
         self.assertEqual(opts.prompt_template, "CTX={context_path}\nINV={skill_inventory_path}\nOUT={output_path}")
+        self.assertEqual(opts.model, "gpt-5.5")
+        self.assertEqual(opts.reasoning_effort, "xhigh")
 
     def test_load_requirement_analysis_options(self):
         with tempfile.TemporaryDirectory() as tmp:

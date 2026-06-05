@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import tempfile
+import threading
 from pathlib import Path
 
 from lark_agent_bridge.report_version import (
@@ -162,6 +163,84 @@ class TestReportVersionStore:
             group = store.get_group("g1")
             assert group is not None
             assert group.label == "updated"
+
+
+class TestReportVersionStoreConcurrency:
+    def test_concurrent_distinct_groups_do_not_corrupt(self):
+        # Narrowing the dispatcher lock from chat to chain-root lets two
+        # same-chat analyses run concurrently, so add_version() can now be
+        # called in parallel. Without a lock, _persist() iterates _groups while
+        # another thread inserts a new group key -> "dictionary changed size
+        # during iteration". A tiny switch interval forces the interleave so the
+        # latent race is observed deterministically. Every add must survive.
+        import sys
+
+        old_interval = sys.getswitchinterval()
+        sys.setswitchinterval(1e-6)
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                store = ReportVersionStore(Path(tmp) / "versions.json")
+                n, iters = 16, 25
+                barrier = threading.Barrier(n)
+                errors: list[Exception] = []
+
+                def worker(i: int) -> None:
+                    try:
+                        barrier.wait(timeout=5)
+                        for j in range(iters):
+                            store.add_version(f"bug:{i}-{j}", job_id=f"job-{i}-{j}")
+                    except Exception as exc:
+                        errors.append(exc)
+
+                threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join(timeout=15)
+
+                assert not errors, errors
+                # No lost updates: every distinct group is recorded.
+                assert store.group_count == n * iters
+                # And the persisted file stays valid / reloadable with all groups.
+                reloaded = ReportVersionStore(store.state_file)
+                assert reloaded.group_count == n * iters
+        finally:
+            sys.setswitchinterval(old_interval)
+
+    def test_concurrent_same_group_assigns_unique_versions(self):
+        # Concurrent adds to the SAME group must not collide on version numbers.
+        import sys
+
+        old_interval = sys.getswitchinterval()
+        sys.setswitchinterval(1e-6)
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                store = ReportVersionStore(Path(tmp) / "versions.json")
+                n = 40
+                barrier = threading.Barrier(n)
+                errors: list[Exception] = []
+
+                def worker(i: int) -> None:
+                    try:
+                        barrier.wait(timeout=5)
+                        store.add_version("bug:X", job_id=f"job-{i}")
+                    except Exception as exc:
+                        errors.append(exc)
+
+                threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
+                for t in threads:
+                    t.start()
+                for t in threads:
+                    t.join(timeout=10)
+
+                assert not errors, errors
+                group = store.get_group("bug:X")
+                assert group is not None
+                assert len(group.versions) == n
+                numbers = sorted(v.version for v in group.versions)
+                assert numbers == list(range(1, n + 1))
+        finally:
+            sys.setswitchinterval(old_interval)
 
 
 class TestDeriveGroupKey:

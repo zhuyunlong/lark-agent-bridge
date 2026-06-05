@@ -167,6 +167,51 @@ class AppServerInvestigationRouteTests(unittest.TestCase):
         self.assertEqual([item.value for item in request.resources], ["file_abc123"])
         self.assertEqual(request.trigger_mode, "auto")
 
+    def test_free_term_followup_without_link_inherits_bug_url_from_latest_chat_context(self):
+        """续聊：先分析过某 bug，再裸发「自主分析」(无链接/无附件/无回复)，应从本群最近分析上下文恢复 bug_url。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = Path(tmp) / "analysis.md"
+            html = Path(tmp) / "analysis.html"
+            metadata.write_text("analysis", encoding="utf-8")
+            html.write_text("<html></html>", encoding="utf-8")
+            fake_bug = FakeBugRunner(metadata, html)
+            fake_lark = FakeLarkClient()
+            fake_runner = FakeAppServerInvestigationRunner(Path(tmp) / "app_server.html")
+            app = BridgeApp(
+                self._config(tmp),
+                lark_client=fake_lark,
+                bug_runner=fake_bug,
+                app_server_investigation_runner=fake_runner,
+            )
+            # 上一轮：同一个群里分析过 BUG_URL，落下可恢复的对话上下文。
+            app.conversation_store.remember(
+                root_message_id="om_prior_bug",
+                chat_id="oc_denied",
+                mode="bug_analysis",
+                request_text=f"{self.BUG_URL} 调查3D启动时序",
+                summary_text="根因是首帧超时",
+                report_url="http://127.0.0.1:8765/reports/om_prior_bug/",
+                report_excerpt="关键证据：displayChanged 后无后续",
+            )
+
+            # 这一轮：裸触发「自主分析」，不带链接、不带附件、不使用飞书回复。
+            result = app.handle_event(
+                event(
+                    event_id="evt_followup_auto",
+                    message_id="om_followup_auto",
+                    content="@bot 自主分析",
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.details["mode"], "app_server_investigation")
+        self.assertEqual(len(fake_runner.requests), 1)
+        self.assertEqual(fake_bug.requests, [])
+        request = fake_runner.requests[0]["request"]
+        self.assertEqual(request.trigger_term, "自主分析")
+        # 核心：缺失的 bug 链接应从本群最近一次分析上下文继承。
+        self.assertEqual(request.bug_url, self.BUG_URL)
+
 
 if __name__ == "__main__":
     unittest.main()

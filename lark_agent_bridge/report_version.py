@@ -13,6 +13,7 @@ The version store is a simple JSON file persisted alongside other state.
 from __future__ import annotations
 
 import json
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -111,6 +112,11 @@ class ReportVersionStore:
     def __init__(self, state_file: str | Path) -> None:
         self.state_file = Path(state_file)
         self._groups: dict[str, VersionGroup] = self._load()
+        # RLock (not Lock): compare_versions() calls get_version() internally,
+        # so the lock must be re-entrant. Guards every mutation/read of _groups
+        # plus the whole-file _persist(); two same-chat analyses can now run
+        # concurrently (chain-root lock), so add_version is called in parallel.
+        self._lock = threading.RLock()
 
     # -- public API --
 
@@ -134,60 +140,70 @@ class ReportVersionStore:
         """
         now = datetime.now(timezone.utc).isoformat()
 
-        group = self._groups.get(group_key)
-        if group is None:
-            group = VersionGroup(
-                group_key=group_key,
-                label=label or group_key,
-                created_at=now,
-            )
-            self._groups[group_key] = group
+        with self._lock:
+            group = self._groups.get(group_key)
+            if group is None:
+                group = VersionGroup(
+                    group_key=group_key,
+                    label=label or group_key,
+                    created_at=now,
+                )
+                self._groups[group_key] = group
 
-        next_version = int(version or 0) or (group.latest_version + 1)
-        version = ReportVersion(
-            version=next_version,
-            job_id=job_id,
-            report_url=report_url,
-            summary=_truncate(summary, 500),
-            provider=provider,
-            mode=mode,
-            created_at=now,
-            duration_seconds=duration_seconds,
-            metadata=metadata or {},
-        )
-        group.versions.append(version)
-        group.updated_at = now
-        if label:
-            group.label = label
-        self._persist()
-        return version
+            # Honour a caller-supplied version only if it is still free; under
+            # concurrent same-group adds the peeked number may already be taken,
+            # so fall back to the authoritative next number to avoid collisions.
+            requested = int(version or 0)
+            existing = {v.version for v in group.versions}
+            next_version = requested if requested and requested not in existing else group.latest_version + 1
+            version = ReportVersion(
+                version=next_version,
+                job_id=job_id,
+                report_url=report_url,
+                summary=_truncate(summary, 500),
+                provider=provider,
+                mode=mode,
+                created_at=now,
+                duration_seconds=duration_seconds,
+                metadata=metadata or {},
+            )
+            group.versions.append(version)
+            group.updated_at = now
+            if label:
+                group.label = label
+            self._persist()
+            return version
 
     def get_group(self, group_key: str) -> VersionGroup | None:
-        return self._groups.get(group_key)
+        with self._lock:
+            return self._groups.get(group_key)
 
     def peek_next_version(self, group_key: str) -> int:
-        group = self._groups.get(group_key)
-        if group is None:
-            return 1
-        return group.latest_version + 1
+        with self._lock:
+            group = self._groups.get(group_key)
+            if group is None:
+                return 1
+            return group.latest_version + 1
 
     def get_version(self, group_key: str, version: int) -> ReportVersion | None:
-        group = self._groups.get(group_key)
-        if group is None:
+        with self._lock:
+            group = self._groups.get(group_key)
+            if group is None:
+                return None
+            for v in group.versions:
+                if v.version == version:
+                    return v
             return None
-        for v in group.versions:
-            if v.version == version:
-                return v
-        return None
 
     def list_groups(self, *, limit: int = 50) -> list[VersionGroup]:
         """Return most recently updated groups."""
-        sorted_groups = sorted(
-            self._groups.values(),
-            key=lambda g: g.updated_at or g.created_at,
-            reverse=True,
-        )
-        return sorted_groups[:limit]
+        with self._lock:
+            sorted_groups = sorted(
+                self._groups.values(),
+                key=lambda g: g.updated_at or g.created_at,
+                reverse=True,
+            )
+            return sorted_groups[:limit]
 
     def delete_by_job_id(self, job_id: str) -> int:
         normalized = job_id.strip()
@@ -195,18 +211,19 @@ class ReportVersionStore:
             return 0
         removed = 0
         now = datetime.now(timezone.utc).isoformat()
-        for group_key, group in list(self._groups.items()):
-            kept = [version for version in group.versions if version.job_id != normalized]
-            removed += len(group.versions) - len(kept)
-            if len(kept) == len(group.versions):
-                continue
-            if not kept:
-                del self._groups[group_key]
-                continue
-            group.versions = kept
-            group.updated_at = now
-        if removed:
-            self._persist()
+        with self._lock:
+            for group_key, group in list(self._groups.items()):
+                kept = [version for version in group.versions if version.job_id != normalized]
+                removed += len(group.versions) - len(kept)
+                if len(kept) == len(group.versions):
+                    continue
+                if not kept:
+                    del self._groups[group_key]
+                    continue
+                group.versions = kept
+                group.updated_at = now
+            if removed:
+                self._persist()
         return removed
 
     def compare_versions(
@@ -220,60 +237,68 @@ class ReportVersionStore:
         Returns a dict with both versions' data and a diff summary,
         or ``None`` if either version is not found.
         """
-        va = self.get_version(group_key, version_a)
-        vb = self.get_version(group_key, version_b)
-        if va is None or vb is None:
-            return None
+        with self._lock:
+            va = self.get_version(group_key, version_a)
+            vb = self.get_version(group_key, version_b)
+            if va is None or vb is None:
+                return None
 
-        diff_fields: list[str] = []
-        if va.provider != vb.provider:
-            diff_fields.append("provider")
-        if va.mode != vb.mode:
-            diff_fields.append("mode")
-        if va.summary != vb.summary:
-            diff_fields.append("summary")
+            diff_fields: list[str] = []
+            if va.provider != vb.provider:
+                diff_fields.append("provider")
+            if va.mode != vb.mode:
+                diff_fields.append("mode")
+            if va.summary != vb.summary:
+                diff_fields.append("summary")
 
-        return {
-            "group_key": group_key,
-            "version_a": va.to_dict(),
-            "version_b": vb.to_dict(),
-            "diff_fields": diff_fields,
-            "duration_delta": vb.duration_seconds - va.duration_seconds,
-        }
+            return {
+                "group_key": group_key,
+                "version_a": va.to_dict(),
+                "version_b": vb.to_dict(),
+                "diff_fields": diff_fields,
+                "duration_delta": vb.duration_seconds - va.duration_seconds,
+            }
 
     @property
     def group_count(self) -> int:
-        return len(self._groups)
+        with self._lock:
+            return len(self._groups)
 
     def clear(self) -> int:
-        count = len(self._groups)
-        self._groups.clear()
-        self._persist()
-        return count
+        with self._lock:
+            count = len(self._groups)
+            self._groups.clear()
+            self._persist()
+            return count
 
     def prune_old_versions(self, *, max_versions_per_group: int = 20) -> int:
         """Remove oldest versions beyond the limit per group."""
         removed = 0
-        for group in self._groups.values():
-            if len(group.versions) <= max_versions_per_group:
-                continue
-            group.versions.sort(key=lambda v: v.version)
-            excess = len(group.versions) - max_versions_per_group
-            group.versions = group.versions[excess:]
-            removed += excess
-        if removed:
-            self._persist()
+        with self._lock:
+            for group in self._groups.values():
+                if len(group.versions) <= max_versions_per_group:
+                    continue
+                group.versions.sort(key=lambda v: v.version)
+                excess = len(group.versions) - max_versions_per_group
+                group.versions = group.versions[excess:]
+                removed += excess
+            if removed:
+                self._persist()
         return removed
 
     # -- persistence --
 
     def _persist(self) -> None:
+        # Caller holds self._lock. Atomic write (tmp + replace) so a concurrent
+        # reload never observes a half-written file.
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
         data = {k: g.to_dict() for k, g in self._groups.items()}
-        self.state_file.write_text(
+        tmp = self.state_file.with_suffix(".tmp")
+        tmp.write_text(
             json.dumps(data, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        tmp.replace(self.state_file)
 
     def _load(self) -> dict[str, VersionGroup]:
         if not self.state_file.exists():
