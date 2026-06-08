@@ -765,6 +765,7 @@ class _ResultBugMixin:
         classification_source: str = "",
         classification_reason: str = "",
         classification_provider: str = "",
+        root_message_id: str | None = None,
     ) -> TaskResult:
         self._send_intent_preflight_card(
             event,
@@ -780,6 +781,7 @@ class _ResultBugMixin:
             "bug_request_received",
             "收到 bug 分析请求",
             event=event,
+            session_id=root_message_id,
             bug_url=bug_request.bug_url,
             prompt=bug_request.prompt,
             raw_text=bug_request.raw_text,
@@ -790,10 +792,11 @@ class _ResultBugMixin:
             status="analyzing",
             details={"Bug 链接": bug_request.bug_url[:60], "分析提示": bug_request.prompt or "默认"},
             note="分析进行中，请稍候…",
+            session_id=root_message_id,
         )
         runner_kwargs: dict[str, object] = {
             "event": event,
-            "progress_callback": self._event_progress_callback(event),
+            "progress_callback": self._event_progress_callback(event, session_id=root_message_id),
         }
         if plans_override is not None:
             runner_kwargs["plans_override"] = plans_override
@@ -807,7 +810,12 @@ class _ResultBugMixin:
             runner_kwargs["classification_provider"] = classification_provider
         result = self.bug_runner.run_bug_analysis(bug_request, **runner_kwargs)
         self._ensure_result_bug_url(result, bug_request.bug_url)
-        return self._deliver_result(event, result, request_text=bug_request.raw_text or route_content)
+        return self._deliver_result(
+            event,
+            result,
+            request_text=bug_request.raw_text or route_content,
+            root_message_id=root_message_id,
+        )
 
     def _run_perception_request(self, event: LarkEvent, perception_request, route_content: str) -> TaskResult:
         self._send_intent_preflight_card(

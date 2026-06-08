@@ -3,6 +3,201 @@ from _app_base import _AppTestBase
 
 
 class AppBugFollowupTests(_AppTestBase):
+    def test_bug_time_clarification_full_time_reply_runs_fresh_bug_analysis(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = Path(tmp) / "bug_metadata.md"
+            html = Path(tmp) / "bug_report.html"
+            metadata.write_text("bug", encoding="utf-8")
+            html.write_text("<html></html>", encoding="utf-8")
+            fake_lark = FakeLarkClient()
+            fake_bug = FakeBugRunner(metadata, html)
+            fake_chat = FakeOmlxChatClient()
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    allowed_chats=["oc_denied"],
+                ),
+                lark_client=fake_lark,
+                bug_runner=fake_bug,
+                chat_client=fake_chat,
+            )
+            bug_url = "https://project.feishu.cn/xpfailuremgmt/buglo/detail/7010953353"
+            original_text = f"{bug_url} 3D生命周期"
+            clarification_event = event(
+                event_id="evt_bug_time_missing",
+                message_id="om_bug_time_missing",
+                content=f"@bot {original_text}",
+            )
+            app.activity_store.record_event(clarification_event)
+            app.activity_store.record_result(
+                clarification_event,
+                TaskResult(
+                    success=True,
+                    message="缺少明确问题时间",
+                    job_id="job_missing_time",
+                    job_dir=Path(tmp) / "jobs" / "job_missing_time",
+                    skipped=True,
+                    details={
+                        "mode": "bug_time_clarification",
+                        "bug_url": bug_url,
+                        "user_request_text": original_text,
+                        "time_gate_status": "missing_fault_time",
+                    },
+                ),
+            )
+
+            followup = app.handle_event(
+                event(
+                    event_id="evt_bug_time_reply",
+                    message_id="om_bug_time_reply",
+                    root_id="om_bug_time_missing",
+                    parent_id="om_bot_reply",
+                    content="@bot 6月8日 16:47",
+                )
+            )
+
+        self.assertTrue(followup.success)
+        self.assertEqual(followup.details["mode"], "bug_analysis")
+        self.assertEqual(len(fake_bug.analysis_calls), 1)
+        self.assertEqual(fake_bug.reanalysis_calls, [])
+        self.assertEqual(fake_bug.agent_followup_calls, [])
+        self.assertEqual(fake_chat.context_calls, [])
+        self.assertEqual(followup.details["conversation_root_message_id"], "om_bug_time_missing")
+        session = app.activity_store.get_session("om_bug_time_missing") or {}
+        stages = [str(item.get("stage") or "") for item in session.get("progress", []) if isinstance(item, dict)]
+        self.assertIn("bug_request_received", stages)
+        self.assertIn("bug_fetch_data", stages)
+        self.assertIsNone(app.activity_store.get_session("om_bug_time_reply"))
+        request = fake_bug.analysis_calls[0]["request"]
+        self.assertEqual(request.bug_url, bug_url)
+        self.assertIn("3D生命周期", request.prompt)
+        self.assertIn("6月8日 16:47", request.prompt)
+
+    def test_bug_time_clarification_normalizes_nonstandard_full_time_reply(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = Path(tmp) / "bug_metadata.md"
+            html = Path(tmp) / "bug_report.html"
+            metadata.write_text("bug", encoding="utf-8")
+            html.write_text("<html></html>", encoding="utf-8")
+            fake_lark = FakeLarkClient()
+            fake_bug = FakeBugRunner(metadata, html)
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    allowed_chats=["oc_denied"],
+                ),
+                lark_client=fake_lark,
+                bug_runner=fake_bug,
+                chat_client=FakeOmlxChatClient(),
+            )
+            bug_url = "https://project.feishu.cn/xpfailuremgmt/buglo/detail/7010953353"
+            original_text = f"{bug_url} 3D生命周期"
+            clarification_event = event(
+                event_id="evt_bug_time_nonstandard_missing",
+                message_id="om_bug_time_nonstandard_missing",
+                content=f"@bot {original_text}",
+            )
+            app.activity_store.record_event(clarification_event)
+            app.activity_store.record_result(
+                clarification_event,
+                TaskResult(
+                    success=True,
+                    message="缺少明确问题时间",
+                    details={
+                        "mode": "bug_time_clarification",
+                        "bug_url": bug_url,
+                        "user_request_text": original_text,
+                        "time_gate_status": "missing_fault_time",
+                    },
+                ),
+            )
+
+            followup = app.handle_event(
+                event(
+                    event_id="evt_bug_time_nonstandard_reply",
+                    message_id="om_bug_time_nonstandard_reply",
+                    root_id="om_bug_time_nonstandard_missing",
+                    parent_id="om_bot_reply",
+                    content="@bot 6月8号下午4点47分",
+                )
+            )
+
+        self.assertTrue(followup.success)
+        self.assertEqual(followup.details["mode"], "bug_analysis")
+        request = fake_bug.analysis_calls[0]["request"]
+        self.assertIn("6月8日16:47", request.prompt)
+
+    def test_bug_time_clarification_time_without_date_keeps_asking_for_full_time(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = Path(tmp) / "bug_metadata.md"
+            html = Path(tmp) / "bug_report.html"
+            metadata.write_text("bug", encoding="utf-8")
+            html.write_text("<html></html>", encoding="utf-8")
+            fake_lark = FakeLarkClient()
+            fake_bug = FakeBugRunner(metadata, html)
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    allowed_chats=["oc_denied"],
+                ),
+                lark_client=fake_lark,
+                bug_runner=fake_bug,
+                chat_client=FakeOmlxChatClient(),
+            )
+            bug_url = "https://project.feishu.cn/xpfailuremgmt/buglo/detail/7010953353"
+            original_text = f"{bug_url} 3D生命周期"
+            clarification_event = event(
+                event_id="evt_bug_time_short_missing",
+                message_id="om_bug_time_short_missing",
+                content=f"@bot {original_text}",
+            )
+            app.activity_store.record_event(clarification_event)
+            app.activity_store.record_result(
+                clarification_event,
+                TaskResult(
+                    success=True,
+                    message="缺少明确问题时间",
+                    details={
+                        "mode": "bug_time_clarification",
+                        "bug_url": bug_url,
+                        "user_request_text": original_text,
+                        "time_gate_status": "missing_fault_time",
+                    },
+                ),
+            )
+
+            followup = app.handle_event(
+                event(
+                    event_id="evt_bug_time_short_reply",
+                    message_id="om_bug_time_short_reply",
+                    root_id="om_bug_time_short_missing",
+                    parent_id="om_bot_reply",
+                    content="@bot 16:47",
+                )
+            )
+            date_only_followup = app.handle_event(
+                event(
+                    event_id="evt_bug_time_date_only_reply",
+                    message_id="om_bug_time_date_only_reply",
+                    root_id="om_bug_time_short_missing",
+                    parent_id="om_bot_reply",
+                    content="@bot 6月8日",
+                )
+            )
+
+        self.assertTrue(followup.success)
+        self.assertTrue(followup.skipped)
+        self.assertEqual(followup.details["mode"], "bug_time_clarification")
+        self.assertTrue(date_only_followup.success)
+        self.assertTrue(date_only_followup.skipped)
+        self.assertIn("缺少几点几分", date_only_followup.message)
+        self.assertEqual(fake_bug.analysis_calls, [])
+        self.assertEqual(fake_bug.reanalysis_calls, [])
+        self.assertEqual(fake_bug.agent_followup_calls, [])
+
     def test_bug_followup_reruns_when_existing_report_cannot_answer_new_source_request(self):
         with tempfile.TemporaryDirectory() as tmp:
             metadata = Path(tmp) / "bug_metadata.md"

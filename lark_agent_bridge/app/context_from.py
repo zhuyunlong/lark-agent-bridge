@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import shutil
 import stat
+import unicodedata
 
 from ._shared import *  # noqa: F401,F403
 
@@ -137,6 +138,13 @@ class _ContextFromMixin:
         direct_followup_result = self._maybe_handle_direct_analysis_followup(event, followup_context, route_content)
         if direct_followup_result is not None:
             return direct_followup_result
+        bug_time_clarification_result = self._maybe_handle_bug_time_clarification_followup(
+            event,
+            followup_context,
+            route_content,
+        )
+        if bug_time_clarification_result is not None:
+            return bug_time_clarification_result
         if "bug" in str(followup_context.mode).casefold():
             existing_answer = self._answer_bug_followup_from_existing(route_content, followup_context)
             if existing_answer is not None:
@@ -325,6 +333,135 @@ class _ContextFromMixin:
             raw_text="\n\n".join(raw_parts),
             triggered=True,
             error=None,
+        )
+
+    def _maybe_handle_bug_time_clarification_followup(self, event: LarkEvent, followup_context, route_content: str) -> TaskResult | None:
+        if str(getattr(followup_context, "mode", "") or "") != "bug_time_clarification":
+            return None
+        previous_session = self.activity_store.get_session(followup_context.root_message_id) or {}
+        request_text = self._bug_request_text_for_followup_context(followup_context, previous_session=previous_session)
+        bug_request = parse_bug_request(request_text, bug_url_re=self.bug_url_re)
+        if not bug_request.triggered:
+            return None
+
+        normalized_followup = self._normalize_bug_time_clarification_text(route_content)
+        if not self._looks_like_bug_time_fragment(normalized_followup):
+            return None
+        if not self._bug_time_followup_has_full_datetime(normalized_followup):
+            missing_part = "几月几日"
+            if self._bug_time_followup_has_date(normalized_followup):
+                missing_part = "几点几分"
+            result = TaskResult(
+                success=True,
+                message=(
+                    f"已收到时间片段 `{route_content.strip()}`，但还缺少{missing_part}。\n"
+                    "请补充完整问题时间，例如：`6月8日 16:47`。"
+                ),
+                skipped=True,
+                details={
+                    "mode": "bug_time_clarification",
+                    "bug_url": bug_request.bug_url,
+                    "time_gate_status": "missing_fault_time",
+                    "user_request_text": request_text,
+                },
+            )
+            return self._finalize_followup_reply(event, result, followup_context, route_content)
+
+        recovered_bug_request = self._fresh_bug_request_from_followup_context(
+            followup_context,
+            followup_text=normalized_followup,
+        )
+        if recovered_bug_request is None:
+            return None
+        pending = self._maybe_request_approval(
+            event,
+            operation_type="bug_analysis",
+            description="Bug 分析",
+            route_content=recovered_bug_request.raw_text,
+            bug_url=recovered_bug_request.bug_url,
+            prompt=recovered_bug_request.prompt,
+            estimated_duration_seconds=self.config.bug_analysis.timeout_seconds,
+        )
+        if pending is not None:
+            return pending
+        return self._run_bug_request(
+            event,
+            recovered_bug_request,
+            recovered_bug_request.raw_text,
+            root_message_id=followup_context.root_message_id,
+        )
+
+    def _normalize_bug_time_clarification_text(self, text: str) -> str:
+        normalized = unicodedata.normalize("NFKC", text or "")
+        normalized = normalized.replace("号", "日")
+        normalized = re.sub(
+            r"(?<!\d)(\d{1,2})\s*月\s*(\d{1,2})(?!\s*日|\d)",
+            lambda match: f"{int(match.group(1))}月{int(match.group(2))}日",
+            normalized,
+        )
+        normalized = re.sub(
+            r"(?<!\d)(\d{1,2})\.(\d{1,2})(?=\D|$)",
+            lambda match: f"{int(match.group(1))}-{int(match.group(2))}",
+            normalized,
+        )
+
+        def replace_cn_time(match: re.Match[str]) -> str:
+            period = match.group(1) or ""
+            hour = int(match.group(2))
+            minute = int(match.group(3))
+            if period in {"下午", "晚上"} and 1 <= hour < 12:
+                hour += 12
+            elif period == "中午" and hour < 11:
+                hour += 12
+            return f"{hour:02d}:{minute:02d}"
+
+        normalized = re.sub(
+            r"(上午|早上|下午|晚上|中午)?\s*(\d{1,2})点\s*(\d{1,2})分?",
+            replace_cn_time,
+            normalized,
+        )
+        return normalized.strip()
+
+    def _looks_like_bug_time_fragment(self, text: str) -> bool:
+        return self._bug_time_followup_has_clock(text) or self._bug_time_followup_has_date(text)
+
+    def _bug_time_followup_has_clock(self, text: str) -> bool:
+        return bool(re.search(r"(?<!\d)\d{1,2}:\d{2}(?::\d{2})?(?!\d)", text or ""))
+
+    def _bug_time_followup_has_date(self, text: str) -> bool:
+        normalized = text or ""
+        return bool(
+            re.search(r"(?<!\d)\d{1,2}[-/]\d{1,2}(?!\d)", normalized)
+            or re.search(r"(?<!\d)\d{1,2}月\d{1,2}日", normalized)
+            or re.search(r"\b20\d{2}[-_/年]\d{1,2}[-_/月]\d{1,2}", normalized)
+        )
+
+    def _bug_time_followup_has_full_datetime(self, text: str) -> bool:
+        resolver = getattr(self.bug_runner, "_resolve_bug_time_context", None)
+        if callable(resolver):
+            try:
+                time_context = resolver(request_text=text, title="", description="", reference_time="")
+            except Exception:
+                time_context = None
+            if time_context is not None:
+                return bool(getattr(time_context, "has_full_datetime", False))
+        return self._bug_time_text_has_full_datetime(text)
+
+    def _bug_time_text_has_full_datetime(self, text: str) -> bool:
+        normalized = text or ""
+        return bool(
+            re.search(
+                r"\b20\d{2}[-_/年]\d{1,2}[-_/月]\d{1,2}[日_\s-]*\d{1,2}:\d{2}(?::\d{2})?\b",
+                normalized,
+            )
+            or re.search(
+                r"(?<!\d)\d{1,2}[-/]\d{1,2}(?:[\]\[日_\s-]+)\d{1,2}:\d{2}(?::\d{2})?(?!\d)",
+                normalized,
+            )
+            or re.search(
+                r"(?<!\d)\d{1,2}月\d{1,2}日[^\d]{0,8}\d{1,2}:\d{2}(?::\d{2})?(?!\d)",
+                normalized,
+            )
         )
 
     def _followup_context_has_analysis_artifacts(self, followup_context) -> bool:
