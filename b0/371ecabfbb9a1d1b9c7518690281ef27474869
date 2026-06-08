@@ -1,0 +1,73 @@
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.22",
+  "base_commit_sha": "b0371ecabfbb9a1d1b9c7518690281ef27474869",
+  "prompts": {
+    "4069f1b3980ef31f": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "864aa17a-5379-408e-a588-259db62078a7",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 33,
+      "total_deletions": 6,
+      "accepted_lines": 31,
+      "overriden_lines": 0
+    },
+    "42cc483ef371015a": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8a1c54cb-fc2f-406a-90b5-edc0d6af5894",
+        "model": "mimo-v2.5-pro"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 68,
+      "total_deletions": 16,
+      "accepted_lines": 50,
+      "overriden_lines": 10
+    },
+    "462bd152a3e603e6": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "45b74730-6d4b-488b-b279-6f4ffd9e465f",
+        "model": "mimo-v2.5-pro"
+      },
+      "human_author": null,
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 2,
+      "overriden_lines": 0
+    },
+    "654f38df490139e2": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e7842-c3ea-7dc2-81d0-ac7a6a171d75",
+        "model": "gpt-5.4"
+      },
+      "human_author": null,
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 11,
+      "overriden_lines": 0
+    },
+    "cb652dc665efd509": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "bb127628-99cf-4e68-a009-21da4e7d03cf",
+        "model": "mimo-v2.5-pro"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 99,
+      "total_deletions": 0,
+      "accepted_lines": 0,
+      "overriden_lines": 0
+    }
+  }
+}
