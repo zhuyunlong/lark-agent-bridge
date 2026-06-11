@@ -1,0 +1,21 @@
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.22",
+  "base_commit_sha": "ea546367beb61e6aef04a60f3fbd24d9be88cb84",
+  "prompts": {
+    "eabd23114223e0de": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "351faf7a-c091-4202-b391-288e2386fb58",
+        "model": "claude-fable-5"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 1826,
+      "total_deletions": 1306,
+      "accepted_lines": 1824,
+      "overriden_lines": 0
+    }
+  }
+}
