@@ -1,0 +1,29 @@
+docs/refactor/02-target-architecture.md
+  eabd23114223e0de 1-93
+docs/refactor/03-refactor-plan.md
+  eabd23114223e0de 1-47
+docs/refactor/PROGRESS.md
+  eabd23114223e0de 1-20
+docs/refactor/01-architecture-baseline.md
+  eabd23114223e0de 1-110
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.22",
+  "base_commit_sha": "92e08d4bbc8ebe9aacc1f6a18352d96624521f38",
+  "prompts": {
+    "eabd23114223e0de": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "351faf7a-c091-4202-b391-288e2386fb58",
+        "model": "claude-fable-5"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 270,
+      "total_deletions": 0,
+      "accepted_lines": 270,
+      "overriden_lines": 0
+    }
+  }
+}
