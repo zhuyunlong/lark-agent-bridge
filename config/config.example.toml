@@ -246,3 +246,35 @@ enabled = false
 
 [notifications]
 enabled = false
+
+# ---------------------------------------------------------------------------
+# 以下为可选的运行参数调优 section（默认值即历史硬编码值，不配置则行为不变）
+# ---------------------------------------------------------------------------
+
+# [health]                              # 健康监控阈值
+# watchdog_max_idle_seconds = 3600.0    # 子进程看门狗空闲超时
+# max_event_lag_seconds = 300.0         # 事件处理滞后告警阈值
+# max_disk_usage_percent = 90.0         # 磁盘使用率告警阈值
+
+# [auth]                                # 管理端认证
+# pbkdf2_iterations = 100000            # 密码哈希迭代数（新哈希内嵌迭代数，旧哈希仍可校验）
+# session_ttl_seconds = 86400           # 会话有效期
+# max_sessions = 256                    # 内存会话上限
+
+# [state]                               # 状态存储容量
+# max_seen_events = 50000               # 事件去重集合上限
+# max_progress_events = 200             # 每会话进度日志保留条数
+# lifecycle_max_active = 500            # 活跃生命周期记录上限
+# progress_card_max_age_seconds = 7200  # 进度卡片 TTL（须大于 bug_analysis.timeout_seconds）
+
+# [ai_provider] 追加的 agent-loop 限额键（与上方 [ai_provider] 合并使用）：
+# request_limit = 50                    # pydantic-ai 单次分析请求数上限
+# tool_calls_limit = 80                 # 工具调用次数上限
+# max_tokens_floor = 8192               # max_tokens 下限
+
+# [bug_analysis] 追加的解压/解码超时键（与上方 [bug_analysis] 合并使用）：
+# archive_extract_timeout_seconds = 900
+# archive_decode_timeout_seconds = 600
+
+# 触发词覆盖：新建 config/parser_terms.toml，同名 key（list[str]）覆盖内置触发词，如：
+# TRIGGER_TERMS = ["信号生命周期", "自定义触发词"]

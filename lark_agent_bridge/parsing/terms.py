@@ -320,3 +320,38 @@ _SOURCE_TARGET_STOP_WORDS = {
     "unity",
     "signal",
 }
+
+
+# ---------------------------------------------------------------------------
+# 可选的触发词覆盖：config/parser_terms.toml 中同名 key（list[str]）将覆盖
+# 本模块的内置触发词常量。文件不存在时行为与内置完全一致。
+# 示例：
+#   TRIGGER_TERMS = ["信号生命周期", "自定义触发词"]
+# ---------------------------------------------------------------------------
+
+def _apply_term_overrides(namespace: dict[str, object]) -> None:
+    import tomllib
+
+    from ..profile_registry import CONFIG_DIR
+
+    path = CONFIG_DIR / "parser_terms.toml"
+    if not path.exists():
+        return
+    try:
+        with path.open("rb") as fh:
+            data = tomllib.load(fh)
+    except (OSError, tomllib.TOMLDecodeError):
+        return
+    for key, value in data.items():
+        current = namespace.get(key)
+        if current is None or not isinstance(value, list):
+            continue
+        if not all(isinstance(item, str) for item in value):
+            continue
+        if isinstance(current, tuple):
+            namespace[key] = tuple(value)
+        elif isinstance(current, set):
+            namespace[key] = set(value)
+
+
+_apply_term_overrides(globals())

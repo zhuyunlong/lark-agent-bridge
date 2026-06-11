@@ -44,22 +44,35 @@ class _HandleEventMixin(_RoutesMixin, _DeliveryMixin, _MentionMixin, _ProgressCa
     ) -> None:
         self.config = config
         self.lark_client = lark_client or LarkClient(config)
-        self.state_store = state_store or EventStateStore(config.data_dir / "state" / "seen_events.jsonl")
+        self.state_store = state_store or EventStateStore(
+            config.data_dir / "state" / "seen_events.jsonl",
+            max_seen_events=config.state.max_seen_events,
+        )
         self.conversation_store = conversation_store or ConversationContextStore(
             config.data_dir / "state" / "conversation_contexts.json",
             max_history_turns=config.omlx_chat.followup_max_history_turns,
         )
-        self.activity_store = activity_store or AgentActivityStore(config.data_dir / "state" / "agent_activity.json")
+        self.activity_store = activity_store or AgentActivityStore(
+            config.data_dir / "state" / "agent_activity.json",
+            max_progress_events=config.state.max_progress_events,
+        )
         self.progress_callback = progress_callback
         self._progress_cards: dict[str, dict[str, object]] = {}
         # Guards _progress_cards dict structure (get/setitem/pop/iterate) against
         # concurrent worker threads and the daemon cleanup loop. Held only around
         # dict access — never while sending cards over the network.
         self._progress_cards_lock = threading.Lock()
-        self._progress_cards_max_age_seconds = 7200  # 2 hour TTL (must exceed bug_analysis timeout)
+        self._progress_cards_max_age_seconds = config.state.progress_card_max_age_seconds
         self._progress_card_stream_update_interval_seconds = 5.0
-        self.process_watchdog = ProcessWatchdog()
-        self.health_monitor = HealthMonitor(data_dir=config.data_dir, process_watchdog=self.process_watchdog)
+        self.process_watchdog = ProcessWatchdog(
+            max_idle_seconds=config.health.watchdog_max_idle_seconds,
+        )
+        self.health_monitor = HealthMonitor(
+            data_dir=config.data_dir,
+            process_watchdog=self.process_watchdog,
+            max_event_lag_seconds=config.health.max_event_lag_seconds,
+            max_disk_usage_percent=config.health.max_disk_usage_percent,
+        )
         self._restore_daemon_health_pid()
         self.case_store = CaseStore(config.data_dir / "state" / "cases.json")
         self.skill_manager = SkillManager(config)
@@ -76,7 +89,7 @@ class _HandleEventMixin(_RoutesMixin, _DeliveryMixin, _MentionMixin, _ProgressCa
         self.bug_url_re = build_bug_url_re(config.bug_url_domains) if config.bug_url_domains else None
         self.escalation_checker = EscalationChecker()
         self.notification_history = NotificationHistory(config.data_dir / "state" / "notification_history.json")
-        self.lifecycle_store = LifecycleStore()
+        self.lifecycle_store = LifecycleStore(max_active=config.state.lifecycle_max_active)
         self.report_publisher = report_publisher or HtmlReportPublisher(config)
         self.knowledge_service = knowledge_service or KnowledgeService(
             config,

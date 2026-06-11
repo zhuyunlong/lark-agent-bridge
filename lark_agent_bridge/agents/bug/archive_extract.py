@@ -60,7 +60,7 @@ class _ArchiveExtractMixin(_BugFaultTimeMixin, _BugLogInputSelectMixin, _BugOutp
                 cwd=self._working_dir(),
                 capture_output=True,
                 text=True,
-                timeout=900,
+                timeout=self.config.bug_analysis.archive_extract_timeout_seconds,
                 check=False,
             )
         except Exception as exc:  # subprocess startup/timeout
@@ -98,7 +98,7 @@ class _ArchiveExtractMixin(_BugFaultTimeMixin, _BugLogInputSelectMixin, _BugOutp
             cwd=self._working_dir(),
             capture_output=True,
             text=True,
-            timeout=600,
+            timeout=self.config.bug_analysis.archive_decode_timeout_seconds,
             check=False,
             debug_log_path=self._subprocess_debug_log_path(
                 archive_path.parent,
@@ -134,7 +134,7 @@ class _ArchiveExtractMixin(_BugFaultTimeMixin, _BugLogInputSelectMixin, _BugOutp
             cwd=xp_path.parent,
             capture_output=True,
             text=True,
-            timeout=600,
+            timeout=self.config.bug_analysis.archive_decode_timeout_seconds,
             check=False,
             debug_log_path=self._subprocess_debug_log_path(xp_path.parent, f"decrypt-{xp_path.name}"),
         )
@@ -262,7 +262,7 @@ class _ArchiveExtractMixin(_BugFaultTimeMixin, _BugLogInputSelectMixin, _BugOutp
             cwd=self._working_dir(),
             capture_output=True,
             text=True,
-            timeout=900,
+            timeout=self.config.bug_analysis.archive_extract_timeout_seconds,
             check=False,
             session_id=bridge_session_id,
             debug_log_path=self._subprocess_debug_log_path(

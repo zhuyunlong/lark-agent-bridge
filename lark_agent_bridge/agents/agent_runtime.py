@@ -276,11 +276,11 @@ class AgentRuntime:
         try:
             from pydantic_ai import UsageLimits
             usage_limits = UsageLimits(
-                request_limit=50,
-                tool_calls_limit=80,
+                request_limit=self.options.request_limit,
+                tool_calls_limit=self.options.tool_calls_limit,
             )
             # Use higher max_tokens for pydantic-ai since tool results consume context
-            effective_max_tokens = max(self.options.summary_max_tokens, 8192)
+            effective_max_tokens = max(self.options.summary_max_tokens, self.options.max_tokens_floor)
             result = agent.run_sync(
                 user_prompt,
                 model_settings=self._build_model_settings(effective_max_tokens),
@@ -470,8 +470,11 @@ class AgentRuntime:
             )
 
         from pydantic_ai import UsageLimits
-        usage_limits = UsageLimits(request_limit=50, tool_calls_limit=80)
-        effective_max_tokens = max(self.options.summary_max_tokens, 8192)
+        usage_limits = UsageLimits(
+            request_limit=self.options.request_limit,
+            tool_calls_limit=self.options.tool_calls_limit,
+        )
+        effective_max_tokens = max(self.options.summary_max_tokens, self.options.max_tokens_floor)
 
         accumulated_text = ""
         chunk_count = 0

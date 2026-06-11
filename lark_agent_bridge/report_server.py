@@ -305,6 +305,9 @@ class ReportHttpServer:
         self._admin_auth = AdminAuth(
             self.config.data_dir,
             admin_token=self.config.report_server.admin_token,
+            pbkdf2_iterations=self.config.auth.pbkdf2_iterations,
+            session_ttl_seconds=self.config.auth.session_ttl_seconds,
+            max_sessions=self.config.auth.max_sessions,
         )
         prefix = _url_prefix(
             resolve_public_base_url(

@@ -104,6 +104,9 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
             _default_repo_roots(default_guideengine_repo, default_napa5_repo),
         ),
         signal_resolver=sections._signal_resolver_options(data),
+        health=sections._health_options(data.get("health") or {}),
+        auth=sections._auth_options(data.get("auth") or {}),
+        state=sections._state_options(data.get("state") or {}),
         ai_provider=ai_provider,
         requirement_analysis=sections._requirement_analysis_options(
             data.get("requirement_analysis") or {}

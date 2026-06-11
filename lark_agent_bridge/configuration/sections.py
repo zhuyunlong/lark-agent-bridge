@@ -10,12 +10,14 @@ from ..models import (
     AIProviderOptions,
     AppServerInvestigationOptions,
     ApprovalOptions,
+    AuthOptions,
     BugAnalysisOptions,
     ClaudeAgentOptions,
     CodexAppServerOptions,
     DownloadConfig,
     DualAgentOptions,
     EventConsumerOptions,
+    HealthOptions,
     IntentAnalysisOptions,
     InternalNetworkEnvOptions,
     JobRetentionOptions,
@@ -29,6 +31,7 @@ from ..models import (
     RequirementAnalysisOptions,
     SignalResolverOptions,
     SourceInvestigationOptions,
+    StateOptions,
     WorkflowArchiveOptions,
 )
 from .coercion import (
@@ -79,6 +82,9 @@ def _ai_provider_options(
             summary_temperature=float(data.get("summary_temperature", 0.3)),
             summary_max_tokens=int(data.get("summary_max_tokens", 4096)),
             summary_timeout_seconds=float(data.get("summary_timeout_seconds", 300)),
+            request_limit=int(data.get("request_limit", AIProviderOptions().request_limit)),
+            tool_calls_limit=int(data.get("tool_calls_limit", AIProviderOptions().tool_calls_limit)),
+            max_tokens_floor=int(data.get("max_tokens_floor", AIProviderOptions().max_tokens_floor)),
         ),
         presets=presets,
         apply_enabled=ai_enabled_env is None,
@@ -294,6 +300,12 @@ def _bug_analysis_options(
         ),
         confirm_low_confidence_skill=bool(
             data.get("confirm_low_confidence_skill", defaults.confirm_low_confidence_skill)
+        ),
+        archive_extract_timeout_seconds=int(
+            data.get("archive_extract_timeout_seconds", defaults.archive_extract_timeout_seconds)
+        ),
+        archive_decode_timeout_seconds=int(
+            data.get("archive_decode_timeout_seconds", defaults.archive_decode_timeout_seconds)
         ),
         force_reanalysis_terms=_string_list(
             data.get("force_reanalysis_terms", defaults.force_reanalysis_terms),
@@ -548,6 +560,44 @@ def _source_investigation_options(
         ),
         codegraph_min_confidence=float(
             data.get("codegraph_min_confidence", defaults.codegraph_min_confidence)
+        ),
+    )
+
+
+def _health_options(data: dict[str, Any]) -> HealthOptions:
+    defaults = HealthOptions()
+    return HealthOptions(
+        watchdog_max_idle_seconds=float(
+            data.get("watchdog_max_idle_seconds", defaults.watchdog_max_idle_seconds)
+        ),
+        max_event_lag_seconds=float(
+            data.get("max_event_lag_seconds", defaults.max_event_lag_seconds)
+        ),
+        max_disk_usage_percent=float(
+            data.get("max_disk_usage_percent", defaults.max_disk_usage_percent)
+        ),
+    )
+
+
+def _auth_options(data: dict[str, Any]) -> AuthOptions:
+    defaults = AuthOptions()
+    return AuthOptions(
+        pbkdf2_iterations=int(data.get("pbkdf2_iterations", defaults.pbkdf2_iterations)),
+        session_ttl_seconds=int(data.get("session_ttl_seconds", defaults.session_ttl_seconds)),
+        max_sessions=int(data.get("max_sessions", defaults.max_sessions)),
+    )
+
+
+def _state_options(data: dict[str, Any]) -> StateOptions:
+    defaults = StateOptions()
+    return StateOptions(
+        max_seen_events=int(data.get("max_seen_events", defaults.max_seen_events)),
+        max_progress_events=int(data.get("max_progress_events", defaults.max_progress_events)),
+        lifecycle_max_active=int(
+            data.get("lifecycle_max_active", defaults.lifecycle_max_active)
+        ),
+        progress_card_max_age_seconds=int(
+            data.get("progress_card_max_age_seconds", defaults.progress_card_max_age_seconds)
         ),
     )
 

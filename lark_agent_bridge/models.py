@@ -126,6 +126,8 @@ class BugAnalysisOptions:
     resume_followup_sessions: bool = False
     auto_fallback_to_file_agent: bool = False
     confirm_low_confidence_skill: bool = True
+    archive_extract_timeout_seconds: int = 900
+    archive_decode_timeout_seconds: int = 600
     force_reanalysis_terms: list[str] = field(
         default_factory=lambda: [
             "结果不合理",
@@ -375,6 +377,38 @@ class AIProviderOptions:
     summary_temperature: float = 0.3
     summary_max_tokens: int = 4096
     summary_timeout_seconds: float = 300
+    # pydantic-ai agent-loop limits
+    request_limit: int = 50
+    tool_calls_limit: int = 80
+    max_tokens_floor: int = 8192
+
+
+@dataclass(slots=True)
+class HealthOptions:
+    """健康监控阈值（看门狗空闲、事件滞后、磁盘水位）。"""
+
+    watchdog_max_idle_seconds: float = 3600.0
+    max_event_lag_seconds: float = 300.0
+    max_disk_usage_percent: float = 90.0
+
+
+@dataclass(slots=True)
+class AuthOptions:
+    """管理端认证参数（密码哈希强度、会话 TTL、会话上限）。"""
+
+    pbkdf2_iterations: int = 100_000
+    session_ttl_seconds: int = 86400
+    max_sessions: int = 256
+
+
+@dataclass(slots=True)
+class StateOptions:
+    """状态存储容量与保留策略。"""
+
+    max_seen_events: int = 50000
+    max_progress_events: int = 200
+    lifecycle_max_active: int = 500
+    progress_card_max_age_seconds: int = 7200  # 须大于 bug_analysis.timeout_seconds
 
 
 @dataclass(slots=True)
@@ -419,6 +453,9 @@ class BridgeConfig:
     ai_provider: AIProviderOptions = field(default_factory=AIProviderOptions)
     requirement_analysis: RequirementAnalysisOptions = field(default_factory=RequirementAnalysisOptions)
     signal_resolver: SignalResolverOptions = field(default_factory=SignalResolverOptions)
+    health: HealthOptions = field(default_factory=HealthOptions)
+    auth: AuthOptions = field(default_factory=AuthOptions)
+    state: StateOptions = field(default_factory=StateOptions)
     runner_timeout_seconds: int = 900
 
 

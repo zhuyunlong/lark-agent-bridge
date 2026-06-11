@@ -18,7 +18,9 @@ logger = get_logger("state")
 class EventStateStore:
     _MAX_SEEN_EVENTS = 50000
 
-    def __init__(self, state_file: str | Path) -> None:
+    def __init__(self, state_file: str | Path, *, max_seen_events: int | None = None) -> None:
+        if max_seen_events:
+            self._MAX_SEEN_EVENTS = max(1000, int(max_seen_events))
         self.state_file = Path(state_file)
         self._seen = self._load_seen()
         # Guards the test-and-set in mark_seen so concurrent workers cannot both

@@ -57,9 +57,20 @@ _MAX_SESSIONS = 256
 class AdminAuth:
     """Manages admin authentication state (tokens + users + sessions)."""
 
-    def __init__(self, data_dir: Path, *, admin_token: str = "") -> None:
+    def __init__(
+        self,
+        data_dir: Path,
+        *,
+        admin_token: str = "",
+        pbkdf2_iterations: int = _PBKDF2_ITERATIONS,
+        session_ttl_seconds: int = _SESSION_TTL_SECONDS,
+        max_sessions: int = _MAX_SESSIONS,
+    ) -> None:
         self._data_dir = data_dir
         self._admin_token: str = admin_token.strip()
+        self._pbkdf2_iterations = max(10_000, int(pbkdf2_iterations))
+        self._session_ttl_seconds = max(60, int(session_ttl_seconds))
+        self._max_sessions = max(1, int(max_sessions))
         self._users_file: Path = data_dir / "admin_users.json"
         self._sessions: dict[str, AdminSession] = {}
         self._users: dict[str, AdminUser] = {}
@@ -106,7 +117,7 @@ class AdminAuth:
             username=username,
             role=user.role,
             created_at=now,
-            expires_at=now + _SESSION_TTL_SECONDS,
+            expires_at=now + self._session_ttl_seconds,
         )
         self._sessions[token] = session
         self._prune_sessions()
@@ -127,7 +138,7 @@ class AdminAuth:
             raise ValueError("密码长度不能少于 6 位")
         user = AdminUser(
             username=username,
-            password_hash=_hash_password(password),
+            password_hash=_hash_password(password, iterations=self._pbkdf2_iterations),
             role=role if role in {"admin", "viewer"} else "admin",
         )
         self._users[username] = user
@@ -157,7 +168,7 @@ class AdminAuth:
             raise ValueError("密码长度不能少于 6 位")
         self._users[username] = AdminUser(
             username=user.username,
-            password_hash=_hash_password(new_password),
+            password_hash=_hash_password(new_password, iterations=self._pbkdf2_iterations),
             role=user.role,
         )
         self._save_users()
@@ -203,9 +214,9 @@ class AdminAuth:
         expired = [t for t, s in self._sessions.items() if s.expires_at <= now]
         for t in expired:
             del self._sessions[t]
-        if len(self._sessions) > _MAX_SESSIONS:
+        if len(self._sessions) > self._max_sessions:
             by_age = sorted(self._sessions.items(), key=lambda kv: kv[1].created_at)
-            for token, _ in by_age[: len(self._sessions) - _MAX_SESSIONS]:
+            for token, _ in by_age[: len(self._sessions) - self._max_sessions]:
                 del self._sessions[token]
 
 
@@ -213,18 +224,24 @@ class AdminAuth:
 # Password helpers (module-level for testability)
 # ---------------------------------------------------------------------------
 
-def _hash_password(password: str) -> str:
+def _hash_password(password: str, *, iterations: int = _PBKDF2_ITERATIONS) -> str:
     salt = os.urandom(16)
-    h = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, _PBKDF2_ITERATIONS)
-    return f"{salt.hex()}:{h.hex()}"
+    h = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+    return f"{iterations}:{salt.hex()}:{h.hex()}"
 
 
 def _verify_password(password: str, stored_hash: str) -> bool:
     try:
-        salt_hex, hash_hex = stored_hash.split(":", 1)
-        salt = bytes.fromhex(salt_hex)
-        expected = bytes.fromhex(hash_hex)
-    except (ValueError, TypeError):
+        parts = stored_hash.split(":")
+        if len(parts) == 3:  # 新格式：迭代数内嵌，verify 与配置无关
+            iterations = int(parts[0])
+            salt = bytes.fromhex(parts[1])
+            expected = bytes.fromhex(parts[2])
+        else:  # 旧格式（salt:hash）：用历史默认迭代数
+            iterations = _PBKDF2_ITERATIONS
+            salt = bytes.fromhex(parts[0])
+            expected = bytes.fromhex(parts[1])
+    except (ValueError, TypeError, IndexError):
         return False
-    actual = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, _PBKDF2_ITERATIONS)
+    actual = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
     return hmac.compare_digest(actual, expected)
