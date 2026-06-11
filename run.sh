@@ -7,6 +7,11 @@
 
 set -e
 
+# Codux exposes the active AI CLI through DMUX wrappers in interactive shells.
+# A long-running bridge listener must resolve its own agent binaries.
+unset DMUX_ACTIVE_AI_RESOLVED_PATH DMUX_ACTIVE_AI_TOOL
+unset DMUX_ACTIVE_AI_INVOCATION_ID DMUX_ACTIVE_AI_STARTED_AT
+
 REQUESTED_PROFILE="${1:-default}"
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -38,7 +43,11 @@ PROFILE_ENV="$("$PYTHON_BIN" -m lark_agent_bridge.profile_registry --path "$PRES
 eval "$PROFILE_ENV"
 
 if [ "${PROFILE_REQUIRES_API_KEY:-false}" = "true" ] && [ -z "${LARK_AGENT_BRIDGE_AI_API_KEY:-}" ]; then
-  CONFIG_AI_API_KEY="$("$PYTHON_BIN" -c 'import sys, tomllib; data = tomllib.load(open(sys.argv[1], "rb")); print(str(data.get("ai_provider", {}).get("api_key", "")))' "$CONFIG" 2>/dev/null || true)"
+  CONFIG_AI_API_KEY="$("$PYTHON_BIN" -c 'import sys, tomllib; from pathlib import Path; config = Path(sys.argv[1]); profile = sys.argv[2]; data = tomllib.load(config.open("rb")); key = str(data.get("ai_provider", {}).get("api_key", "") or ""); secrets = config.parent / "config" / "secrets.toml";
+if not key and secrets.exists():
+    secret_data = tomllib.load(secrets.open("rb"))
+    key = str((secret_data.get(profile) or {}).get("api_key", "") or "")
+print(key)' "$CONFIG" "$PROFILE" 2>/dev/null || true)"
   if [ -z "$CONFIG_AI_API_KEY" ]; then
     echo "Warning: profile '$PROFILE' requires a direct API key." >&2
     echo "Set LARK_AGENT_BRIDGE_AI_API_KEY or local [ai_provider].api_key in config.toml." >&2

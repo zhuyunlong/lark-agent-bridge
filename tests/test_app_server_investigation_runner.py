@@ -1,9 +1,10 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from lark_agent_bridge.app_server_investigation import AppServerInvestigationRunner, PreparedAppServerInvestigation
+from lark_agent_bridge.app_server_investigation import AppServerInvestigationRunner, PreparedAppServerInvestigation, _detect_selected_skill
 from lark_agent_bridge.models import AppServerInvestigationOptions, AppServerInvestigationRequest, BugAnalysisOptions, BridgeConfig, CodexAppServerOptions, create_job_context
 from lark_agent_bridge.skill_manager import SkillManager
 from tests._app_base import event
@@ -12,6 +13,7 @@ from tests._app_base import event
 class FakeBugRunnerForAppServer:
     def __init__(self):
         self.prompts = []
+        self.result_override = None
 
     def _emit_progress(self, progress_callback, **payload):
         if progress_callback is not None:
@@ -50,6 +52,8 @@ class FakeBugRunnerForAppServer:
         stderr_path.write_text("", encoding="utf-8")
         command_path.write_text("[]", encoding="utf-8")
         events_path.write_text("", encoding="utf-8")
+        if self.result_override is not None:
+            return dict(self.result_override)
         return {
             "ok": True,
             "stdout": "## 结论摘要\n3D 生命周期卡在 displayChanged 之后。",
@@ -69,6 +73,21 @@ class FakeBugRunnerForAppServer:
 
 
 class AppServerInvestigationRunnerTests(unittest.TestCase):
+    def test_detect_selected_skill_ignores_business_log_words(self):
+        markdown = (
+            "## 结论摘要\n"
+            "- Primary skill: `scene-signal-diagnosis`。\n"
+            "## 关键证据\n"
+            "- 日志显示命中 SKILL isNeedAutoFold，但这只是业务字段。\n"
+        )
+        inventory = {"skills": [{"name": "scene-signal-diagnosis"}, {"name": "unity-startup-lifecycle-check"}]}
+
+        self.assertEqual(_detect_selected_skill(markdown, {}, inventory), "scene-signal-diagnosis")
+        self.assertEqual(
+            _detect_selected_skill("## 关键证据\n- 日志显示命中 SKILL isNeedAutoFold。\n", {}, inventory),
+            "",
+        )
+
     def test_runner_uses_config_prompt_and_writes_context_inventory(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "workspace"
@@ -77,7 +96,18 @@ class AppServerInvestigationRunnerTests(unittest.TestCase):
             for name in ("scene-signal-diagnosis", "3d-stuck-investigate"):
                 skill_dir = skills_root / name
                 skill_dir.mkdir(parents=True, exist_ok=True)
-                (skill_dir / "SKILL.md").write_text(f"# {name}\n", encoding="utf-8")
+                content = f"# {name}\n"
+                if name == "scene-signal-diagnosis":
+                    content = (
+                        "---\n"
+                        "name: scene-signal-diagnosis\n"
+                        "description: scene signal\n"
+                        "report_requires_android_unity_boundary: true\n"
+                        "report_primary_log_globs: app/com.xiaopeng.montecarlo/*\n"
+                        "---\n\n"
+                        "# scene-signal-diagnosis\n"
+                    )
+                (skill_dir / "SKILL.md").write_text(content, encoding="utf-8")
             guideengine = root / "guideengine"
             guideengine.mkdir(parents=True, exist_ok=True)
             prepared_logs = Path(tmp) / "prepared_logs"
@@ -158,6 +188,102 @@ class AppServerInvestigationRunnerTests(unittest.TestCase):
             self.assertIn("PREP=", prompt)
             self.assertIn("FOCUS=", prompt)
             self.assertEqual(bug_runner.prompts[0]["timeout"], 321)
+            inventory = json.loads(Path(result.details["skill_inventory_json_path"]).read_text(encoding="utf-8"))
+            scene = next(item for item in inventory["skills"] if item["name"] == "scene-signal-diagnosis")
+            self.assertTrue(scene["report_contract"]["requires_android_unity_boundary"])
+            self.assertEqual(scene["report_contract"]["primary_log_globs"], ["app/com.xiaopeng.montecarlo/*"])
+            inventory_md = Path(result.details["skill_inventory_path"]).read_text(encoding="utf-8")
+            self.assertIn("报告契约", inventory_md)
+            self.assertIn("requires_android_unity_boundary", inventory_md)
+
+    def test_failed_runner_retains_app_server_usage_details(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "workspace"
+            skills_root = root / ".ai" / "skills"
+            skills_root.mkdir(parents=True, exist_ok=True)
+            (skills_root / "3d-stuck-investigate").mkdir(parents=True, exist_ok=True)
+            (skills_root / "3d-stuck-investigate" / "SKILL.md").write_text("# skill\n", encoding="utf-8")
+            guideengine = root / "guideengine"
+            guideengine.mkdir(parents=True, exist_ok=True)
+            prepared_logs = Path(tmp) / "prepared_logs"
+            prepared_logs.mkdir(parents=True, exist_ok=True)
+
+            config = BridgeConfig(
+                dry_run=False,
+                workspace_root=root,
+                guideengine_repo=guideengine,
+                data_dir=Path(tmp) / "data",
+                source_investigation=SimpleNamespace(repo_roots=[guideengine]),
+                bug_analysis=BugAnalysisOptions(
+                    app_server_investigation=AppServerInvestigationOptions(
+                        enabled=True,
+                        prompt_template="OUT={output_path}\n",
+                    )
+                ),
+                codex_app_server=CodexAppServerOptions(enabled=True, command="codex"),
+            )
+            bug_runner = FakeBugRunnerForAppServer()
+            bug_runner.result_override = {
+                "ok": False,
+                "message": "codex app-server turn timed out after 600.0s",
+                "error_code": "codex_app_server_turn_timeout",
+                "stdout": "Codex token usage token≈2621677 input=2606367 cache=2500000 output=15310",
+                "stderr": "",
+                "app_server_version": "0.136.0",
+                "thread_id": "thread-timeout",
+                "turn_id": "turn-timeout",
+                "usage": {
+                    "totalTokens": 2621677,
+                    "inputTokens": 2606367,
+                    "cachedInputTokens": 2500000,
+                    "outputTokens": 15310,
+                },
+            }
+            runner = AppServerInvestigationRunner(config, bug_runner=bug_runner, skill_manager=SkillManager(config))
+            context = create_job_context(config.data_dir, event=event(event_id="evt-timeout", chat_id="oc", message_id="om-timeout"))
+            analysis_dir = context.output_dir / "app_server_investigation"
+            analysis_dir.mkdir(parents=True, exist_ok=True)
+            prepared = PreparedAppServerInvestigation(
+                context=context,
+                request_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/1 自主分析",
+                prompt_text="",
+                bug_url="https://project.feishu.cn/xpfailuremgmt/buglo/detail/1",
+                title="3D 生命周期异常",
+                description="displayChanged 后没有后续回调",
+                trigger_mode="free",
+                trigger_term="自主分析",
+                source_roots=[guideengine],
+                fault_time="2026-05-25 16:50:41",
+                fault_time_source="bug_title",
+                fault_time_note="from title",
+                selected_input=prepared_logs,
+                prepared_input=prepared_logs,
+                focused_log_input=prepared_logs,
+                log_focus_manifest=analysis_dir / "log_focus.md",
+                bridge_session_id="bridge_timeout",
+                analysis_dir=analysis_dir,
+            )
+            runner._prepare_bug_request = lambda *args, **kwargs: prepared
+            request = AppServerInvestigationRequest(
+                prompt="",
+                bug_url="https://project.feishu.cn/xpfailuremgmt/buglo/detail/1",
+                raw_text="@bot 自主分析",
+                triggered=True,
+                trigger_mode="free",
+                trigger_term="自主分析",
+            )
+
+            result = runner.run(request, event=event(event_id="evt-timeout", chat_id="oc", message_id="om-timeout"))
+
+            self.assertFalse(result.success)
+            self.assertEqual(result.error_code, "codex_app_server_turn_timeout")
+            self.assertEqual(result.details["app_server_usage_scope"], "cumulative")
+            self.assertEqual(result.details["app_server_input_tokens"], 2606367)
+            self.assertEqual(result.details["app_server_cached_input_tokens"], 2500000)
+            self.assertEqual(result.details["app_server_output_tokens"], 15310)
+            self.assertEqual(result.details["app_server_total_tokens"], 2621677)
+            self.assertEqual(result.details["app_server_thread_id"], "thread-timeout")
+            self.assertEqual(result.details["app_server_turn_id"], "turn-timeout")
 
     def test_runner_passes_app_server_model_and_reasoning_override(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -908,9 +908,13 @@
       if (!details || typeof details !== "object") return "";
       const total = details.app_server_total_tokens || details.agent_summary_total_tokens;
       const input = details.app_server_input_tokens || details.agent_summary_input_tokens;
+      const cached = details.app_server_cached_input_tokens || details.agent_summary_cached_input_tokens;
       const output = details.app_server_output_tokens || details.agent_summary_output_tokens;
-      if (!(total || input || output)) return "";
-      return ["in " + (input || "-"), "out " + (output || "-"), "total " + (total || "-")].join(" / ");
+      if (!(total || input || cached || output)) return "";
+      const parts = ["in " + (input || "-")];
+      if (cached) parts.push("cache " + cached);
+      parts.push("out " + (output || "-"), "total " + (total || "-"));
+      return parts.join(" / ");
     }
 
     function stepSummary(step) {

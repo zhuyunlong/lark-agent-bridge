@@ -110,6 +110,34 @@ class SkillManagerTests(unittest.TestCase):
             with self.assertRaises(SkillManagerError):
                 manager.create_skill(name="../bad")
 
+    def test_skill_manager_reads_report_contract_from_frontmatter(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            skill_dir = root / ".ai" / "skills" / "scene-signal-diagnosis"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "---\n"
+                "name: Scene Signal\n"
+                "description: 场景信号\n"
+                "report_requires_android_unity_boundary: true\n"
+                "report_primary_log_globs: app/com.xiaopeng.montecarlo/*\n"
+                "report_system_log_globs: logd/kernel*, logd/main*\n"
+                "report_system_keywords: GSL|SurfaceFlinger\n"
+                "---\n\n"
+                "# Scene Signal\n",
+                encoding="utf-8",
+            )
+
+            manager = SkillManager(BridgeConfig(workspace_root=root, data_dir=root / "data"))
+            record = manager.get_skill("scene-signal-diagnosis", include_content=False)
+
+            self.assertTrue(record.report_contract["requires_android_unity_boundary"])
+            self.assertEqual(record.report_contract["required_sections"], ["Android 最终状态", "责任边界"])
+            self.assertEqual(record.report_contract["primary_log_globs"], ["app/com.xiaopeng.montecarlo/*"])
+            self.assertEqual(record.report_contract["system_log_globs"], ["logd/kernel*", "logd/main*"])
+            self.assertEqual(record.report_contract["system_keywords"], ["GSL", "SurfaceFlinger"])
+            self.assertEqual(record.to_dict()["report_contract"], record.report_contract)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -68,6 +68,11 @@ NAPA_VERSION_RE = re.compile(
     r"(?![A-Za-z0-9_.-])"
 )
 TOMBSTONE_PC_RE = re.compile(r"#\d+\s+pc\s+[0-9a-fA-F]{8,16}\s+\S*lib[\w.-]+\.so\b", re.I)
+BARE_SO_STACK_RE = re.compile(
+    r"(?m)(?:^|\s)(?:#\d+\s+)?(?<![0-9a-fA-F-])[0-9a-fA-F]{8,16}(?![0-9a-fA-F])\s+\S*lib[\w.-]+\.so\b",
+    re.I,
+)
+TOMBSTONE_MAP_LINE_RE = re.compile(r"^\s*[0-9a-fA-F]+-[0-9a-fA-F]+\s+[r-][w-][x-][ps]\s", re.I)
 SO_ADDR_RE = re.compile(r"\blib[\w.-]+\.so\b|0x[0-9a-fA-F]{4,}|\bpc\s+[0-9a-fA-F]{8,16}\b", re.I)
 ADDR2LINE_ADDRESS_RE = re.compile(r"0x[0-9a-fA-F]{4,}|\bpc\s+[0-9a-fA-F]{8,16}\b", re.I)
 LOG_FOLDER_RE = re.compile(r"(?<![A-Za-z0-9_])(log\d+)(?![A-Za-z0-9_])", re.I)
@@ -186,6 +191,8 @@ CLAUDE_TRIGGER_TERMS = (
 )
 PERCEPTION_TRIGGER_TERMS = (
     "当前感知数据",
+    "感知数据链路",
+    "感知链路",
     "感知数据总结",
     "perception summary",
     "perception-summary",
@@ -426,8 +433,11 @@ def parse_addr2line_request(text: str, *, allow_missing_address: bool = False) -
     normalized_text = text or ""
     cleaned = _strip_leading_mentions(normalized_text).strip()
     lowered = cleaned.casefold()
-    has_stack_payload = TOMBSTONE_PC_RE.search(cleaned) is not None
-    has_addr_payload = ADDR2LINE_ADDRESS_RE.search(cleaned) is not None and ("lib" in lowered or "pc " in lowered)
+    has_bare_stack_payload = _has_bare_so_stack(cleaned)
+    has_stack_payload = TOMBSTONE_PC_RE.search(cleaned) is not None or has_bare_stack_payload
+    has_addr_payload = (ADDR2LINE_ADDRESS_RE.search(cleaned) is not None or has_bare_stack_payload) and (
+        "lib" in lowered or "pc " in lowered
+    )
     has_trigger = _looks_like_addr2line_intent(
         cleaned,
         lowered,
@@ -1175,16 +1185,31 @@ def _looks_like_addr2line_intent(
 
 def _extract_addr2line_payload(text: str) -> str:
     lines = [line.strip() for line in text.splitlines()]
-    stack_lines = [line for line in lines if TOMBSTONE_PC_RE.search(line)]
+    stack_lines = [
+        line
+        for line in lines
+        if not _is_tombstone_map_line(line) and (TOMBSTONE_PC_RE.search(line) or BARE_SO_STACK_RE.search(line))
+    ]
     if stack_lines:
         return "\n".join(stack_lines)
-    if SO_ADDR_RE.search(text):
+    if ADDR2LINE_ADDRESS_RE.search(text) and SO_ADDR_RE.search(text):
         return text
     return ""
 
 
 def _has_addr2line_address(text: str) -> bool:
-    return ADDR2LINE_ADDRESS_RE.search(text) is not None
+    return ADDR2LINE_ADDRESS_RE.search(text) is not None or _has_bare_so_stack(text)
+
+
+def _has_bare_so_stack(text: str) -> bool:
+    return any(
+        not _is_tombstone_map_line(line) and BARE_SO_STACK_RE.search(line)
+        for line in text.splitlines()
+    )
+
+
+def _is_tombstone_map_line(line: str) -> bool:
+    return TOMBSTONE_MAP_LINE_RE.search(line or "") is not None
 
 
 _ASCII_TERM_RE_CACHE: dict[str, "re.Pattern[str]"] = {}

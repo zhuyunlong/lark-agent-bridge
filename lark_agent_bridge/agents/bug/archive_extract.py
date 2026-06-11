@@ -703,6 +703,33 @@ class _ArchiveExtractMixin:
             return value
         return fallback if isinstance(fallback, str) else ""
 
+    def _bug_comment_text(self, fetched: dict[str, object]) -> str:
+        comments: list[str] = []
+
+        def collect(value: object) -> None:
+            if isinstance(value, str):
+                text = value.strip()
+                if text:
+                    comments.append(text)
+                return
+            if isinstance(value, list):
+                for item in value:
+                    collect(item)
+                return
+            if isinstance(value, dict):
+                for key in ("text", "content", "body", "description", "comment", "message"):
+                    if key in value:
+                        collect(value.get(key))
+
+        for key in ("comments", "comment", "comment_list", "discussions", "notes"):
+            collect(fetched.get(key))
+        return "\n".join(comments)
+
+    def _bug_stack_payload_text(self, fetched: dict[str, object], description: str) -> str:
+        return "\n".join(
+            part for part in (description.strip(), self._bug_comment_text(fetched).strip()) if part
+        )
+
     def _bug_reference_time(self, fetched: dict[str, object], full_item: dict[str, object]) -> str:
         for value in (
             fetched.get("create_time"),

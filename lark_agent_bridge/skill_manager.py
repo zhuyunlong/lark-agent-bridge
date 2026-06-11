@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .models import BridgeConfig
-from .skill_registry import AUX_BUG_SKILLS, PRIMARY_BUG_SKILL_MAP, extract_skill_frontmatter
+from .skill_registry import AUX_BUG_SKILLS, PRIMARY_BUG_SKILL_MAP, extract_skill_frontmatter, extract_skill_frontmatter_fields
 
 
 _SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
@@ -58,6 +58,7 @@ class SkillRecord:
     route_status_label: str = ""
     selectable_in_report_card: bool = False
     routing_note: str = ""
+    report_contract: dict[str, Any] = field(default_factory=dict)
     content: str = ""
 
     def to_dict(self, *, include_content: bool = False) -> dict[str, Any]:
@@ -80,6 +81,7 @@ class SkillRecord:
             "route_status_label": self.route_status_label,
             "selectable_in_report_card": self.selectable_in_report_card,
             "routing_note": self.routing_note,
+            "report_contract": self.report_contract,
         }
         if include_content:
             payload["content"] = self.content
@@ -334,10 +336,13 @@ class SkillManager:
         content = ""
         description = ""
         frontmatter_name = ""
+        frontmatter_fields: dict[str, Any] = {}
         status = "ok"
         if skill_md.exists():
             content = skill_md.read_text(encoding="utf-8", errors="replace")
-            frontmatter_name, description = extract_skill_frontmatter(content)
+            frontmatter_fields = extract_skill_frontmatter_fields(content)
+            frontmatter_name = str(frontmatter_fields.get("name") or "").strip()
+            description = str(frontmatter_fields.get("description") or "").strip()
         else:
             status = "missing_skill_md"
         kind, label, requires_logs, role = self._metadata_for(name)
@@ -369,6 +374,7 @@ class SkillManager:
             route_status_label=route_status_label,
             selectable_in_report_card=selectable,
             routing_note=routing_note,
+            report_contract=_report_contract_from_frontmatter(frontmatter_fields),
             content=content if include_content else "",
         )
 
@@ -396,6 +402,7 @@ class SkillManager:
             route_status_label=route_status_label,
             selectable_in_report_card=selectable,
             routing_note=routing_note,
+            report_contract={},
         )
 
     def _metadata_for(self, name: str) -> tuple[str, str, bool, str]:
@@ -573,6 +580,48 @@ def _updated_at(path: Path) -> str:
     except OSError:
         return ""
     return datetime.fromtimestamp(timestamp, timezone.utc).isoformat()
+
+
+def _report_contract_from_frontmatter(fields: dict[str, Any]) -> dict[str, Any]:
+    contract: dict[str, Any] = {}
+    if _frontmatter_bool(fields.get("report_requires_android_unity_boundary")):
+        contract["requires_android_unity_boundary"] = True
+        contract["required_sections"] = ["Android 最终状态", "责任边界"]
+    required_sections = _frontmatter_list(fields.get("report_required_sections"))
+    if required_sections:
+        contract["required_sections"] = required_sections
+    required_section_keywords = _frontmatter_list(fields.get("report_required_section_keywords"), split_char="|")
+    if required_section_keywords:
+        contract["required_section_keywords"] = required_section_keywords
+    primary_log_globs = _frontmatter_list(fields.get("report_primary_log_globs"))
+    if primary_log_globs:
+        contract["primary_log_globs"] = primary_log_globs
+    system_log_globs = _frontmatter_list(fields.get("report_system_log_globs"))
+    if system_log_globs:
+        contract["system_log_globs"] = system_log_globs
+    system_keywords = _frontmatter_list(fields.get("report_system_keywords"), split_char="|")
+    if system_keywords:
+        contract["system_keywords"] = system_keywords
+    return contract
+
+
+def _frontmatter_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return False
+
+
+def _frontmatter_list(value: Any, *, split_char: str = ",") -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if not isinstance(value, str):
+        return []
+    text = value.strip()
+    if not text:
+        return []
+    return [item.strip() for item in text.split(split_char) if item.strip()]
 
 
 def _role_order(role: str) -> int:

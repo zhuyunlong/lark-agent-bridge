@@ -145,6 +145,13 @@ class _ContextFromMixin:
         )
         if bug_time_clarification_result is not None:
             return bug_time_clarification_result
+        bug_stack_clarification_result = self._maybe_handle_bug_stack_clarification_followup(
+            event,
+            followup_context,
+            route_content,
+        )
+        if bug_stack_clarification_result is not None:
+            return bug_stack_clarification_result
         if "bug" in str(followup_context.mode).casefold():
             existing_answer = self._answer_bug_followup_from_existing(route_content, followup_context)
             if existing_answer is not None:
@@ -370,6 +377,55 @@ class _ContextFromMixin:
         recovered_bug_request = self._fresh_bug_request_from_followup_context(
             followup_context,
             followup_text=normalized_followup,
+        )
+        if recovered_bug_request is None:
+            return None
+        pending = self._maybe_request_approval(
+            event,
+            operation_type="bug_analysis",
+            description="Bug 分析",
+            route_content=recovered_bug_request.raw_text,
+            bug_url=recovered_bug_request.bug_url,
+            prompt=recovered_bug_request.prompt,
+            estimated_duration_seconds=self.config.bug_analysis.timeout_seconds,
+        )
+        if pending is not None:
+            return pending
+        return self._run_bug_request(
+            event,
+            recovered_bug_request,
+            recovered_bug_request.raw_text,
+            root_message_id=followup_context.root_message_id,
+        )
+
+    def _maybe_handle_bug_stack_clarification_followup(self, event: LarkEvent, followup_context, route_content: str) -> TaskResult | None:
+        if str(getattr(followup_context, "mode", "") or "") != "bug_stack_clarification":
+            return None
+        previous_session = self.activity_store.get_session(followup_context.root_message_id) or {}
+        request_text = self._bug_request_text_for_followup_context(followup_context, previous_session=previous_session)
+        bug_request = parse_bug_request(request_text, bug_url_re=self.bug_url_re)
+        if not bug_request.triggered:
+            return None
+        if not parse_addr2line_request(route_content).triggered:
+            result = TaskResult(
+                success=True,
+                message=(
+                    "还没识别到可反解的堆栈地址。\n"
+                    "请直接粘贴 tombstone/backtrace 文本，例如：`#00 pc 0000000000123450 /system/.../libxxx.so`，"
+                    "或先把 crash/tombstone 日志附件上传到 Bug 后再回复继续。"
+                ),
+                skipped=True,
+                details={
+                    "mode": "bug_stack_clarification",
+                    "bug_url": bug_request.bug_url,
+                    "stack_gate_status": "missing_stack_payload",
+                    "user_request_text": request_text,
+                },
+            )
+            return self._finalize_followup_reply(event, result, followup_context, route_content)
+        recovered_bug_request = self._fresh_bug_request_from_followup_context(
+            followup_context,
+            followup_text=route_content,
         )
         if recovered_bug_request is None:
             return None

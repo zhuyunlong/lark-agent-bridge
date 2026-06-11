@@ -68,9 +68,10 @@ unset_env = [
 
 [ai_provider]
 enabled = true
-preset = "cc-switch-deepseek-claude"
+preset = "deepseek-claude"
 api_key = ""
 intent_timeout_seconds = 30
+intent_max_tokens = 4096
 summary_timeout_seconds = 300
 summary_max_tokens = 4096
 
@@ -104,13 +105,32 @@ prompt_template = """
 - 结构化上下文：{context_json_path}
 - Skill 清单：{skill_inventory_path}
 - Skill 清单 JSON：{skill_inventory_json_path}
+- Log focus 清单（log_focus.md）：{log_focus_manifest}
 
 分析要求：
-1. 先根据用户问题、Bug 描述、时间和日志范围，自行选择最合适的 skill。
-2. 再读取对应 skill 的 SKILL.md 和必要 references，不要一次性盲扫所有 skill。
-3. 只在 `{prepared_input}` 和 `{focused_log_input}` 范围内优先检查日志，再按需扩展。
-4. 只读源码和日志，不要修改源码、日志或配置。
-5. 输出中文 Markdown，必须可直接保存到 `{output_path}`。
+1. 先做问题分类，再根据 Skill 清单选择 1 个 primary skill，最多 1 个 secondary skill，并说明选择理由；不要在配置层臆造 skill 规则。
+2. 再读取对应 skill 的 SKILL.md、report_contract 和必要 references，不要一次性盲扫所有 skill。
+3. 查询前先写 3-5 个假设，每个假设说明目标日志范围、关键词、要证明或排除什么。
+4. 日志查询必须优先围绕 `{focused_log_input}` 和 Log focus 清单；只有证据不足或当前 skill 明确要求时，才扩展到 `{prepared_input}`。
+5. 主业务包名、跨包搜索范围、系统日志路径、系统关键词和报告必备章节都以当前 skill 的 SKILL.md / references / scripts / report_contract 为准；不要在全局配置之外自行猜测。
+6. 第一轮查询限定故障时间前后的小窗口；每阶段先汇总已查证据，再决定是否扩展；不要重复执行相同命令。
+7. 进入更大日志范围或系统日志前，必须说明要验证的假设；日志查询必须带时间窗口和关键词，不要无目标递归扫描。
+8. 源码查询必须围绕日志已命中的类名、信号名、枚举值或业务状态；不要泛扫整个仓库。
+9. 若所选 skill 的 report_contract.required_sections 非空，最终 Markdown 必须按原名输出这些章节；无法闭环时写清缺口，不要省略。
+10. 每个关键判断必须有 file:line 证据。只有推断时必须标注“推断”；证据不足时写“待确认”，不要强行定因。
+11. 只读源码和日志，不要修改源码、日志或配置。
+12. 输出中文 Markdown，必须可直接保存到 `{output_path}`。
+
+基础输出结构：
+- 结论摘要
+- 调查方案
+- 关键时间线
+- 关键证据
+- 已排除项
+- 已确认链路
+- 源码解释
+- 待确认项
+- 建议动作
 
 最终只输出 Markdown 正文，不要输出额外解释。
 """

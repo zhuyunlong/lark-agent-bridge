@@ -24,7 +24,7 @@ class _FakeAIOptions:
     requires_api_key: bool = False
     precondition: str = ""
     intent_temperature: float = 0.0
-    intent_max_tokens: int = 1024
+    intent_max_tokens: int = 4096
     intent_timeout_seconds: float = 30
     intent_max_retries: int = 2
     summary_temperature: float = 0.3

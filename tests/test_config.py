@@ -56,6 +56,25 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("../../xp/Napa5", example)
         self.assertNotIn("../../xp/Napa5/.worktrees/os6_robotaxi", example)
 
+    def test_committed_app_server_investigation_prompt_bounds_log_search(self):
+        config = load_config(Path("config/config.example.toml"))
+        prompt = config.bug_analysis.app_server_investigation.prompt_template
+
+        self.assertIn("先做问题分类", prompt)
+        self.assertIn("1 个 primary skill", prompt)
+        self.assertIn("file:line", prompt)
+        self.assertIn("不要重复执行相同命令", prompt)
+        self.assertIn("log_focus.md", prompt)
+        self.assertIn("report_contract", prompt)
+        self.assertIn("当前 skill 的 SKILL.md", prompt)
+        self.assertIn("系统日志路径", prompt)
+        self.assertIn("不要在配置层臆造 skill 规则", prompt)
+        self.assertNotIn("com.xiaopeng.montecarlo", prompt)
+        self.assertNotIn("GSL|OPENGLRENDER|SurfaceFlinger", prompt)
+        self.assertNotIn("MonteCarlo", prompt)
+        self.assertNotIn("scene-signal 类 skill", prompt)
+        self.assertNotIn("unity-startup 类 skill", prompt)
+
     def test_omlx_api_key_empty_config_uses_local_default(self):
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "config.toml"
@@ -420,23 +439,39 @@ command = "custom-codex"
         self.assertEqual(config.ai_provider.api_format, "openai")
         self.assertEqual(config.bug_analysis.command, "custom-codex")
 
-    def test_repository_config_defaults_to_cc_switch_deepseek_claude_when_present(self):
+    def test_repository_config_defaults_to_deepseek_claude_when_present(self):
         root_config = Path(__file__).resolve().parents[1] / "config.toml"
         if not root_config.exists():
             self.skipTest("local config.toml is ignored and may be absent in clean checkouts")
 
         config = load_config(root_config)
 
-        self.assertEqual(config.ai_provider.preset, "cc-switch-deepseek-claude")
+        self.assertEqual(config.ai_provider.preset, "deepseek-claude")
         self.assertEqual(config.ai_provider.api_format, "anthropic")
-        self.assertEqual(config.ai_provider.base_url, "http://127.0.0.1:15721")
-        self.assertEqual(config.ai_provider.api_key, "PROXY_MANAGED")
+        self.assertEqual(config.ai_provider.base_url, "https://api.deepseek.com/anthropic")
+        self.assertNotEqual(config.ai_provider.api_key, "PROXY_MANAGED")
         self.assertEqual(config.bug_analysis.provider, "claude")
         self.assertEqual(config.bug_analysis.command, "claude")
         self.assertEqual(config.intent_analysis.provider, "claude")
         self.assertEqual(config.intent_analysis.command, "claude")
         self.assertEqual(config.source_investigation.provider, "claude")
         self.assertEqual(config.source_investigation.command, "claude")
+
+    def test_ai_provider_default_intent_max_tokens_allows_structured_output_headroom(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "config.toml"
+            config_path.write_text(
+                """
+[ai_provider]
+enabled = true
+preset = "cc-switch-deepseek-claude"
+""",
+                encoding="utf-8",
+            )
+
+            config = load_config(config_path)
+
+        self.assertEqual(config.ai_provider.intent_max_tokens, 4096)
 
     def test_preset_override_drives_agent_defaults_from_protocol(self):
         cases = [

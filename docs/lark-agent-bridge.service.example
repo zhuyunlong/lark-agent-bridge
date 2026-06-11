@@ -13,7 +13,7 @@ EnvironmentFile=/path/to/lark-agent-bridge/.env
 
 # Choose a profile from config/presets.toml.
 # run.sh prefers the project .venv, so optional extras stay available.
-ExecStart=/path/to/lark-agent-bridge/run.sh cc-switch-deepseek-claude
+ExecStart=/path/to/lark-agent-bridge/run.sh deepseek-claude
 
 # Auto-restart on failure
 Restart=on-failure

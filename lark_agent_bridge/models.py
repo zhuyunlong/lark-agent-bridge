@@ -368,7 +368,7 @@ class AIProviderOptions:
     precondition: str = ""
     # Intent classification settings
     intent_temperature: float = 0.0
-    intent_max_tokens: int = 1024
+    intent_max_tokens: int = 4096
     intent_timeout_seconds: float = 30
     intent_max_retries: int = 2
     # Summary generation settings

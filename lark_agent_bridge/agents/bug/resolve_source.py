@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from ._shared import *  # noqa: F401,F403
 from . import _shared
+from ...parser import parse_addr2line_request
 
 
 class _ResolveSourceMixin:
@@ -195,11 +196,30 @@ class _ResolveSourceMixin:
                 self._append_unique(terms, term)
         return terms[:12]
 
+    def _has_stack_reverse_lookup_intent(self, prompt_text: str) -> bool:
+        prompt = str(prompt_text or "").strip()
+        if not prompt:
+            return False
+        return parse_addr2line_request(prompt, allow_missing_address=True).triggered
+
+    def _has_stack_reverse_lookup_payload(self, *texts: str) -> bool:
+        merged = "\n".join(str(text or "") for text in texts if str(text or "").strip())
+        if not merged:
+            return False
+        return parse_addr2line_request(merged).triggered
+
     def _domain_kind_from_plans(self, plans: list["BugAnalysisPlan"]) -> str:
         for plan in plans:
             if plan.kind != "general" and not _kind_spec(plan.kind).is_source_stage:
                 return plan.kind
         return "general"
+
+    def _stack_reverse_preflight_can_override(self, selection: "BugAnalysisSelection") -> bool:
+        if selection.skill_name.strip() in {"", "general"}:
+            return True
+        if selection.source in {"manual_fallback", "heuristic", "fallback"}:
+            return all(plan.kind in {"general", "crash"} for plan in selection.plans)
+        return False
 
     def _context_profile_for_domain(self, domain_kind: str, skill_name: str) -> str:
         normalized = skill_name.strip()
@@ -350,6 +370,7 @@ class _ResolveSourceMixin:
         description: str,
         attachments: object = (),
         time_context: "BugTimeContext | None" = None,
+        stack_payload_text: str = "",
     ) -> "UnifiedBugDecision":
         """Single entry-point that replaces the old two-step flow.
 
@@ -384,6 +405,23 @@ class _ResolveSourceMixin:
             selection = self._manual_bug_selection(
                 prompt_text=prompt_text, title=title, description=description,
             )
+        payload_source = stack_payload_text or description
+        if (
+            self._stack_reverse_preflight_can_override(selection)
+            and self._has_stack_reverse_lookup_intent(prompt_text)
+            and self._has_stack_reverse_lookup_payload(
+                request_text,
+                prompt_text,
+                payload_source,
+            )
+        ):
+            selection = self._selection_from_plans(
+                [BugAnalysisPlan(kind=SOURCE_STAGE_KIND)],
+                source="preflight_rules",
+                reason="用户明确要求反解堆栈，且 Bug 文本包含可用堆栈，执行源码/堆栈分析阶段。",
+            )
+            selection.skill_name = "source_analysis"
+            selection.skill_label = self._analysis_label(SOURCE_STAGE_KIND)
 
         # --- step 2: source analysis decision ---
         source_decision = self._decide_source_analysis_request(
@@ -620,6 +658,43 @@ class _ResolveSourceMixin:
             },
         )
 
+    def _bug_stack_clarification_result(
+        self,
+        *,
+        context,
+        started: float,
+        request_text: str,
+        bug_url: str,
+        progress_callback: Callable[[dict[str, object]], None] | None,
+    ) -> TaskResult:
+        self._emit_progress(
+            progress_callback,
+            stage="bug_stack_gate_blocked",
+            message="缺少可反解堆栈，等待用户补充 tombstone/backtrace",
+            job_id=context.job_id,
+            bug_url=bug_url,
+            stack_gate_status="missing_stack_payload",
+        )
+        message = (
+            "缺少可反解堆栈：当前请求要求反解堆栈，但 Bug 详情没有堆栈文本，也没有可下载附件。\n"
+            "请在同一条消息下回复 tombstone/backtrace 地址（形如 `#00 pc 000000... /xxx/libxxx.so`），"
+            "或把包含 crash/tombstone 的日志附件上传到 Bug 后再回复继续。"
+        )
+        return TaskResult(
+            success=True,
+            message=message,
+            skipped=True,
+            job_id=context.job_id,
+            job_dir=context.job_dir,
+            duration_seconds=time.monotonic() - started,
+            details={
+                "mode": "bug_stack_clarification",
+                "bug_url": bug_url,
+                "user_request_text": request_text,
+                "stack_gate_status": "missing_stack_payload",
+            },
+        )
+
     def _bug_time_context_payload(self, time_context: BugTimeContext | None) -> dict[str, object]:
         if time_context is None:
             return {}
@@ -747,12 +822,9 @@ class _ResolveSourceMixin:
             "在选择 skill 前必须先参考 problem_time；如果 has_full_datetime=false，表示问题时间不足，后续应先要求补充时间而不是继续分析。"
             "只有当没有任何专用 skill 明确匹配时，才选择 general。"
             "general 不是让系统盲扫源码给根因，而是表示需要分诊、材料检查或要求用户补充更明确方向。"
-            "先判断是否有更专一的 primary skill；signal-chain-analyzer 优先级最低，只在用户明确要排查某个具体 SignalCode / SIGNAL_... 的通用信号链路、信号来源或是否送达时使用，"
-            "不要因为文本里出现 signal/信号 字样就滥用。"
-            "3D场景信号 / SceneType / 上电P / 临停P / 特殊场景 / 小憩 / 露营 / 洗车 / 充电场景 / 放电场景 / 场景选择 / 离车舒享 / 行车场景 / 泊车场景 优先考虑 scene-signal-diagnosis。"
-            "xtheme / 105004 / 105009 / 晨曦 / 傍晚 / 主题切换 / XuiConditionHelper 应优先考虑 xtheme-analyzer。"
-            "车道级 / 车道级进不去 / 车道级渲染 / LD / lane-level / LDConf / CheckLDState / tile / 瓦片 优先考虑车道级（ld-lane-level）类 skill。"
-            "启动 / 时序 / 首帧 / UnityReady / displayChanged / startRender 优先考虑启动类 skill；卡顿 / 卡死 / 掉帧 / 黑屏 / ANR / 不刷新 优先考虑卡顿类 skill；闪退 / crash / tombstone / FATAL EXCEPTION / SIGSEGV / 异常退出 优先考虑 crash 类 skill；当前感知数据总结 优先考虑感知类 skill。"
+            "先判断是否有更专一的 primary skill；业务差异以输入 JSON 里的 primary_skills.name/kind/description/report_contract 为准，"
+            "不要在决策器里臆造或覆盖 skill 规则。"
+            "通用词只能作为辅助线索：如果文本只出现 signal/信号、卡顿、主题、启动等泛词，必须结合 primary_skills 描述和用户现象确认是否真的匹配专用 skill。"
             "若用户已明确点名某 skill 或给出明确方向，直接采用并给 high 置信度；若多个预设都相近、信息不足或只能模糊归类，给 low 置信度并在 reason 里说明分诊依据。"
             "只输出一个 JSON 对象，字段必须完整："
             f'{{"analysis_kind":"{"|".join(analysis_kinds or ["general"])}",'
@@ -832,9 +904,9 @@ class _ResolveSourceMixin:
             "请先判断当前追问能否直接基于已有分析结果回答；如果不能，再决定是否需要重新分析，"
             "并选择最合适的主分析 skill。"
             "如果没有专用 skill 明确匹配，general 只代表分诊或澄清，不要把泛泛请求改写成源码根因分析。"
-            "先判断是否有更专一的 primary skill；signal-chain-analyzer 优先级最低，只用于明确给出具体 SignalCode / SIGNAL_... 的通用信号链路问题；"
-            "3D场景信号 / SceneType / 上电P / 临停P / 特殊场景 / 小憩 / 露营 / 洗车 / 充电场景 / 放电场景 / 场景选择 / 离车舒享 / 行车场景 / 泊车场景 优先考虑 scene-signal-diagnosis。"
-            "xtheme / 105004 / 105009 / 晨曦 / 傍晚 / 主题切换 / XuiConditionHelper 优先考虑 xtheme-analyzer。"
+            "先判断是否有更专一的 primary skill；业务差异以输入 JSON 里的 primary_skills.name/kind/description/report_contract 为准，"
+            "不要在决策器里臆造或覆盖 skill 规则。"
+            "通用词只能作为辅助线索：如果文本只出现 signal/信号、卡顿、主题、启动等泛词，必须结合 primary_skills 描述和追问意图确认是否真的需要重新分析。"
             "如果选择的 skill 需要日志，而当前 prepared_log_input / selected_log_input 为空，请把 retry_download_if_missing 设为 true。"
             "只输出一个 JSON 对象，字段必须完整："
             '{"action":"answer_from_existing|reanalyze",'

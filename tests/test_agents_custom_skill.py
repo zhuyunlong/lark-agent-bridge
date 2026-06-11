@@ -4,6 +4,86 @@ import tomllib
 
 
 class AgentsCustomSkillTests(_AgentTestBase):
+    def test_file_agent_focus_dir_keeps_navigation_and_key_logd_when_app_noise_exceeds_cap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = BugAnalysisRunner(BridgeConfig(dry_run=False, data_dir=Path(tmp) / "data"))
+            input_path = Path(tmp) / "logs" / "Log" / "log1"
+            fault_time = "2026-05-25 16:50:41"
+            line = "05-25 16:50:35.000 100 100 I FocusTest: hit\n"
+
+            for index in range(30):
+                path = input_path / "app" / f"com.xiaopeng.a{index:02d}" / "user0_main_2026-05-25_16-00.alog.log"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(line, encoding="utf-8")
+            nav_log = input_path / "app" / "com.xiaopeng.montecarlo" / "user0_main_2026-05-25_16-00.alog.log"
+            nav_log.parent.mkdir(parents=True, exist_ok=True)
+            nav_log.write_text(line, encoding="utf-8")
+            for name in ("kernel.txt", "main.txt", "events.txt", "crash.txt"):
+                path = input_path / "logd" / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                content = line
+                if name == "main.txt":
+                    content = (
+                        line * 3
+                        + "05-25 16:50:36.000 200 201 I SurfaceFlinger: GSL fence timeout\n"
+                    )
+                path.write_text(content, encoding="utf-8")
+
+            focus_dir, _, copied = runner._build_file_agent_focus_dir(
+                input_path=input_path,
+                fault_time=fault_time,
+                analysis_kind="app_server_autonomous",
+                analysis_dir=Path(tmp) / "analysis",
+            )
+            assert focus_dir is not None
+            copied_rel = {path.relative_to(focus_dir).as_posix() for path in copied}
+            focused_main = (focus_dir / "logd" / "main.txt").read_text(encoding="utf-8")
+
+        self.assertIn("app/com.xiaopeng.montecarlo/user0_main_2026-05-25_16-00.alog.log", copied_rel)
+        self.assertIn("logd/kernel.txt", copied_rel)
+        self.assertIn("logd/main.txt", copied_rel)
+        self.assertIn("logd/events.txt", copied_rel)
+        self.assertIn("logd/crash.txt", copied_rel)
+        self.assertIn("SurfaceFlinger: GSL", focused_main)
+
+    def test_key_logd_survives_when_montecarlo_exceeds_24_files(self):
+        """Regression: key logd (kernel/main/events/crash) must not be squeezed
+        out when MonteCarlo directory has more than 24 files."""
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = BugAnalysisRunner(BridgeConfig(dry_run=False, data_dir=Path(tmp) / "data"))
+            input_path = Path(tmp) / "logs" / "Log" / "log1"
+            fault_time = "2026-05-25 16:50:41"
+            line = "05-25 16:50:35.000 100 100 I FocusTest: hit\n"
+
+            # 30 files inside montecarlo alone — exceeds the 24-cap
+            mc_dir = input_path / "app" / "com.xiaopeng.montecarlo"
+            mc_dir.mkdir(parents=True, exist_ok=True)
+            for index in range(30):
+                (mc_dir / f"user{index}_main_2026-05-25_16-00.alog.log").write_text(line, encoding="utf-8")
+            for index in range(6):
+                path = input_path / "logd" / f"kernel.txt.{index:02d}"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(line, encoding="utf-8")
+            for name in ("main.txt", "events.txt", "crash.txt"):
+                path = input_path / "logd" / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(line, encoding="utf-8")
+
+            focus_dir, _, copied = runner._build_file_agent_focus_dir(
+                input_path=input_path,
+                fault_time=fault_time,
+                analysis_kind="app_server_autonomous",
+                analysis_dir=Path(tmp) / "analysis",
+            )
+            assert focus_dir is not None
+            copied_rel = {path.relative_to(focus_dir).as_posix() for path in copied}
+
+        # All 4 key logd files must survive even with 30 montecarlo files
+        self.assertTrue(any(path.startswith("logd/kernel.txt") for path in copied_rel))
+        self.assertIn("logd/main.txt", copied_rel)
+        self.assertIn("logd/events.txt", copied_rel)
+        self.assertIn("logd/crash.txt", copied_rel)
+
     def test_file_agent_context_allows_json_fence_when_prompt_requires_structured_output(self):
         with tempfile.TemporaryDirectory() as tmp:
             runner = BugAnalysisRunner(BridgeConfig(dry_run=False, data_dir=Path(tmp) / "data"))

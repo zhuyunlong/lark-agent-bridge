@@ -117,6 +117,68 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(request.error, "missing_symbol_version")
         self.assertIn("libunity.so", request.addr_text)
 
+    def test_parse_addr2line_request_accepts_bare_hex_so_stack(self):
+        text = (
+            "0000000000085304 /apex/com.android.runtime/lib64/bionic/libc.so (__memcpy+276)\n"
+            "00000000049f7194 /system/app/xp_envirodrive-mainland/lib/arm64/libil2cpp.so\n"
+            "0000000004872b6c /system/app/xp_envirodrive-mainland/lib/arm64/libil2cpp.so\n"
+            "堆栈解析"
+        )
+
+        request = parse_addr2line_request(text)
+
+        self.assertTrue(request.triggered)
+        self.assertEqual(request.error, "missing_symbol_version")
+        self.assertIn("00000000049f7194", request.addr_text)
+        self.assertIn("libil2cpp.so", request.addr_text)
+
+    def test_parse_addr2line_request_accepts_single_line_rom_and_markdown_so_stack(self):
+        text = (
+            "XMARTQTZHG01E5_V6.2.61.6806_20260529152853.2_REV01_USERDEBUG_Alpha "
+            "000000000118520c /system/app/xp_envirodrive-mainland/lib/arm64/"
+            "[libunity.so](http://libunity.so/) "
+            "00000000011856bc /system/app/xp_envirodrive-mainland/lib/arm64/"
+            "[libunity.so](http://libunity.so/) "
+            "反解堆栈"
+        )
+
+        request = parse_addr2line_request(text)
+
+        self.assertTrue(request.triggered)
+        self.assertIsNone(request.error)
+        self.assertEqual(
+            request.rom_version,
+            "XMARTQTZHG01E5_V6.2.61.6806_20260529152853.2_REV01_USERDEBUG_Alpha",
+        )
+        self.assertIn("000000000118520c", request.addr_text)
+        self.assertIn("libunity.so", request.addr_text)
+
+    def test_parse_addr2line_request_ignores_tombstone_mapping_lines(self):
+        text = (
+            "XMARTQGZHE29E5_V6.1.0.8810_20260327200937.9_REV01_USER_Release 反解堆栈\n"
+            "#00 pc 0000000000123456 /apex/lib64/libbar.so\n"
+            "7f8a2c3000-7f8a2c4000 r--p 00000000 fd:00 12345678  /system/lib64/libfoo.so"
+        )
+
+        request = parse_addr2line_request(text)
+
+        self.assertTrue(request.triggered)
+        self.assertIn("0000000000123456", request.addr_text)
+        self.assertIn("libbar.so", request.addr_text)
+        self.assertNotIn("12345678", request.addr_text)
+        self.assertNotIn("libfoo.so", request.addr_text)
+
+    def test_parse_addr2line_request_does_not_extract_substring_from_long_hex_token(self):
+        request = parse_addr2line_request(
+            "反解堆栈\n"
+            "deadbeefdeadbeef001122334455667788 /system/lib64/liblong.so",
+            allow_missing_address=True,
+        )
+
+        self.assertTrue(request.triggered)
+        self.assertEqual(request.addr_text, "")
+        self.assertEqual(request.error, "missing_address")
+
     def test_parse_addr2line_request_recognizes_stack_analysis_intent_variants(self):
         rom = "XMARTQGZHE29E5_V6.1.0.8810_20260327200937.9_REV01_USER_Release"
         variants = (
@@ -363,6 +425,12 @@ class ParserTests(unittest.TestCase):
 
         self.assertTrue(request.triggered)
         self.assertEqual(request.prompt, "perception 总结当前感知数据")
+
+    def test_parse_perception_summary_data_chain_investigation(self):
+        request = parse_perception_summary_request("@bot 时间点6月8日 19:17 感知数据链路调查")
+
+        self.assertTrue(request.triggered)
+        self.assertEqual(request.prompt, "时间点6月8日 19:17 感知数据链路调查")
 
     def test_parse_perception_summary_extracts_file_resource(self):
         request = parse_perception_summary_request("@bot 总结当前感知数据 file_abc123")

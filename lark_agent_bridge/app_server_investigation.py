@@ -12,8 +12,9 @@ from typing import Callable
 
 from .downloader import DownloadError, LogDownloader
 from .models import AppServerInvestigationRequest, BridgeConfig, DownloadResource, LarkEvent, TaskResult, create_job_context
-from .reporting.app_server_report_html import render_app_server_report
+from .reporting.app_server_report_html import _first_section, render_app_server_report
 from .skill_manager import SkillManager, SkillRecord
+from .token_usage import normalize_token_usage
 
 
 @dataclass(slots=True)
@@ -455,7 +456,21 @@ class AppServerInvestigationRunner:
             model_override=self.config.bug_analysis.app_server_investigation.model,
             reasoning_effort_override=self.config.bug_analysis.app_server_investigation.reasoning_effort,
         )
+        usage = normalize_token_usage(result.get("usage") if isinstance(result.get("usage"), dict) else None)
         if not result.get("ok"):
+            details = {
+                "mode": "app_server_investigation",
+                "bug_url": prepared.bug_url,
+                "trigger_mode": prepared.trigger_mode,
+                "trigger_term": prepared.trigger_term,
+                "context_path": str(context_path),
+                "skill_inventory_path": str(skill_inventory_path),
+                "output_path": str(output_path),
+                "app_server_version": str(result.get("app_server_version") or ""),
+                "app_server_thread_id": str(result.get("thread_id") or ""),
+                "app_server_turn_id": str(result.get("turn_id") or ""),
+            }
+            details.update(_app_server_usage_details(usage))
             return TaskResult(
                 success=False,
                 message=str(result.get("message") or "Codex app-server AI 自主分析失败。"),
@@ -465,19 +480,9 @@ class AppServerInvestigationRunner:
                 error_code=str(result.get("error_code") or "codex_app_server_failed"),
                 stdout=str(result.get("stdout") or ""),
                 stderr=str(result.get("stderr") or ""),
-                details={
-                    "mode": "app_server_investigation",
-                    "bug_url": prepared.bug_url,
-                    "trigger_mode": prepared.trigger_mode,
-                    "trigger_term": prepared.trigger_term,
-                    "context_path": str(context_path),
-                    "skill_inventory_path": str(skill_inventory_path),
-                    "output_path": str(output_path),
-                    "app_server_version": str(result.get("app_server_version") or ""),
-                },
+                details=details,
             )
         markdown = str(result.get("final_text") or "").strip() or str(result.get("stdout") or "").strip()
-        usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
         if not markdown:
             return TaskResult(
                 success=False,
@@ -540,11 +545,7 @@ class AppServerInvestigationRunner:
                 "app_server_version": str(result.get("app_server_version") or ""),
                 "app_server_thread_id": str(result.get("thread_id") or ""),
                 "app_server_turn_id": str(result.get("turn_id") or ""),
-                "app_server_usage_scope": "cumulative",
-                "app_server_input_tokens": usage.get("input_tokens"),
-                "app_server_cached_input_tokens": usage.get("cached_input_tokens"),
-                "app_server_output_tokens": usage.get("output_tokens"),
-                "app_server_total_tokens": usage.get("total_tokens"),
+                **_app_server_usage_details(usage),
                 "files_to_send": [html_path],
             },
         )
@@ -624,6 +625,7 @@ class AppServerInvestigationRunner:
             "",
         ]
         for record in records:
+            contract = record.report_contract or {}
             lines.extend(
                 [
                     f"## {record.name}",
@@ -634,6 +636,7 @@ class AppServerInvestigationRunner:
                     f"- 目录: `{record.path or '(virtual)'}`",
                     f"- SKILL.md: `{record.skill_md_path or '(missing)'}`",
                     f"- 描述: {record.description or '无'}",
+                    f"- 报告契约: `{json.dumps(contract, ensure_ascii=False, sort_keys=True)}`" if contract else "- 报告契约: 无",
                     "",
                 ]
             )
@@ -696,13 +699,20 @@ class AppServerInvestigationRunner:
                 "app_server_total_tokens": usage_payload.get("total_tokens"),
             }
         )
+        selected_skill = _detect_selected_skill(markdown, context_payload, inventory_payload)
+        report_contract = _selected_skill_report_contract(inventory_payload, selected_skill)
         meta = {
             "bug_label": prepared.bug_url or (prepared.title or "直传文件"),
             "fault_time": prepared.fault_time,
             "trigger_term": prepared.trigger_term or prepared.trigger_mode,
-            "selected_skill": _detect_selected_skill(markdown, context_payload),
+            "selected_skill": selected_skill,
+            "report_contract": report_contract,
             "has_logs": has_logs,
-            "evidence_count": len(_section_issue_items(sections.get("关键证据", ""))),
+            "evidence_count": len(
+                _section_issue_items(
+                    _first_section(sections, "关键证据", "关键时间线", "已确认链路")
+                )
+            ),
             "token_text": token_text,
             "skill_count": len(inventory_payload.get("skills") or []),
             "context_path": context_path,
@@ -755,24 +765,86 @@ class AppServerInvestigationRunner:
             "path": record.path,
             "skill_md_path": record.skill_md_path,
             "references": references,
+            "report_contract": record.report_contract,
         }
 
 
-def _detect_selected_skill(markdown: str, context_payload: dict[str, object]) -> str:
+def _detect_selected_skill(
+    markdown: str,
+    context_payload: dict[str, object],
+    inventory_payload: dict[str, object] | None = None,
+) -> str:
     """Best-effort: which skill the app-server auto-selected (for the overview card)."""
+    known = _known_skill_names(inventory_payload)
     if isinstance(context_payload, dict):
         for key in ("selected_skill", "skill", "chosen_skill"):
             value = context_payload.get(key)
             if value:
-                return str(value)
+                normalized = _normalize_known_skill(str(value), known)
+                if normalized:
+                    return normalized
     text = markdown or ""
-    match = re.search(r"触发\s*[`“\"']?([A-Za-z0-9._\-]+)", text)
-    if match:
-        return match.group(1)
-    match = re.search(r"(?:命中|选择|使用)\s*skill[:：]?\s*[`“\"']?([A-Za-z0-9._\-]+)", text, re.IGNORECASE)
-    if match:
-        return match.group(1)
+    patterns = (
+        r"(?:primary\s+skill|主\s*skill)\s*[:：]\s*[`“\"']?([A-Za-z0-9._\-]+)",
+        r"(?:命中|选择|使用)\s*skill[:：]?\s*[`“\"']?([A-Za-z0-9._\-]+)",
+        r"触发\s*[`“\"']?([A-Za-z0-9._\-]+)",
+    )
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith(("```", "`")):
+            continue
+        for pattern in patterns:
+            match = re.search(pattern, line, re.IGNORECASE)
+            if not match:
+                continue
+            candidate = match.group(1).strip("`'\"“”")
+            normalized = _normalize_known_skill(candidate, known)
+            if normalized:
+                return normalized
     return ""
+
+
+def _selected_skill_report_contract(inventory_payload: dict[str, object] | None, selected_skill: str) -> dict[str, object]:
+    if not selected_skill or not isinstance(inventory_payload, dict):
+        return {}
+    skills = inventory_payload.get("skills")
+    if not isinstance(skills, list):
+        return {}
+    selected = selected_skill.lower()
+    for skill in skills:
+        if not isinstance(skill, dict):
+            continue
+        name = str(skill.get("name") or skill.get("skill") or skill.get("id") or "").strip().lower()
+        if name != selected:
+            continue
+        contract = skill.get("report_contract")
+        return dict(contract) if isinstance(contract, dict) else {}
+    return {}
+
+
+def _known_skill_names(inventory_payload: dict[str, object] | None) -> dict[str, str]:
+    if not isinstance(inventory_payload, dict):
+        return {}
+    skills = inventory_payload.get("skills")
+    if not isinstance(skills, list):
+        return {}
+    known: dict[str, str] = {}
+    for skill in skills:
+        if not isinstance(skill, dict):
+            continue
+        for key in ("name", "skill", "id"):
+            value = str(skill.get(key) or "").strip()
+            if value:
+                known[value.lower()] = value
+    return known
+
+
+def _normalize_known_skill(candidate: str, known: dict[str, str]) -> str:
+    if known:
+        return known.get(candidate.lower(), "")
+    # Without an inventory, only trust skill-like identifiers; this avoids
+    # treating business log words such as isNeedAutoFold as the selected skill.
+    return candidate if re.search(r"[-_]", candidate) else ""
 
 
 def _markdown_summary(text: str) -> str:
@@ -782,7 +854,24 @@ def _markdown_summary(text: str) -> str:
             continue
         line = re.sub(r"^#+\s*", "", line)
         line = re.sub(r"^\d+\.\s*", "", line)
-        if line in {"结论摘要", "关键证据", "最可能原因", "待确认项", "建议动作"}:
+        if line in {
+            "结论摘要",
+            "调查方案",
+            "查询路径",
+            "Android 最终状态",
+            "Android最终状态",
+            "责任边界",
+            "关键时间线",
+            "关键证据",
+            "已排除项",
+            "已确认链路",
+            "源码解释",
+            "源码侧判断",
+            "最可能原因",
+            "待确认项",
+            "建议动作",
+            "建议下一步",
+        }:
             continue
         return line[:1200]
     return ""
@@ -823,6 +912,18 @@ def _section_issue_items(text: str) -> list[dict[str, object]]:
             }
         )
     return items
+
+
+def _app_server_usage_details(usage: dict[str, int]) -> dict[str, object]:
+    if not usage:
+        return {}
+    return {
+        "app_server_usage_scope": "cumulative",
+        "app_server_input_tokens": usage.get("input_tokens"),
+        "app_server_cached_input_tokens": usage.get("cached_input_tokens"),
+        "app_server_output_tokens": usage.get("output_tokens"),
+        "app_server_total_tokens": usage.get("total_tokens"),
+    }
 
 
 def _token_summary_text(details: dict[str, object]) -> str:

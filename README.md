@@ -47,7 +47,7 @@ Start the bot through the single launcher and single runtime config:
 # Clean checkout setup: create the ignored local runtime file from the committed template.
 cp config/config.example.toml config.toml
 
-# Default: config.toml + cc-switch-deepseek-claude
+# Default: config.toml + deepseek-claude
 ./run.sh
 
 # Override only the preset/profile. run.sh still loads config.toml.

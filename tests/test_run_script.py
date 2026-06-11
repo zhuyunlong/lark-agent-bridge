@@ -55,6 +55,15 @@ class RunScriptTests(unittest.TestCase):
         self.assertIn("unset LARK_AGENT_BRIDGE_AI_API_KEY", content)
         self.assertIn("launchctl unsetenv LARK_AGENT_BRIDGE_AI_API_KEY", content)
 
+    def test_run_sh_clears_codux_active_ai_wrapper_state(self):
+        content = RUN_SCRIPT.read_text(encoding="utf-8")
+
+        self.assertIn("DMUX_ACTIVE_AI_RESOLVED_PATH", content)
+        self.assertIn("DMUX_ACTIVE_AI_TOOL", content)
+        self.assertIn("DMUX_ACTIVE_AI_INVOCATION_ID", content)
+        self.assertIn("DMUX_ACTIVE_AI_STARTED_AT", content)
+        self.assertIn("unset DMUX_ACTIVE_AI_RESOLVED_PATH", content)
+
     def test_run_sh_uses_only_config_toml_with_preset_override(self):
         content = RUN_SCRIPT.read_text(encoding="utf-8")
 
@@ -89,7 +98,7 @@ class RunScriptTests(unittest.TestCase):
         self.assertTrue(example.exists())
         content = example.read_text(encoding="utf-8")
 
-        self.assertIn('preset = "cc-switch-deepseek-claude"', content)
+        self.assertIn('preset = "deepseek-claude"', content)
         self.assertIn('api_key = ""', content)
         self.assertNotIn("ou_", content)
         self.assertNotIn("oc_", content)

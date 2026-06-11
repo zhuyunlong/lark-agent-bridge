@@ -215,7 +215,10 @@ def render_source_analysis_report(
         else _source_verdict(answer=answer, evidence=visual_evidence, success=success)
     )
     summary_body = render_issue_list(summary_items, empty_text=_short_text(answer or verdict, 240)) if summary_items else f"<pre>{H(answer or verdict)}</pre>"
-    boundary_items = _source_boundary_items(coverage_boundary, sections.get("待确认项", "") if sections else "")
+    boundary_items = _source_boundary_items(coverage_boundary)
+    pending_items = _section_issue_items(sections.get("待确认项", "")) if sections else []
+    for item in pending_items:
+        item["sev"] = "yellow"
     reason_items = _section_issue_items(sections.get("最可能原因", "")) if sections else []
     action_items = _section_issue_items(sections.get("建议动作", "")) if sections else []
     chain_nodes = _chain_nodes_from_evidence(answer=answer, evidence=visual_evidence, target=target, success=success)
@@ -241,6 +244,7 @@ def render_source_analysis_report(
         f'{render_swimlane(target=target, answer=answer, evidence=evidence, diagram_kinds=diagram_kinds, swimlane_rows=swimlane_rows)}'
         f'{render_section("最可能原因", render_issue_list(reason_items, empty_text="未明确给出最可能原因。"))}'
         f'{render_section("边界与说明", render_issue_list(boundary_items, empty_text="未返回额外边界说明。"))}'
+        f'{render_section("待确认项", render_issue_list(pending_items, empty_text="当前没有额外待确认项。"))}'
         f'{render_section("建议动作", render_issue_list(action_items, empty_text="当前没有额外建议动作。"))}'
         f'{render_flow(diagram_kinds=diagram_kinds, target=target, evidence=evidence)}'
         f'{render_chain(chain_nodes, title="分析链路", description="按入口、分发、消费和待确认组织源码证据。")}'
@@ -770,13 +774,10 @@ def _markdown_evidence_rows(section_text: str) -> list[tuple[str, str, str]]:
     return rows
 
 
-def _source_boundary_items(coverage_boundary: str, pending_section: str) -> list[dict[str, object]]:
+def _source_boundary_items(coverage_boundary: str) -> list[dict[str, object]]:
     items: list[dict[str, object]] = []
     if coverage_boundary.strip():
         items.append({"sev": "yellow", "title": "覆盖边界", "detail": coverage_boundary.strip()})
-    for item in _section_issue_items(pending_section):
-        item["sev"] = "yellow"
-        items.append(item)
     return items
 
 

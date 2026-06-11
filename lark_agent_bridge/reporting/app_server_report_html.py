@@ -1,10 +1,10 @@
 """HTML renderer for the autonomous app-server investigation ("AI 自主分析") report.
 
-Self-contained: the visual contract intentionally mirrors the 3d-stuck-investigate
-report (Chinese-first content, one-line verdict with honest severity, a compact
+Self-contained: the visual contract intentionally mirrors the local skill report
+style (Chinese-first content, one-line verdict with honest severity, a compact
 metadata strip colored by real value, markdown-rendered prose, severity issue lists, optional
 root-cause chain, and a collapsed raw-evidence fold). The design system below is a
-local copy of the 3d卡顿 stylesheet; this module does NOT import the skill file.
+local copy of the shared report stylesheet; this module does NOT import skill files.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ import re
 from typing import Iterable, Mapping, Sequence
 
 
-# Design system copied/adapted from 3d-stuck-investigate/scripts/report_html.py.
+# Design system copied/adapted from the local skill report stylesheet.
 BASE_REPORT_CSS = """
 :root {
   --c-bg: #f8f9fb; --c-surface: #ffffff; --c-border: #e2e5ea;
@@ -177,8 +177,6 @@ pre {
 # chosen even when fault words appear (they describe a suspected, unconfirmed symptom).
 _FAULT_SIGNAL = re.compile(r"失败|崩溃|异常|错误|fatal|error|卡死|卡顿|超时|无法启动|挂死|死锁|panic|crash", re.IGNORECASE)
 _INSUFFICIENT_SIGNAL = re.compile(r"证据不足|无法确定|无法确认|不能证明|需补充|需确认|待确认|缺少|可信度.{0,4}(低|中低)|尚不能|未能定位")
-
-
 def render_app_server_report(
     *,
     title: str,
@@ -196,13 +194,33 @@ def render_app_server_report(
     """
 
     sections = _markdown_sections(full_markdown)
-    summary_section = sections.get("结论摘要", "") or summary_markdown
-    cause_section = sections.get("最可能原因", "")
-    pending_section = sections.get("待确认项", "")
-    evidence_section = sections.get("关键证据", "")
-    action_section = sections.get("建议动作", "")
-    source_section = sections.get("源码侧判断", "")
-    gap_section = sections.get("证据缺口", "")
+    summary_section = _first_section(sections, "结论摘要") or summary_markdown
+    plan_section = _first_section(sections, "调查方案", "查询路径", "查询方案")
+    android_state_section = _first_section(
+        sections,
+        "Android 最终状态",
+        "Android最终状态",
+        "Android 状态",
+        "Android侧最终状态",
+        "Android 侧最终状态",
+    )
+    responsibility_section = _first_section(
+        sections,
+        "责任边界",
+        "责任方",
+        "责任归属",
+        "责任界定",
+        "Android/Unity 责任边界",
+    )
+    timeline_section = _first_section(sections, "关键时间线", "时间线")
+    evidence_section = _first_section(sections, "关键证据")
+    excluded_section = _first_section(sections, "已排除项", "排除项")
+    confirmed_chain_section = _first_section(sections, "已确认链路", "确认链路", "链路确认")
+    source_section = _first_section(sections, "源码解释", "源码侧判断")
+    cause_section = _first_section(sections, "最可能原因", "可能原因", "根因判断")
+    gap_section = _first_section(sections, "证据缺口")
+    pending_section = _first_section(sections, "待确认项")
+    action_section = _first_section(sections, "建议动作", "建议下一步", "下一步")
 
     has_logs = bool(meta.get("has_logs"))
     evidence_count = meta.get("evidence_count")
@@ -227,17 +245,62 @@ def render_app_server_report(
         ),
         render_meta_strip(meta, has_logs=has_logs, evidence_count=evidence_count),
         render_section("结论摘要", f'<div class="prose">{_markdown_to_html(summary_section)}</div>'),
-        render_section(
-            "最可能原因",
-            render_issue_list(_section_issue_items(cause_section, "red" if severity == "red" else "yellow"), empty_text="未明确给出最可能原因。"),
-        ),
-        render_section("关键证据", _evidence_html(evidence_section)),
-        render_section("待确认项", render_issue_list(pending_items, empty_text="当前没有额外待确认项。")),
-        render_section(
-            "建议动作",
-            render_issue_list(_section_issue_items(action_section, "green"), empty_text="当前没有额外建议动作。"),
-        ),
     ]
+
+    if plan_section:
+        body_parts.append(render_section("调查方案", _prose_html(plan_section)))
+
+    boundary_required = _requires_android_unity_boundary(meta, full_markdown)
+    if boundary_required or android_state_section:
+        body_parts.append(
+            render_section(
+                "Android 最终状态",
+                _prose_or_missing_html(
+                    android_state_section,
+                    "报告未明确输出必需章节：Android 最终状态。",
+                ),
+            )
+        )
+    if boundary_required or responsibility_section:
+        body_parts.append(
+            render_section(
+                "责任边界",
+                _prose_or_missing_html(
+                    responsibility_section,
+                    "报告未明确输出必需章节：责任边界。",
+                ),
+            )
+        )
+
+    if timeline_section:
+        body_parts.append(render_section("关键时间线", _prose_html(timeline_section)))
+    if confirmed_chain_section:
+        body_parts.append(render_section("已确认链路", _prose_html(confirmed_chain_section)))
+    if excluded_section:
+        body_parts.append(render_section("已排除项", _prose_html(excluded_section)))
+
+    body_parts.extend(
+        [
+            render_section(
+                "最可能原因",
+                render_issue_list(_section_issue_items(cause_section, "red" if severity == "red" else "yellow"), empty_text="未明确给出最可能原因。"),
+            ),
+            render_section("关键证据", _evidence_html(evidence_section)),
+        ]
+    )
+
+    if source_section and not _markdown_subsections(source_section):
+        body_parts.append(render_section("源码解释", _prose_html(source_section)))
+
+    body_parts.extend(
+        [
+            render_section("待确认项", render_issue_list(pending_items, empty_text="当前没有额外待确认项。")),
+            render_section(
+                "建议动作",
+                render_issue_list(_section_issue_items(action_section, "green"), empty_text="当前没有额外建议动作。"),
+            ),
+        ]
+    )
 
     chain_nodes = _chain_nodes(source_section, gap_section)
     if chain_nodes:
@@ -253,6 +316,47 @@ def render_app_server_report(
     body_parts.append("</div>")
 
     return render_document(title, "".join(body_parts))
+
+
+def _first_section(sections: Mapping[str, str], *names: str) -> str:
+    for name in names:
+        value = sections.get(name)
+        if value and value.strip():
+            return value.strip()
+    return ""
+
+
+def _prose_html(section: str) -> str:
+    return f'<div class="prose">{_markdown_to_html(section)}</div>'
+
+
+def _prose_or_missing_html(section: str, missing_text: str) -> str:
+    if section and section.strip():
+        return _prose_html(section)
+    return render_issue_list([{"sev": "yellow", "title": missing_text, "detail": ""}])
+
+
+def _requires_android_unity_boundary(meta: Mapping[str, object], full_markdown: str) -> bool:
+    contract = meta.get("report_contract")
+    if not isinstance(contract, Mapping):
+        return False
+    if contract.get("requires_android_unity_boundary"):
+        return True
+    required_sections = contract.get("required_sections")
+    if not isinstance(required_sections, list):
+        return False
+    required = {str(section).strip() for section in required_sections}
+    if not {"Android 最终状态", "责任边界"}.issubset(required):
+        return False
+    keywords = contract.get("required_section_keywords")
+    if not isinstance(keywords, list) or not keywords:
+        return False
+    text = "\n".join(
+        str(meta.get(key) or "")
+        for key in ("bug_label", "request_text", "prompt_text", "description")
+    )
+    text = f"{text}\n{full_markdown or ''}".casefold()
+    return any(str(keyword).strip().casefold() in text for keyword in keywords if str(keyword).strip())
 
 
 def render_verdict(*, severity: str, summary_section: str, cause_section: str, gap_section: str) -> str:

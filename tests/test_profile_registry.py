@@ -9,13 +9,13 @@ class ProfileRegistryTests(unittest.TestCase):
     def test_default_profile_and_shell_exports_come_from_presets_toml(self):
         name, spec = resolve_profile("default")
 
-        self.assertEqual(name, "cc-switch-deepseek-claude")
+        self.assertEqual(name, "deepseek-claude")
         self.assertEqual(spec["agent_provider"], "claude")
-        self.assertFalse(spec["requires_api_key"])
+        self.assertTrue(spec["requires_api_key"])
 
         exports = shell_exports("default")
-        self.assertIn("PROFILE=cc-switch-deepseek-claude", exports)
-        self.assertIn("export LARK_AGENT_BRIDGE_AI_PRESET=cc-switch-deepseek-claude", exports)
+        self.assertIn("PROFILE=deepseek-claude", exports)
+        self.assertIn("export LARK_AGENT_BRIDGE_AI_PRESET=deepseek-claude", exports)
         self.assertIn("export LARK_AGENT_BRIDGE_AGENT_PROVIDER=claude", exports)
 
     def test_registry_marks_direct_api_and_official_profiles(self):

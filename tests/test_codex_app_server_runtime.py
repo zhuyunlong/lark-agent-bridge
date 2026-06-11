@@ -125,6 +125,7 @@ class CodexAppServerRuntimeTests(unittest.TestCase):
                         "total": {
                             "totalTokens": 321,
                             "inputTokens": 280,
+                            "cachedInputTokens": 200,
                             "outputTokens": 41,
                         }
                     }
@@ -134,6 +135,7 @@ class CodexAppServerRuntimeTests(unittest.TestCase):
 
         self.assertIn("rg --line-number scene mode", command_preview)
         self.assertIn("token≈321", usage_preview)
+        self.assertIn("cache=200", usage_preview)
 
     def test_event_preview_reports_error_and_warning(self):
         error_preview = app_server_event_preview(

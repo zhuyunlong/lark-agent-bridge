@@ -231,6 +231,7 @@ class _RunPrimaryMixin:
             option_map = self._load_option_map(project_key, **bridge_kwargs)
             title = str(fetched.get("title", ""))
             description = self._bug_description(fetched)
+            stack_payload_text = self._bug_stack_payload_text(fetched, description)
             time_context = self._resolve_bug_time_context(
                 request_text=request_text,
                 title=title,
@@ -275,6 +276,7 @@ class _RunPrimaryMixin:
                     description=description,
                     attachments=fetched.get("attachments", []),
                     time_context=time_context,
+                    stack_payload_text=stack_payload_text,
                 )
                 selection = decision.selection
                 source_decision = decision.source_decision
@@ -299,7 +301,24 @@ class _RunPrimaryMixin:
                         progress_callback=progress_callback,
                     )
             plans = selection.plans
-            if not time_context.has_full_datetime:
+            if (
+                (
+                    any(_kind_spec(item.kind).is_source_stage for item in plans)
+                    or self._stack_reverse_preflight_can_override(selection)
+                )
+                and self._has_stack_reverse_lookup_intent(prompt_text)
+                and not self._has_stack_reverse_lookup_payload(request_text, prompt_text, stack_payload_text)
+                and not fetched.get("attachments")
+            ):
+                return self._bug_stack_clarification_result(
+                    context=context,
+                    started=started,
+                    request_text=request_text,
+                    bug_url=request.bug_url,
+                    progress_callback=progress_callback,
+                )
+            requires_log_input = any(self._plan_requires_log_input(item) for item in plans)
+            if requires_log_input and not time_context.has_full_datetime:
                 return self._bug_time_clarification_result(
                     context=context,
                     started=started,
@@ -309,7 +328,6 @@ class _RunPrimaryMixin:
                     status="missing_fault_time",
                     progress_callback=progress_callback,
                 )
-            requires_log_input = any(self._plan_requires_log_input(item) for item in plans)
             selected_input = self._select_log_input(bug_dir, fetched)
             cache_reused = False
             if self._has_bug_cache_content(bug_dir) and (selected_input is not None or not requires_log_input):
@@ -374,29 +392,31 @@ class _RunPrimaryMixin:
                 prepared_input=prepared_input,
             )
             fault_time, fault_time_note = time_context.fault_time, time_context.note
-            log_coverage = self._scan_log_time_coverage(prepared_input, fault_time=fault_time) if prepared_input else None
-            if log_coverage is None or not log_coverage.has_time_evidence:
-                return self._bug_time_clarification_result(
-                    context=context,
-                    started=started,
-                    request_text=request_text,
-                    bug_url=request.bug_url,
-                    time_context=time_context,
-                    status="log_time_unknown",
-                    progress_callback=progress_callback,
-                    log_coverage=log_coverage,
-                )
-            if not log_coverage.covers_fault_time:
-                return self._bug_time_clarification_result(
-                    context=context,
-                    started=started,
-                    request_text=request_text,
-                    bug_url=request.bug_url,
-                    time_context=time_context,
-                    status="log_not_covering_fault_time",
-                    progress_callback=progress_callback,
-                    log_coverage=log_coverage,
-                )
+            log_coverage: LogCoverage | None = None
+            if requires_log_input:
+                log_coverage = self._scan_log_time_coverage(prepared_input, fault_time=fault_time) if prepared_input else None
+                if log_coverage is None or not log_coverage.has_time_evidence:
+                    return self._bug_time_clarification_result(
+                        context=context,
+                        started=started,
+                        request_text=request_text,
+                        bug_url=request.bug_url,
+                        time_context=time_context,
+                        status="log_time_unknown",
+                        progress_callback=progress_callback,
+                        log_coverage=log_coverage,
+                    )
+                if not log_coverage.covers_fault_time:
+                    return self._bug_time_clarification_result(
+                        context=context,
+                        started=started,
+                        request_text=request_text,
+                        bug_url=request.bug_url,
+                        time_context=time_context,
+                        status="log_not_covering_fault_time",
+                        progress_callback=progress_callback,
+                        log_coverage=log_coverage,
+                    )
             source_evidence_enabled = (
                 self._should_collect_source_evidence(request_text, prompt_text)
                 or any(_kind_spec(plan.kind).is_source_stage for plan in plans)

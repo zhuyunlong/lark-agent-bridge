@@ -473,7 +473,7 @@ class IntentAnalysisRunner:
             "4. 如果消息是普通闲聊、问候、解释型问题，选 chat。\n"
             "5. 如果消息是在发新的 bug 链接分析请求，选 bug；如果是带附件/URL 的日志分析请求但不是 bug 链接，选 direct_analysis；"
             "如果是信号生命周期调查，只有在用户明确给出单个 SignalCode / SIGNAL_... 并询问信号来源、是否送达或链路时才选 signal；"
-            "3D场景信号、SceneType、上电P、临停P、特殊场景等属于更专一的场景信号分析，带 bug 链接选 bug，带附件/URL 日志选 direct_analysis，不能因为含“信号”二字就选 signal。"
+            "带 bug 链接或日志附件的业务现象分析应优先走 bug/direct_analysis，不能因为含“信号”二字就选 signal。"
             "如果是感知总结，选 perception_summary；如果是代码/仓库分析但没有明确日志、Bug 或已配置入口，选 unsupported。\n"
             "6. 只有在没有合适路径时才选 unsupported。\n\n"
             "输入 JSON：\n"

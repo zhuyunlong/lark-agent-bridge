@@ -733,7 +733,8 @@ class KnowledgeWarmupCodegraphTests(_KnowledgeTestBase):
                 BridgeConfig(
                     data_dir=root,
                     knowledge=KnowledgeOptions(enabled=True, storage=root / "knowledge.sqlite"),
-                )
+                ),
+                warmup_codegraph=False,
             )
 
             with patch("lark_agent_bridge.knowledge.source_investigation.subprocess.run") as mocked_run:

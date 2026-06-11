@@ -804,7 +804,9 @@ class _BugCacheMixin:
         return options.working_dir or self.config.workspace_root
 
     def _plan_requires_log_input(self, plan: "BugAnalysisPlan") -> bool:
-        return plan.kind in PLAN_KIND_REGISTRY
+        if plan.kind not in PLAN_KIND_REGISTRY:
+            return False
+        return not _kind_spec(plan.kind).is_source_stage
 
     def _bug_fetcher_script(self) -> Path:
         return self.config.workspace_root / ".ai/skills/feishu-bug-fetcher/scripts/bug-fetcher.sh"

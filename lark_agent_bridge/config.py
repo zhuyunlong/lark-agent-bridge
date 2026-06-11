@@ -298,7 +298,7 @@ def load_config(config_path: str | Path | None = None) -> BridgeConfig:
                 or ai_provider_data.get("fallback_api_key", "")
             ),
             intent_temperature=float(ai_provider_data.get("intent_temperature", 0.0)),
-            intent_max_tokens=int(ai_provider_data.get("intent_max_tokens", 1024)),
+            intent_max_tokens=int(ai_provider_data.get("intent_max_tokens", 4096)),
             intent_timeout_seconds=float(ai_provider_data.get("intent_timeout_seconds", 30)),
             intent_max_retries=int(ai_provider_data.get("intent_max_retries", 2)),
             summary_temperature=float(ai_provider_data.get("summary_temperature", 0.3)),

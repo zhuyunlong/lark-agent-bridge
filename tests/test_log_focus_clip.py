@@ -146,3 +146,70 @@ def test_log_rules_contain_fault_time_gate_and_no_raw_reread():
     # 不回读原始全量 logs
     assert "log_focus" in budget
     assert "bug_cache" in budget or "原始日志" in budget
+
+
+def test_focus_candidates_includes_uncalibrated_montecarlo_when_events_confirms(tmp_path):
+    m = _mk()
+    logs = tmp_path / "logs"
+    mc = logs / "app" / "com.xiaopeng.montecarlo"
+    mc.mkdir(parents=True)
+    # Uncalibrated log: year 2010 instead of 2026
+    uncalibrated = mc / "user0_main_2010-01-01_08-00.alog.log"
+    uncalibrated.write_text("01-01 08:04:13.764 16821 16821 I Unity: init\n", encoding="utf-8")
+    # Normal log within fault window
+    normal = mc / "user0_main_2026-06-08_16-00.alog.log"
+    normal.write_text("06-08 16:47:00.000 16821 16821 I Unity: running\n", encoding="utf-8")
+    # Events log with am_proc_start confirming montecarlo was running
+    logd = logs / "logd"
+    logd.mkdir(parents=True)
+    events = logd / "events.txt"
+    events.write_text(
+        "01-01 08:04:13.764  1179  1270 I am_proc_start: [0,16821,1000,com.xiaopeng.montecarlo,restart,com.xiaopeng.montecarlo]\n",
+        encoding="utf-8",
+    )
+
+    cands = m._file_agent_focus_candidates(
+        input_path=logs, fault_time="2026-06-08 16:47:00", analysis_kind="general"
+    )
+    names = {p.name for p in cands}
+    assert "user0_main_2010-01-01_08-00.alog.log" in names
+    assert "user0_main_2026-06-08_16-00.alog.log" in names
+
+    analysis_dir = tmp_path / "out"
+    analysis_dir.mkdir()
+    _focus_dir, _manifest, copied = m._build_file_agent_focus_dir(
+        input_path=logs,
+        fault_time="2026-06-08 16:47:00",
+        analysis_kind="general",
+        analysis_dir=analysis_dir,
+    )
+    copied_by_name = {path.name: path for path in copied}
+    uncalibrated_focus = copied_by_name["user0_main_2010-01-01_08-00.alog.log"]
+    assert uncalibrated_focus.stat().st_size > 0
+    assert "01-01 08:04:13.764" in uncalibrated_focus.read_text(encoding="utf-8")
+
+
+def test_focus_candidates_excludes_uncalibrated_without_events_confirmation(tmp_path):
+    m = _mk()
+    logs = tmp_path / "logs"
+    mc = logs / "app" / "com.xiaopeng.montecarlo"
+    mc.mkdir(parents=True)
+    uncalibrated = mc / "user0_main_2010-01-01_08-00.alog.log"
+    uncalibrated.write_text("01-01 08:04:13.764 16821 16821 I Unity: init\n", encoding="utf-8")
+    normal = mc / "user0_main_2026-06-08_16-00.alog.log"
+    normal.write_text("06-08 16:47:00.000 16821 16821 I Unity: running\n", encoding="utf-8")
+    # Events log WITHOUT am_proc_start for montecarlo
+    logd = logs / "logd"
+    logd.mkdir(parents=True)
+    events = logd / "events.txt"
+    events.write_text(
+        "01-01 08:04:13.764  1179  1270 I am_proc_start: [0,16821,1000,com.xiaopeng.other,restart,com.xiaopeng.other]\n",
+        encoding="utf-8",
+    )
+
+    cands = m._file_agent_focus_candidates(
+        input_path=logs, fault_time="2026-06-08 16:47:00", analysis_kind="general"
+    )
+    names = {p.name for p in cands}
+    assert "user0_main_2010-01-01_08-00.alog.log" not in names
+    assert "user0_main_2026-06-08_16-00.alog.log" in names

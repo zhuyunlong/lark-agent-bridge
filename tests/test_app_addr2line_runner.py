@@ -222,6 +222,38 @@ class AppAddr2lineRunnerTests(_AppTestBase):
             "http://10.99.26.55/rom/napa/lib_napa5/6.1.0-test",
         )
         self.assertEqual(fake_addr2line.requests[0].apk_version, "V6.1.0_20260327175820_Release")
+
+    def test_addr2line_request_routes_single_line_rom_markdown_so_stack(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_lark = FakeLarkClient()
+            fake_rom = FakeRomVersionRunner()
+            fake_addr2line = FakeAddr2LineRunner()
+            rom = "XMARTQGZHE29E5_V6.1.0.8810_20260327200937.9_REV01_USER_Release"
+            text = (
+                f"@bot {rom} "
+                "000000000118520c /system/app/xp_envirodrive-mainland/lib/arm64/"
+                "[libunity.so](http://libunity.so/) "
+                "00000000011856bc /system/app/xp_envirodrive-mainland/lib/arm64/"
+                "[libunity.so](http://libunity.so/) "
+                "反解堆栈"
+            )
+            app = BridgeApp(
+                BridgeConfig(dry_run=False, data_dir=Path(tmp), allowed_chats=["oc_denied"], lark=LarkOptions(bot_name="bot")),
+                lark_client=fake_lark,
+                rom_version_runner=fake_rom,
+                addr2line_runner=fake_addr2line,
+            )
+
+            result = app.handle_event(event(content=text))
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.details["mode"], "addr2line_resolve")
+        self.assertEqual(len(fake_addr2line.requests), 1)
+        request = fake_addr2line.requests[0]
+        self.assertEqual(request.rom_version, rom)
+        self.assertEqual(request.apk_version, "V6.1.0_20260327175820_Release")
+        self.assertIn("000000000118520c", request.addr_text)
+        self.assertIn("libunity.so", request.addr_text)
     def test_rom_plus_symbol_table_phrase_without_stack_routes_to_rom_lookup(self):
         with tempfile.TemporaryDirectory() as tmp:
             fake_lark = FakeLarkClient()
@@ -409,6 +441,106 @@ class AppAddr2lineRunnerTests(_AppTestBase):
         self.assertEqual(result.details["result_count"], 0)
         self.assertIn("dry-run", result.message)
 
+    def test_addr2line_runner_dry_run_plans_bare_hex_napa5_stack(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runner = Addr2LineRunner(
+                BridgeConfig(dry_run=True, data_dir=root / "data", workspace_root=root, guideengine_repo=root)
+            )
+
+            result = runner.run_resolve(
+                Addr2LineRequest(
+                    addr_text="\n".join(
+                        [
+                            "00000000049f7194 /system/app/xp_envirodrive-mainland/lib/arm64/libil2cpp.so",
+                            "0000000004872b6c /system/app/xp_envirodrive-mainland/lib/arm64/libil2cpp.so",
+                        ]
+                    ),
+                    apk_version="V6.1.0_20260327175820_Release",
+                    napa5_download_url="http://napa.example/6.1.0-test",
+                    triggered=True,
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.details["symbol_sources"], {"libil2cpp.so": "napa5"})
+        self.assertEqual(result.details["result_count"], 0)
+
+    def test_addr2line_runner_dry_run_plans_single_line_markdown_bare_stack(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script = root / ".ai/skills/addr2line-resolve/scripts/addr2line_resolve.py"
+            script.parent.mkdir(parents=True)
+            script.write_text("# fake script\n", encoding="utf-8")
+            runner = Addr2LineRunner(
+                BridgeConfig(dry_run=True, data_dir=root / "data", workspace_root=root, guideengine_repo=root)
+            )
+
+            result = runner.run_resolve(
+                Addr2LineRequest(
+                    addr_text=(
+                        "0000000000085304 /apex/com.android.runtime/lib64/bionic/[libc.so](http://libc.so/) "
+                        "(__memcpy+276) "
+                        "00000000049f7194 /system/app/xp_envirodrive-mainland/lib/arm64/"
+                        "[libil2cpp.so](http://libil2cpp.so/) "
+                        "0000000004872b6c /system/app/xp_envirodrive-mainland/lib/arm64/"
+                        "[libil2cpp.so](http://libil2cpp.so/)"
+                    ),
+                    apk_version="V6.1.0_20260327175820_Release",
+                    symbol_table_url="http://maven.example/envirodrive_so/V6.1.0_20260327175820_Release/",
+                    napa5_download_url="http://napa.example/6.1.0-test",
+                    triggered=True,
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.details["symbol_sources"]["libc.so"], "addr2line_script")
+        self.assertEqual(result.details["symbol_sources"]["libil2cpp.so"], "napa5")
+        self.assertEqual(result.details["result_count"], 0)
+
+    def test_download_napa_so_redownloads_partial_existing_file(self):
+        class FakeResponse:
+            def __init__(self, body: bytes):
+                self.body = body
+                self.offset = 0
+                self.headers = {"Content-Length": str(len(body))}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self, size=-1):
+                if size is None or size < 0:
+                    size = len(self.body) - self.offset
+                chunk = self.body[self.offset : self.offset + size]
+                self.offset += len(chunk)
+                return chunk
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            runner = Addr2LineRunner(
+                BridgeConfig(dry_run=False, data_dir=root / "data", workspace_root=root, guideengine_repo=root)
+            )
+            context = SimpleNamespace(input_dir=root / "input")
+            target = context.input_dir / "napa5_symbols" / "libil2cpp.so"
+            target.parent.mkdir(parents=True)
+            target.write_bytes(b"bad")
+            calls = []
+
+            def fake_open(request, *, timeout):
+                calls.append(request.full_url)
+                return FakeResponse(b"complete")
+
+            with mock.patch.object(runner, "_open_internal_url", side_effect=fake_open):
+                path = runner._download_napa_so("http://napa.example/build", "libil2cpp.so", context)
+
+            self.assertEqual(path, target)
+            self.assertEqual(target.read_bytes(), b"complete")
+            self.assertEqual(calls, ["http://napa.example/build/libil2cpp.so"])
+            self.assertFalse(target.with_suffix(".so.part").exists())
+
     def test_addr2line_runner_resolves_unity_navi_and_napa5_sources(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -498,6 +630,25 @@ class AppAddr2lineRunnerTests(_AppTestBase):
         self.assertIn("libunity.so 0xf385e4 -> UnityBuiltinFunction", result.message)
         self.assertIn("libxdata_sdk.so 0x338a3c -> X3D_Protocol::DrivingSensorPullOverParser::Parse", result.message)
         self.assertIn("libil2cpp.so 0x1234 -> Il2CppCrashFunction", result.message)
+
+    def test_addr_groups_ignore_maps_lines_and_long_hex_substrings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = Addr2LineRunner(
+                BridgeConfig(dry_run=False, data_dir=Path(tmp) / "data", workspace_root=Path(tmp))
+            )
+
+            groups = runner._addr_groups_by_so(
+                "\n".join(
+                    [
+                        "7f8a2c3000-7f8a2c4000 r--p 00000000 fd:00 12345678  /system/lib64/libfoo.so",
+                        "deadbeefdeadbeef001122334455667788 /system/lib64/liblong.so",
+                        "#00 pc 0000000000123456 /apex/lib64/libbar.so",
+                        "0000000000007777 /system/lib64/libbare.so",
+                    ]
+                )
+            )
+
+        self.assertEqual(groups, {"libbar.so": ["0x123456"], "libbare.so": ["0x7777"]})
     def test_addr2line_request_fails_when_rom_lookup_cannot_resolve_navigation_version(self):
         with tempfile.TemporaryDirectory() as tmp:
             fake_lark = FakeLarkClient()

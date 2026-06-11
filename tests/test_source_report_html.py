@@ -122,6 +122,32 @@ class SourceReportHtmlTests(unittest.TestCase):
         self.assertIn("SetLdTileCenterMsg.java:17", html)
         self.assertNotIn("lane-grid", html)
 
+    def test_source_analysis_report_renders_pending_as_dedicated_section(self):
+        html = render_source_analysis_report(
+            title="待确认项独立成节",
+            request_text="基于源码分析 Foo",
+            answer=(
+                "## 结论摘要\n- 初步定位在 Foo 分发链。\n\n"
+                "## 待确认项\n"
+                "- 运行态是否真正触发该分支待确认。\n"
+                "- 缺少 Bar 的调用栈证据。\n"
+            ),
+            target="Foo",
+            source_evidence=[{"file": "Foo.kt", "line": "10", "text": "hit"}],
+            coverage_boundary="只检查源码仓。",
+            diagram_kinds=[],
+            backend="source_investigation",
+            success=True,
+        )
+
+        # 待确认项必须独立成节，且承载 markdown 中的待确认内容
+        self.assertIn("待确认项", html)
+        self.assertIn("运行态是否真正触发该分支待确认", html)
+        # 边界与说明只保留 coverage_boundary，不再吞掉待确认项内容
+        boundary_block = html.split("边界与说明", 1)[1].split("待确认项", 1)[0]
+        self.assertIn("只检查源码仓", boundary_block)
+        self.assertNotIn("运行态是否真正触发该分支待确认", boundary_block)
+
 
     def test_empty_evidence_not_green(self):
         html = render_source_analysis_report(

@@ -9,6 +9,7 @@ _FOCUS_MAX_LINES_PER_FILE = 15000
 _FOCUS_MIN_LINES_PER_FILE = 2000
 _FOCUS_MAX_LOOKBACK_SECONDS = 21600
 _FOCUS_EXPAND_STEP_SECONDS = 3600
+_FOCUS_LOGD_PREFIXES = ("kernel", "main", "events", "crash")
 
 
 class _CustomSkillMixin:
@@ -333,6 +334,122 @@ class _CustomSkillMixin:
             out = out[-_FOCUS_MAX_LINES_PER_FILE:]
         return out
 
+    def _is_montecarlo_path(self, path: Path) -> bool:
+        parts = [part.casefold() for part in path.parts]
+        return any("montecarlo" in part for part in parts)
+
+    def _is_key_logd_path(self, path: Path) -> bool:
+        parts = [part.casefold() for part in path.parts]
+        if not any(part == "logd" for part in parts):
+            return False
+        name = path.name.casefold()
+        return any(name.startswith(prefix) for prefix in _FOCUS_LOGD_PREFIXES)
+
+    def _is_key_logd_coverage_file(self, path: Path) -> bool:
+        if not self._is_key_logd_path(path):
+            return False
+        if self._is_log_coverage_file(path):
+            return True
+        name = path.name.casefold()
+        return bool(re.match(r"^(kernel|main|events|crash)(?:[._-].*)?$", name))
+
+    def _key_logd_prefix(self, path: Path) -> str:
+        if not self._is_key_logd_path(path):
+            return ""
+        name = path.name.casefold()
+        for prefix in _FOCUS_LOGD_PREFIXES:
+            if name.startswith(prefix):
+                return prefix
+        return ""
+
+    def _iter_key_logd_files(self, input_path: Path | None) -> list[Path]:
+        if input_path is None or not input_path.exists():
+            return []
+        if input_path.is_file():
+            return [input_path] if self._is_key_logd_coverage_file(input_path) else []
+        matches: list[Path] = []
+        try:
+            for logd_dir in input_path.rglob("logd"):
+                if not logd_dir.is_dir():
+                    continue
+                for path in logd_dir.iterdir():
+                    if path.is_file() and self._is_key_logd_coverage_file(path):
+                        matches.append(path)
+        except OSError:
+            return matches
+        return sorted(matches, key=lambda item: str(item))
+
+    def _find_uncalibrated_montecarlo_logs(
+        self,
+        all_files: list[Path],
+        fault_dt: "datetime | None",
+    ) -> list[Path]:
+        """Return montecarlo logs whose filename year is clearly uncalibrated (>2yr off)."""
+        if fault_dt is None:
+            return []
+        result: list[Path] = []
+        for path in all_files:
+            if not self._is_montecarlo_path(path):
+                continue
+            file_dt = self._parse_log_file_datetime(path.name)
+            if file_dt is None:
+                continue
+            if abs(file_dt.tm_year - fault_dt.year) > 2:
+                result.append(path)
+        return result
+
+    def _events_log_confirms_process_start(
+        self,
+        events_files: list[Path],
+        package: str = "com.xiaopeng.montecarlo",
+    ) -> bool:
+        """Check whether events log contains am_proc_start for the given package."""
+        pattern = re.compile(rf"am_proc_start:.*{re.escape(package)}")
+        for path in events_files:
+            try:
+                with path.open(encoding="utf-8", errors="replace") as fh:
+                    for line in fh:
+                        if pattern.search(line):
+                            return True
+            except OSError:
+                continue
+        return False
+
+    def _confirmed_uncalibrated_montecarlo_logs(
+        self,
+        *,
+        all_files: list[Path],
+        key_logd_files: list[Path],
+        fault_dt: "datetime | None",
+    ) -> list[Path]:
+        uncalibrated = self._find_uncalibrated_montecarlo_logs(all_files, fault_dt)
+        if not uncalibrated:
+            return []
+        events_files = [p for p in key_logd_files if p.name.casefold().startswith("events")]
+        if not events_files:
+            # Flat backslash paths: filename like "ALLlog\log1\logd\events.txt"
+            events_files = [
+                p for p in all_files
+                if "logd" in p.name.casefold() and "events" in p.name.casefold()
+            ]
+        if events_files and self._events_log_confirms_process_start(events_files):
+            return uncalibrated
+        return []
+
+    def _file_agent_focus_rank(self, path: Path) -> int:
+        name = path.name.casefold()
+        if self._is_montecarlo_path(path):
+            return 0
+        if self._is_key_logd_path(path):
+            if name.startswith(("kernel", "main")):
+                return 1
+            return 2
+        if name in {"prop.txt", "dfx.txt"}:
+            return 3
+        if self._is_montecarlo_or_logd_path(path):
+            return 4
+        return 5
+
     def _file_agent_focus_candidates(
         self,
         *,
@@ -346,6 +463,12 @@ class _CustomSkillMixin:
             return [input_path]
         fault_dt = self._parse_bug_datetime(fault_time)
         all_files = self._iter_log_coverage_files(input_path)
+        key_logd_files = self._iter_key_logd_files(input_path)
+        if key_logd_files:
+            files_by_resolved = {path.resolve(): path for path in all_files}
+            for path in key_logd_files:
+                files_by_resolved.setdefault(path.resolve(), path)
+            all_files = sorted(files_by_resolved.values(), key=lambda item: str(item))
         if not all_files:
             return []
         selected: list[Path] = []
@@ -366,6 +489,18 @@ class _CustomSkillMixin:
             if abs((candidate_dt - fault_dt).total_seconds()) > 3600:
                 continue
             selected.append(path)
+        # Include montecarlo logs with uncalibrated timestamps (e.g. year 2010)
+        # when events log confirms the process was running.
+        uncalibrated = self._confirmed_uncalibrated_montecarlo_logs(
+            all_files=all_files,
+            key_logd_files=key_logd_files,
+            fault_dt=fault_dt,
+        )
+        if uncalibrated:
+            selected_resolved = {p.resolve() for p in selected}
+            pending = [p for p in uncalibrated if p.resolve() not in selected_resolved]
+            if pending:
+                selected.extend(pending)
         if not selected and fault_dt is not None:
             for path in all_files:
                 file_dt = self._parse_log_file_datetime(path.name)
@@ -376,9 +511,27 @@ class _CustomSkillMixin:
                     selected.append(path)
         ranked = sorted(
             [*decoded_aux, *selected],
-            key=lambda item: (self._log_file_priority(item.resolve()), str(item.resolve())),
+            key=lambda item: (
+                self._file_agent_focus_rank(item.resolve()),
+                self._log_file_priority(item.resolve()),
+                str(item.resolve()),
+            ),
         )
-        return ranked[:24]
+        # Guarantee each key logd family is not squeezed out when one family or
+        # MonteCarlo files dominate the list.
+        key_logd = [p for p in ranked if self._is_key_logd_path(p.resolve())]
+        reserved: list[Path] = []
+        reserved_resolved: set[Path] = set()
+        for prefix in _FOCUS_LOGD_PREFIXES:
+            for path in key_logd:
+                resolved = path.resolve()
+                if resolved in reserved_resolved or self._key_logd_prefix(resolved) != prefix:
+                    continue
+                reserved.append(path)
+                reserved_resolved.add(resolved)
+                break
+        rest = [p for p in ranked if p.resolve() not in reserved_resolved]
+        return reserved + rest[:24 - len(reserved)]
 
     def _build_file_agent_focus_dir(
         self,
@@ -400,6 +553,23 @@ class _CustomSkillMixin:
         focus_dir.mkdir(parents=True, exist_ok=True)
         copied: list[Path] = []
         fault_dt = self._parse_bug_datetime(fault_time)
+        uncalibrated_resolved: set[Path] = set()
+        if input_path is not None and input_path.exists():
+            all_files = self._iter_log_coverage_files(input_path)
+            key_logd_files = self._iter_key_logd_files(input_path)
+            if key_logd_files:
+                files_by_resolved = {path.resolve(): path for path in all_files}
+                for path in key_logd_files:
+                    files_by_resolved.setdefault(path.resolve(), path)
+                all_files = sorted(files_by_resolved.values(), key=lambda item: str(item))
+            uncalibrated_resolved = {
+                path.resolve()
+                for path in self._confirmed_uncalibrated_montecarlo_logs(
+                    all_files=all_files,
+                    key_logd_files=key_logd_files,
+                    fault_dt=fault_dt,
+                )
+            }
         for source in candidates:
             if input_path is not None and input_path.exists() and input_path.is_dir():
                 try:
@@ -415,13 +585,18 @@ class _CustomSkillMixin:
                     raw_lines = [line.rstrip("\n") for line in handle]
             except OSError:
                 continue
-            clipped = self._clip_log_lines(
-                raw_lines,
-                fault_dt,
-                is_main_log=self._is_montecarlo_or_logd_path(source),
-            )
+            if source.resolve() in uncalibrated_resolved:
+                clipped = raw_lines[-_FOCUS_MAX_LINES_PER_FILE:]
+            else:
+                clipped = self._clip_log_lines(
+                    raw_lines,
+                    fault_dt,
+                    is_main_log=self._is_montecarlo_path(source),
+                )
+            if not clipped:
+                continue
             try:
-                dest.write_text("\n".join(clipped) + ("\n" if clipped else ""), encoding="utf-8")
+                dest.write_text("\n".join(clipped) + "\n", encoding="utf-8")
             except OSError:
                 continue
             copied.append(dest)

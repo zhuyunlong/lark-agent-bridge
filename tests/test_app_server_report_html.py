@@ -9,6 +9,7 @@ import re
 
 from lark_agent_bridge.reporting.app_server_report_html import (
     _markdown_to_html,
+    _requires_android_unity_boundary,
     _verdict_severity,
     render_app_server_report,
 )
@@ -21,6 +22,32 @@ SAMPLE_MD = """## 结论摘要
 - 触发 `3d-stuck-investigate`，并补充 `scene-signal-diagnosis`。
 - 当前日志**不能证明 montecarlo / Unity 渲染线程在 16:07 卡死**：缺少目标小时应用日志。
 - 可确认的是：问题时间处于本地上电初期，更像是 P 挡场景显示策略差异。
+
+## 调查方案
+
+- Primary skill: `scene-signal-diagnosis`，Secondary skill: `unity-startup-lifecycle-check`。
+- 先确认 Android 场景状态，再判断 Unity / Surface 后续显示链路。
+
+## Android 最终状态
+
+- Android 在 `16:50:37.298` 已将 P 挡舒享映射为 `P_Gear_Car_Park_Comfort`，并在 `16:50:37.313` 推送 `SceneType=14` 到 Unity。
+
+## 责任边界
+
+- Android 场景信号已闭环；若 3D 内容仍未展示，责任边界转向 Unity/3D 显示状态、资源加载、业务 UI 覆盖或系统图形栈。
+
+## 关键时间线
+
+- `16:50:37.298` Android 计算目标 SceneType。
+- `16:50:37.313` Unity 收到场景变化。
+
+## 已排除项
+
+- Android 未发送场景信号已排除。
+
+## 已确认链路
+
+- Android -> Unity 场景信号链路已确认闭环。
 
 ## 关键证据
 
@@ -68,6 +95,7 @@ def _render(md=SAMPLE_MD, **meta_over):
         "skill_inventory_path": "/inv.json",
         "context_payload": {"trigger_term": "自主分析"},
         "inventory_payload": {"skills": [{"name": "x", "description": "d"}]},
+        "report_contract": {"requires_android_unity_boundary": True, "required_sections": ["Android 最终状态", "责任边界"]},
         "prepared_input": "/p",
         "focused_log_input": "/f",
         "request_text": "结合源码分析 P 挡 SR 是否卡死",
@@ -138,10 +166,73 @@ def test_metadata_strip_present_and_skill_shown():
     assert "AI Token" in out
 
 
+def test_android_unity_boundary_sections_are_visible():
+    visible = _visible_body(_render())
+    for text in (
+        "调查方案",
+        "Android 最终状态",
+        "责任边界",
+        "关键时间线",
+        "已排除项",
+        "已确认链路",
+    ):
+        assert text in visible
+    assert "Android 场景信号已闭环" in visible
+    assert "Unity/3D 显示状态" in visible
+
+
+def test_new_output_aliases_render_into_existing_report_slots():
+    md = """## 结论摘要
+- 链路调查完成。
+
+## 源码解释
+- `SceneService.kt:12` 说明场景状态由 Android 推送。
+
+## 建议下一步
+- 补采 Unity 侧截图和目标时刻渲染状态。
+"""
+    visible = _visible_body(_render(md))
+    assert "源码解释" in visible
+    assert "SceneService.kt:12" in visible
+    assert "建议动作" in visible
+    assert "补采 Unity 侧截图和目标时刻渲染状态" in visible
+
+
 def test_chain_rendered_from_source_and_gap():
     out = _render()
     assert 'class="chain"' in out
     assert "证据缺口" in out
+
+
+def test_android_only_report_does_not_require_unity_boundary():
+    meta = {
+        "selected_skill": "navigation-diagnosis",
+        "bug_label": "导航异常",
+        "request_text": "Android 导航数据延迟",
+        "prompt_text": "",
+        "description": "Android 侧 VHAL 数据上报延迟导致导航异常",
+    }
+
+    assert _requires_android_unity_boundary(meta, "## 结论摘要\nAndroid 导航数据异常。") is False
+    assert _requires_android_unity_boundary(meta, "## 结论摘要\n3D 渲染异常。") is False
+    assert _requires_android_unity_boundary(meta, "## 结论摘要\nSurface 丢失。") is False
+
+
+def test_android_unity_boundary_is_contract_driven():
+    assert _requires_android_unity_boundary(
+        {"report_contract": {"requires_android_unity_boundary": True}},
+        "## 结论摘要\n普通问题。",
+    ) is True
+    conditional_meta = {
+        "report_contract": {
+            "required_sections": ["Android 最终状态", "责任边界"],
+            "required_section_keywords": ["Unity", "SceneType"],
+        },
+        "description": "最后 SceneType 未展示",
+    }
+    assert _requires_android_unity_boundary(conditional_meta, "## 结论摘要\n待查。") is True
+    conditional_meta["description"] = "普通信号链路延迟"
+    assert _requires_android_unity_boundary(conditional_meta, "## 结论摘要\n待查。") is False
 
 
 def test_raw_evidence_is_collapsed_fold():

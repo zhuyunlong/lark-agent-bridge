@@ -15,7 +15,7 @@
 
 ## 统一规则
 
-- 默认 profile 是 `cc-switch-deepseek-claude`。
+- 默认 profile 是 `deepseek-claude`。
 - `*-claude` 代表 Anthropic 协议，本地 agent 固定为 `claude`。
 - `*-codex` 代表 OpenAI 协议，本地 agent 固定为 `codex`。
 - `cc-switch-*` 固定走 `http://127.0.0.1:15721`，key 由 cc-switch 管理。

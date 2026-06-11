@@ -7,7 +7,7 @@
 # config.toml — it will be merged with (and can override) these built-ins.
 
 [defaults]
-profile = "cc-switch-deepseek-claude"
+profile = "deepseek-claude"
 
 [mimo-claude]
 type = "direct-api"

@@ -804,6 +804,33 @@ class AppDirectAnalysisTests(_AppTestBase):
         self.assertEqual(len(fake_lark.files), 1)
         self.assertEqual(Path(fake_lark.files[0]["path"]).resolve(), html.resolve())
         self.assertIn("published_report_url", result.details)
+
+    def test_perception_data_chain_request_does_not_require_intent_router(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_lark = FakeLarkClient()
+            fake_intent = FakeIntentRunner(enabled=True)
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    allowed_chats=["oc_d977fe30a92c7ac81e3e6b543d99ef5b"],
+                ),
+                lark_client=fake_lark,
+                intent_runner=fake_intent,
+            )
+
+            result = app.handle_event(
+                event(
+                    chat_id="oc_d977fe30a92c7ac81e3e6b543d99ef5b",
+                    content="@bot 时间点6月8日 19:17 感知数据链路调查",
+                )
+            )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, "missing_log")
+        self.assertEqual(result.details["mode"], "perception_summary")
+        self.assertEqual(fake_intent.calls, [])
+
     def test_intent_perception_reply_to_file_fetches_reply_resource_when_event_lacks_reply_to(self):
         with tempfile.TemporaryDirectory() as tmp:
             html = Path(tmp) / "perception-summary.html"

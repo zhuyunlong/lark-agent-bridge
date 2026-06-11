@@ -1,5 +1,6 @@
 from _agents_base import *  # noqa: F401,F403
 from _agents_base import _AgentTestBase
+from lark_agent_bridge.agents import BugAnalysisSelection
 
 
 class AgentsBugAnalysisTests(_AgentTestBase):
@@ -151,6 +152,388 @@ class AgentsBugAnalysisTests(_AgentTestBase):
         self.assertIn(str(log_root), metadata_body)
         self.assertIn("源码证据", metadata_body)
         self.assertIn("主题配置", evidence_body)
+
+    def test_source_stage_bug_with_stack_description_does_not_require_log_attachment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(
+                dry_run=False,
+                data_dir=Path(tmp),
+                workspace_root=Path(tmp),
+                guideengine_repo=Path(tmp) / "guideengine",
+            )
+            runner = BugAnalysisRunner(config)
+
+            def fake_run_json_command(command, timeout):
+                if "check-env" in command:
+                    return {"meegle_installed": True, "auth_ok": True}
+                if "resolve-url" in command:
+                    return {"project_key": "xpfailuremgmt", "work_item_id": "7008711"}
+                if "fetch-data" in command:
+                    return {
+                        "title": "Native Crash",
+                        "status": "处理中",
+                        "create_time": "2026-06-10 16:00",
+                        "create_by": "tester",
+                        "fields": {},
+                        "attachments": [],
+                        "description": (
+                            "问题时间: 2026-06-10 15:58\n"
+                            "backtrace:\n"
+                            "#00 pc 0000000000123450 /apex/com.android.runtime/lib64/libart.so\n"
+                            "#01 pc 0000000000004560 /system/lib64/libnative.so"
+                        ),
+                    }
+                if command[:3] == ["meegle", "workitem", "get"]:
+                    return {"work_item_current_node": []}
+                raise AssertionError(f"unexpected command: {command}")
+
+            with (
+                mock.patch.object(runner, "_run_json_command", side_effect=fake_run_json_command),
+                mock.patch.object(runner, "_load_option_map", return_value={}),
+                mock.patch.object(
+                    runner,
+                    "_download_bug_attachments",
+                    return_value={"downloaded": [], "unzipped": [], "errors": [], "skipped": [], "ok": True},
+                ),
+                mock.patch.object(runner, "_select_log_input", return_value=None),
+                mock.patch.object(runner, "_run_analysis", side_effect=AssertionError("source_stage should not run log scripts")),
+                mock.patch.object(runner, "_run_source_stage_pydantic_ai", side_effect=self._fake_source_stage_success),
+                mock.patch.object(runner, "_run_custom_skill_agent_analysis", side_effect=self._fake_source_stage_success),
+                mock.patch.object(runner, "_build_combined_report_artifacts", return_value=None),
+                mock.patch.object(
+                    runner,
+                    "_run_bug_agent_summary",
+                    return_value={
+                        "message": "",
+                        "command": None,
+                        "error": "",
+                        "provider": "",
+                        "session_id": "",
+                        "resumed": False,
+                        "duration_seconds": 0.0,
+                        "usage": {},
+                    },
+                ),
+            ):
+                result = runner.run_bug_analysis(
+                    BugRequest(
+                        bug_url="https://project.feishu.cn/xpfailuremgmt/buglo/detail/7008711",
+                        prompt="解析堆栈",
+                        raw_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/7008711 解析堆栈",
+                        triggered=True,
+                    ),
+                    plans_override=[BugAnalysisPlan(kind="source_stage")],
+                    classification_skill="source_analysis",
+                    classification_source="preflight_rules",
+                )
+
+        self.assertTrue(result.success, result.message)
+        self.assertEqual(result.details["analysis_kind"], "source_stage")
+        self.assertEqual(result.details["analysis_skill"], "source_analysis")
+        self.assertEqual(result.details["selected_log_input"], "")
+        self.assertEqual(result.details["prepared_log_input"], "")
+
+    def test_agent_handled_log_skill_without_log_attachment_still_fails_fast(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(
+                dry_run=False,
+                data_dir=Path(tmp),
+                workspace_root=Path(tmp),
+                guideengine_repo=Path(tmp) / "guideengine",
+            )
+            runner = BugAnalysisRunner(config)
+
+            def fake_run_json_command(command, timeout):
+                if "check-env" in command:
+                    return {"meegle_installed": True, "auth_ok": True}
+                if "resolve-url" in command:
+                    return {"project_key": "xpfailuremgmt", "work_item_id": "7008712"}
+                if "fetch-data" in command:
+                    return {
+                        "title": "车道级进不去",
+                        "status": "处理中",
+                        "create_time": "2026-06-10 16:00",
+                        "create_by": "tester",
+                        "fields": {},
+                        "attachments": [],
+                        "description": "问题时间: 2026-06-10 15:58\n车道级入口不出现",
+                    }
+                if command[:3] == ["meegle", "workitem", "get"]:
+                    return {"work_item_current_node": []}
+                raise AssertionError(f"unexpected command: {command}")
+
+            with (
+                mock.patch.object(runner, "_run_json_command", side_effect=fake_run_json_command),
+                mock.patch.object(runner, "_load_option_map", return_value={}),
+                mock.patch.object(
+                    runner,
+                    "_download_bug_attachments",
+                    return_value={"downloaded": [], "unzipped": [], "errors": [], "skipped": [], "ok": True},
+                ),
+                mock.patch.object(runner, "_select_log_input", return_value=None),
+                mock.patch.object(
+                    runner,
+                    "_run_ld_pydantic_ai_analysis",
+                    return_value={"ok": True, "message": "should not reach analysis without logs"},
+                ),
+            ):
+                result = runner.run_bug_analysis(
+                    BugRequest(
+                        bug_url="https://project.feishu.cn/xpfailuremgmt/buglo/detail/7008712",
+                        prompt="分析车道级",
+                        raw_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/7008712 分析车道级",
+                        triggered=True,
+                    ),
+                    plans_override=[BugAnalysisPlan(kind="ld_lane_level")],
+                    classification_skill="ld-lane-level",
+                    classification_source="agent",
+                )
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, "bug_analysis_missing_log_attachment")
+
+    def test_bug_stack_reverse_request_with_description_stack_routes_to_source_stage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(
+                dry_run=False,
+                data_dir=Path(tmp),
+                workspace_root=Path(tmp),
+                guideengine_repo=Path(tmp) / "guideengine",
+            )
+            runner = BugAnalysisRunner(config)
+
+            def fake_run_json_command(command, timeout):
+                if "check-env" in command:
+                    return {"meegle_installed": True, "auth_ok": True}
+                if "resolve-url" in command:
+                    return {"project_key": "xpfailuremgmt", "work_item_id": "7008711"}
+                if "fetch-data" in command:
+                    return {
+                        "title": "【稳定性】【Native Crash】地图导航出现 Native Crash",
+                        "status": "处理中",
+                        "create_time": "2026-06-10 16:00",
+                        "create_by": "tester",
+                        "fields": {},
+                        "attachments": [],
+                        "description": (
+                            "backtrace:\n"
+                            "#00 pc 0000000000123450 /system/app/demo/lib/arm64/libil2cpp.so\n"
+                            "#01 pc 0000000000004560 /system/lib64/libnative.so"
+                        ),
+                    }
+                if command[:3] == ["meegle", "workitem", "get"]:
+                    return {"work_item_current_node": []}
+                raise AssertionError(f"unexpected command: {command}")
+
+            with (
+                mock.patch.object(runner, "_run_json_command", side_effect=fake_run_json_command),
+                mock.patch.object(runner, "_load_option_map", return_value={}),
+                mock.patch.object(
+                    runner,
+                    "_download_bug_attachments",
+                    return_value={"downloaded": [], "unzipped": [], "errors": [], "skipped": [], "ok": True},
+                ),
+                mock.patch.object(runner, "_select_log_input", return_value=None),
+                mock.patch.object(runner, "_run_analysis", side_effect=AssertionError("source_stage should not run log scripts")),
+                mock.patch.object(runner, "_run_source_stage_pydantic_ai", side_effect=self._fake_source_stage_success),
+                mock.patch.object(runner, "_run_custom_skill_agent_analysis", side_effect=self._fake_source_stage_success),
+                mock.patch.object(runner, "_build_combined_report_artifacts", return_value=None),
+                mock.patch.object(
+                    runner,
+                    "_run_bug_agent_summary",
+                    return_value={
+                        "message": "",
+                        "command": None,
+                        "error": "",
+                        "provider": "",
+                        "session_id": "",
+                        "resumed": False,
+                        "duration_seconds": 0.0,
+                        "usage": {},
+                    },
+                ),
+            ):
+                result = runner.run_bug_analysis(
+                    BugRequest(
+                        bug_url="https://project.feishu.cn/xpfailuremgmt/buglo/detail/7008711",
+                        prompt="反解堆栈",
+                        raw_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/7008711 反解堆栈",
+                        triggered=True,
+                    ),
+                )
+
+        self.assertTrue(result.success, result.message)
+        self.assertEqual(result.details["analysis_kind"], "source_stage")
+        self.assertEqual(result.details["analysis_skill"], "source_analysis")
+        self.assertEqual(result.details["selected_log_input"], "")
+        self.assertEqual(result.details["prepared_log_input"], "")
+
+    def test_stack_reverse_preflight_does_not_override_specific_log_classification(self):
+        runner = BugAnalysisRunner(BridgeConfig(dry_run=False))
+        selection = BugAnalysisSelection(
+            plans=[BugAnalysisPlan(kind="stuck")],
+            skill_name="3d-stuck-investigate",
+            skill_label="3D卡顿分析",
+            source="agent",
+            reason="用户要求分析卡顿日志",
+            confidence="high",
+        )
+
+        with mock.patch.object(runner, "_classify_bug_request_with_agent", return_value=selection):
+            decision = runner._unified_classify_and_decide(
+                request_text=(
+                    "之前已经堆栈解析过了，这次帮我分析卡顿日志\n"
+                    "#00 pc 0000000000123450 /system/lib64/libnative.so"
+                ),
+                prompt_text="之前已经堆栈解析过了，这次帮我分析卡顿日志",
+                title="卡顿问题",
+                description="#00 pc 0000000000123450 /system/lib64/libnative.so",
+                attachments=[],
+            )
+
+        self.assertEqual(decision.selection.plans[0].kind, "stuck")
+        self.assertEqual(decision.selection.skill_name, "3d-stuck-investigate")
+
+    def test_stack_reverse_intent_uses_parser_terms(self):
+        runner = BugAnalysisRunner(BridgeConfig(dry_run=False))
+
+        for text in ("反解crash", "crash分析", "地址反解"):
+            with self.subTest(text=text):
+                self.assertTrue(runner._has_stack_reverse_lookup_intent(text))
+
+    def test_bug_stack_reverse_request_without_stack_or_attachments_asks_for_stack_clarification(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(
+                dry_run=False,
+                data_dir=Path(tmp),
+                workspace_root=Path(tmp),
+                guideengine_repo=Path(tmp) / "guideengine",
+            )
+            runner = BugAnalysisRunner(config)
+
+            def fake_run_json_command(command, timeout):
+                if "check-env" in command:
+                    return {"meegle_installed": True, "auth_ok": True}
+                if "resolve-url" in command:
+                    return {"project_key": "xpfailuremgmt", "work_item_id": "7008711"}
+                if "fetch-data" in command:
+                    return {
+                        "title": "【稳定性】【Native Crash】地图导航出现 Native Crash",
+                        "status": "原因分析",
+                        "create_time": "2026-06-10 16:00",
+                        "create_by": "tester",
+                        "fields": {},
+                        "attachments": [],
+                        "description": "",
+                    }
+                if command[:3] == ["meegle", "workitem", "get"]:
+                    return {"work_item_current_node": []}
+                raise AssertionError(f"unexpected command: {command}")
+
+            with (
+                mock.patch.object(runner, "_run_json_command", side_effect=fake_run_json_command),
+                mock.patch.object(runner, "_load_option_map", return_value={}),
+                mock.patch.object(runner, "_download_bug_attachments", side_effect=AssertionError("no stack should fail before download")),
+            ):
+                result = runner.run_bug_analysis(
+                    BugRequest(
+                        bug_url="https://project.feishu.cn/xpfailuremgmt/buglo/detail/7008711",
+                        prompt="反解堆栈",
+                        raw_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/7008711 反解堆栈",
+                        triggered=True,
+                    ),
+                )
+
+        self.assertTrue(result.success)
+        self.assertTrue(result.skipped)
+        self.assertEqual(result.details["mode"], "bug_stack_clarification")
+        self.assertEqual(
+            result.details["bug_url"],
+            "https://project.feishu.cn/xpfailuremgmt/buglo/detail/7008711",
+        )
+        self.assertEqual(
+            result.details["user_request_text"],
+            "https://project.feishu.cn/xpfailuremgmt/buglo/detail/7008711 反解堆栈",
+        )
+        self.assertIn("缺少可反解堆栈", result.message)
+
+    def test_bug_stack_reverse_request_uses_stack_from_comments(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(
+                dry_run=False,
+                data_dir=Path(tmp),
+                workspace_root=Path(tmp),
+                guideengine_repo=Path(tmp) / "guideengine",
+            )
+            runner = BugAnalysisRunner(config)
+
+            def fake_run_json_command(command, timeout):
+                if "check-env" in command:
+                    return {"meegle_installed": True, "auth_ok": True}
+                if "resolve-url" in command:
+                    return {"project_key": "xpfailuremgmt", "work_item_id": "7008713"}
+                if "fetch-data" in command:
+                    return {
+                        "title": "Native Crash",
+                        "status": "处理中",
+                        "create_time": "2026-06-10 16:00",
+                        "create_by": "tester",
+                        "fields": {},
+                        "attachments": [],
+                        "description": "",
+                        "comments": [
+                            {
+                                "text": (
+                                    "补充堆栈:\n"
+                                    "#00 pc 0000000000123450 /system/app/demo/lib/arm64/libil2cpp.so"
+                                )
+                            }
+                        ],
+                    }
+                if command[:3] == ["meegle", "workitem", "get"]:
+                    return {"work_item_current_node": []}
+                raise AssertionError(f"unexpected command: {command}")
+
+            with (
+                mock.patch.object(runner, "_run_json_command", side_effect=fake_run_json_command),
+                mock.patch.object(runner, "_load_option_map", return_value={}),
+                mock.patch.object(
+                    runner,
+                    "_download_bug_attachments",
+                    return_value={"downloaded": [], "unzipped": [], "errors": [], "skipped": [], "ok": True},
+                ),
+                mock.patch.object(runner, "_select_log_input", return_value=None),
+                mock.patch.object(runner, "_run_analysis", side_effect=AssertionError("source_stage should not run log scripts")),
+                mock.patch.object(runner, "_run_source_stage_pydantic_ai", side_effect=self._fake_source_stage_success),
+                mock.patch.object(runner, "_run_custom_skill_agent_analysis", side_effect=self._fake_source_stage_success),
+                mock.patch.object(runner, "_build_combined_report_artifacts", return_value=None),
+                mock.patch.object(
+                    runner,
+                    "_run_bug_agent_summary",
+                    return_value={
+                        "message": "",
+                        "command": None,
+                        "error": "",
+                        "provider": "",
+                        "session_id": "",
+                        "resumed": False,
+                        "duration_seconds": 0.0,
+                        "usage": {},
+                    },
+                ),
+            ):
+                result = runner.run_bug_analysis(
+                    BugRequest(
+                        bug_url="https://project.feishu.cn/xpfailuremgmt/buglo/detail/7008713",
+                        prompt="反解堆栈",
+                        raw_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/7008713 反解堆栈",
+                        triggered=True,
+                    ),
+                )
+
+        self.assertTrue(result.success, result.message)
+        self.assertEqual(result.details["analysis_kind"], "source_stage")
+
     def test_bug_analysis_general_request_without_clear_direction_asks_for_direction(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = BridgeConfig(

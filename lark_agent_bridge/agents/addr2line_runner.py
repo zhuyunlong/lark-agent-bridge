@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import time
@@ -25,6 +26,12 @@ from ..parser import ROM_VERSION_RE
 
 
 _STACK_LINE_RE = re.compile(r"#\d+\s+pc\s+[0-9a-fA-F]{8,16}\s+\S*lib[\w.-]+\.so\b.*", re.I)
+_ADDR_SO_PAIR_RE = re.compile(
+    r"(?:#\d+\s+pc\s+)?(?<![0-9a-fA-F-])(?P<addr>[0-9a-fA-F]{8,16})(?![0-9a-fA-F])"
+    r"\s+(?P<path>\S*?(?P<so>lib[\w.-]+\.so)\b)",
+    re.I,
+)
+_MEMORY_MAP_LINE_RE = re.compile(r"^\s*[0-9a-fA-F]+-[0-9a-fA-F]+\s+[r-][w-][x-][ps]\s", re.I)
 _CRASH_FILE_NAME_RE = re.compile(r"(?:^|[\\/])(?:crash[^\\/]*|tombstone[^\\/]*)$", re.I)
 _NAVIGATION_CRASH_TERMS = (
     "xp_envirodrive",
@@ -585,12 +592,12 @@ class Addr2LineRunner:
     def _addr_groups_by_so(self, text: str) -> dict[str, list[str]]:
         groups: dict[str, list[str]] = {}
         for line in text.splitlines():
-            match = re.search(r"#\d+\s+pc\s+([0-9a-fA-F]{8,16})\s+(\S*lib[\w.-]+\.so)\b", line)
-            if match is None:
+            if _MEMORY_MAP_LINE_RE.search(line):
                 continue
-            so_name = Path(match.group(2)).name
-            addr = "0x" + (match.group(1).lstrip("0") or "0")
-            groups.setdefault(so_name, []).append(addr)
+            for match in _ADDR_SO_PAIR_RE.finditer(line):
+                so_name = match.group("so")
+                addr = "0x" + (match.group("addr").lstrip("0") or "0")
+                groups.setdefault(so_name, []).append(addr)
         return groups
 
     def _addr_text_for_so_names(self, text: str, so_names: set[str]) -> str:
@@ -598,6 +605,16 @@ class Addr2LineRunner:
             return ""
         kept: list[str] = []
         for line in text.splitlines():
+            if _MEMORY_MAP_LINE_RE.search(line):
+                continue
+            matched_pairs = [
+                match.group(0)
+                for match in _ADDR_SO_PAIR_RE.finditer(line)
+                if match.group("so") in so_names
+            ]
+            if matched_pairs:
+                kept.extend(matched_pairs)
+                continue
             match = re.search(r"\S*lib[\w.-]+\.so\b", line)
             if match is not None and Path(match.group(0)).name in so_names:
                 kept.append(line)
@@ -1427,20 +1444,83 @@ class Addr2LineRunner:
         target_dir = context.input_dir / "napa5_symbols"
         target_dir.mkdir(parents=True, exist_ok=True)
         target = target_dir / so_name
-        if target.exists() and target.stat().st_size > 0:
+        if self._is_reusable_elf(target):
             return target
         url = f"{base_url}/{so_name}"
+        partial = target.with_name(f"{target.name}.part")
+        try:
+            partial.unlink()
+        except OSError:
+            pass
         request = urllib.request.Request(url, headers={"User-Agent": "lark-agent-bridge/addr2line"})
         try:
-            with self._open_internal_url(request, timeout=self._timeout_seconds()) as response, target.open("wb") as dst:
+            with self._open_internal_url(request, timeout=self._timeout_seconds()) as response, partial.open("wb") as dst:
+                response_headers = getattr(response, "headers", None)
                 shutil.copyfileobj(response, dst)
+            expected_size = self._content_length(response_headers)
+            actual_size = partial.stat().st_size
+            if expected_size is not None and actual_size != expected_size:
+                raise OSError(f"incomplete download: expected {expected_size} bytes, got {actual_size}")
+            if actual_size <= 0:
+                raise OSError("empty download")
+            partial.replace(target)
         except (urllib.error.URLError, OSError) as exc:
             try:
-                target.unlink()
+                partial.unlink()
             except OSError:
                 pass
             raise OSError(str(exc)) from exc
         return target
+
+    def _content_length(self, headers: object) -> int | None:
+        try:
+            value = headers.get("Content-Length")  # type: ignore[attr-defined]
+        except AttributeError:
+            return None
+        if value is None:
+            return None
+        try:
+            length = int(str(value).strip())
+        except ValueError:
+            return None
+        return length if length >= 0 else None
+
+    def _is_reusable_elf(self, path: Path) -> bool:
+        try:
+            size = path.stat().st_size
+            if size <= 0:
+                return False
+            with path.open("rb") as fh:
+                header = fh.read(64)
+        except OSError:
+            return False
+        if len(header) < 16 or header[:4] != b"\x7fELF":
+            return False
+        elf_class = header[4]
+        endian_flag = header[5]
+        endian = "<" if endian_flag == 1 else ">" if endian_flag == 2 else ""
+        if not endian:
+            return False
+        try:
+            if elf_class == 2:
+                if len(header) < 64:
+                    return False
+                e_shoff = struct.unpack_from(f"{endian}Q", header, 0x28)[0]
+                e_shentsize = struct.unpack_from(f"{endian}H", header, 0x3A)[0]
+                e_shnum = struct.unpack_from(f"{endian}H", header, 0x3C)[0]
+            elif elf_class == 1:
+                if len(header) < 52:
+                    return False
+                e_shoff = struct.unpack_from(f"{endian}I", header, 0x20)[0]
+                e_shentsize = struct.unpack_from(f"{endian}H", header, 0x2E)[0]
+                e_shnum = struct.unpack_from(f"{endian}H", header, 0x30)[0]
+            else:
+                return False
+        except struct.error:
+            return False
+        if not e_shoff or not e_shentsize or not e_shnum:
+            return True
+        return e_shoff + (e_shentsize * e_shnum) <= size
 
     def _open_internal_url(self, request: urllib.request.Request, *, timeout: int):
         env = build_internal_network_env(self.config.internal_network_env)

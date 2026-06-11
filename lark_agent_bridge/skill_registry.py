@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 
 PRIMARY_BUG_SKILL_MAP: dict[str, tuple[str, str, bool]] = {
     "unity-startup-lifecycle-check": ("startup", "3D启动时序分析", True),
@@ -23,16 +25,40 @@ AUX_BUG_SKILLS = {
 }
 
 
-def extract_skill_frontmatter(text: str) -> tuple[str, str]:
-    name = ""
-    description = ""
+def extract_skill_frontmatter_fields(text: str) -> dict[str, Any]:
+    fields: dict[str, Any] = {}
     lines = text.splitlines()
     if lines and lines[0].strip() == "---":
         for line in lines[1:]:
             if line.strip() == "---":
                 break
-            if line.startswith("name:"):
-                name = line.partition(":")[2].strip().strip('"').strip("'")
-            elif line.startswith("description:"):
-                description = line.partition(":")[2].strip().strip('"').strip("'")
+            if ":" not in line or line.startswith((" ", "\t", "#")):
+                continue
+            key, _sep, raw_value = line.partition(":")
+            key = key.strip()
+            if not key:
+                continue
+            fields[key] = _parse_frontmatter_value(raw_value.strip())
+    return fields
+
+
+def extract_skill_frontmatter(text: str) -> tuple[str, str]:
+    fields = extract_skill_frontmatter_fields(text)
+    name = str(fields.get("name") or "").strip()
+    description = str(fields.get("description") or "").strip()
     return name, description
+
+
+def _parse_frontmatter_value(raw_value: str) -> Any:
+    value = raw_value.strip().strip('"').strip("'")
+    lowered = value.lower()
+    if lowered == "true":
+        return True
+    if lowered == "false":
+        return False
+    if value.startswith("[") and value.endswith("]"):
+        inner = value[1:-1].strip()
+        if not inner:
+            return []
+        return [item.strip().strip('"').strip("'") for item in inner.split(",") if item.strip()]
+    return value

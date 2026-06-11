@@ -647,6 +647,7 @@ class _LogResourcesMixin:
             "bug_clarification",
             "bug_skill_confirmation",
             "bug_time_clarification",
+            "bug_stack_clarification",
             "knowledge_qa",
             "knowledge_probe",
             "basic_chat",

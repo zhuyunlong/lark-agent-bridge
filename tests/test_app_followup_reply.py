@@ -1190,6 +1190,77 @@ class AppFollowupReplyTests(_AppTestBase):
             fake_rom.requests[0].rom_version,
             "XMARTQGZHE29E5_V6.1.0.8810_20260327200937.9_REV01_USER_Release",
         )
+
+    def test_group_bare_hex_stack_reply_to_rom_lookup_routes_to_addr2line(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_lark = FakeLarkClient()
+            fake_addr2line = FakeAddr2LineRunner()
+            app = BridgeApp(
+                BridgeConfig(
+                    dry_run=False,
+                    data_dir=Path(tmp),
+                    allowed_chats=["oc_denied"],
+                ),
+                lark_client=fake_lark,
+                addr2line_runner=fake_addr2line,
+            )
+            rom = "XMARTQGZHE29E5_V6.1.0.8810_20260327200937.9_REV01_USER_Release"
+            app.conversation_store.remember(
+                root_message_id="om_rom_root_for_addr",
+                chat_id="oc_denied",
+                mode="rom_version_lookup",
+                request_text=f"@bot {rom} 查导航版本",
+                summary_text="ROM 版本查询完成",
+                report_url="",
+                report_excerpt="",
+            )
+            app.conversation_store.remember_alias(
+                alias_message_id="om_rom_reply_for_addr",
+                root_message_id="om_rom_root_for_addr",
+            )
+            app.activity_store.record_result(
+                event(message_id="om_rom_root_for_addr", content=f"@bot {rom} 查导航版本"),
+                TaskResult(
+                    success=True,
+                    message="ROM 版本查询完成",
+                    details={
+                        "mode": "rom_version_lookup",
+                        "rom_version": rom,
+                        "required_outputs": {
+                            "navigation_version": "V6.1.0_20260327175820_Release",
+                            "symbol_table_url": (
+                                "http://maven.xiaopeng.local/service/rest/repository/browse/"
+                                "xp_android_release/com/xiaopeng/lib/envirodrive_so/V6.1.0_20260327175820_Release/"
+                            ),
+                            "napa5_download_url": "http://10.99.26.55/rom/napa/lib_napa5/6.1.0-test",
+                        },
+                    },
+                ),
+            )
+
+            result = app.handle_event(
+                event(
+                    event_id="evt_group_bare_hex_stack_after_rom",
+                    message_id="om_group_bare_hex_stack_after_rom",
+                    reply_to="om_rom_reply_for_addr",
+                    content=(
+                        "0000000000085304 /apex/com.android.runtime/lib64/bionic/libc.so (__memcpy+276)\n"
+                        "00000000049f7194 /system/app/xp_envirodrive-mainland/lib/arm64/libil2cpp.so\n"
+                        "0000000004872b6c /system/app/xp_envirodrive-mainland/lib/arm64/libil2cpp.so\n"
+                        "堆栈解析"
+                    ),
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.details["mode"], "addr2line_resolve")
+        self.assertEqual(len(fake_addr2line.requests), 1)
+        request = fake_addr2line.requests[0]
+        self.assertEqual(request.rom_version, rom)
+        self.assertEqual(request.apk_version, "V6.1.0_20260327175820_Release")
+        self.assertEqual(request.napa5_download_url, "http://10.99.26.55/rom/napa/lib_napa5/6.1.0-test")
+        self.assertIn("00000000049f7194", request.addr_text)
+        self.assertIn("libil2cpp.so", request.addr_text)
     def test_followup_reanalysis_fetches_current_message_reply_to_when_event_lacks_it(self):
         with tempfile.TemporaryDirectory() as tmp:
             metadata = Path(tmp) / "bug_metadata.md"

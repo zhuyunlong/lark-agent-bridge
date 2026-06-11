@@ -126,6 +126,10 @@ class TestExtractJson(unittest.TestCase):
 class TestIntentAgent(unittest.TestCase):
     """Test IntentAgent wrapper."""
 
+    def test_default_intent_token_budget_has_structured_output_headroom(self):
+        opts = AIProviderOptions()
+        self.assertEqual(opts.intent_max_tokens, 4096)
+
     def test_not_available_without_config(self):
         opts = AIProviderOptions()  # empty/disabled
         agent = IntentAgent(opts)

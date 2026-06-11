@@ -29,7 +29,7 @@ Real deployments usually keep these values in local `config.toml` or environment
 
 Profile selection is owned by `run.sh` and `config/presets.toml`:
 
-- `./run.sh` defaults to `cc-switch-deepseek-claude`.
+- `./run.sh` defaults to `deepseek-claude`.
 - `./run.sh <profile>` keeps `config.toml` and overrides only the profile.
 - `*-claude` maps to `claude`; `*-codex` maps to `codex`.
 - `codex-offi` / `claude-offi` use official CLI login and disable direct API.

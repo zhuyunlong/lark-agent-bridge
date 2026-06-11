@@ -124,12 +124,14 @@ def app_server_event_preview(event: dict[str, object]) -> str:
             if isinstance(total, dict):
                 total_tokens = total.get("totalTokens")
                 input_tokens = total.get("inputTokens")
+                cached_input_tokens = total.get("cachedInputTokens")
                 output_tokens = total.get("outputTokens")
                 if isinstance(total_tokens, int):
                     if isinstance(input_tokens, int) and isinstance(output_tokens, int):
+                        cache_text = f" cache={cached_input_tokens}" if isinstance(cached_input_tokens, int) else ""
                         return (
                             "Codex token usage "
-                            f"token≈{total_tokens} input={input_tokens} output={output_tokens}"
+                            f"token≈{total_tokens} input={input_tokens}{cache_text} output={output_tokens}"
                         )
                     return f"Codex token usage token≈{total_tokens}"
         return ""
