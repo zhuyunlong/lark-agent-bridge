@@ -1,0 +1,31 @@
+lark_agent_bridge/configuration/loader.py
+  eabd23114223e0de 107-109
+lark_agent_bridge/configuration/sections.py
+  eabd23114223e0de 13,20,34,85-87,304-309,567-604
+lark_agent_bridge/models.py
+  eabd23114223e0de 129-130,380-411,456-458
+docs/refactor/steps/S16-S21-config-hardening.md
+  eabd23114223e0de 1-33
+lark_agent_bridge/app/handle_event.py
+  eabd23114223e0de 47-50,55-58,65,67-75,92
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.22",
+  "base_commit_sha": "edaf67e5aeb9d1932f098d4b38eda828c835253f",
+  "prompts": {
+    "eabd23114223e0de": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "351faf7a-c091-4202-b391-288e2386fb58",
+        "model": "claude-fable-5"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 142,
+      "total_deletions": 6,
+      "accepted_lines": 560,
+      "overriden_lines": 0
+    }
+  }
+}
