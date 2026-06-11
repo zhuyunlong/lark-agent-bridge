@@ -1,0 +1,23 @@
+docs/refactor/steps/S1-addr2line-subpackage.md
+  eabd23114223e0de 1-23
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.22",
+  "base_commit_sha": "18eb0caa5f9364c729aacb29bf3cb73f734ecfcd",
+  "prompts": {
+    "eabd23114223e0de": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "351faf7a-c091-4202-b391-288e2386fb58",
+        "model": "claude-fable-5"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 202,
+      "total_deletions": 0,
+      "accepted_lines": 202,
+      "overriden_lines": 0
+    }
+  }
+}
