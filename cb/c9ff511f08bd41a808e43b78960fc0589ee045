@@ -1,0 +1,37 @@
+lark_agent_bridge/agents/tools/register.py
+  eabd23114223e0de 1-633
+lark_agent_bridge/agents/tools/shell.py
+  eabd23114223e0de 1-130
+lark_agent_bridge/agents/agent_tools.py
+  eabd23114223e0de 1,16-21,23,28-54,56-81,84-94
+docs/refactor/steps/S10-S13-agents-bug-splits.md
+  eabd23114223e0de 1-41
+lark_agent_bridge/agents/tools/search.py
+  eabd23114223e0de 1-285
+lark_agent_bridge/agents/tools/__init__.py
+  eabd23114223e0de 1-4
+lark_agent_bridge/agents/tools/file_access.py
+  eabd23114223e0de 1-224
+lark_agent_bridge/agents/tools/cache.py
+  eabd23114223e0de 1-85
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.22",
+  "base_commit_sha": "cbc9ff511f08bd41a808e43b78960fc0589ee045",
+  "prompts": {
+    "eabd23114223e0de": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "351faf7a-c091-4202-b391-288e2386fb58",
+        "model": "claude-fable-5"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 1824,
+      "overriden_lines": 0
+    }
+  }
+}
