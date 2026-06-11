@@ -1,0 +1,43 @@
+lark_agent_bridge/report_http/query.py
+  eabd23114223e0de 1-18
+lark_agent_bridge/report_http/index_page.py
+  eabd23114223e0de 1-234
+lark_agent_bridge/report_http/knowledge_export.py
+  eabd23114223e0de 1-39
+lark_agent_bridge/report_http/history.py
+  eabd23114223e0de 1-99
+lark_agent_bridge/report_http/paths.py
+  eabd23114223e0de 1-33
+lark_agent_bridge/report_http/__init__.py
+  eabd23114223e0de 1-25
+lark_agent_bridge/report_http/http_io.py
+  eabd23114223e0de 1-160
+lark_agent_bridge/report_server.py
+  eabd23114223e0de 1-8,41-72,254
+lark_agent_bridge/report_http/admin_api.py
+  eabd23114223e0de 1-218
+lark_agent_bridge/report_http/skills_knowledge_api.py
+  eabd23114223e0de 1-129
+lark_agent_bridge/report_http/request_handler.py
+  eabd23114223e0de 1-371
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.22",
+  "base_commit_sha": "1207768c02e25e61b2c75bf8877138d1200e4be6",
+  "prompts": {
+    "eabd23114223e0de": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "351faf7a-c091-4202-b391-288e2386fb58",
+        "model": "claude-fable-5"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 1432,
+      "total_deletions": 1136,
+      "accepted_lines": 1556,
+      "overriden_lines": 0
+    }
+  }
+}
