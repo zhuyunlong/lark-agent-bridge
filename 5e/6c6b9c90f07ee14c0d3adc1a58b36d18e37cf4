@@ -1,0 +1,29 @@
+scripts/refactor_tools/README.md
+  eabd23114223e0de 1-19
+docs/refactor/FINAL-SUMMARY.md
+  eabd23114223e0de 1-58
+docs/refactor/PROGRESS.md
+  eabd23114223e0de 3,6-7,9,11-15,17-18
+tests/test_file_size_boundaries.py
+  eabd23114223e0de 6-8,26-32
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.22",
+  "base_commit_sha": "5e6c6b9c90f07ee14c0d3adc1a58b36d18e37cf4",
+  "prompts": {
+    "eabd23114223e0de": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "351faf7a-c091-4202-b391-288e2386fb58",
+        "model": "claude-fable-5"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 101,
+      "total_deletions": 31,
+      "accepted_lines": 518,
+      "overriden_lines": 0
+    }
+  }
+}
