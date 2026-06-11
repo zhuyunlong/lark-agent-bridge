@@ -1,0 +1,23 @@
+docs/refactor/steps/S15-S18-knowledge-report-cards.md
+  eabd23114223e0de 1-35
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.22",
+  "base_commit_sha": "ec0a2dcd355b56f68185dd7304a9d7108200d584",
+  "prompts": {
+    "eabd23114223e0de": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "351faf7a-c091-4202-b391-288e2386fb58",
+        "model": "claude-fable-5"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 270,
+      "total_deletions": 0,
+      "accepted_lines": 451,
+      "overriden_lines": 5
+    }
+  }
+}
