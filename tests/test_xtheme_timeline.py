@@ -452,6 +452,79 @@ class XThemeTimelineTests(unittest.TestCase):
         self.assertEqual(1, html.count("IThemeElement.THEME_ELEMENT_TYPE_SR 为空"))
         self.assertIn("SR 主题皮肤列表为空，共 2 条日志", html)
 
+    def test_report_summarizes_xtheme_upstream_chain_before_raw_snapshot(self):
+        analyzer = _load_xtheme_analyzer()
+        result = {
+            "inits": [],
+            "calc_times": [
+                {
+                    "ts": "06-09 21:44:54.074",
+                    "md": "06-09",
+                    "cur": 1304,
+                    "sunrise": 350,
+                    "sunset": 1193,
+                    "calTime": "TIME_NIGHT",
+                    "finalTime": "TIME_DAY",
+                    "themeMode": 0,
+                    "file": "main.log",
+                    "line": 60,
+                    "raw": "calculateTimeInfo",
+                }
+            ],
+            "time_checks": [],
+            "ui_changes": [
+                {"ts": "06-09 21:44:57.334", "md": "06-09", "uiMode": 1, "themeMode": 0, "file": "main.log", "line": 40}
+            ],
+            "theme_changes": [],
+            "theme_msgs": [],
+            "sunrise_sets": [
+                {"ts": "06-09 21:25:45.429", "md": "06-09", "sunriseMin": 350, "sunsetMin": 1193, "file": "main.log", "line": 30}
+            ],
+            "twilights": [],
+            "twilight_fails": [],
+            "calc_warns": [],
+            "theme_elems": [],
+            "strategies": [
+                {"ts": "06-09 21:44:57.959", "md": "06-09", "code": 1076, "themeMode": 1, "timePeriod": 3, "detail": "SrThemeSkin:Basic", "file": "main.log", "line": 70},
+                {"ts": "06-09 05:28:45.446", "md": "06-09", "code": 1115, "themeMode": 0, "timePeriod": 1, "detail": "SrThemeSkin:Basic", "file": "main.log", "line": 10},
+            ],
+            "get_msgs": [],
+            "langs": [],
+            "cultures": [],
+            "theme_type_parses": [
+                {"ts": "06-09 21:44:57.491", "md": "06-09", "uiMode": 19, "autoMode": 1, "file": "main.log", "line": 50}
+            ],
+            "theme_helper_configs": [
+                {"ts": "06-09 21:44:57.458", "md": "06-09", "oldTheme": "THEME_DAY_NORMAL", "newTheme": "THEME_NIGHT_NORMAL", "appUiMode": 19, "file": "main.log", "line": 45}
+            ],
+            "theme_collects": [
+                {"ts": "06-09 21:44:57.959", "md": "06-09", "themeState": "THEME_NIGHT_NORMAL", "dayNightType": "THEME_NIGHT_NORMAL", "file": "main.log", "line": 69}
+            ],
+            "theme_switches": [],
+            "timer_gaps": [],
+            "condition_mgrs": [],
+            "theme_managers": [],
+            "theme_elem_sr": [],
+            "theme_elem_car": [],
+            "locales": [],
+            "init_callbacks": [],
+        }
+
+        data = analyzer.build_report_data(result, target_time="2026-06-09 21:44", request_text="黑夜白天")
+        html = analyzer.render_html(Path("/tmp/input"), Path("/tmp/input"), result, data)
+
+        self.assertIn("核心信号与上游输入", html)
+        self.assertIn("源头输入", html)
+        self.assertIn("直接上游状态", html)
+        self.assertIn("XTheme 输出", html)
+        self.assertIn("Android 系统 UI mode", html)
+        self.assertIn("ThemeHelper 主题模式", html)
+        self.assertIn("日出日落 / Twilight", html)
+        self.assertIn("Cal=TIME_NIGHT / Final=TIME_DAY", html)
+        self.assertIn("SIGNAL_SR_XTHEME", html)
+        self.assertIn("SIGNAL_SR_XTHEME_MSG", html)
+        self.assertLess(html.index("核心信号与上游输入"), html.index("问题时刻前 XTheme 计算输入快照"))
+
     def test_twilight_init_failure_is_not_error_when_sunrise_input_exists(self):
         analyzer = _load_xtheme_analyzer()
         result = {
