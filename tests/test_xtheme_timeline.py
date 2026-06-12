@@ -398,6 +398,60 @@ class XThemeTimelineTests(unittest.TestCase):
         self.assertGreater(html.index("<h2>状态变更汇总表</h2>"), html.index(folded_marker))
         self.assertLess(html.index("问题时刻前 XTheme 计算输入快照"), html.index(folded_marker))
 
+    def test_corrected_ui_theme_observations_are_compacted(self):
+        analyzer = _load_xtheme_analyzer()
+        result = {
+            "inits": [],
+            "calc_times": [],
+            "time_checks": [],
+            "ui_changes": [],
+            "theme_changes": [
+                {"ts": "06-09 21:06:00.000", "md": "06-09", "themeMode": 1, "file": "main.log", "line": 90}
+            ],
+            "theme_msgs": [],
+            "sunrise_sets": [],
+            "twilights": [],
+            "twilight_fails": [],
+            "calc_warns": [
+                {"ts": "06-09 21:04:23.418", "md": "06-09", "timePeriod": "TIME_DAY", "file": "main.log", "line": 10},
+                {"ts": "06-09 21:04:23.418", "md": "06-09", "timePeriod": "TIME_DAY", "file": "main.log", "line": 11},
+                {"ts": "06-09 21:04:34.159", "md": "06-09", "timePeriod": "TIME_DAY", "file": "main.log", "line": 12},
+            ],
+            "theme_elems": [
+                {"ts": "06-09 21:04:00.000", "md": "06-09", "kind": "status", "type": "1080102", "status": "null", "file": "main.log", "line": 20},
+                {"ts": "06-09 21:05:00.000", "md": "06-09", "kind": "status", "type": "1080102", "status": "null", "file": "main.log", "line": 21},
+            ],
+            "strategies": [],
+            "get_msgs": [],
+            "langs": [],
+            "cultures": [],
+            "theme_type_parses": [],
+            "theme_helper_configs": [],
+            "theme_collects": [],
+            "theme_switches": [],
+            "timer_gaps": [],
+            "condition_mgrs": [],
+            "theme_managers": [],
+            "theme_elem_sr": [
+                {"ts": "06-09 21:07:00.000", "md": "06-09", "status": "empty", "file": "main.log", "line": 30},
+                {"ts": "06-09 21:08:00.000", "md": "06-09", "status": "empty", "file": "main.log", "line": 31},
+            ],
+            "theme_elem_car": [],
+            "locales": [],
+            "init_callbacks": [],
+        }
+
+        data = analyzer.build_report_data(result, target_time="2026-06-09 21:44", request_text="黑夜白天")
+        html = analyzer.render_html(Path("/tmp/input"), Path("/tmp/input"), result, data)
+
+        self.assertEqual(1, html.count("uiMode/ThemeMode 短暂不一致（已修正）"))
+        self.assertIn("去重后 2 个时间点", html)
+        self.assertIn("共 3 条日志", html)
+        self.assertEqual(1, html.count("ThemeElement 1080102 使用默认值"))
+        self.assertIn("共 2 条日志，首末 06-09 21:04:00.000 ~ 06-09 21:05:00.000", html)
+        self.assertEqual(1, html.count("IThemeElement.THEME_ELEMENT_TYPE_SR 为空"))
+        self.assertIn("SR 主题皮肤列表为空，共 2 条日志", html)
+
     def test_twilight_init_failure_is_not_error_when_sunrise_input_exists(self):
         analyzer = _load_xtheme_analyzer()
         result = {
