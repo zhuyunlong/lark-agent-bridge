@@ -172,6 +172,13 @@ _DIRECT_API_COMPACTION_PROFILES: tuple[DirectApiCompactionProfileSpec, ...] = (
         handler="_direct_api_context_excerpt_for_scene_signal_target_focus",
         metadata_markers=("bug_scene_signal_report",),
     ),
+    DirectApiCompactionProfileSpec(
+        name="xtheme_signal_boundary",
+        analysis_kind="xtheme",
+        skill_name="xtheme-analyzer",
+        handler="_direct_api_context_excerpt_for_xtheme_signal_boundary",
+        metadata_markers=("bug_xtheme_analysis_report",),
+    ),
 )
 
 # Derived sets — kept for call sites that need a set (e.g. set membership tests

@@ -979,7 +979,62 @@ class AgentsBugAnalysisTests(_AgentTestBase):
         self.assertIn(f"JSON `XTheme时光主题分析`: `{json_path}`", metadata)
         self.assertIn("uiMode/ThemeMode 不一致且未修正", summary)
         self.assertIn("问题时间证据", summary)
+        self.assertIn("Android 最终状态", summary)
+        self.assertIn("责任边界", summary)
+        self.assertIn("上游输入", summary)
+        self.assertIn("XTheme 输出", summary)
         self.assertIn("UI Mode observer", summary)
+
+    def test_xtheme_direct_api_prompt_requires_android_boundary_sections(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
+            metadata_path = Path(tmp) / "bug_metadata.md"
+            request_path = Path(tmp) / "bug_agent_request.md"
+            json_path = Path(tmp) / "bug_xtheme_analysis_report.json"
+            request_path.write_text("分析黑白夜", encoding="utf-8")
+            json_path.write_text(
+                json.dumps(
+                    {
+                        "verdict": {"msg": "定时器中断"},
+                        "target_time": "2026-06-09 21:44",
+                        "focus_snapshot": [
+                            {
+                                "kind": "calculateTimeInfoByTheme",
+                                "value": "Cal=TIME_NIGHT Final=TIME_DAY themeMode=0",
+                                "ts": "06-09 21:44:54.074",
+                                "source": "main.log:118197",
+                            },
+                            {
+                                "kind": "XThemeStrategy 1076",
+                                "value": "ThemeMode=1 TimePeriod=3 SrThemeSkin:Basic",
+                                "ts": "06-09 21:44:57.959",
+                                "source": "main.log:118312",
+                            },
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            metadata_path.write_text(
+                "# Bug Metadata\n"
+                "- 命中 Skill: `xtheme-analyzer`\n"
+                f"- JSON `XTheme时光主题分析`: `{json_path}`\n",
+                encoding="utf-8",
+            )
+
+            prompt = runner._build_bug_agent_summary_prompt_for_api(
+                request_text="分析黑白夜",
+                request_artifact=request_path,
+                metadata_path=metadata_path,
+            )
+
+        self.assertIn("## Android 最终状态", prompt)
+        self.assertIn("## 责任边界", prompt)
+        self.assertIn("当前 XTheme 输出", prompt)
+        self.assertIn("XThemeStrategy 1076", prompt)
+        self.assertIn("ThemeMode=1 TimePeriod=3", prompt)
+
     def test_bug_agent_summary_context_embeds_unquoted_report_paths(self):
         with tempfile.TemporaryDirectory() as tmp:
             runner = BugAnalysisRunner(BridgeConfig(dry_run=True))

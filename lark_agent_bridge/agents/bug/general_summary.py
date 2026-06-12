@@ -8,6 +8,72 @@ from .signal_report import _SignalReportMixin
 
 
 class _GeneralSummaryMixin(_CombinedReportMixin, _SignalReportMixin):
+    def _xtheme_focus_entry(self, item: dict[str, object]) -> tuple[str, str]:
+        kind = str(item.get("kind") or "").strip()
+        value = str(item.get("value") or "").strip()
+        ts = str(item.get("ts") or "").strip()
+        source = str(item.get("source") or "").strip()
+        body = " ".join(part for part in (ts, kind, value) if part).strip()
+        if source:
+            body += f" [{source}]"
+        return kind, body
+
+    def _xtheme_focus_sections(self, payload: dict[str, object]) -> dict[str, str]:
+        focus_snapshot = payload.get("focus_snapshot", [])
+        upstream: list[str] = []
+        calculations: list[str] = []
+        outputs: list[str] = []
+        if isinstance(focus_snapshot, list):
+            for item in focus_snapshot:
+                if not isinstance(item, dict):
+                    continue
+                kind, entry = self._xtheme_focus_entry(item)
+                if not entry:
+                    continue
+                if "XThemeStrategy" in kind:
+                    outputs.append(entry)
+                elif "calculateTimeInfo" in kind:
+                    calculations.append(entry)
+                else:
+                    upstream.append(entry)
+
+        android_lines = []
+        if calculations:
+            android_lines.append(f"- 计算结果: {calculations[0]}")
+        if outputs:
+            android_lines.append(f"- 当前 XTheme 输出: {outputs[0]}")
+        if not android_lines:
+            android_lines.append("- 未命中问题时刻前的 calculateTimeInfo/XThemeStrategy 关键快照")
+
+        boundary = self._xtheme_boundary_summary(calculations, outputs)
+        return {
+            "android": "\n".join(android_lines),
+            "boundary": boundary,
+            "upstream": "\n".join(f"- {line}" for line in upstream[:6]) or "- 未命中 ThemeHelper/UI mode/日出日落输入快照",
+            "output": "\n".join(f"- {line}" for line in outputs[:4]) or "- 未命中 XThemeStrategy 发送证据",
+        }
+
+    def _xtheme_boundary_summary(self, calculations: list[str], outputs: list[str]) -> str:
+        calc_text = " ".join(calculations)
+        output_text = " ".join(outputs)
+        if (
+            "Final=TIME_DAY" in calc_text
+            and "ThemeMode=1" in output_text
+            and ("TimePeriod=3" in output_text or "TIME_NIGHT" in output_text)
+        ):
+            return (
+                "- Android 侧最终已通过 XThemeStrategy 发送 Night/TIME_NIGHT；"
+                "已知 Android 问题窗口是最终发送前曾计算/发送 Day/TIME_DAY。"
+                "若用户画面异常持续到最终发送之后，责任边界需要转 Unity/3D 消费、资源或图层证据。"
+            )
+        if outputs:
+            return (
+                "- Android 侧最终状态以 XThemeStrategy 输出为准；"
+                "若该输出与上游输入不一致，归 Android ThemeHelper/XuiConditionHelper/XThemeStrategy 链路；"
+                "若输出正确但画面仍异常，转 Unity/3D 消费或显示侧补证。"
+            )
+        return "- Android 侧未命中最终 XThemeStrategy 发送证据，当前不能把责任转给 Unity/3D。"
+
     def _build_summary_from_report(
         self,
         *,
@@ -81,6 +147,7 @@ class _GeneralSummaryMixin(_CombinedReportMixin, _SignalReportMixin):
             counts = payload.get("counts", {}) if isinstance(payload, dict) else {}
             issues = payload.get("issues", []) if isinstance(payload, dict) else []
             focus_snapshot = payload.get("focus_snapshot", []) if isinstance(payload, dict) else []
+            sections = self._xtheme_focus_sections(payload) if isinstance(payload, dict) else {}
             msg = str(verdict.get("msg", "")) if isinstance(verdict, dict) else ""
             issue_lines: list[str] = []
             if isinstance(issues, list):
@@ -112,6 +179,10 @@ class _GeneralSummaryMixin(_CombinedReportMixin, _SignalReportMixin):
                 f"目标时间: {payload.get('target_time') or fault_time or '未识别'}\n"
                 f"统计: {counts_text or '无'}\n"
                 f"关键问题:\n{chr(10).join(issue_lines) if issue_lines else '- 无明确异常'}\n"
+                f"Android 最终状态:\n{sections.get('android', '- 未整理')}\n"
+                f"责任边界:\n{sections.get('boundary', '- 未整理')}\n"
+                f"上游输入:\n{sections.get('upstream', '- 未整理')}\n"
+                f"XTheme 输出:\n{sections.get('output', '- 未整理')}\n"
                 f"问题时间证据:\n{chr(10).join(focus_lines) if focus_lines else '- 无问题时间快照'}\n"
                 f"描述: {prompt_text}\n"
                 f"HTML: {html_path}"

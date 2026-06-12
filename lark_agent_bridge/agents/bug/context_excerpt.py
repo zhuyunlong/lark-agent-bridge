@@ -326,6 +326,111 @@ class _ContextExcerptMixin:
                 max_table_rows=3,
             )
         return self._read_bug_summary_context_excerpt(path, max_chars)
+
+    def _compact_xtheme_report_excerpt(self, path: Path, *, max_chars: int) -> str:
+        payload = self._load_structured_report_payload(path)
+        if payload is None:
+            return self._read_bug_summary_context_excerpt(path, max_chars)
+
+        lines: list[str] = ["# XTheme Report Focus"]
+        verdict = payload.get("verdict")
+        if isinstance(verdict, dict):
+            msg = self._clean_markdown_inline_text(str(verdict.get("msg") or verdict.get("message") or ""))
+            sev = self._clean_markdown_inline_text(str(verdict.get("sev") or ""))
+            if msg:
+                prefix = f"[{sev}] " if sev else ""
+                lines.append(f"- verdict: {prefix}{msg}")
+        target_time = self._clean_markdown_inline_text(str(payload.get("target_time") or ""))
+        if target_time:
+            lines.append(f"- target_time: {target_time}")
+        counts = payload.get("counts")
+        if isinstance(counts, dict) and counts:
+            lines.append("- counts: " + ", ".join(f"{key}={value}" for key, value in counts.items()))
+
+        focus_snapshot = payload.get("focus_snapshot")
+        if isinstance(focus_snapshot, list):
+            upstream: list[str] = []
+            calculations: list[str] = []
+            outputs: list[str] = []
+            for item in focus_snapshot:
+                if not isinstance(item, dict):
+                    continue
+                kind = self._clean_markdown_inline_text(str(item.get("kind") or ""))
+                value = self._clean_markdown_inline_text(str(item.get("value") or ""))
+                ts = self._clean_markdown_inline_text(str(item.get("ts") or ""))
+                source = self._clean_markdown_inline_text(str(item.get("source") or ""))
+                if not (kind or value):
+                    continue
+                entry = " ".join(part for part in (ts, kind, value) if part).strip()
+                if source:
+                    entry += f" [{source}]"
+                if "XThemeStrategy" in kind:
+                    outputs.append(entry)
+                elif "calculateTimeInfo" in kind:
+                    calculations.append(entry)
+                else:
+                    upstream.append(entry)
+            if outputs:
+                lines.append("## 当前 XTheme 输出")
+                lines.extend(f"- {entry}" for entry in outputs[:4])
+            if upstream:
+                lines.append("## 上游输入")
+                lines.extend(f"- {entry}" for entry in upstream[:8])
+            if calculations:
+                lines.append("## 计算结果")
+                lines.extend(f"- {entry}" for entry in calculations[:4])
+
+        issues = payload.get("issues")
+        if isinstance(issues, list) and issues:
+            lines.append("## 脚本判定问题")
+            for item in issues[:4]:
+                if not isinstance(item, dict):
+                    continue
+                title_text = self._clean_markdown_inline_text(str(item.get("title") or ""))
+                detail = self._clean_markdown_inline_text(str(item.get("detail") or ""))
+                if title_text or detail:
+                    lines.append(f"- {title_text}: {detail}".rstrip(": "))
+
+        theme_switches = payload.get("theme_switches")
+        if isinstance(theme_switches, list) and theme_switches:
+            lines.append("## 问题前后主题切换")
+            for item in theme_switches[-8:]:
+                if not isinstance(item, dict):
+                    continue
+                ts = self._clean_markdown_inline_text(str(item.get("ts") or ""))
+                from_mode = item.get("from")
+                to_mode = item.get("to")
+                source = self._clean_markdown_inline_text(
+                    f"{item.get('file') or ''}:{item.get('line') or ''}".rstrip(":")
+                )
+                detail = f"{ts} {from_mode}->{to_mode}".strip()
+                if source:
+                    detail += f" [{source}]"
+                lines.append(f"- {detail}")
+
+        rendered = "\n".join(lines).strip()
+        if len(rendered) > max_chars:
+            rendered = rendered[: max_chars - 1].rstrip() + "…"
+        return rendered
+
+    def _direct_api_context_excerpt_for_xtheme_signal_boundary(
+        self,
+        *,
+        title: str,
+        path: Path,
+        max_chars: int,
+    ) -> str:
+        if self._is_report_json_path(path):
+            return self._compact_xtheme_report_excerpt(path, max_chars=min(max_chars, 2600))
+        if title.startswith("Matched Skill:") or title.startswith("Matched Skill Reference:"):
+            return self._compact_markdown_outline_excerpt(
+                path,
+                max_chars=min(max_chars, 1800),
+                max_headings=6,
+                max_entries_per_heading=3,
+                max_table_rows=4,
+            )
+        return self._read_bug_summary_context_excerpt(path, max_chars)
     def _direct_api_bug_summary_context_excerpt(
         self,
         *,

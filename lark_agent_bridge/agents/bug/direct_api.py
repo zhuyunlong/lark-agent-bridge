@@ -451,6 +451,13 @@ class _DirectApiMixin(_SummaryEvidenceMixin, _ApiPromptSnapshotMixin, _ContextEx
             metadata_path=metadata_path,
             snapshot_details=snapshot_details,
         )
+        metadata_contract_text = self._read_text_excerpt(metadata_path, 20000)
+        requires_android_boundary = (
+            compaction_profile in {"xtheme_signal_boundary", "scene_signal_target_focus"}
+            or "xtheme-analyzer" in metadata_contract_text
+            or "scene-signal-diagnosis" in metadata_contract_text
+            or "report_requires_android_unity_boundary" in metadata_contract_text
+        )
         prompt = "请基于以下已内嵌的分析材料完成同一个 bug 会话的最终回答。\n"
         prompt += "注意：所有相关文件内容已内嵌在本消息中，无需读取本地文件。\n\n要求：\n"
         snapshot_prefix = ""
@@ -497,6 +504,17 @@ class _DirectApiMixin(_SummaryEvidenceMixin, _ApiPromptSnapshotMixin, _ContextEx
             "## 建议动作\n"
             "- 给出下一轮可执行动作，例如补日志、重跑某个 skill、沿某个源码或日志点继续查。\n\n"
         )
+        if requires_android_boundary:
+            prompt += (
+                "本轮命中 Android/Unity 边界类主题或场景报告，最终回答必须在 `## 关键证据` 前额外输出：\n"
+                "## Android 最终状态\n"
+                "- 明确 Android 侧最终输入、计算结果、当前 XTheme 输出或场景信号输出是否正确；"
+                "XTheme 场景必须写清 `ThemeMode`、`TimePeriod`、`SrThemeSkin`、`XThemeStrategy code`。\n"
+                "## 责任边界\n"
+                "- 明确到底是 Android 输入/计算/发送侧问题，还是 Android 已发送正确后需要转 Unity/3D 消费、资源、图层或显示侧补证；"
+                "不要只写“已发送/未发送”。\n"
+                "结论摘要第一条也必须直接回答：当前 XTheme/场景信号最终状态是什么，上游输入是什么，现象若仍存在应归到哪条链路。\n\n"
+            )
         if snapshot_prefix:
             prompt += snapshot_prefix
         prompt += f"### 用户原始请求\n{request_text}\n\n"
