@@ -1,0 +1,23 @@
+tests/test_agents_bug_analysis.py
+  98147536e4a95b03 982-985,988-1036
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.22",
+  "base_commit_sha": "4c9138711ca2442023cfbd7c850cd91aa39f09ce",
+  "prompts": {
+    "98147536e4a95b03": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019eb9b4-b7b6-74e1-bffa-c812b052eafa",
+        "model": "gpt-5.5"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 53,
+      "total_deletions": 0,
+      "accepted_lines": 53,
+      "overriden_lines": 0
+    }
+  }
+}
