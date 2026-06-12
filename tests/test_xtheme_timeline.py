@@ -236,6 +236,101 @@ class XThemeTimelineTests(unittest.TestCase):
         self.assertEqual(data["issues"], [])
         self.assertNotIn("05-18 14:02:53.330", html)
 
+    def test_report_verdict_prioritizes_target_focus_over_background_timer_gaps(self):
+        analyzer = _load_xtheme_analyzer()
+        result = {
+            "inits": [],
+            "calc_times": [
+                {
+                    "ts": "06-09 05:50:18.557",
+                    "md": "06-09",
+                    "cur": 350,
+                    "sunrise": 350,
+                    "sunset": 1193,
+                    "calTime": "TIME_DAY",
+                    "finalTime": "TIME_DAY",
+                    "themeMode": 0,
+                    "file": "main.log",
+                    "line": 10,
+                    "raw": "early timer",
+                },
+                {
+                    "ts": "06-09 21:44:54.074",
+                    "md": "06-09",
+                    "cur": 1304,
+                    "sunrise": 350,
+                    "sunset": 1193,
+                    "calTime": "TIME_NIGHT",
+                    "finalTime": "TIME_DAY",
+                    "themeMode": 0,
+                    "file": "main.log",
+                    "line": 118197,
+                    "raw": "target calc",
+                },
+            ],
+            "time_checks": [],
+            "ui_changes": [],
+            "theme_changes": [
+                {
+                    "ts": "06-09 21:44:57.959",
+                    "md": "06-09",
+                    "themeMode": 1,
+                    "newThemeMode": 1,
+                    "file": "main.log",
+                    "line": 118307,
+                    "raw": "setThemeMode",
+                }
+            ],
+            "theme_msgs": [],
+            "sunrise_sets": [
+                {"ts": "06-09 21:25:45.429", "md": "06-09", "sunriseMin": 350, "sunsetMin": 1193, "file": "main.log", "line": 91694}
+            ],
+            "twilights": [],
+            "twilight_fails": [],
+            "calc_warns": [],
+            "theme_elems": [],
+            "strategies": [
+                {
+                    "ts": "06-09 21:44:57.959",
+                    "md": "06-09",
+                    "code": 1076,
+                    "themeMode": 1,
+                    "timePeriod": 3,
+                    "detail": "SrThemeSkin:Basic",
+                    "file": "main.log",
+                    "line": 118312,
+                }
+            ],
+            "get_msgs": [],
+            "langs": [],
+            "cultures": [],
+            "theme_type_parses": [],
+            "theme_helper_configs": [],
+            "theme_collects": [],
+            "theme_switches": [],
+            "timer_gaps": [
+                {
+                    "from": "06-09 05:50:18.557",
+                    "to": "06-09 19:54:03.269",
+                    "seconds": 50624,
+                    "sev": "red",
+                }
+            ],
+            "condition_mgrs": [],
+            "theme_managers": [],
+            "theme_elem_sr": [],
+            "theme_elem_car": [],
+            "locales": [],
+            "init_callbacks": [],
+        }
+
+        data = analyzer.build_report_data(result, target_time="2026-06-09 21:44", request_text="黑夜白天")
+
+        self.assertIn("Cal/Final 不一致", data["verdict"]["msg"])
+        self.assertIn("TIME_NIGHT", data["verdict"]["msg"])
+        self.assertIn("TIME_DAY", data["verdict"]["msg"])
+        self.assertNotIn("定时器长时间中断", data["verdict"]["msg"])
+
     def test_twilight_init_failure_is_not_error_when_sunrise_input_exists(self):
         analyzer = _load_xtheme_analyzer()
         result = {
