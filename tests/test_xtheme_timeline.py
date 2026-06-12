@@ -331,6 +331,73 @@ class XThemeTimelineTests(unittest.TestCase):
         self.assertIn("TIME_DAY", data["verdict"]["msg"])
         self.assertNotIn("定时器长时间中断", data["verdict"]["msg"])
 
+    def test_report_folds_full_timeline_and_transition_details(self):
+        analyzer = _load_xtheme_analyzer()
+        result = {
+            "inits": [],
+            "calc_times": [
+                {
+                    "ts": "06-09 21:44:54.074",
+                    "md": "06-09",
+                    "cur": 1304,
+                    "sunrise": 350,
+                    "sunset": 1193,
+                    "calTime": "TIME_NIGHT",
+                    "finalTime": "TIME_DAY",
+                    "themeMode": 0,
+                    "file": "main.log",
+                    "line": 118197,
+                    "raw": "target calc",
+                }
+            ],
+            "time_checks": [],
+            "ui_changes": [
+                {"ts": "06-09 21:44:57.334", "md": "06-09", "uiMode": 1, "themeMode": 0, "file": "main.log", "line": 118262, "raw": "ui mode"}
+            ],
+            "theme_changes": [],
+            "theme_msgs": [],
+            "sunrise_sets": [],
+            "twilights": [],
+            "twilight_fails": [],
+            "calc_warns": [],
+            "theme_elems": [],
+            "strategies": [
+                {
+                    "ts": "06-09 21:44:57.959",
+                    "md": "06-09",
+                    "code": 1076,
+                    "themeMode": 1,
+                    "timePeriod": 3,
+                    "detail": "SrThemeSkin:Basic",
+                    "file": "main.log",
+                    "line": 118312,
+                }
+            ],
+            "get_msgs": [],
+            "langs": [],
+            "cultures": [],
+            "theme_type_parses": [],
+            "theme_helper_configs": [],
+            "theme_collects": [],
+            "theme_switches": [],
+            "timer_gaps": [],
+            "condition_mgrs": [],
+            "theme_managers": [],
+            "theme_elem_sr": [],
+            "theme_elem_car": [],
+            "locales": [],
+            "init_callbacks": [],
+        }
+
+        data = analyzer.build_report_data(result, target_time="2026-06-09 21:44", request_text="黑夜白天")
+        html = analyzer.render_html(Path("/tmp/input"), Path("/tmp/input"), result, data)
+
+        folded_marker = "<details><summary>完整时间线与状态变更（默认折叠）</summary>"
+        self.assertIn(folded_marker, html)
+        self.assertGreater(html.index("<h2>关键事件时间线（重复已折叠）</h2>"), html.index(folded_marker))
+        self.assertGreater(html.index("<h2>状态变更汇总表</h2>"), html.index(folded_marker))
+        self.assertLess(html.index("问题时刻前 XTheme 计算输入快照"), html.index(folded_marker))
+
     def test_twilight_init_failure_is_not_error_when_sunrise_input_exists(self):
         analyzer = _load_xtheme_analyzer()
         result = {
