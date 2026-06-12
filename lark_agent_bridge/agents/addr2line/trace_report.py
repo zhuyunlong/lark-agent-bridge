@@ -551,4 +551,3 @@ class _TraceReportMixin:
             }
             for so_name, entries in ranked
         ]
-

@@ -524,4 +524,3 @@ class _SymbolResolveMixin:
                 "lookup_error_code": lookup_result.error_code,
             },
         )
-

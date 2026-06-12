@@ -116,5 +116,3 @@ class _FrameSummary:
     address: str
     symbol: str = ""
     path: str = ""
-
-

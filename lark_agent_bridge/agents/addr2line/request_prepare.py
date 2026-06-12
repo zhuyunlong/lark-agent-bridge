@@ -479,4 +479,3 @@ class _RequestPrepareMixin:
         month = value.month or 0
         day = value.day or 0
         return (((month * 32) + day) * 24 * 3600) + self._time_of_day_seconds(value)
-
