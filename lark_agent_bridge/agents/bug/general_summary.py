@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from ._shared import *  # noqa: F401,F403
 
 
@@ -8,7 +10,7 @@ from .signal_report import _SignalReportMixin
 
 
 class _GeneralSummaryMixin(_CombinedReportMixin, _SignalReportMixin):
-    def _xtheme_focus_entry(self, item: dict[str, object]) -> tuple[str, str]:
+    def _xtheme_focus_entry(self, item: dict[str, object]) -> dict[str, str]:
         kind = str(item.get("kind") or "").strip()
         value = str(item.get("value") or "").strip()
         ts = str(item.get("ts") or "").strip()
@@ -16,20 +18,21 @@ class _GeneralSummaryMixin(_CombinedReportMixin, _SignalReportMixin):
         body = " ".join(part for part in (ts, kind, value) if part).strip()
         if source:
             body += f" [{source}]"
-        return kind, body
+        return {"kind": kind, "value": value, "ts": ts, "source": source, "body": body}
 
     def _xtheme_focus_sections(self, payload: dict[str, object]) -> dict[str, str]:
         focus_snapshot = payload.get("focus_snapshot", [])
-        upstream: list[str] = []
-        calculations: list[str] = []
-        outputs: list[str] = []
+        upstream: list[dict[str, str]] = []
+        calculations: list[dict[str, str]] = []
+        outputs: list[dict[str, str]] = []
         if isinstance(focus_snapshot, list):
             for item in focus_snapshot:
                 if not isinstance(item, dict):
                     continue
-                kind, entry = self._xtheme_focus_entry(item)
-                if not entry:
+                entry = self._xtheme_focus_entry(item)
+                if not entry["body"]:
                     continue
+                kind = entry["kind"]
                 if "XThemeStrategy" in kind:
                     outputs.append(entry)
                 elif "calculateTimeInfo" in kind:
@@ -38,10 +41,12 @@ class _GeneralSummaryMixin(_CombinedReportMixin, _SignalReportMixin):
                     upstream.append(entry)
 
         android_lines = []
-        if calculations:
-            android_lines.append(f"- 计算结果: {calculations[0]}")
-        if outputs:
-            android_lines.append(f"- 当前 XTheme 输出: {outputs[0]}")
+        latest_calculation = self._latest_xtheme_entry(calculations)
+        latest_output = self._latest_xtheme_entry(outputs)
+        if latest_calculation is not None:
+            android_lines.append(f"- 计算结果: {latest_calculation['body']}")
+        if latest_output is not None:
+            android_lines.append(f"- 当前 XTheme 输出: {latest_output['body']}")
         if not android_lines:
             android_lines.append("- 未命中问题时刻前的 calculateTimeInfo/XThemeStrategy 关键快照")
 
@@ -49,23 +54,40 @@ class _GeneralSummaryMixin(_CombinedReportMixin, _SignalReportMixin):
         return {
             "android": "\n".join(android_lines),
             "boundary": boundary,
-            "upstream": "\n".join(f"- {line}" for line in upstream[:6]) or "- 未命中 ThemeHelper/UI mode/日出日落输入快照",
-            "output": "\n".join(f"- {line}" for line in outputs[:4]) or "- 未命中 XThemeStrategy 发送证据",
+            "upstream": "\n".join(f"- {entry['body']}" for entry in upstream[:6]) or "- 未命中 ThemeHelper/UI mode/日出日落输入快照",
+            "output": "\n".join(f"- {entry['body']}" for entry in outputs[:4]) or "- 未命中 XThemeStrategy 发送证据",
         }
 
-    def _xtheme_boundary_summary(self, calculations: list[str], outputs: list[str]) -> str:
-        calc_text = " ".join(calculations)
-        output_text = " ".join(outputs)
-        if (
-            "Final=TIME_DAY" in calc_text
-            and "ThemeMode=1" in output_text
-            and ("TimePeriod=3" in output_text or "TIME_NIGHT" in output_text)
-        ):
-            return (
-                "- Android 侧最终已通过 XThemeStrategy 发送 Night/TIME_NIGHT；"
-                "已知 Android 问题窗口是最终发送前曾计算/发送 Day/TIME_DAY。"
-                "若用户画面异常持续到最终发送之后，责任边界需要转 Unity/3D 消费、资源或图层证据。"
-            )
+    def _latest_xtheme_entry(self, entries: list[dict[str, str]]) -> dict[str, str] | None:
+        if not entries:
+            return None
+        return max(entries, key=lambda entry: entry.get("ts", ""))
+
+    def _xtheme_value_token(self, value: str, key: str) -> str:
+        match = re.search(rf"\b{re.escape(key)}[:=]\s*([^\s,\]]+)", value)
+        return match.group(1).strip() if match else ""
+
+    def _xtheme_boundary_summary(
+        self,
+        calculations: list[dict[str, str]],
+        outputs: list[dict[str, str]],
+    ) -> str:
+        latest_calculation = self._latest_xtheme_entry(calculations)
+        if latest_calculation is not None:
+            value = latest_calculation["value"]
+            cal_time = self._xtheme_value_token(value, "Cal")
+            final_time = self._xtheme_value_token(value, "Final")
+            if cal_time and final_time and cal_time != final_time:
+                return (
+                    f"- Android 计算层存在 Cal/Final 不一致：Cal={cal_time}，Final={final_time}。"
+                    "应先沿 ThemeHelper/XuiConditionHelper/XThemeStrategy 链路确认该差异是否解释用户异常；"
+                    "若最新 XTheme 输出与预期一致但画面仍异常，再转 Unity/3D 消费、资源或图层证据。"
+                )
+            if cal_time and final_time:
+                return (
+                    f"- Android 计算层 Cal/Final 一致：{final_time}。"
+                    "若当前 XTheme 输出也符合上游输入而画面仍异常，责任边界转 Unity/3D 消费或显示侧补证。"
+                )
         if outputs:
             return (
                 "- Android 侧最终状态以 XThemeStrategy 输出为准；"

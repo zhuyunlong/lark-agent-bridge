@@ -128,6 +128,7 @@ class DirectApiCompactionProfileSpec:
     skill_name: str
     handler: str
     metadata_markers: tuple[str, ...] = ()
+    requires_android_unity_boundary: bool = False
 
 
 # Single source of truth for all plan-kind policy decisions.
@@ -171,6 +172,7 @@ _DIRECT_API_COMPACTION_PROFILES: tuple[DirectApiCompactionProfileSpec, ...] = (
         skill_name="scene-signal-diagnosis",
         handler="_direct_api_context_excerpt_for_scene_signal_target_focus",
         metadata_markers=("bug_scene_signal_report",),
+        requires_android_unity_boundary=True,
     ),
     DirectApiCompactionProfileSpec(
         name="xtheme_signal_boundary",
@@ -178,6 +180,7 @@ _DIRECT_API_COMPACTION_PROFILES: tuple[DirectApiCompactionProfileSpec, ...] = (
         skill_name="xtheme-analyzer",
         handler="_direct_api_context_excerpt_for_xtheme_signal_boundary",
         metadata_markers=("bug_xtheme_analysis_report",),
+        requires_android_unity_boundary=True,
     ),
 )
 

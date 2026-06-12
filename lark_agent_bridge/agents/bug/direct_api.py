@@ -452,10 +452,23 @@ class _DirectApiMixin(_SummaryEvidenceMixin, _ApiPromptSnapshotMixin, _ContextEx
             snapshot_details=snapshot_details,
         )
         metadata_contract_text = self._read_text_excerpt(metadata_path, 20000)
+        profile_requires_boundary = any(
+            profile.name == compaction_profile and profile.requires_android_unity_boundary
+            for profile in _DIRECT_API_COMPACTION_PROFILES
+        )
+        skill_name = self._snapshot_field_from_text(metadata_contract_text, "命中 Skill")
+        skill_requires_boundary = False
+        if skill_name:
+            try:
+                skill_record = self.skill_manager.get_skill(skill_name, include_content=False)
+                skill_requires_boundary = bool(
+                    skill_record.report_contract.get("requires_android_unity_boundary")
+                )
+            except Exception:
+                skill_requires_boundary = False
         requires_android_boundary = (
-            compaction_profile in {"xtheme_signal_boundary", "scene_signal_target_focus"}
-            or "xtheme-analyzer" in metadata_contract_text
-            or "scene-signal-diagnosis" in metadata_contract_text
+            profile_requires_boundary
+            or skill_requires_boundary
             or "report_requires_android_unity_boundary" in metadata_contract_text
         )
         prompt = "请基于以下已内嵌的分析材料完成同一个 bug 会话的最终回答。\n"

@@ -1035,6 +1035,49 @@ class AgentsBugAnalysisTests(_AgentTestBase):
         self.assertIn("XThemeStrategy 1076", prompt)
         self.assertIn("ThemeMode=1 TimePeriod=3", prompt)
 
+    def test_xtheme_summary_derives_boundary_from_report_values(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
+            html_path = Path(tmp) / "bug_xtheme_analysis_report.html"
+            json_path = Path(tmp) / "bug_xtheme_analysis_report.json"
+            html_path.write_text("<html>xtheme</html>", encoding="utf-8")
+            json_path.write_text(
+                json.dumps(
+                    {
+                        "verdict": {"msg": "主题链路报告已生成"},
+                        "focus_snapshot": [
+                            {
+                                "kind": "calculateTimeInfoByTheme",
+                                "value": "Cal=TIME_DAY Final=TIME_DAY themeMode=0",
+                                "ts": "06-09 12:00:01.000",
+                                "source": "main.log:10",
+                            },
+                            {
+                                "kind": "XThemeStrategy 1076",
+                                "value": "ThemeMode=0 TimePeriod=1 SrThemeSkin:Basic",
+                                "ts": "06-09 12:00:02.000",
+                                "source": "main.log:11",
+                            },
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            summary = runner._build_summary_from_report(
+                plan=BugAnalysisPlan(kind="xtheme"),
+                report_json=json_path,
+                prompt_text="分析黑白夜",
+                fault_time="2026-06-09 12:00",
+                html_path=html_path,
+                selected_input=None,
+            )
+
+        self.assertIn("Cal/Final 一致：TIME_DAY", summary)
+        self.assertIn("当前 XTheme 输出", summary)
+        self.assertNotIn("Night/TIME_NIGHT", summary)
+
     def test_bug_agent_summary_context_embeds_unquoted_report_paths(self):
         with tempfile.TemporaryDirectory() as tmp:
             runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
