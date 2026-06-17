@@ -9,7 +9,10 @@ class _BugLogInputSelectMixin:
 
     def _should_download_bug_attachment(self, name: str) -> bool:
         lower_name = name.strip().casefold()
-        return bool(lower_name) and any(lower_name.endswith(suffix) for suffix in _BUG_ATTACHMENT_DOWNLOAD_SUFFIXES)
+        return bool(lower_name) and (
+            self._split_xp_zip_part_match(name) is not None
+            or any(lower_name.endswith(suffix) for suffix in _BUG_ATTACHMENT_DOWNLOAD_SUFFIXES)
+        )
     def _extract_downloaded_zip(self, archive_path: Path, logs_dir: Path) -> bool:
         try:
             with zipfile.ZipFile(archive_path) as zf:
@@ -39,12 +42,18 @@ class _BugLogInputSelectMixin:
             return logs_dir
         for suffix in _BUG_LOG_INPUT_PRIORITY_SUFFIXES:
             for candidate in attachments:
-                if candidate.name.lower().endswith(suffix) and self._is_usable_log_attachment(candidate):
+                if (
+                    candidate.name.lower().endswith(suffix)
+                    and self._is_usable_log_attachment(candidate)
+                    and self._has_required_split_xp_zip_parts(candidate, fetched)
+                ):
                     return candidate
         return None
     def _prepare_log_input(self, selected_input: Path) -> Path:
         lower_name = selected_input.name.lower()
-        if lower_name.endswith(".xp"):
+        if self._split_xp_zip_part_match(selected_input.name):
+            prepared = self._prepare_split_xp_zip(selected_input)
+        elif lower_name.endswith(".xp"):
             prepared = self._expand_xp_file(selected_input)
         elif self._is_archive_log_attachment(selected_input) and not lower_name.endswith(".xp.zip.001"):
             prepared = self._extract_log_archive(selected_input)
@@ -67,6 +76,103 @@ class _BugLogInputSelectMixin:
                         continue
                     return child
         return None
+    def _split_xp_zip_part_match(self, name: str):
+        return re.match(r"^(.+\.xp\.zip)\.(\d{3,})$", name.strip(), flags=re.IGNORECASE)
+    def _has_required_split_xp_zip_parts(self, candidate: Path, fetched: dict[str, object]) -> bool:
+        match = self._split_xp_zip_part_match(candidate.name)
+        if match is None:
+            return True
+        base_name = match.group(1).casefold()
+        required_names: list[str] = []
+        for item in fetched.get("attachments", []):
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name")
+            if not isinstance(name, str):
+                continue
+            part_match = self._split_xp_zip_part_match(name)
+            if part_match is not None and part_match.group(1).casefold() == base_name:
+                required_names.append(name)
+        if not required_names:
+            return True
+        return all((candidate.parent / name).exists() for name in required_names)
+    def _prepare_split_xp_zip(self, selected_input: Path) -> Path:
+        base_name, parts = self._collect_split_xp_zip_parts(selected_input)
+        merged_zip = selected_input.with_name(base_name)
+        self._merge_split_xp_zip_parts(parts, merged_zip)
+        try:
+            extract_dir = self._extract_log_archive(merged_zip)
+        finally:
+            try:
+                merged_zip.unlink()
+            except OSError:
+                pass
+        xp_path = self._find_extracted_xp_file(extract_dir, xp_name=base_name[: -len(".zip")])
+        if xp_path is None:
+            raise RuntimeError(f"分片日志解压后未找到 xp 文件: {base_name}")
+        return self._expand_xp_file(xp_path)
+    def _collect_split_xp_zip_parts(self, selected_input: Path) -> tuple[str, list[Path]]:
+        match = self._split_xp_zip_part_match(selected_input.name)
+        if not match:
+            raise RuntimeError(f"不是 xp 分片日志: {selected_input.name}")
+        base_name = match.group(1)
+        candidates: list[tuple[int, Path]] = []
+        try:
+            children = list(selected_input.parent.iterdir())
+        except OSError as exc:
+            raise RuntimeError(f"读取分片目录失败: {selected_input.parent}") from exc
+        for child in children:
+            if not child.is_file():
+                continue
+            child_match = self._split_xp_zip_part_match(child.name)
+            if child_match is None:
+                continue
+            if child_match.group(1).casefold() != base_name.casefold():
+                continue
+            candidates.append((int(child_match.group(2)), child))
+        if not candidates:
+            raise RuntimeError(f"未找到分片日志: {base_name}.NNN")
+        candidates.sort(key=lambda item: item[0])
+        indexes = [index for index, _ in candidates]
+        if indexes[0] != 1:
+            raise RuntimeError(f"分片日志缺少首片: {base_name}.001")
+        missing = [index for index in range(1, indexes[-1] + 1) if index not in set(indexes)]
+        if missing:
+            raise RuntimeError(f"分片日志缺少: {base_name}.{missing[0]:03d}")
+        return base_name, [path for _, path in candidates]
+    def _merge_split_xp_zip_parts(self, parts: list[Path], merged_zip: Path) -> None:
+        total_size = 0
+        latest_mtime = 0.0
+        for part in parts:
+            stat_result = part.stat()
+            total_size += stat_result.st_size
+            latest_mtime = max(latest_mtime, stat_result.st_mtime)
+        try:
+            if merged_zip.exists():
+                merged_stat = merged_zip.stat()
+                if merged_stat.st_size == total_size and merged_stat.st_mtime >= latest_mtime:
+                    return
+        except OSError:
+            pass
+        with merged_zip.open("wb") as out:
+            for part in parts:
+                with part.open("rb") as src:
+                    shutil.copyfileobj(src, out)
+    def _find_extracted_xp_file(self, root: Path, *, xp_name: str) -> Path | None:
+        direct = root / xp_name
+        if direct.is_file():
+            return direct
+        try:
+            matches = sorted(path for path in root.rglob(xp_name) if path.is_file())
+        except OSError:
+            return None
+        if matches:
+            return matches[0]
+        try:
+            matches = sorted(path for path in root.rglob("*.xp") if path.is_file())
+        except OSError:
+            return None
+        return matches[0] if matches else None
     def _analyze_logs_intelligently(
         self,
         log_dir: Path,

@@ -150,6 +150,8 @@ class _BugCacheStoreMixin:
             return None, None
         selected_input = self._existing_path_from_text(payload.get("selected_log_input"))
         prepared_input = self._existing_path_from_text(payload.get("prepared_log_input"))
+        if prepared_input is not None and self._split_xp_zip_part_match(prepared_input.name):
+            prepared_input = None
         if prepared_input is None and selected_input is not None:
             try:
                 prepared_input = self._reuse_prepared_bug_input(selected_input)

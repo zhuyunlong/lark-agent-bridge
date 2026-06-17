@@ -1044,6 +1044,38 @@ class AgentsBugAnalysis2Tests(_AgentTestBase):
             )
 
         self.assertIsNone(selected)
+    def test_bug_analysis_select_log_input_waits_for_all_split_xp_zip_parts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
+            bug_dir = Path(tmp)
+            attachments_dir = bug_dir / "attachments"
+            attachments_dir.mkdir(parents=True, exist_ok=True)
+            first_part = attachments_dir / "bundle.xp.zip.001"
+            first_part.write_bytes(b"part1")
+
+            selected = runner._select_log_input(
+                bug_dir,
+                fetched={
+                    "attachments": [
+                        {"name": "bundle.xp.zip.001"},
+                        {"name": "bundle.xp.zip.002"},
+                    ]
+                },
+            )
+            self.assertIsNone(selected)
+
+            (attachments_dir / "bundle.xp.zip.002").write_bytes(b"part2")
+            selected = runner._select_log_input(
+                bug_dir,
+                fetched={
+                    "attachments": [
+                        {"name": "bundle.xp.zip.001"},
+                        {"name": "bundle.xp.zip.002"},
+                    ]
+                },
+            )
+
+        self.assertEqual(selected, first_part)
     def test_bug_analysis_select_log_input_skips_png_xp_attachment(self):
         with tempfile.TemporaryDirectory() as tmp:
             runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
@@ -1080,6 +1112,8 @@ class AgentsBugAnalysis2Tests(_AgentTestBase):
             "main.log",
             "bundle.xp",
             "bundle.xp.zip.001",
+            "bundle.xp.zip.002",
+            "bundle.xp.zip.006",
         ]
         rejected = [
             "video.mp4",
@@ -1110,6 +1144,9 @@ class AgentsBugAnalysis2Tests(_AgentTestBase):
             attachments = [
                 {"name": "keep.zip", "url": "https://example.test/keep.zip"},
                 {"name": "keep.log", "url": "https://example.test/keep.log"},
+                {"name": "parts.xp.zip.001", "url": "https://example.test/parts.xp.zip.001"},
+                {"name": "parts.xp.zip.002", "url": "https://example.test/parts.xp.zip.002"},
+                {"name": "parts.xp.zip.003", "url": "https://example.test/parts.xp.zip.003"},
                 {"name": "skip.mp4", "url": "https://example.test/skip.mp4"},
                 {"name": "skip.png", "url": "https://example.test/skip.png"},
             ]
@@ -1124,11 +1161,23 @@ class AgentsBugAnalysis2Tests(_AgentTestBase):
                 )
 
         downloaded = set(result["downloaded"])
-        self.assertEqual(downloaded, {"keep.zip", "keep.log"})
+        self.assertEqual(
+            downloaded,
+            {
+                "keep.zip",
+                "keep.log",
+                "parts.xp.zip.001",
+                "parts.xp.zip.002",
+                "parts.xp.zip.003",
+            },
+        )
         self.assertEqual(set(result["skipped"]), {"skip.mp4", "skip.png"})
         command_text = "\n".join(" ".join(command) for command in commands)
         self.assertIn("keep.zip", command_text)
         self.assertIn("keep.log", command_text)
+        self.assertIn("parts.xp.zip.001", command_text)
+        self.assertIn("parts.xp.zip.002", command_text)
+        self.assertIn("parts.xp.zip.003", command_text)
         self.assertIn("--overwrite", command_text)
         self.assertNotIn("skip.mp4", command_text)
         self.assertNotIn("skip.png", command_text)
@@ -1170,6 +1219,66 @@ class AgentsBugAnalysis2Tests(_AgentTestBase):
 
             with self.assertRaisesRegex(RuntimeError, "不是有效 zip"):
                 runner._prepare_log_input(invalid_zip)
+    def test_bug_analysis_prepare_log_input_combines_split_xp_zip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
+            root = Path(tmp)
+            base_zip = root / "bundle.xp.zip"
+            xp_name = "bundle.xp"
+            with zipfile.ZipFile(base_zip, "w") as zf:
+                zf.writestr(xp_name, b"encrypted")
+            payload = base_zip.read_bytes()
+            base_zip.unlink()
+            part_size = max(1, len(payload) // 3)
+            parts = [
+                root / "bundle.xp.zip.001",
+                root / "bundle.xp.zip.002",
+                root / "bundle.xp.zip.003",
+            ]
+            for index, part in enumerate(parts):
+                start = index * part_size
+                end = None if index == len(parts) - 1 else (index + 1) * part_size
+                part.write_bytes(payload[start:end])
+            prepared_dir = root / "prepared" / "Log"
+            prepared_dir.mkdir(parents=True)
+            expanded_paths = []
+
+            def fake_expand_xp_file(path):
+                expanded_paths.append(path)
+                return prepared_dir
+
+            with mock.patch.object(runner, "_expand_xp_file", side_effect=fake_expand_xp_file):
+                prepared = runner._prepare_log_input(parts[0])
+
+        self.assertEqual(prepared, prepared_dir)
+        self.assertEqual([path.name for path in expanded_paths], [xp_name])
+        self.assertFalse((root / "bundle.xp.zip").exists())
+    def test_bug_cache_metadata_does_not_reuse_split_part_as_prepared_input(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
+            bug_dir = Path(tmp) / "bug"
+            attachments_dir = bug_dir / "attachments"
+            attachments_dir.mkdir(parents=True)
+            split_part = attachments_dir / "bundle.xp.zip.001"
+            split_part.write_bytes(b"partial")
+            prepared_dir = attachments_dir / "bundle" / "Log"
+            prepared_dir.mkdir(parents=True)
+            (bug_dir / "cache.json").write_text(
+                json.dumps(
+                    {
+                        "selected_log_input": str(split_part),
+                        "prepared_log_input": str(split_part),
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(runner, "_prepare_log_input", return_value=prepared_dir) as prepare:
+                selected, prepared = runner._read_bug_cache_log_input(bug_dir)
+
+        self.assertEqual(selected, split_part)
+        self.assertEqual(prepared, prepared_dir)
+        prepare.assert_called_once_with(split_part)
     def test_bug_analysis_selects_and_extracts_7z_log_attachment(self):
         with tempfile.TemporaryDirectory() as tmp:
             runner = BugAnalysisRunner(BridgeConfig(dry_run=True))

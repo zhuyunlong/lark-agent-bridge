@@ -3,6 +3,85 @@ from _agents_base import _AgentTestBase
 
 
 class AgentsBugReanalysis2Tests(_AgentTestBase):
+    def test_bug_reanalysis_does_not_reuse_split_part_as_prepared_input(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=False, data_dir=Path(tmp), workspace_root=Path(tmp))
+            runner = BugAnalysisRunner(config)
+            job_dir = Path(tmp) / "jobs" / "job_split"
+            output_dir = job_dir / "output"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            split_part = Path(tmp) / "bug_cache" / "attachments" / "bundle.xp.zip.001"
+            split_part.parent.mkdir(parents=True, exist_ok=True)
+            split_part.write_bytes(b"partial")
+            prepared_input = Path(tmp) / "prepared" / "Log"
+            prepared_input.mkdir(parents=True, exist_ok=True)
+            combined_html = output_dir / "bug_startup_stuck_report.html"
+            combined_json = output_dir / "bug_startup_stuck_report.json"
+            analysis_inputs = []
+
+            def fake_run_analysis(*, plan, input_path, html_path, json_path, analysis_dir, timeout, target_time, request_text=None):
+                analysis_inputs.append(input_path)
+                html_path.write_text("<html>startup</html>", encoding="utf-8")
+                json_path.write_text("{}", encoding="utf-8")
+                return subprocess.CompletedProcess(args=["python3"], returncode=0, stdout="", stderr="")
+
+            previous_session = {
+                "job_id": "job_split",
+                "job_dir": str(job_dir),
+                "details": {
+                    "bug_url": "https://project.feishu.cn/xpfailuremgmt/buglo/detail/7000000000",
+                    "analysis_kinds": ["startup"],
+                    "prepared_log_input": str(split_part),
+                    "selected_log_input": str(split_part),
+                    "user_request_text": (
+                        "https://project.feishu.cn/xpfailuremgmt/buglo/detail/7000000000 "
+                        "问题时间 2026-06-07 09:35"
+                    ),
+                },
+            }
+            previous_context = mock.Mock(
+                request_text=previous_session["details"]["user_request_text"],
+                summary_text="",
+                report_excerpt="",
+                history=[],
+            )
+
+            with (
+                mock.patch.object(
+                    runner,
+                    "_retry_bug_log_download",
+                    return_value={"ok": True, "selected_input": split_part, "prepared_input": prepared_input},
+                ) as retry_mock,
+                mock.patch.object(runner, "_run_analysis", side_effect=fake_run_analysis),
+                mock.patch.object(
+                    runner,
+                    "_build_combined_report_artifacts",
+                    return_value={"html_path": combined_html, "json_path": combined_json, "summary": "combined summary"},
+                ),
+                mock.patch.object(
+                    runner,
+                    "_run_bug_agent_summary",
+                    return_value={
+                        "message": "agent final summary",
+                        "command": None,
+                        "error": "",
+                        "provider": "codex",
+                        "session_id": "sess_current",
+                        "resumed": False,
+                        "duration_seconds": 1.0,
+                        "usage": {},
+                    },
+                ),
+            ):
+                result = runner.run_bug_reanalysis(
+                    followup_text="重新分析",
+                    previous_context=previous_context,
+                    previous_session=previous_session,
+                    force_rerun=True,
+                )
+
+        self.assertTrue(result.success)
+        retry_mock.assert_called_once()
     def test_bug_reanalysis_uses_agent_summary_and_persisted_session(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = BridgeConfig(dry_run=False, data_dir=Path(tmp), workspace_root=Path(tmp))

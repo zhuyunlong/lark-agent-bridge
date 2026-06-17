@@ -159,6 +159,8 @@ class _RunReanalysisMixin(_BugAgentFollowupMixin):
                 status="missing_fault_time",
                 progress_callback=progress_callback,
             )
+        if prepared_input is not None and self._split_xp_zip_part_match(prepared_input.name):
+            prepared_input = None
         if requires_log_input and prepared_input is None:
             recovered_selected, recovered_prepared = self._recover_cached_bug_log_input(details, request_text=request_text)
             if recovered_prepared is not None:
