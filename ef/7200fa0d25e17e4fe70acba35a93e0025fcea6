@@ -1,0 +1,21 @@
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.22",
+  "base_commit_sha": "ef7200fa0d25e17e4fe70acba35a93e0025fcea6",
+  "prompts": {
+    "3d541dad03389ce5": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "b8af210a-3383-4cf7-ae44-017ed18de822",
+        "model": "auto"
+      },
+      "human_author": "zhuyl3",
+      "messages": [],
+      "total_additions": 299,
+      "total_deletions": 58,
+      "accepted_lines": 264,
+      "overriden_lines": 0
+    }
+  }
+}
