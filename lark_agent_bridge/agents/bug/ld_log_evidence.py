@@ -133,6 +133,8 @@ class _LdLogEvidenceMixin:
             for path in sorted(logs_dir.rglob("*")):
                 if not path.is_file():
                     continue
+                if self._is_baidu_sdk_diag_log_path(path.relative_to(logs_dir)):
+                    continue
                 normalized = self._normalize_log_locator(path.relative_to(logs_dir)).lower()
                 if not any(pkg in normalized for pkg in self._LD_LOG_PACKAGES):
                     continue
@@ -145,6 +147,8 @@ class _LdLogEvidenceMixin:
                         if info.is_dir():
                             continue
                         name_lower = info.filename.lower()
+                        if self._is_baidu_sdk_diag_log_path(info.filename):
+                            continue
                         if not any(pkg in name_lower for pkg in self._LD_LOG_PACKAGES):
                             continue
                         if not name_lower.endswith((".alog", ".alog.log", ".xlog", ".xlog.log", ".log")):
@@ -269,6 +273,11 @@ class _LdLogEvidenceMixin:
         if m:
             return self._safe_datetime(*(int(m.group(i)) for i in range(1, 7)))
         return None
+    def _is_baidu_sdk_diag_log_path(self, path: Path | str) -> bool:
+        normalized = self._normalize_log_locator(path).casefold()
+        parts = normalized.split("/")
+        name = parts[-1] if parts else normalized
+        return name.startswith("diag_d-") or "ldnavi_log" in parts or "ldlog" in parts
     def _is_montecarlo_or_logd_path(self, path: Path) -> bool:
         parts = [part.casefold() for part in path.parts]
         return any(part == "logd" for part in parts) or any("montecarlo" in part for part in parts)
@@ -314,6 +323,8 @@ class _LdLogEvidenceMixin:
         try:
             for path in root.rglob("*"):
                 if not path.is_file():
+                    continue
+                if self._is_baidu_sdk_diag_log_path(path):
                     continue
                 is_zst = path.name.lower().endswith(".zst")
                 montecarlo_or_logd = self._is_montecarlo_or_logd_path(path)

@@ -219,6 +219,53 @@ class AgentsRecentRefactorTests(_AgentTestBase):
             next(i for i, p in enumerate(joined) if "aicabinservice" in p),
         )
 
+    def test_ld_focus_log_candidates_exclude_baidu_sdk_diag_logs_by_default(self):
+        from datetime import datetime as _dt
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=False, data_dir=Path(tmp) / "data", workspace_root=Path(tmp))
+            runner = BugAnalysisRunner(config)
+            logs = Path(tmp) / "logs" / "data" / "Log" / "log1"
+            mc_dir = logs / "app" / "com.xiaopeng.montecarlo"
+            mc_dir.mkdir(parents=True)
+            (mc_dir / "main_2026-06-14_22-00.log").write_text("LD:false\n", encoding="utf-8")
+            ldlog_dir = mc_dir / "ldnavi_log" / "ldlog"
+            ldlog_dir.mkdir(parents=True)
+            diag_log = ldlog_dir / "DIAG_D-373-20260614-221301_1780998853-2520.log"
+            diag_zst = ldlog_dir / "DIAG_D-374-20260614-221602_1780998853-2520.log.zst"
+            diag_log.write_text("map_status:2\n", encoding="utf-8")
+            diag_zst.write_text("compressed placeholder\n", encoding="utf-8")
+            diag_zst.with_suffix("").write_text("decoded placeholder\n", encoding="utf-8")
+
+            cands = runner._ld_focus_log_candidates(Path(tmp) / "logs", _dt(2026, 6, 14, 22, 13), limit=8)
+            joined = [str(c) for c in cands]
+
+        self.assertTrue(any("main_2026-06-14_22-00.log" in p for p in joined))
+        self.assertFalse(any("ldnavi_log" in p or "DIAG_D-" in p for p in joined))
+
+    def test_ld_executor_find_log_files_excludes_baidu_sdk_diag_logs_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=False, data_dir=Path(tmp) / "data", workspace_root=Path(tmp))
+            runner = BugAnalysisRunner(config)
+            cache_dir = Path(tmp) / "cache"
+            mc_dir = cache_dir / "logs" / "data" / "Log" / "log1" / "app" / "com.xiaopeng.montecarlo"
+            mc_dir.mkdir(parents=True)
+            (mc_dir / "main_2026-06-14_22-00.log").write_text("LD:false\n", encoding="utf-8")
+            ldlog_dir = mc_dir / "ldnavi_log" / "ldlog"
+            ldlog_dir.mkdir(parents=True)
+            (ldlog_dir / "DIAG_D-373-20260614-221301_1780998853-2520.log").write_text(
+                "map_status:2\n",
+                encoding="utf-8",
+            )
+
+            log_files = runner._ld_executor_find_log_files(
+                cache_dir=cache_dir,
+                fault_time="2026-06-14 22:13",
+            )
+            joined = [str(path) for path in log_files]
+
+        self.assertTrue(any("main_2026-06-14_22-00.log" in p for p in joined))
+        self.assertFalse(any("ldnavi_log" in p or "DIAG_D-" in p for p in joined))
+
     def test_needs_skill_confirmation_gate(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = BridgeConfig(data_dir=Path(tmp), workspace_root=Path(tmp))
