@@ -437,6 +437,35 @@ class UnityStartupSkillTests(unittest.TestCase):
         self.assertTrue(context.nearest_bind_after_target.is_bound)
         self.assertIn("AndroidMainActivity onResume", context.summary)
 
+    def test_surface_binding_context_html_shows_raw_logs_instead_of_evidence_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "main_2026-05-28_20-00.alog.log"
+            log_path.write_text(
+                "\n".join(
+                    [
+                        "05-28 20:04:50.000  3000  3000 I AndroidMainActivity: onResume begin, Version:1 start resume the glSurface view =XPEDriveSurfaceView{abc}",
+                        "05-28 20:04:55.000  3000  3100 I SrSM_UnityContext: onUnityDisplaySurfaceSubmit, type: MainSurface, surface: null, scene: 0, status: SurfaceStatusDestroyed, height: 0, width: 0, purpose: UnityRealRenderToThisSurface, mMainSurfaceViewHeight: 1476, mMainSurface: Surface(name=old), surfaceOwnerHashCode:123, mUnityPlayer: com.unity3d.player.UnityPlayer@1",
+                        "05-28 20:04:55.001  3000  3100 I SrSM_UnityContext: onUnityDisplaySurfaceSubmit, displayChanged id: 2, surface: null, projectType: 1",
+                        "05-28 20:05:05.000  3000  3100 I SrSM_UnityContext: onUnityDisplaySurfaceSubmit, type: MainSurface, surface: Surface(name=SurfaceView[com.xiaopeng.montecarlo]), scene: 0, status: SurfaceStatusChanged, height: 1476, width: 2880, purpose: UnityRealRenderToThisSurface, mMainSurfaceViewHeight: 0, mMainSurface: null, surfaceOwnerHashCode:456, mUnityPlayer: com.unity3d.player.UnityPlayer@1",
+                        "05-28 20:05:05.001  3000  3100 I SrSM_UnityContext: onUnityDisplaySurfaceSubmit, displayChanged id: 2, surface: Surface(name=SurfaceView[com.xiaopeng.montecarlo]), projectType: 1",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            events = self.mod.scan_text_log(log_path)
+            context = self.mod.build_surface_binding_context(events, self.mod.parse_target_time("2026-05-28 20:05:00"))
+
+        html = self.mod.render_surface_binding_context_html(context)
+
+        self.assertIn("<th>原始日志</th>", html)
+        self.assertNotIn("<th>证据</th>", html)
+        self.assertIn(
+            "05-28 20:05:05.001  3000  3100 I SrSM_UnityContext: onUnityDisplaySurfaceSubmit, "
+            "displayChanged id: 2, surface: Surface(name=SurfaceView[com.xiaopeng.montecarlo]), projectType: 1",
+            html,
+        )
+        self.assertNotIn("main_2026-05-28_20-00.alog.log:L", html)
+
     def test_diagnose_text_does_not_report_complete_when_preload_done_but_player_missing(self):
         def fake(node_id: str):
             event = self._fake_event(self.mod, "2026-05-22 17:29:48.419", 8066)
