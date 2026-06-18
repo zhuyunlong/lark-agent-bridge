@@ -96,6 +96,24 @@ class UnityStartupSkillTests(unittest.TestCase):
         self.assertEqual(focus.index, 2)
         self.assertIn("之后最近", reason)
 
+    def test_choose_focus_session_returns_none_when_target_has_no_relevant_session(self):
+        stale = self.mod.Session(
+            index=1,
+            events=[self._fake_event(self.mod, "2026-06-16 16:35:26.833", 21684)],
+            first_by_node={},
+            all_by_node={},
+            status="complete",
+            diagnosis="stale",
+            missing_critical=[],
+            primary_pid=21684,
+        )
+        target_time = self.mod.parse_target_time("2026-06-17 20:05")
+
+        focus, reason = self.mod.choose_focus_session([stale], target_time)
+
+        self.assertIsNone(focus)
+        self.assertIn("未识别到目标时间对应的启动会话", reason)
+
     def test_select_target_logs_falls_back_to_variable_prefix_main_logs_without_package_path(self):
         with tempfile.TemporaryDirectory() as tmp:
             decoded_log = Path(tmp) / "user0_main_2026-05-11_23-00.alog.log"
@@ -271,6 +289,26 @@ class UnityStartupSkillTests(unittest.TestCase):
 
         self.assertEqual([session.index for session in selected], [2, 3])
 
+    def test_select_report_sessions_returns_empty_when_target_has_no_focus_session(self):
+        stale = self.mod.Session(
+            index=1,
+            events=[self._fake_event(self.mod, "2026-06-16 16:35:26.833", 21684)],
+            first_by_node={},
+            all_by_node={},
+            status="complete",
+            diagnosis="stale",
+            missing_critical=[],
+            primary_pid=21684,
+        )
+
+        selected = self.mod.select_report_sessions(
+            [stale],
+            None,
+            self.mod.parse_target_time("2026-06-17 20:05"),
+        )
+
+        self.assertEqual(selected, [])
+
     def test_scan_system_load_snapshots_parses_logd_lines(self):
         with tempfile.TemporaryDirectory() as tmp:
             log_path = Path(tmp) / "main.txt"
@@ -442,6 +480,94 @@ class UnityStartupSkillTests(unittest.TestCase):
         self.assertEqual(severity, "red")
         self.assertNotIn("启动链路完整", message)
         self.assertIn("未闭环", message)
+
+    def test_build_overall_verdict_uses_surface_context_when_focus_session_is_stale(self):
+        def node(node_id: str):
+            event = self._fake_event(self.mod, "2026-06-16 16:35:26.833", 21684)
+            event.node_id = node_id
+            return event
+
+        first_by_node = {
+            "app_attach_base_context": node("app_attach_base_context"),
+            "app_on_create": node("app_on_create"),
+            "activity_on_create": node("activity_on_create"),
+            "activity_on_resume": node("activity_on_resume"),
+            "unity_preload_start": node("unity_preload_start"),
+            "unity_preload_success": node("unity_preload_success"),
+            "unity_player_create_start": node("unity_player_create_start"),
+            "unity_player_created": node("unity_player_created"),
+            "ready_prepare": node("ready_prepare"),
+            "unity_first_frame_callback": node("unity_first_frame_callback"),
+            "unity_first_frame_final": node("unity_first_frame_final"),
+        }
+        stale_session = self.mod.Session(
+            index=12,
+            events=list(first_by_node.values()),
+            first_by_node=first_by_node,
+            all_by_node={},
+            status="complete",
+            diagnosis="启动链路完整，已经到达 3D 最终首帧展示。",
+            missing_critical=[],
+            primary_pid=21684,
+        )
+        unbind = self.mod.SurfaceBindingRecord(
+            timestamp=self.mod.dt.datetime.strptime("2026-06-17 09:57:24.409", "%Y-%m-%d %H:%M:%S.%f"),
+            timestamp_text="2026-06-17 09:57:24.409",
+            surface_type="MainSurface",
+            surface="null",
+            is_bound=False,
+            file_path="/tmp/09.log",
+            line_no=10,
+            excerpt="displayChanged id: 2, surface: null",
+            display_id=2,
+            status="SurfaceStatusDestroyed",
+            width=0,
+            height=0,
+            owner_hash=230077477,
+            pid=21684,
+        )
+        bind = self.mod.SurfaceBindingRecord(
+            timestamp=self.mod.dt.datetime.strptime("2026-06-17 20:06:07.098", "%Y-%m-%d %H:%M:%S.%f"),
+            timestamp_text="2026-06-17 20:06:07.098",
+            surface_type="MainSurface",
+            surface="Surface(name=null)/@0xdb6b425",
+            is_bound=True,
+            file_path="/tmp/20.log",
+            line_no=20,
+            excerpt="displayChanged id: 2, surface: Surface(name=null)/@0xdb6b425",
+            display_id=2,
+            status="SurfaceStatusChanged",
+            width=2560,
+            height=1440,
+            owner_hash=230077477,
+            pid=21684,
+        )
+        context = self.mod.SurfaceBindingContext(
+            target_time=self.mod.parse_target_time("2026-06-17 20:05"),
+            records=[unbind, bind],
+            last_unbind_before_target=unbind,
+            last_bind_before_target=None,
+            nearest_bind_after_target=bind,
+            nearest_unbind_after_target=None,
+            last_resume_before_target=None,
+            nearest_resume_after_target=None,
+            summary="目标时间前最近一次 MainSurface 为 null 解绑，目标时间后重新 displayChanged 到非 null surface。",
+            severity="yellow",
+        )
+
+        severity, message = self.mod.build_overall_verdict(
+            [stale_session],
+            [],
+            focus_session=stale_session,
+            target_time=self.mod.parse_target_time("2026-06-17 20:05"),
+            boot_relation=None,
+            surface_binding_context=context,
+        )
+
+        self.assertEqual(severity, "yellow")
+        self.assertIn("MainSurface displayChanged 绑定周期", message)
+        self.assertIn("目标时间更接近", message)
+        self.assertNotIn("启动链路完整", message)
 
     def test_diagnose_text_prefers_napa_resource_failure_chain(self):
         def fake(node_id: str, message: str = "msg"):
