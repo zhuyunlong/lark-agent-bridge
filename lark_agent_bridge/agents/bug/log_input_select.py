@@ -428,9 +428,7 @@ class _BugLogInputSelectMixin:
         ranked.sort(key=lambda item: (item[0], item[1], str(item[2])))
         return ranked[0][2]
     def _startup_analysis_input(self, input_path: Path, fault_time: str) -> Path:
-        if input_path.is_file():
-            return input_path
-        return self._select_startup_input(input_path, fault_time)
+        return input_path
     def _log_file_priority(self, path: Path) -> int:
         lower = path.name.lower()
         if lower.endswith((".alog.log", ".xlog.log")):

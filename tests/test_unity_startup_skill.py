@@ -176,6 +176,26 @@ class UnityStartupSkillTests(unittest.TestCase):
         self.assertIn(decoded_member, rel_paths)
         self.assertNotIn(raw_member, rel_paths)
 
+    def test_collect_inputs_includes_logd_events_lifecycle_logs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "logs"
+            app_dir = root / "data" / "Log" / "log0" / "app" / "com.xiaopeng.montecarlo"
+            logd_dir = root / "data" / "Log" / "log0" / "logd"
+            app_dir.mkdir(parents=True)
+            logd_dir.mkdir(parents=True)
+            app_log = app_dir / "user0_main_2026-05-28_20-00.alog.log"
+            events_log = logd_dir / "events.txt.1"
+            app_log.write_text("decoded text log\n", encoding="utf-8")
+            events_log.write_text("", encoding="utf-8")
+            workspace = Path(tmp) / "workspace"
+
+            copied, warnings = self.mod.collect_and_materialize_inputs(root, workspace)
+
+        rel_paths = {path.relative_to(workspace / "collected").as_posix() for path in copied}
+        self.assertFalse(warnings)
+        self.assertIn("data/Log/log0/app/com.xiaopeng.montecarlo/user0_main_2026-05-28_20-00.alog.log", rel_paths)
+        self.assertIn("data/Log/log0/logd/events.txt.1", rel_paths)
+
     def test_decode_warning_uses_collected_relative_path(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp) / "workspace"
@@ -334,6 +354,50 @@ class UnityStartupSkillTests(unittest.TestCase):
 
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0].node_id, "unity_preload_start")
+
+    def test_scan_text_log_parses_logd_events_activity_resume(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "events.txt.1"
+            log_path.write_text(
+                "05-28 20:05:01.000  1000  1000 I am_on_resume_called: [0,com.xiaopeng.montecarlo/.AndroidMainActivity,ON_RESUME]\n",
+                encoding="utf-8",
+            )
+
+            events = self.mod.scan_text_log(log_path)
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].node_id, "activity_on_resume")
+        self.assertEqual(events[0].tag, "am_on_resume_called")
+        self.assertIn("logd/events", events[0].source)
+
+    def test_surface_binding_context_tracks_main_surface_unbind_and_rebind(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "main_2026-05-28_20-00.alog.log"
+            log_path.write_text(
+                "\n".join(
+                    [
+                        "05-28 20:04:50.000  3000  3000 I AndroidMainActivity: onResume begin, Version:1 start resume the glSurface view =XPEDriveSurfaceView{abc}",
+                        "05-28 20:04:55.000  3000  3100 I SrSM_UnityContext: onUnityDisplaySurfaceSubmit, type: MainSurface, surface: null, scene: 0, status: SurfaceStatusDestroyed, height: 0, width: 0, purpose: UnityRealRenderToThisSurface, mMainSurfaceViewHeight: 1476, mMainSurface: Surface(name=old), surfaceOwnerHashCode:123, mUnityPlayer: com.unity3d.player.UnityPlayer@1",
+                        "05-28 20:04:55.001  3000  3100 I SrSM_UnityContext: onUnityDisplaySurfaceSubmit, displayChanged id: 2, surface: null, projectType: 1",
+                        "05-28 20:05:04.000  3000  3000 I AndroidMainActivity: onResume begin, Version:1 start resume the glSurface view =XPEDriveSurfaceView{def}",
+                        "05-28 20:05:05.000  3000  3100 I SrSM_UnityContext: onUnityDisplaySurfaceSubmit, type: MainSurface, surface: Surface(name=SurfaceView[com.xiaopeng.montecarlo]), scene: 0, status: SurfaceStatusChanged, height: 1476, width: 2880, purpose: UnityRealRenderToThisSurface, mMainSurfaceViewHeight: 0, mMainSurface: null, surfaceOwnerHashCode:456, mUnityPlayer: com.unity3d.player.UnityPlayer@1",
+                        "05-28 20:05:05.001  3000  3100 I SrSM_UnityContext: onUnityDisplaySurfaceSubmit, displayChanged id: 2, surface: Surface(name=SurfaceView[com.xiaopeng.montecarlo]), projectType: 1",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            target_time = self.mod.parse_target_time("2026-05-28 20:05:00")
+
+            events = self.mod.scan_text_log(log_path)
+            context = self.mod.build_surface_binding_context(events, target_time)
+
+        self.assertIsNotNone(context.last_unbind_before_target)
+        self.assertIsNotNone(context.nearest_bind_after_target)
+        self.assertEqual(context.last_unbind_before_target.surface_type, "MainSurface")
+        self.assertEqual(context.nearest_bind_after_target.surface_type, "MainSurface")
+        self.assertFalse(context.last_unbind_before_target.is_bound)
+        self.assertTrue(context.nearest_bind_after_target.is_bound)
+        self.assertIn("AndroidMainActivity onResume", context.summary)
 
     def test_diagnose_text_does_not_report_complete_when_preload_done_but_player_missing(self):
         def fake(node_id: str):

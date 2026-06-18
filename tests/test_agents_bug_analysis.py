@@ -1204,11 +1204,11 @@ class AgentsBugAnalysisTests(_AgentTestBase):
                 )
 
         self.assertTrue(result.success)
-        # With fixed _startup_analysis_input, the runner selects the best
-        # matching log file (by fault time) instead of passing the whole dir.
+        # Startup analysis must keep the prepared directory so the skill can
+        # scan process-related app logs plus logd/events activity lifecycle.
         self.assertEqual(len(analysis_inputs), 1)
         selected = analysis_inputs[0]
-        self.assertIn("main_2026-05-11_23-00.alog", str(selected))
+        self.assertEqual(selected.resolve(), (cache_dir / "logs").resolve())
         self.assertTrue(result.details["bug_cache_reused"])
         self.assertEqual(result.details["bug_cache_dir"], str(cache_dir.resolve()))
     def test_startup_input_selects_logs_with_variable_prefix_before_fixed_timestamp(self):
@@ -1224,7 +1224,7 @@ class AgentsBugAnalysisTests(_AgentTestBase):
 
             selected = runner._startup_analysis_input(log_root, "2026-05-11 23:10")
 
-        self.assertEqual(selected, matching)
+        self.assertEqual(selected, log_root)
     def test_agent_runtime_annotation_injects_section_into_html_report(self):
         with tempfile.TemporaryDirectory() as tmp:
             runner = BugAnalysisRunner(BridgeConfig(dry_run=True, data_dir=Path(tmp), workspace_root=Path(tmp)))
