@@ -279,7 +279,7 @@ class _ArchiveExtractMixin(_BugFaultTimeMixin, _BugLogInputSelectMixin, _BugOutp
     def _has_raw_logs_needing_decode(self, input_path: Path) -> bool:
         def needs_decode(path: Path) -> bool:
             lower = path.name.lower()
-            return lower.endswith((".alog", ".xlog")) and not Path(str(path) + ".log").exists()
+            return lower.endswith(_RAW_LOG_SUFFIXES) and not _has_decoded_log_sibling(path)
 
         if input_path.is_file():
             return needs_decode(input_path)

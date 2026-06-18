@@ -266,6 +266,25 @@ class AgentsRecentRefactorTests(_AgentTestBase):
         self.assertTrue(any("main_2026-06-14_22-00.log" in p for p in joined))
         self.assertFalse(any("ldnavi_log" in p or "DIAG_D-" in p for p in joined))
 
+    def test_ld_executor_prefers_plain_text_sibling_over_raw_alog(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=False, data_dir=Path(tmp) / "data", workspace_root=Path(tmp))
+            runner = BugAnalysisRunner(config)
+            cache_dir = Path(tmp) / "cache"
+            mc_dir = cache_dir / "logs" / "data" / "Log" / "log1" / "app" / "com.xiaopeng.montecarlo"
+            mc_dir.mkdir(parents=True)
+            raw = mc_dir / "main_2026-06-17_20-00.alog"
+            decoded = mc_dir / "main_2026-06-17_20-00.txt"
+            raw.write_bytes(b"raw")
+            decoded.write_text("decoded\n", encoding="utf-8")
+
+            log_files = runner._ld_executor_find_log_files(
+                cache_dir=cache_dir,
+                fault_time="2026-06-17 20:05",
+            )
+
+        self.assertEqual(log_files, [decoded])
+
     def test_needs_skill_confirmation_gate(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = BridgeConfig(data_dir=Path(tmp), workspace_root=Path(tmp))

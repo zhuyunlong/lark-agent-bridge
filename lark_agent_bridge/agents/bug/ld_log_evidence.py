@@ -37,8 +37,9 @@ class _LdLogEvidenceMixin:
         _append(prepared_input)
         if prepared_input.is_file():
             lower_name = prepared_input.name.lower()
-            if lower_name.endswith((".alog", ".xlog")):
-                _append(prepared_input.with_name(prepared_input.name + ".log"))
+            if lower_name.endswith(_RAW_LOG_SUFFIXES):
+                for decoded in _decoded_log_sibling_paths(prepared_input):
+                    _append(decoded)
             elif lower_name.endswith((".alog.log", ".xlog.log")):
                 _append(prepared_input.with_suffix(""))
             fault_dt = self._parse_bug_datetime(fault_time)
@@ -52,7 +53,7 @@ class _LdLogEvidenceMixin:
                 if not sibling.is_file():
                     continue
                 normalized = self._normalize_log_locator(sibling.name).lower()
-                if not normalized.endswith((".alog", ".alog.log", ".xlog", ".xlog.log", ".log")):
+                if not normalized.endswith((".alog", ".alog.log", ".xlog", ".xlog.log", ".log", ".txt")):
                     continue
                 if fault_dt is None:
                     _append(sibling)
@@ -95,9 +96,9 @@ class _LdLogEvidenceMixin:
         fault_dt: "time.struct_time | None",
     ) -> bool:
         normalized = self._normalize_log_locator(locator).lower()
-        if not normalized.endswith((".alog", ".alog.log", ".xlog", ".xlog.log", ".log")):
+        if not normalized.endswith((".alog", ".alog.log", ".xlog", ".xlog.log", ".log", ".txt")):
             return False
-        if path.suffix == ".alog" and path.with_suffix(".alog.log").exists():
+        if path.suffix.casefold() in _RAW_LOG_SUFFIXES and _has_decoded_log_sibling(path):
             return False
         basename = self._log_basename_from_locator(locator)
         file_dt = self._parse_log_file_datetime(basename)
@@ -151,7 +152,7 @@ class _LdLogEvidenceMixin:
                             continue
                         if not any(pkg in name_lower for pkg in self._LD_LOG_PACKAGES):
                             continue
-                        if not name_lower.endswith((".alog", ".alog.log", ".xlog", ".xlog.log", ".log")):
+                        if not name_lower.endswith((".alog", ".alog.log", ".xlog", ".xlog.log", ".log", ".txt")):
                             continue
                         basename = self._log_basename_from_locator(info.filename)
                         file_dt = self._parse_log_file_datetime(basename)

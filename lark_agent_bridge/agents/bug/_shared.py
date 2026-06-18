@@ -458,6 +458,7 @@ _BUG_LOG_COVERAGE_SUFFIXES = (
     ".log",
     ".txt",
 )
+_RAW_LOG_SUFFIXES = (".alog", ".xlog")
 _GENERIC_BUG_PROMPT_TERMS = (
     "分析",
     "分析下",
@@ -488,6 +489,31 @@ _GENERAL_SCOPE_PATTERNS = (
 _PRIMARY_BUG_SKILL_MAP = PRIMARY_BUG_SKILL_MAP
 _AUX_BUG_SKILLS = AUX_BUG_SKILLS
 _extract_skill_frontmatter = extract_skill_frontmatter
+
+
+def _decoded_log_sibling_paths(path: Path) -> tuple[Path, ...]:
+    lower_name = path.name.casefold()
+    if not lower_name.endswith(_RAW_LOG_SUFFIXES):
+        return ()
+    candidates = (
+        Path(str(path) + ".log"),
+        Path(str(path) + ".txt"),
+        path.with_suffix(".log"),
+        path.with_suffix(".txt"),
+    )
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(candidate)
+    return tuple(unique)
+
+
+def _has_decoded_log_sibling(path: Path) -> bool:
+    return any(candidate.exists() for candidate in _decoded_log_sibling_paths(path))
 
 
 @dataclass(slots=True)
@@ -752,6 +778,9 @@ __all__ = [
     '_BUG_LOG_COVERAGE_MAX_FILES',
     '_BUG_LOG_COVERAGE_MAX_LINES_PER_FILE',
     '_BUG_LOG_COVERAGE_SUFFIXES',
+    '_RAW_LOG_SUFFIXES',
+    '_decoded_log_sibling_paths',
+    '_has_decoded_log_sibling',
     '_GENERIC_BUG_PROMPT_TERMS',
     '_GENERAL_SCOPE_PATTERNS',
     '_PRIMARY_BUG_SKILL_MAP',

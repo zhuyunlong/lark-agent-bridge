@@ -1219,6 +1219,25 @@ class AgentsBugAnalysis2Tests(_AgentTestBase):
 
             with self.assertRaisesRegex(RuntimeError, "不是有效 zip"):
                 runner._prepare_log_input(invalid_zip)
+    def test_bug_analysis_skips_decode_when_plain_text_sibling_exists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
+            log_dir = Path(tmp) / "Log" / "log0" / "app" / "com.xiaopeng.montecarlo"
+            log_dir.mkdir(parents=True)
+            raw_log = log_dir / "user0_main_2026-06-17_20-00.alog"
+            raw_log.write_bytes(b"raw")
+            (log_dir / "user0_main_2026-06-17_20-00.txt").write_text(
+                "decoded\n",
+                encoding="utf-8",
+            )
+            xlog = log_dir / "user0_main_2026-06-17_21-00.xlog"
+            xlog.write_bytes(b"raw")
+            (log_dir / "user0_main_2026-06-17_21-00.log").write_text(
+                "decoded\n",
+                encoding="utf-8",
+            )
+
+            self.assertFalse(runner._has_raw_logs_needing_decode(Path(tmp)))
     def test_bug_analysis_prepare_log_input_combines_split_xp_zip(self):
         with tempfile.TemporaryDirectory() as tmp:
             runner = BugAnalysisRunner(BridgeConfig(dry_run=True))
