@@ -466,6 +466,61 @@ class UnityStartupSkillTests(unittest.TestCase):
         )
         self.assertNotIn("main_2026-05-28_20-00.alog.log:L", html)
 
+    def test_chain_html_explains_missing_nodes_without_target_session(self):
+        unbind = self.mod.SurfaceBindingRecord(
+            timestamp=self.mod.dt.datetime.strptime("2026-06-17 09:57:24.409", "%Y-%m-%d %H:%M:%S.%f"),
+            timestamp_text="2026-06-17 09:57:24.409",
+            surface_type="MainSurface",
+            surface="null",
+            is_bound=False,
+            file_path="/tmp/09.log",
+            line_no=10,
+            excerpt="06-17 09:57:24.409 21684 9192 I NAV_SrSM_UnityContext: displayChanged id: 2, surface: null",
+            display_id=2,
+            status="SurfaceStatusDestroyed",
+            width=0,
+            height=0,
+            owner_hash=230077477,
+            pid=21684,
+        )
+        bind = self.mod.SurfaceBindingRecord(
+            timestamp=self.mod.dt.datetime.strptime("2026-06-17 20:06:07.098", "%Y-%m-%d %H:%M:%S.%f"),
+            timestamp_text="2026-06-17 20:06:07.098",
+            surface_type="MainSurface",
+            surface="Surface(name=null)/@0xdb6b425",
+            is_bound=True,
+            file_path="/tmp/20.log",
+            line_no=20,
+            excerpt="06-17 20:06:07.098 21684 13182 I NAV_SrSM_UnityContext: displayChanged id: 2, surface: Surface(name=null)/@0xdb6b425",
+            display_id=2,
+            status="SurfaceStatusChanged",
+            width=2560,
+            height=1440,
+            owner_hash=230077477,
+            pid=21684,
+        )
+        context = self.mod.SurfaceBindingContext(
+            target_time=self.mod.parse_target_time("2026-06-17 20:05"),
+            records=[unbind, bind],
+            last_unbind_before_target=unbind,
+            last_bind_before_target=None,
+            nearest_bind_after_target=bind,
+            nearest_unbind_after_target=None,
+            last_resume_before_target=None,
+            nearest_resume_after_target=None,
+            summary="目标时间前解绑，目标时间后重新绑定。",
+            severity="yellow",
+        )
+
+        html = self.mod.render_chain_html([], focus_session=None, surface_binding_context=context)
+
+        self.assertIn("卡点链路分析", html)
+        self.assertIn("MainSurface 非 null 绑定", html)
+        self.assertIn("UnityReady 未命中", html)
+        self.assertIn("首帧信号未命中", html)
+        self.assertIn("目标时间没有对应启动会话", html)
+        self.assertIn("06-17 20:06:07.098 21684 13182 I NAV_SrSM_UnityContext", html)
+
     def test_diagnose_text_does_not_report_complete_when_preload_done_but_player_missing(self):
         def fake(node_id: str):
             event = self._fake_event(self.mod, "2026-05-22 17:29:48.419", 8066)
