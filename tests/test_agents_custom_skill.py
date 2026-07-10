@@ -677,6 +677,7 @@ class AgentsCustomSkillTests(_AgentTestBase):
             runner = BugAnalysisRunner(config)
             log_root = Path(tmp) / "logs"
             self._write_matching_log(log_root, "2026-05-22 19:46:00")
+            progress_events: list[dict[str, object]] = []
 
             def fake_run_json_command(command, timeout):
                 if "check-env" in command:
@@ -708,7 +709,12 @@ class AgentsCustomSkillTests(_AgentTestBase):
                     "## 建议动作\n- 继续追踪 LD 状态切换前一帧。\n",
                     encoding="utf-8",
                 )
-                return subprocess.CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+                return subprocess.CompletedProcess(
+                    args=command,
+                    returncode=0,
+                    stdout="Authorization: Bearer stdout-secret",
+                    stderr="upstream stderr-secret",
+                )
 
             selection = runner.selection_for_skill_name(
                 skill_name,
@@ -761,7 +767,8 @@ class AgentsCustomSkillTests(_AgentTestBase):
                         prompt="2026-05-22 19:46 退无图",
                         raw_text="https://project.feishu.cn/xpfailuremgmt/buglo/detail/6998107767 2026-05-22 19:46 退无图",
                         triggered=True,
-                    )
+                    ),
+                    progress_callback=progress_events.append,
                 )
                 analysis_file_exists = Path(result.details.get("ld_lane_level_analysis_file", "")).exists()
 
@@ -772,6 +779,14 @@ class AgentsCustomSkillTests(_AgentTestBase):
         self.assertEqual(result.details["ld_lane_level_analysis_status"], "completed")
         self.assertEqual(result.details["ld_lane_level_evidence_count"], 2)
         self.assertTrue(analysis_file_exists)
+        completed_event = next(
+            item for item in progress_events if item["stage"] == "bug_run_analysis_completed"
+        )
+        self.assertNotIn("stdout_tail", completed_event["details"])
+        self.assertNotIn("stderr_tail", completed_event["details"])
+        completed_payload = json.dumps(completed_event, ensure_ascii=False)
+        self.assertNotIn("stdout-secret", completed_payload)
+        self.assertNotIn("stderr-secret", completed_payload)
         run_mock.assert_called_once()
         summary_mock.assert_called_once()
     def test_custom_skill_analysis_validation_requires_key_evidence_section(self):
@@ -930,7 +945,7 @@ class AgentsCustomSkillTests(_AgentTestBase):
                     progress_events[-1]["details"]["error_code"],
                     "custom_skill_agent_missing_output",
                 )
-    def test_bug_ld_direct_api_fallback_progress_includes_error_details(self):
+    def test_bug_ld_direct_api_fallback_progress_redacts_error_details(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "workspace"
             data_dir = Path(tmp) / "data"
@@ -1029,10 +1044,8 @@ class AgentsCustomSkillTests(_AgentTestBase):
         self.assertFalse(result.success)
         fallback_event = next(item for item in progress_events if item["stage"] == "ld_direct_api_fallback")
         self.assertEqual(fallback_event["details"]["error_code"], "ld_direct_api_error")
-        self.assertEqual(
-            fallback_event["details"]["error_message"],
-            "LD 车道级分析 API 调用失败：upstream forbidden",
-        )
+        self.assertNotIn("error_message", fallback_event["details"])
+        self.assertNotIn("upstream forbidden", json.dumps(fallback_event, ensure_ascii=False))
     def test_ld_pydantic_ai_analysis_is_bounded_to_prepared_log_context(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "workspace"
@@ -1411,6 +1424,127 @@ class AgentsCustomSkillTests(_AgentTestBase):
         messages = [str(event.get("message") or "") for event in progress_events]
         self.assertTrue(any("Codex 文本 故障正常。" in message for message in messages))
         self.assertFalse(any("Codex delta 故" in message for message in messages))
+        delta_details = [
+            event.get("details", {})
+            for event in progress_events
+            if event.get("details", {}).get("app_server_event_kind") == "agent_delta"
+        ]
+        self.assertTrue(delta_details)
+        self.assertEqual(delta_details[0]["app_server_summary"], "Codex 文本 故障正常。")
+
+    def test_app_server_progress_includes_structured_event_details(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "workspace"
+            skill_name = "app-server-custom-skill"
+            skill_dir = root / ".ai" / "skills" / skill_name
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text(
+                "---\nname: App Server Custom Skill\ndescription: app-server test.\n---\n\n# App Server\n",
+                encoding="utf-8",
+            )
+            config = BridgeConfig(
+                dry_run=False,
+                data_dir=Path(tmp) / "data",
+                workspace_root=root,
+                codex_app_server=CodexAppServerOptions(enabled=True, use_for_file_agent=True, fallback_to_exec=True),
+            )
+            config.bug_analysis.provider = "codex"
+            config.bug_analysis.command = "codex"
+            config.source_investigation.repo_roots = [root]
+            runner = BugAnalysisRunner(config)
+            log_root = Path(tmp) / "logs"
+            self._write_matching_log(log_root, "2026-05-25 16:50:41")
+            progress_events: list[dict[str, object]] = []
+            runtime = mock.Mock()
+
+            def _run_turn(_prompt_text, *, on_event=None):
+                if on_event is not None:
+                    on_event(
+                        {
+                            "method": "item/started",
+                            "params": {
+                                "threadId": "thread-app-server",
+                                "turnId": "turn-app-server",
+                                "item": {
+                                    "id": "cmd-1",
+                                    "type": "commandExecution",
+                                    "command": "/bin/zsh -lc \"rg scene\"",
+                                    "status": "inProgress",
+                                },
+                            },
+                        }
+                    )
+                    on_event(
+                        {
+                            "method": "turn/plan/updated",
+                            "params": {
+                                "threadId": "thread-app-server",
+                                "turnId": "turn-app-server",
+                                "explanation": "先读 log_focus。",
+                                "plan": [{"step": "读取聚焦日志", "status": "completed"}],
+                            },
+                        }
+                    )
+                return CodexAppServerResult(
+                    ok=True,
+                    final_text="## 结论摘要\n- ok\n\n## 关键证据\n- L1\n",
+                    command=["codex", "app-server"],
+                    stdout="Codex command rg scene",
+                    stderr="",
+                    thread_id="thread-app-server",
+                    turn_id="turn-app-server",
+                    duration_seconds=2.0,
+                    events=[],
+                    usage={"totalTokens": 10, "inputTokens": 8, "outputTokens": 2},
+                    completion_state=CompletionState.COMPLETE,
+                )
+
+            runtime.run_turn.side_effect = _run_turn
+
+            with (
+                mock.patch(
+                    "lark_agent_bridge.agents.bug.custom_skill.check_codex_app_server_available",
+                    return_value=(True, "0.134.0"),
+                ),
+                mock.patch(
+                    "lark_agent_bridge.agents.bug.custom_skill.CodexAppServerRuntime",
+                    return_value=runtime,
+                ),
+                mock.patch.object(
+                    runner,
+                    "_prepare_codex_app_server_minimal_home",
+                    return_value=Path(tmp) / "codex_home",
+                ),
+            ):
+                runner._run_custom_skill_agent_analysis(
+                    skill_name=skill_name,
+                    request_text="2026-05-25 16:50:41 3D场景模式",
+                    prompt_text="2026-05-25 16:50:41 3D场景模式",
+                    title="3D 场景模式",
+                    description="",
+                    fault_time="2026-05-25 16:50:41",
+                    selected_input=log_root,
+                    prepared_input=log_root,
+                    source_evidence_path=None,
+                    html_path=Path(tmp) / "bug_custom_skill_report.html",
+                    json_path=Path(tmp) / "bug_custom_skill_report.json",
+                    analysis_dir=Path(tmp) / "custom_skill_analysis",
+                    progress_callback=progress_events.append,
+                    timeout=30,
+                )
+
+        structured_details = [
+            event["details"]
+            for event in progress_events
+            if event.get("details", {}).get("app_server_event_kind")
+        ]
+        self.assertTrue(structured_details)
+        self.assertEqual(structured_details[0]["app_server_event_kind"], "tool_call")
+        self.assertEqual(structured_details[0]["app_server_item_type"], "commandExecution")
+        self.assertEqual(structured_details[0]["app_server_tool_name"], "command")
+        self.assertIn("rg scene", structured_details[0]["app_server_summary"])
+        self.assertEqual(structured_details[1]["app_server_event_kind"], "plan_update")
+        self.assertEqual(structured_details[1]["app_server_plan_step_count"], 1)
 
     def test_app_server_policy_honors_disable_node_repl_under_minimal_home(self):
         # Regression: 1219603 flipped disable_node_repl to False whenever

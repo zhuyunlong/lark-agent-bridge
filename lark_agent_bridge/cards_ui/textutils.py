@@ -17,7 +17,7 @@ def _progress_lines(progress: list[dict[str, Any]], *, limit: int = 6) -> list[s
         item
         for item in progress
         if isinstance(item, dict)
-        and not str(item.get("stage") or "").strip().startswith("bug_agent_summary_stream")
+        and not _is_stream_progress_stage(str(item.get("stage") or "").strip())
     ]
     for item in normal_items[-limit:]:
         if not isinstance(item, dict):
@@ -48,12 +48,14 @@ def _stream_lines(progress: list[dict[str, Any]], *, limit: int = 6, max_line_ch
         if not isinstance(item, dict):
             continue
         stage = str(item.get("stage") or "").strip()
-        if not stage.startswith("bug_agent_summary_stream"):
+        if not _is_stream_progress_stage(stage):
             continue
         details = item.get("details")
         stream_text = ""
         if isinstance(details, dict):
-            stream_text = str(details.get("stream_preview") or details.get("stream_text") or "").strip()
+            stream_text = _structured_stream_text(details)
+            if not stream_text:
+                stream_text = str(details.get("stream_preview") or details.get("stream_text") or "").strip()
         if not stream_text:
             stream_text = str(item.get("message") or "").strip()
         if not stream_text:
@@ -66,6 +68,62 @@ def _stream_lines(progress: list[dict[str, Any]], *, limit: int = 6, max_line_ch
             stream_text = stream_text[: max_line_chars - 1].rstrip() + "…"
         lines.append(f"{time_prefix} {stream_text}".strip())
     return lines[-limit:]
+
+
+def _is_stream_progress_stage(stage: str) -> bool:
+    return (
+        stage.startswith("bug_agent_summary_stream")
+        or stage.endswith("_agent_analysis_stream")
+        or stage.endswith("_summary_stream")
+    )
+
+
+def _structured_stream_text(details: dict[str, Any]) -> str:
+    kind = str(details.get("app_server_event_kind") or "").strip()
+    if not kind:
+        return ""
+    summary = str(details.get("app_server_summary") or details.get("stream_preview") or "").strip()
+    if kind == "tool_call":
+        item_type = str(details.get("app_server_item_type") or "").strip()
+        if item_type == "commandExecution":
+            command = summary.removeprefix("Codex command ").strip()
+            return f"工具调用：执行命令 {command}" if command else "工具调用：执行命令"
+        tool_name = str(details.get("app_server_tool_name") or "").strip()
+        return f"工具调用：{tool_name}" if tool_name else "工具调用"
+    if kind == "plan_update":
+        text = summary.removeprefix("Codex plan ").strip()
+        return f"计划更新：{text}" if text else "计划更新"
+    if kind == "token_usage":
+        total = details.get("app_server_total_tokens")
+        input_tokens = details.get("app_server_input_tokens")
+        cached = details.get("app_server_cached_input_tokens")
+        output = details.get("app_server_output_tokens")
+        parts: list[str] = []
+        if isinstance(total, int):
+            parts.append(f"总 {total}")
+        if isinstance(input_tokens, int):
+            parts.append(f"输入 {input_tokens}")
+        if isinstance(cached, int):
+            parts.append(f"缓存 {cached}")
+        if isinstance(output, int):
+            parts.append(f"输出 {output}")
+        return "Token：" + "，".join(parts) if parts else "Token 用量更新"
+    if kind == "diff_update":
+        line_count = details.get("app_server_diff_lines")
+        if isinstance(line_count, int) and line_count > 0:
+            return f"代码变更：diff {line_count} 行"
+        return "代码变更更新"
+    if kind == "agent_delta":
+        text = summary
+        for prefix in ("Codex text delta ", "Codex 文本 "):
+            text = text.removeprefix(prefix).strip()
+        return text or summary
+    if kind == "agent_message":
+        text = summary.removeprefix("Codex ").strip()
+        return text or summary
+    if kind == "runtime_notice":
+        return summary
+    return ""
 
 
 def _sanitize_code_block_text(value: str) -> str:

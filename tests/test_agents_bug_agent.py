@@ -3,6 +3,52 @@ from _agents_base import _AgentTestBase
 
 
 class AgentsBugAgentTests(_AgentTestBase):
+    def test_bug_summary_direct_api_failure_redacts_exception_details(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = BridgeConfig(dry_run=False, data_dir=Path(tmp), workspace_root=Path(tmp))
+            config.ai_provider.enabled = True
+            config.ai_provider.base_url = "https://example.invalid/v1"
+            config.ai_provider.primary_model = "demo"
+            runner = BugAnalysisRunner(config)
+            request_artifact = Path(tmp) / "bug_agent_request.md"
+            metadata_path = Path(tmp) / "bug_metadata.md"
+            output_path = Path(tmp) / "bug_agent_summary.md"
+            request_artifact.write_text("request", encoding="utf-8")
+            metadata_path.write_text("metadata", encoding="utf-8")
+            sensitive_detail = "Authorization: Bearer upstream-secret"
+
+            cases = (
+                (LLMClientError(sensitive_detail), "direct_api_error", "LLMClientError"),
+                (RuntimeError(sensitive_detail), "direct_api_unexpected", "RuntimeError"),
+            )
+            for error, expected_code, expected_type in cases:
+                with self.subTest(error_type=expected_type):
+                    progress_events: list[dict[str, object]] = []
+                    with mock.patch("lark_agent_bridge.agents.llm_client.LLMClient") as client_cls:
+                        client = client_cls.return_value
+                        client.is_available.return_value = True
+                        client.generate_summary.side_effect = error
+
+                        result = runner._run_bug_agent_summary_via_api(
+                            request_text="分析启动失败",
+                            request_artifact=request_artifact,
+                            metadata_path=metadata_path,
+                            output_path=output_path,
+                            progress_callback=progress_events.append,
+                        )
+
+                    failed_event = next(
+                        item for item in progress_events if item["stage"] == "bug_agent_summary_failed"
+                    )
+                    exposed_payload = json.dumps(
+                        {"result": result, "progress": failed_event},
+                        ensure_ascii=False,
+                    )
+                    self.assertNotIn(sensitive_detail, exposed_payload)
+                    self.assertEqual(result["error"], expected_code)
+                    self.assertEqual(failed_event["details"]["error"], expected_code)
+                    self.assertEqual(failed_event["details"]["error_type"], expected_type)
+
     def test_bug_summary_direct_api_failure_does_not_fallback_to_file_agent_by_default(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = BridgeConfig(dry_run=False, data_dir=Path(tmp), workspace_root=Path(tmp))

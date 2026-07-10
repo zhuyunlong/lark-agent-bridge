@@ -30,6 +30,7 @@ CHAT_ID = "oc_d977fe30a92c7ac81e3e6b543d99ef5b"
 BOT_MENTION = "@朱云龙的飞书 CLI"
 POLL_INTERVAL = 15          # seconds between status polls
 MAX_WAIT      = 600         # max seconds to wait for bot completion
+APP_SERVER_MAX_WAIT = 900   # app-server analysis can spend ~10 min before final card upload
 
 # Test data – 3D scene signal bug
 BUG_URL_3D = "https://project.feishu.cn/xpfailuremgmt/buglo/detail/6998811703"
@@ -104,7 +105,7 @@ def find_bot_card_reply(user_msg_id: str, timeout: int = MAX_WAIT) -> Optional[d
     done_re = re.compile(r"\*\*当前状态：\*\*\s*✅ 已完成")
     running_re = re.compile(r"\*\*当前状态：\*\*\s*[🔍🟡]?\s*(分析中|处理中)")
     deadline = time.time() + timeout
-    while time.time() < deadline:
+    while True:
         msgs = list_messages(page_size=20)
         for msg in msgs:
             if (
@@ -124,8 +125,10 @@ def find_bot_card_reply(user_msg_id: str, timeout: int = MAX_WAIT) -> Optional[d
                 # still running
                 if running_re.search(content):
                     break  # wait more
-        time.sleep(POLL_INTERVAL)
-    return None
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            return None
+        time.sleep(min(POLL_INTERVAL, remaining))
 
 
 def card_completed(content: str) -> bool:
@@ -199,7 +202,7 @@ def test_auto_app_server_investigation() -> TestResult:
     user_msg_id = send_message(msg_text)
     print(f"  → Sent: {user_msg_id}")
 
-    card = find_bot_card_reply(user_msg_id)
+    card = find_bot_card_reply(user_msg_id, timeout=APP_SERVER_MAX_WAIT)
     elapsed = time.time() - t0
 
     if card is None:
@@ -221,7 +224,7 @@ def test_full_skill_app_server_investigation() -> TestResult:
     user_msg_id = send_message(msg_text)
     print(f"  → Sent: {user_msg_id}")
 
-    card = find_bot_card_reply(user_msg_id)
+    card = find_bot_card_reply(user_msg_id, timeout=APP_SERVER_MAX_WAIT)
     elapsed = time.time() - t0
 
     if card is None:

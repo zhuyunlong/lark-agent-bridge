@@ -37,8 +37,10 @@ class FakeAppServerInvestigationRunner:
         self.html_path = html_path
         self.requests = []
 
-    def run(self, request, *, event=None, progress_callback=None):
-        self.requests.append({"request": request, "event": event, "progress_callback": progress_callback})
+    def run(self, request, *, event=None, progress_callback=None, control=None):
+        self.requests.append(
+            {"request": request, "event": event, "progress_callback": progress_callback, "control": control}
+        )
         self.html_path.write_text("<html><body>auto investigation</body></html>", encoding="utf-8")
         return TaskResult(
             success=True,

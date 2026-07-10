@@ -15,6 +15,7 @@ from .models import AppServerInvestigationRequest, BridgeConfig, DownloadResourc
 from .reporting.app_server_report_html import _first_section, render_app_server_report
 from .skill_manager import SkillManager, SkillRecord
 from .token_usage import normalize_token_usage
+from .agents.codex_app_server_runtime import CodexAppServerTurnController
 
 
 @dataclass(slots=True)
@@ -59,6 +60,7 @@ class AppServerInvestigationRunner:
         *,
         event: LarkEvent | None = None,
         progress_callback: Callable[[dict[str, object]], None] | None = None,
+        control: CodexAppServerTurnController | None = None,
     ) -> TaskResult:
         options = self.config.bug_analysis.app_server_investigation
         if not options.enabled:
@@ -97,7 +99,13 @@ class AppServerInvestigationRunner:
             )
         if isinstance(prepared_or_result, TaskResult):
             return prepared_or_result
-        return self._run_prepared(prepared_or_result, event=event, progress_callback=progress_callback)
+        if control is not None and control.is_cancelled:
+            return self._cancelled_result(
+                prepared_or_result,
+                started=time.monotonic(),
+                reason=control.cancel_reason,
+            )
+        return self._run_prepared(prepared_or_result, event=event, progress_callback=progress_callback, control=control)
 
     def _prepare_bug_request(
         self,
@@ -416,6 +424,7 @@ class AppServerInvestigationRunner:
         *,
         event: LarkEvent | None,
         progress_callback: Callable[[dict[str, object]], None] | None,
+        control: CodexAppServerTurnController | None = None,
     ) -> TaskResult:
         started = time.monotonic()
         context_path, context_json_path, context_payload = self._write_context_files(prepared)
@@ -441,21 +450,24 @@ class AppServerInvestigationRunner:
             bug_url=prepared.bug_url,
             output_path=str(output_path),
         )
-        result = self.bug_runner._run_custom_skill_agent_via_codex_app_server(
-            analysis_kind="app_server_investigation",
-            skill_name="app_server_investigation",
-            prompt_text=prompt,
-            cwd=self._analysis_cwd(prepared),
-            command_path=command_path,
-            stdout_path=stdout_path,
-            stderr_path=stderr_path,
-            events_path=events_path,
-            progress_callback=progress_callback,
-            timeout=int(self.config.codex_app_server.turn_timeout_seconds or self.config.bug_analysis.timeout_seconds),
-            bridge_session_id=prepared.bridge_session_id,
-            model_override=self.config.bug_analysis.app_server_investigation.model,
-            reasoning_effort_override=self.config.bug_analysis.app_server_investigation.reasoning_effort,
-        )
+        run_kwargs: dict[str, object] = {
+            "analysis_kind": "app_server_investigation",
+            "skill_name": "app_server_investigation",
+            "prompt_text": prompt,
+            "cwd": self._analysis_cwd(prepared),
+            "command_path": command_path,
+            "stdout_path": stdout_path,
+            "stderr_path": stderr_path,
+            "events_path": events_path,
+            "progress_callback": progress_callback,
+            "timeout": int(self.config.codex_app_server.turn_timeout_seconds or self.config.bug_analysis.timeout_seconds),
+            "bridge_session_id": prepared.bridge_session_id,
+            "model_override": self.config.bug_analysis.app_server_investigation.model,
+            "reasoning_effort_override": self.config.bug_analysis.app_server_investigation.reasoning_effort,
+        }
+        if control is not None:
+            run_kwargs["app_server_control"] = control
+        result = self.bug_runner._run_custom_skill_agent_via_codex_app_server(**run_kwargs)
         usage = normalize_token_usage(result.get("usage") if isinstance(result.get("usage"), dict) else None)
         if not result.get("ok"):
             details = {
@@ -547,6 +559,32 @@ class AppServerInvestigationRunner:
                 "app_server_turn_id": str(result.get("turn_id") or ""),
                 **_app_server_usage_details(usage),
                 "files_to_send": [html_path],
+            },
+        )
+
+    def _cancelled_result(
+        self,
+        prepared: PreparedAppServerInvestigation,
+        *,
+        started: float,
+        reason: str,
+    ) -> TaskResult:
+        message = f"AI 自主分析已取消：{reason or '用户要求停止当前 AI 自主分析。'}"
+        return TaskResult(
+            success=False,
+            message=message,
+            job_id=prepared.context.job_id,
+            job_dir=prepared.context.job_dir,
+            duration_seconds=time.monotonic() - started,
+            error_code="app_server_investigation_cancelled",
+            details={
+                "mode": "app_server_investigation",
+                "bug_url": prepared.bug_url,
+                "trigger_mode": prepared.trigger_mode,
+                "trigger_term": prepared.trigger_term,
+                "source_mode": "app_server_autonomous",
+                "context_profile": "app_server_autonomous",
+                "classification_source": "configured_app_server_investigation",
             },
         )
 

@@ -474,6 +474,7 @@ class AgentActivityStore:
             session = self._sessions.get(key, {"session_id": key, "progress": [], "started_at": now})
             was_cancelled = str(session.get("status") or "") == "cancelled"
             cancelled_message = str(session.get("message") or "")
+            cancelled_error_code = str(session.get("error_code") or "cancelled")
             details = _jsonable_limited(result.details)
             report_url = ""
             if isinstance(details, dict):
@@ -490,7 +491,7 @@ class AgentActivityStore:
                     "mode": str(result.details.get("mode") or ""),
                     "success": False if was_cancelled else result.success,
                     "skipped": result.skipped,
-                    "error_code": "cancelled_by_admin" if was_cancelled else result.error_code or "",
+                    "error_code": cancelled_error_code if was_cancelled else result.error_code or "",
                     "message": _trim_text(cancelled_message or result.message, 4000) if was_cancelled else _trim_text(result.message, 4000),
                     "job_id": result.job_id or "",
                     "job_dir": str(result.job_dir or ""),
@@ -517,6 +518,9 @@ class AgentActivityStore:
         *,
         reason: str = "",
         terminated_processes: list[dict[str, Any]] | None = None,
+        stage: str = "admin_task_terminate_requested",
+        executor: str = "后台管理页",
+        error_code: str = "cancelled_by_admin",
     ) -> dict[str, Any] | None:
         normalized = session_id.strip()
         if not normalized:
@@ -530,14 +534,14 @@ class AgentActivityStore:
             if not isinstance(progress, list):
                 progress = []
                 session["progress"] = progress
-            message = reason.strip() or "后台管理页请求终止任务。"
+            message = reason.strip() or f"{executor or '系统'}请求终止任务。"
             progress.append(
                 {
                     "timestamp": now,
-                    "stage": "admin_task_terminate_requested",
+                    "stage": stage or "admin_task_terminate_requested",
                     "message": message,
                     "details": {
-                        "executor": "后台管理页",
+                        "executor": executor or "后台管理页",
                         "terminated_processes": _jsonable_limited(terminated_processes or []),
                     },
                 }
@@ -546,7 +550,7 @@ class AgentActivityStore:
             session["status"] = "cancelled"
             session["success"] = False
             session["skipped"] = False
-            session["error_code"] = "cancelled_by_admin"
+            session["error_code"] = error_code or "cancelled_by_admin"
             session["message"] = _trim_text(message, 4000)
             session["updated_at"] = now
             session["finished_at"] = now

@@ -40,6 +40,7 @@ class FakeApp:
         self.config = SimpleNamespace(command_prefixes=[])
         self._lock = threading.Lock()
         self.calls: list[tuple[str, dict]] = []
+        self.control_refs: set[str] = set()
         self.entered: threading.Event | None = None
         self.release: threading.Event | None = None
 
@@ -54,6 +55,9 @@ class FakeApp:
 
     def _looks_like_card_action_payload(self, payload: dict) -> bool:
         return _looks_like_card(payload)
+
+    def is_app_server_control_payload(self, payload: dict) -> bool:
+        return str(payload.get("reply_to") or "") in self.control_refs
 
 
 def _p2p_text(
@@ -114,6 +118,15 @@ class TestClassification:
         d = EventDispatcher(FakeApp(), max_workers=1)
         weight, _ = d._classify(_group_text("你是谁"))
         assert weight == "heavy"
+
+    def test_reply_to_running_app_server_control_is_light(self):
+        app = FakeApp()
+        app.control_refs.add("mRunning")
+        d = EventDispatcher(app, max_workers=1)
+
+        weight, _ = d._classify(_group_text("@bot 停止", message_id="mCancel", reply_to="mRunning"))
+
+        assert weight == "light"
 
     def test_p2p_reply_is_heavy(self):
         d = EventDispatcher(FakeApp(), max_workers=1)

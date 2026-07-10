@@ -67,6 +67,8 @@ from .._helpers import (
 from ..bug_summary_policy import SummaryBackendInput, choose_summary_backend
 from ..codex_app_server_runtime import (
     CodexAppServerRuntime,
+    CodexAppServerTurnController,
+    app_server_event_progress,
     app_server_event_preview,
     check_codex_app_server_available,
 )
@@ -733,6 +735,8 @@ __all__ = [
     'SummaryBackendInput',
     'choose_summary_backend',
     'CodexAppServerRuntime',
+    'CodexAppServerTurnController',
+    'app_server_event_progress',
     'app_server_event_preview',
     'check_codex_app_server_available',
     'OmlxChatClient',

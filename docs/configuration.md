@@ -305,6 +305,9 @@ Behavior:
 - when lark-cli reconnects and replays old messages, `drop_stale_light_interactions = true` skips only stale help/identity/chat interactions created before listener readiness; Bug links, logs, files, signals, and follow-up analysis requests are not dropped by this guard
 - the latest daemon status is stored in `data/state/agent_activity.json`
 - card buttons that trigger bridge work require the `card.action.trigger` event. When the listener is configured for the default `im.message.receive_v1` message event, result cards hide Skill correction, reanalysis, continue-Agent, and feedback buttons so the UI does not expose inactive controls.
+- bot menu clicks require `application.bot.menu_v6`. The bridge recognizes `menu` / `help` as the deterministic help entry and `stop` as a light-weight stop command for the single running Codex app-server analysis.
+- Feishu reactions and recalls are optional control events: `im.message.reaction.created_v1` can turn a `ThumbsUp` / `Like` reaction on a running app-server root/progress message into a steer signal, while `im.message.recalled_v1` cancels only when the recalled message is the active app-server root message. Unmatched reactions/recalls are ignored.
+- callback-like interactions use a 10-minute in-memory idempotency window keyed by Feishu `request_id` first, then `event_id`. Card callbacks that include `card_lifecycle_id` or `action_revision` are skipped as stale only when the bridge has a newer local stamp for that card/session.
 
 ## Approval cards
 

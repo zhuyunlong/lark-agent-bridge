@@ -51,6 +51,8 @@ class _DispatchApp(Protocol):
 
     def _looks_like_card_action_payload(self, payload: dict[str, object]) -> bool: ...
 
+    def is_app_server_control_payload(self, payload: dict[str, object]) -> bool: ...
+
 
 class ChatSessionLock:
     """Per-key lock so heavy tasks sharing a serialization key stay serialized
@@ -192,6 +194,9 @@ class EventDispatcher:
                 weight = "heavy" if action in _HEAVY_CARD_ACTIONS else "light"
                 return weight, action_event.chat_id
             event = LarkEvent.from_dict(payload)
+            is_control = getattr(self._app, "is_app_server_control_payload", None)
+            if callable(is_control) and is_control(payload):
+                return "light", event.chat_id
             if self._is_light_event(event):
                 return "light", event.chat_id
             return "heavy", event.chat_id

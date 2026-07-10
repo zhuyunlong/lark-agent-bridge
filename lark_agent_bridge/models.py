@@ -9,6 +9,8 @@ from pathlib import Path
 import re
 from typing import Any
 
+from .interaction_events import MessageRecalledEvent, ReactionEvent
+
 
 @dataclass(slots=True)
 class SignalResolverOptions:
@@ -484,6 +486,10 @@ class LarkEvent:
     parent_id: str = ""
     root_id: str = ""
     thread_id: str = ""
+    inbound_request_id: str = ""
+    event_type: str = ""
+    event_create_time: str = ""
+    open_message_id: str = ""
     raw: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -519,7 +525,92 @@ class LarkEvent:
             parent_id=str(payload.get("parent_id") or message.get("parent_id") or ""),
             root_id=str(payload.get("root_id") or message.get("root_id") or ""),
             thread_id=str(payload.get("thread_id") or message.get("thread_id") or ""),
+            inbound_request_id=_safe_callback_identifier(_payload_request_id(payload, event_body)),
+            event_type=str(payload.get("event_type") or header.get("event_type") or ""),
+            event_create_time=str(payload.get("event_create_time") or header.get("create_time") or ""),
+            open_message_id=_safe_callback_identifier(
+                payload.get("open_message_id") or message.get("open_message_id") or message.get("message_id") or ""
+            ),
             raw=payload,
+        )
+
+
+@dataclass(slots=True)
+class BotMenuEvent:
+    event_id: str
+    menu_key: str
+    operator_id: str = ""
+    chat_id: str = ""
+    chat_type: str = "p2p"
+    inbound_request_id: str = ""
+    event_type: str = ""
+    event_create_time: str = ""
+    menu_click_time: str = ""
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "BotMenuEvent":
+        header = payload.get("header") or {}
+        event_body = payload.get("event") or payload
+        operator = event_body.get("operator") or {}
+        operator_id = event_body.get("operator_id") or ""
+        if isinstance(operator_id, dict):
+            operator_id = operator_id.get("open_id") or operator_id.get("user_id") or ""
+        if not operator_id and isinstance(operator, dict):
+            nested_operator_id = operator.get("operator_id") or {}
+            if isinstance(nested_operator_id, dict):
+                operator_id = (
+                    nested_operator_id.get("open_id")
+                    or nested_operator_id.get("user_id")
+                    or nested_operator_id.get("union_id")
+                    or ""
+                )
+        chat_id = (
+            event_body.get("open_chat_id")
+            or event_body.get("chat_id")
+            or payload.get("open_chat_id")
+            or payload.get("chat_id")
+            or ""
+        )
+        return cls(
+            event_id=str(payload.get("event_id") or header.get("event_id") or ""),
+            menu_key=_safe_card_action(
+                event_body.get("event_key")
+                or event_body.get("menu_key")
+                or event_body.get("key")
+                or payload.get("event_key")
+                or payload.get("menu_key")
+                or ""
+            ),
+            operator_id=_safe_callback_identifier(operator_id),
+            chat_id=_safe_callback_identifier(chat_id),
+            chat_type=_safe_chat_type(event_body.get("chat_type") or payload.get("chat_type") or "") or "p2p",
+            inbound_request_id=_safe_callback_identifier(_payload_request_id(payload, event_body)),
+            event_type=str(payload.get("event_type") or header.get("event_type") or ""),
+            event_create_time=str(payload.get("event_create_time") or header.get("create_time") or ""),
+            menu_click_time=str(event_body.get("timestamp") or payload.get("timestamp") or ""),
+            raw=payload,
+        )
+
+    @property
+    def is_valid(self) -> bool:
+        return bool(self.event_id and self.menu_key and self.operator_id)
+
+    def to_lark_event(self, *, content: str) -> LarkEvent:
+        return LarkEvent(
+            event_id=self.event_id,
+            message_id="",
+            chat_id=self.chat_id,
+            chat_type=self.chat_type,
+            sender_id=self.operator_id,
+            message_type="bot_menu",
+            content=content,
+            create_time=self.menu_click_time,
+            timestamp=self.event_create_time,
+            inbound_request_id=self.inbound_request_id,
+            event_type=self.event_type,
+            event_create_time=self.event_create_time,
+            raw=self.raw,
         )
 
 
@@ -537,6 +628,12 @@ class CardActionEvent:
     chat_type: str = ""
     operator_id: str = ""
     followup_text: str = ""
+    inbound_request_id: str = ""
+    event_type: str = ""
+    event_create_time: str = ""
+    open_message_id: str = ""
+    card_lifecycle_id: str = ""
+    action_revision: int = 0
     raw: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -600,8 +697,38 @@ class CardActionEvent:
             ),
             operator_id=_safe_callback_identifier(operator_id),
             followup_text=_safe_callback_text(typed_followup_text or value.get("followup_text") or ""),
+            inbound_request_id=_safe_callback_identifier(_payload_request_id(payload, event_body)),
+            event_type=str(payload.get("event_type") or header.get("event_type") or ""),
+            event_create_time=str(payload.get("event_create_time") or header.get("create_time") or ""),
+            open_message_id=_safe_callback_identifier(context.get("open_message_id") or context.get("message_id") or ""),
+            card_lifecycle_id=_safe_callback_identifier(
+                value.get("card_lifecycle_id")
+                or value.get("card_daemon_lifecycle_id")
+                or value.get("daemon_lifecycle_id")
+                or action_body.get("card_lifecycle_id")
+                or action_body.get("card_daemon_lifecycle_id")
+                or action_body.get("daemon_lifecycle_id")
+                or ""
+            ),
+            action_revision=_safe_nonnegative_int(
+                value.get("action_revision")
+                or value.get("request_revision")
+                or value.get("revision")
+                or action_body.get("action_revision")
+                or 0
+            ),
             raw=payload,
         )
+
+
+def _payload_request_id(payload: dict[str, Any], event_body: dict[str, Any]) -> Any:
+    return (
+        payload.get("request_id")
+        or payload.get("requestId")
+        or event_body.get("request_id")
+        or event_body.get("requestId")
+        or ""
+    )
 
 
 def _card_action_form_value(
@@ -964,6 +1091,17 @@ def _safe_card_action(value: Any) -> str:
     if not text or not _CARD_ACTION_RE.fullmatch(text):
         return ""
     return text
+
+
+def _safe_nonnegative_int(value: Any) -> int:
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return value if value >= 0 else 0
+    text = str(value or "").strip()
+    if not text or not text.isdigit():
+        return 0
+    return int(text)
 
 
 def _safe_callback_text(value: Any, *, max_chars: int = 1000) -> str:

@@ -65,6 +65,71 @@ class _PendingRequest:
     response_queue: queue.Queue[dict[str, object]]
 
 
+class CodexAppServerTurnController:
+    """Thread-safe control channel for one running app-server turn."""
+
+    def __init__(self, *, session_id: str = "") -> None:
+        self.session_id = session_id.strip()
+        self._actions: queue.Queue[dict[str, object]] = queue.Queue()
+        self._lock = threading.Lock()
+        self._thread_id = ""
+        self._turn_id = ""
+        self._cancel_reason = ""
+
+    def bind(self, *, thread_id: str, turn_id: str) -> None:
+        with self._lock:
+            self._thread_id = thread_id.strip()
+            self._turn_id = turn_id.strip()
+
+    def steer(self, text: str, *, source_message_id: str = "", actor_id: str = "") -> bool:
+        cleaned = " ".join(str(text or "").split()).strip()
+        if not cleaned:
+            return False
+        with self._lock:
+            if self._cancel_reason:
+                return False
+            self._actions.put(
+                {
+                    "kind": "steer",
+                    "text": cleaned,
+                    "source_message_id": source_message_id.strip(),
+                    "actor_id": actor_id.strip(),
+                }
+            )
+        return True
+
+    def cancel(self, reason: str = "", *, source_message_id: str = "", actor_id: str = "") -> bool:
+        cleaned = " ".join(str(reason or "").split()).strip() or "用户要求停止当前 AI 自主分析。"
+        with self._lock:
+            if not self._cancel_reason:
+                self._cancel_reason = cleaned
+        self._actions.put(
+            {
+                "kind": "cancel",
+                "reason": cleaned,
+                "source_message_id": source_message_id.strip(),
+                "actor_id": actor_id.strip(),
+            }
+        )
+        return True
+
+    def take_action(self) -> dict[str, object] | None:
+        try:
+            return self._actions.get_nowait()
+        except queue.Empty:
+            return None
+
+    @property
+    def is_cancelled(self) -> bool:
+        with self._lock:
+            return bool(self._cancel_reason)
+
+    @property
+    def cancel_reason(self) -> str:
+        with self._lock:
+            return self._cancel_reason
+
+
 def parse_codex_version(output: str) -> tuple[int, int, int] | None:
     match = re.search(r"(\d+)\.(\d+)\.(\d+)", output or "")
     if not match:
@@ -154,6 +219,12 @@ def app_server_event_preview(event: dict[str, object]) -> str:
         if name and status:
             return f"MCP {name} {status}"
         return ""
+    if method == "turn/plan/updated":
+        progress = app_server_event_progress(event)
+        return str(progress.get("app_server_summary") or "")
+    if method == "turn/diff/updated":
+        progress = app_server_event_progress(event)
+        return str(progress.get("app_server_summary") or "")
     if method in {"hook/started", "hook/completed"}:
         run = params.get("run") or {}
         if isinstance(run, dict):
@@ -194,6 +265,136 @@ def app_server_event_preview(event: dict[str, object]) -> str:
     if method == "item/agentMessage/delta":
         return ""
     return ""
+
+
+def app_server_event_progress(event: dict[str, object]) -> dict[str, object]:
+    method = str(event.get("method") or "")
+    params = event.get("params") or {}
+    if not isinstance(params, dict):
+        params = {}
+    details: dict[str, object] = {
+        "app_server_method": method,
+    }
+    thread_id = str(params.get("threadId") or "").strip()
+    turn_id = str(params.get("turnId") or "").strip()
+    if thread_id:
+        details["app_server_thread_id"] = thread_id
+    if turn_id:
+        details["app_server_turn_id"] = turn_id
+
+    if method == "thread/tokenUsage/updated":
+        token_usage = params.get("tokenUsage") or {}
+        if not isinstance(token_usage, dict):
+            return {}
+        total = token_usage.get("total") or {}
+        if not isinstance(total, dict):
+            return {}
+        details["app_server_event_kind"] = "token_usage"
+        for source_key, target_key in (
+            ("totalTokens", "app_server_total_tokens"),
+            ("inputTokens", "app_server_input_tokens"),
+            ("cachedInputTokens", "app_server_cached_input_tokens"),
+            ("outputTokens", "app_server_output_tokens"),
+            ("reasoningOutputTokens", "app_server_reasoning_output_tokens"),
+        ):
+            value = total.get(source_key)
+            if isinstance(value, int):
+                details[target_key] = value
+        summary = app_server_event_preview(event)
+        if summary:
+            details["app_server_summary"] = summary
+        return details
+
+    if method == "turn/plan/updated":
+        explanation = _compact_text(str(params.get("explanation") or ""), max_chars=140)
+        plan = params.get("plan") or []
+        steps = plan if isinstance(plan, list) else []
+        details["app_server_event_kind"] = "plan_update"
+        details["app_server_plan_step_count"] = len(steps)
+        if explanation:
+            details["app_server_summary"] = f"Codex plan {explanation}"
+        elif steps:
+            first_step = steps[0] if isinstance(steps[0], dict) else {}
+            step_text = _compact_text(str(first_step.get("step") or ""), max_chars=120)
+            details["app_server_summary"] = f"Codex plan {step_text}" if step_text else "Codex plan updated"
+        else:
+            details["app_server_summary"] = "Codex plan updated"
+        return details
+
+    if method == "turn/diff/updated":
+        diff = str(params.get("diff") or "")
+        line_count = len(diff.splitlines()) if diff else 0
+        details["app_server_event_kind"] = "diff_update"
+        details["app_server_diff_lines"] = line_count
+        details["app_server_summary"] = f"Codex diff updated lines={line_count}" if line_count else "Codex diff updated"
+        return details
+
+    if method in {"item/started", "item/completed"}:
+        item = params.get("item") or {}
+        if not isinstance(item, dict):
+            return {}
+        item_type = str(item.get("type") or "")
+        if not item_type:
+            return {}
+        details["app_server_item_type"] = item_type
+        item_id = str(item.get("id") or "").strip()
+        status = str(item.get("status") or "").strip()
+        if item_id:
+            details["app_server_item_id"] = item_id
+        if status:
+            details["app_server_status"] = status
+        if item_type in _TOOL_ITEM_TYPES:
+            details["app_server_event_kind"] = "tool_call"
+            if item_type == "commandExecution":
+                command = _unwrap_shell_command(str(item.get("command") or ""))
+                details["app_server_tool_name"] = "command"
+                if command:
+                    details["app_server_summary"] = f"Codex command {command}"
+            elif item_type == "dynamicToolCall":
+                tool = str(item.get("tool") or "").strip()
+                details["app_server_tool_name"] = tool or "dynamic_tool"
+                details["app_server_summary"] = f"Codex tool {tool}" if tool else "Codex tool call"
+            elif item_type == "mcpToolCall":
+                server = str(item.get("server") or "mcp").strip() or "mcp"
+                tool = str(item.get("tool") or "").strip()
+                details["app_server_tool_name"] = f"{server}.{tool}" if tool else server
+                details["app_server_mcp_server"] = server
+                details["app_server_summary"] = f"Codex MCP {server}.{tool}" if tool else f"Codex MCP {server}"
+            elif item_type == "fileChange":
+                details["app_server_tool_name"] = "file_change"
+                details["app_server_summary"] = "Codex file change request"
+            return details
+        if item_type == "agentMessage":
+            phase = str(item.get("phase") or "").strip()
+            text = _compact_text(str(item.get("text") or ""), max_chars=160)
+            details["app_server_event_kind"] = "agent_message"
+            if phase:
+                details["app_server_message_phase"] = phase
+            if text:
+                details["app_server_summary"] = f"Codex {phase} {text}" if phase else f"Codex message {text}"
+            return details
+        return {}
+
+    if method == "item/agentMessage/delta":
+        delta = _compact_text(str(params.get("delta") or ""), max_chars=160)
+        if not delta:
+            return {}
+        details["app_server_event_kind"] = "agent_delta"
+        item_id = str(params.get("itemId") or "").strip()
+        if item_id:
+            details["app_server_item_id"] = item_id
+        details["app_server_summary"] = f"Codex text delta {delta}"
+        return details
+
+    if method in {"error", "warning", "mcpServer/startupStatus/updated", "hook/started", "hook/completed"}:
+        summary = app_server_event_preview(event)
+        if not summary:
+            return {}
+        details["app_server_event_kind"] = "runtime_notice"
+        details["app_server_summary"] = summary
+        return details
+
+    return {}
 
 
 class CodexAppServerClient:
@@ -466,6 +667,7 @@ class CodexAppServerRuntime:
         prompt: str,
         *,
         on_event: Callable[[dict[str, object]], None] | None = None,
+        control: CodexAppServerTurnController | None = None,
     ) -> CodexAppServerResult:
         started = time.monotonic()
         client = self.client_factory(
@@ -523,6 +725,8 @@ class CodexAppServerRuntime:
                 timeout=self.startup_timeout_seconds,
             )
             turn_id = _extract_turn_id(turn_result)
+            if control is not None:
+                control.bind(thread_id=thread_id, turn_id=turn_id)
             deadline = time.monotonic() + self.turn_timeout_seconds
             last_progress_at = time.monotonic()
 
@@ -534,6 +738,25 @@ class CodexAppServerRuntime:
                     break
 
                 now = time.monotonic()
+                control_action = control.take_action() if control is not None else None
+                if control_action is not None:
+                    kind = str(control_action.get("kind") or "")
+                    last_progress_at = now
+                    if kind == "steer":
+                        self._steer_turn(
+                            client,
+                            thread_id=thread_id,
+                            turn_id=turn_id,
+                            text=str(control_action.get("text") or ""),
+                        )
+                        continue
+                    if kind == "cancel":
+                        self._interrupt_turn(client, thread_id=thread_id, turn_id=turn_id)
+                        reason = str(control_action.get("reason") or control.cancel_reason if control is not None else "").strip()
+                        result_error = f"codex app-server turn cancelled: {reason or 'user requested cancellation'}"
+                        result_error_code = "codex_app_server_cancelled"
+                        should_retire = True
+                        break
                 # Any new stderr line counts as progress (e.g. silent reasoning
                 # that still logs), so long reasoning is not killed as a stall.
                 stderr_count = client.stderr_line_count()
@@ -712,6 +935,24 @@ class CodexAppServerRuntime:
             )
         except Exception:
             return
+
+    def _steer_turn(self, client: Any, *, thread_id: str, turn_id: str, text: str) -> bool:
+        cleaned = " ".join(str(text or "").split()).strip()
+        if not thread_id or not turn_id or not cleaned:
+            return False
+        try:
+            client.request(
+                "turn/steer",
+                {
+                    "threadId": thread_id,
+                    "expectedTurnId": turn_id,
+                    "input": [{"type": "text", "text": cleaned, "text_elements": []}],
+                },
+                timeout=5.0,
+            )
+            return True
+        except Exception:
+            return False
 
 
 def _extract_thread_id(result: dict[str, object]) -> str:

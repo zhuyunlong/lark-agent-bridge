@@ -162,12 +162,17 @@ class _RunPrimaryMixin:
 
         started = time.monotonic()
         try:
-            self._emit_progress(progress_callback, stage="bug_check_env", message="检查 meegle 环境")
-            env_status = self._run_json_command(
-                [str(self._bug_fetcher_script()), "check-env"],
-                timeout=60,
-                **bridge_kwargs,
-            )
+            _check_env_command = [str(self._bug_fetcher_script()), "check-env"]
+            self._emit_progress(progress_callback, stage="bug_check_env",
+                message="检查 meegle 环境", command=" ".join(_check_env_command))
+            _check_env_started = time.monotonic()
+            env_status = self._run_json_command(_check_env_command, timeout=60, **bridge_kwargs)
+            self._emit_progress(progress_callback, stage="bug_check_env_completed",
+                message=(f"meegle 环境检查完成（{time.monotonic() - _check_env_started:.1f}s, "
+                    f"installed={bool(env_status.get('meegle_installed'))}, auth_ok={bool(env_status.get('auth_ok'))}）"),
+                duration_seconds=round(time.monotonic() - _check_env_started, 2),
+                meegle_installed=bool(env_status.get("meegle_installed", False)),
+                auth_ok=bool(env_status.get("auth_ok", False)))
             if not env_status.get("meegle_installed", False):
                 return self._failure(
                     context=context,
@@ -187,14 +192,18 @@ class _RunPrimaryMixin:
                     progress_callback=progress_callback,
                 )
 
-            self._emit_progress(progress_callback, stage="bug_resolve_url", message="解析 bug 链接")
-            resolved = self._run_json_command(
-                [str(self._bug_fetcher_script()), "resolve-url", request.bug_url],
-                timeout=60,
-                **bridge_kwargs,
-            )
+            _resolve_url_command = [str(self._bug_fetcher_script()), "resolve-url", request.bug_url]
+            self._emit_progress(progress_callback, stage="bug_resolve_url",
+                message="解析 bug 链接", command=" ".join(_resolve_url_command), bug_url=request.bug_url)
+            _resolve_url_started = time.monotonic()
+            resolved = self._run_json_command(_resolve_url_command, timeout=60, **bridge_kwargs)
             project_key = str(resolved["project_key"])
             work_item_id = str(resolved["work_item_id"])
+            self._emit_progress(progress_callback, stage="bug_resolve_url_completed",
+                message=(f"已解析 bug 链接（{time.monotonic() - _resolve_url_started:.1f}s, "
+                    f"project_key={project_key}, work_item_id={work_item_id}）"),
+                duration_seconds=round(time.monotonic() - _resolve_url_started, 2),
+                project_key=project_key, work_item_id=work_item_id)
             bug_dir = self._bug_cache_dir(project_key, work_item_id)
             if bug_dir.exists() and not self._is_bug_cache_fresh(
                 bug_dir,
@@ -208,7 +217,12 @@ class _RunPrimaryMixin:
                 message="拉取 bug 详情和字段信息",
                 project_key=project_key,
                 work_item_id=work_item_id,
+                commands=[
+                    f"{self._bug_fetcher_script()} fetch-data {project_key} {work_item_id}",
+                    f"meegle workitem get --project-key {project_key} --work-item-id {work_item_id} --format json",
+                ],
             )
+            _fetch_data_started = time.monotonic()
             # Parallel fetch: bug data + full work item + signal catalog pre-warm
             with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
                 future_fetched = pool.submit(
@@ -231,6 +245,25 @@ class _RunPrimaryMixin:
             option_map = self._load_option_map(project_key, **bridge_kwargs)
             title = str(fetched.get("title", ""))
             description = self._bug_description(fetched)
+            _fetch_attachments = fetched.get("attachments", []) if isinstance(fetched, dict) else []
+            self._emit_progress(
+                progress_callback,
+                stage="bug_fetch_data_completed",
+                message=(
+                    f"已拉取 bug 详情（{time.monotonic() - _fetch_data_started:.1f}s, "
+                    f"title 长度={len(title)}, description 长度={len(description)}, "
+                    f"附件 {len(_fetch_attachments) if isinstance(_fetch_attachments, list) else 0} 个）"
+                ),
+                duration_seconds=round(time.monotonic() - _fetch_data_started, 2),
+                title=title[:120],
+                description_chars=len(description),
+                attachment_count=(len(_fetch_attachments) if isinstance(_fetch_attachments, list) else 0),
+                attachment_names=[
+                    str(item.get("name") or "")
+                    for item in (_fetch_attachments if isinstance(_fetch_attachments, list) else [])
+                    if isinstance(item, dict)
+                ][:8],
+            )
             stack_payload_text = self._bug_stack_payload_text(fetched, description)
             time_context = self._resolve_bug_time_context(
                 request_text=request_text,
@@ -342,7 +375,23 @@ class _RunPrimaryMixin:
                     bug_cache_dir=str(bug_dir),
                 )
             else:
-                self._emit_progress(progress_callback, stage="bug_download_logs", message="下载 bug 附件和日志")
+                _download_attachments = fetched.get("attachments", []) if isinstance(fetched, dict) else []
+                _attachment_names = [
+                    str(item.get("name") or "")
+                    for item in (_download_attachments if isinstance(_download_attachments, list) else [])
+                    if isinstance(item, dict)
+                ]
+                self._emit_progress(
+                    progress_callback,
+                    stage="bug_download_logs",
+                    message=(
+                        f"开始下载 bug 附件和日志（共 {len(_attachment_names)} 个）"
+                    ),
+                    attachment_count=len(_attachment_names),
+                    attachment_names=_attachment_names[:8],
+                    bug_cache_dir=str(bug_dir),
+                )
+                _download_started = time.monotonic()
                 download = self._download_bug_attachments(
                     project_key,
                     work_item_id,
@@ -350,6 +399,29 @@ class _RunPrimaryMixin:
                     fetched.get("attachments", []),
                     timeout=options.timeout_seconds,
                     **bridge_kwargs,
+                )
+                _downloaded_list = download.get("downloaded", []) if isinstance(download, dict) else []
+                _unzipped_list = download.get("unzipped", []) if isinstance(download, dict) else []
+                _errors_list = download.get("errors", []) if isinstance(download, dict) else []
+                _skipped_list = download.get("skipped", []) if isinstance(download, dict) else []
+                self._emit_progress(
+                    progress_callback,
+                    stage="bug_download_logs_completed",
+                    message=(
+                        f"附件下载完成（{time.monotonic() - _download_started:.1f}s, "
+                        f"成功 {len(_downloaded_list)}, 解压 {len(_unzipped_list)}, "
+                        f"失败 {len(_errors_list)}, 跳过 {len(_skipped_list)}）"
+                    ),
+                    duration_seconds=round(time.monotonic() - _download_started, 2),
+                    downloaded=list(_downloaded_list)[:8],
+                    downloaded_count=len(_downloaded_list),
+                    unzipped=list(_unzipped_list)[:8],
+                    unzipped_count=len(_unzipped_list),
+                    errors=list(_errors_list)[:8],
+                    error_count=len(_errors_list),
+                    skipped=list(_skipped_list)[:8],
+                    skipped_count=len(_skipped_list),
+                    bug_cache_dir=str(bug_dir),
                 )
                 selected_input = self._select_log_input(bug_dir, fetched)
             plan = plans[0]
@@ -379,10 +451,40 @@ class _RunPrimaryMixin:
                     progress_callback=progress_callback,
                 )
 
-            self._emit_progress(progress_callback, stage="bug_prepare_logs", message="准备日志输入")
+            _prepare_logs_started = time.monotonic()
+            _selected_input_path = str(selected_input) if selected_input else ""
+            _selected_input_kind = ""
+            if selected_input is not None:
+                if selected_input.is_dir():
+                    _selected_input_kind = "directory"
+                else:
+                    _selected_input_kind = (selected_input.suffix or "").lstrip(".") or "file"
+            self._emit_progress(
+                progress_callback,
+                stage="bug_prepare_logs",
+                message=(
+                    f"准备日志输入（{_selected_input_kind or '无'}: {Path(_selected_input_path).name if _selected_input_path else 'N/A'}）"
+                ),
+                selected_input=_selected_input_path,
+                selected_input_kind=_selected_input_kind,
+            )
             prepared_input = self._reuse_prepared_bug_input(selected_input) if selected_input else None
+            _reused_prepared = prepared_input is not None
             if prepared_input is None:
                 prepared_input = self._prepare_log_input(selected_input) if selected_input else None
+            _prepared_input_path = str(prepared_input) if prepared_input else ""
+            self._emit_progress(
+                progress_callback,
+                stage="bug_prepare_logs_completed",
+                message=(
+                    f"日志输入已准备（{time.monotonic() - _prepare_logs_started:.1f}s, "
+                    f"{'缓存命中' if _reused_prepared else '现解码'}）"
+                ),
+                duration_seconds=round(time.monotonic() - _prepare_logs_started, 2),
+                selected_input=_selected_input_path,
+                prepared_input=_prepared_input_path,
+                reused_prepared=_reused_prepared,
+            )
             self._write_bug_cache_metadata(
                 bug_dir,
                 bug_url=request.bug_url,
@@ -479,7 +581,10 @@ class _RunPrimaryMixin:
                     plan_label=self._analysis_label(current_plan.kind),
                     html_path=str(current_html),
                     json_path=str(current_json),
+                    command=" ".join(str(part) for part in (current_command or []))[:600],
+                    input_path=str(input_for_plan or bug_dir),
                 )
+                _run_analysis_started = time.monotonic()
                 if current_plan.kind == "general":
                     self._write_general_bug_report(
                         html_path=current_html,
@@ -588,7 +693,6 @@ class _RunPrimaryMixin:
                                 stage="ld_direct_api_fallback",
                                 message=f"LD direct_api 失败（{custom_result.get('error_code')}），切换 file_agent",
                                 error_code=str(custom_result.get("error_code") or ""),
-                                error_message=str(custom_result.get("message") or ""),
                             )
                             custom_result = self._run_custom_skill_agent_analysis(
                                 analysis_kind=current_plan.kind,
@@ -836,6 +940,24 @@ class _RunPrimaryMixin:
                     html_path = current_html
                     json_path = current_json
                     analysis_dir = current_analysis_dir
+                _run_analysis_duration = time.monotonic() - _run_analysis_started
+                _completed_returncode = getattr(completed, "returncode", 0) if "completed" in locals() else 0
+                self._emit_progress(
+                    progress_callback,
+                    stage="bug_run_analysis_completed",
+                    message=(
+                        f"{self._analysis_label(current_plan.kind)}执行完成"
+                        f"（{_run_analysis_duration:.1f}s, returncode={_completed_returncode}）"
+                    ),
+                    plan=current_plan.kind,
+                    plan_label=self._analysis_label(current_plan.kind),
+                    duration_seconds=round(_run_analysis_duration, 2),
+                    returncode=_completed_returncode,
+                    html_path=str(current_html),
+                    html_exists=current_html.exists(),
+                    json_path=str(current_json),
+                    json_exists=current_json.exists(),
+                )
 
             if source_evidence_future is not None:
                 resolved_source_evidence_path = self._resolve_source_evidence_future(source_evidence_future)
@@ -844,7 +966,15 @@ class _RunPrimaryMixin:
                 elif source_evidence_path is not None and not source_evidence_path.exists():
                     source_evidence_path = None
 
-            self._emit_progress(progress_callback, stage="bug_build_outputs", message="整理 bug 分析结果")
+            self._emit_progress(
+                progress_callback,
+                stage="bug_build_outputs",
+                message="整理 bug 分析结果",
+                plan_count=len(plans),
+                report_json_count=sum(1 for v in report_jsons.values() if v is not None),
+                html_path_count=len(html_paths),
+            )
+            _build_outputs_started = time.monotonic()
             metadata_text, summary = self._build_bug_outputs(
                 plans=plans,
                 work_item_id=work_item_id,
@@ -893,6 +1023,21 @@ class _RunPrimaryMixin:
                     getattr(source_decision, "intent", ""),
                     has_logs=selected_input is not None,
                 ),
+            )
+            self._emit_progress(
+                progress_callback,
+                stage="bug_build_outputs_completed",
+                message=(
+                    f"bug 分析结果已整理完成（{time.monotonic() - _build_outputs_started:.1f}s）"
+                ),
+                duration_seconds=round(time.monotonic() - _build_outputs_started, 2),
+                metadata_path=str(metadata_path),
+                metadata_chars=len(metadata_text),
+                summary_chars=len(summary),
+                bug_summary_evidence_path=str(bug_summary_evidence_path or ""),
+                evidence_log_count=int((evidence_log_bundle or {}).get("file_count") or 0) if isinstance(evidence_log_bundle, dict) else 0,
+                combined_html_path=str((combined_artifacts or {}).get("html_path") or ""),
+                combined_json_path=str((combined_artifacts or {}).get("json_path") or ""),
             )
             agent_summary_path = context.output_dir / "bug_agent_summary.md"
             agent_summary_result = self._run_bug_agent_summary(

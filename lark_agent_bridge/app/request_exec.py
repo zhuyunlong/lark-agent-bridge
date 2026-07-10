@@ -5,7 +5,47 @@ import json
 import re
 from urllib.parse import quote, urlsplit, urlunsplit
 
+from ..log import get_logger
 from ._shared import *  # noqa: F401,F403
+
+
+_logger = get_logger("app.request_exec")
+
+_APP_SERVER_CANCEL_TERMS_ZH = (
+    "停止",
+    "取消",
+    "中止",
+    "终止",
+    "停一下",
+    "别跑了",
+    "不用跑了",
+)
+_APP_SERVER_CANCEL_NEGATION_TERMS = (
+    "不要取消",
+    "别取消",
+    "不用取消",
+    "不要停止",
+    "别停止",
+    "不用停止",
+    "不要中止",
+    "别中止",
+    "不用中止",
+    "不要终止",
+    "别终止",
+    "不用终止",
+    "don't cancel",
+    "do not cancel",
+    "don't stop",
+    "do not stop",
+    "do not interrupt",
+    "don't interrupt",
+)
+_APP_SERVER_CANCEL_EN_RE = re.compile(
+    r"^(?:please\s+)?(?:stop|cancel|interrupt)"
+    r"(?:\s+(?:this|the|current)\s+(?:job|task|run|analysis|investigation))?[\s.!?。！]*$",
+    re.IGNORECASE,
+)
+_APP_SERVER_CANCEL_ZH_RE = re.compile(r"^(?:请)?(?:停止|取消|中止|终止)(?:当前|这次)?(?:任务|分析|自主分析|AI自主分析)?$")
 
 
 class _RequestExecMixin:
@@ -244,13 +284,182 @@ class _RequestExecMixin:
             details=details,
             note="分析进行中，请稍候…",
         )
-        result = self.app_server_investigation_runner.run(
-            request,
-            event=event,
-            progress_callback=self._event_progress_callback(event),
-        )
+        root_message_id = event.root_id or event.message_id
+        control = CodexAppServerTurnController(session_id=root_message_id)
+        self._register_app_server_control(root_message_id, control)
+        try:
+            result = self.app_server_investigation_runner.run(
+                request,
+                event=event,
+                progress_callback=self._event_progress_callback(event),
+                control=control,
+            )
+        finally:
+            self._unregister_app_server_control(root_message_id, control)
         self._ensure_result_bug_url(result, request.bug_url)
         return self._deliver_result(event, result, request_text=request.raw_text or route_content)
+
+    def _register_app_server_control(self, root_message_id: str, control: CodexAppServerTurnController) -> None:
+        root = str(root_message_id or "").strip()
+        if not root:
+            return
+        with self._app_server_controls_lock:
+            if root in self._app_server_controls:
+                _logger.warning("app-server control root %s already has an active controller; overwriting", root)
+            self._app_server_controls[root] = control
+        self.activity_store.record_progress(
+            {
+                "session_id": root,
+                "stage": "app_server_investigation_control_registered",
+                "message": "AI 自主分析已支持运行中补充指令和取消",
+                "details": {"executor": "Bridge 编排器"},
+            }
+        )
+
+    def _unregister_app_server_control(self, root_message_id: str, control: CodexAppServerTurnController) -> None:
+        root = str(root_message_id or "").strip()
+        if not root:
+            return
+        with self._app_server_controls_lock:
+            if self._app_server_controls.get(root) is control:
+                self._app_server_controls.pop(root, None)
+
+    def is_app_server_control_payload(self, payload: dict[str, object]) -> bool:
+        if (
+            self._looks_like_bot_menu_payload(payload)
+            or self._looks_like_reaction_payload(payload)
+            or self._looks_like_message_recalled_payload(payload)
+        ):
+            return True
+        try:
+            event = LarkEvent.from_dict(payload)
+        except Exception as exc:
+            _logger.debug("is_app_server_control_payload: failed to parse payload: %s", exc)
+            return False
+        if event.chat_type == "group":
+            content = self._normalize_mention_source_text(event.content)
+            if "@" not in content and "<at" not in content:
+                return False
+        direct_reply_to = (event.reply_to or event.parent_id or event.root_id or "").strip()
+        return bool(self._app_server_control_root_for_reply(direct_reply_to))
+
+    def _maybe_handle_app_server_control_event(
+        self,
+        event: LarkEvent,
+        *,
+        route_content: str,
+        direct_reply_to: str,
+    ) -> TaskResult | None:
+        root_message_id = self._app_server_control_root_for_reply(direct_reply_to)
+        if not root_message_id:
+            return None
+        with self._app_server_controls_lock:
+            control = self._app_server_controls.get(root_message_id)
+        if control is None:
+            return None
+        cleaned = " ".join(str(route_content or "").split()).strip()
+        if not cleaned:
+            return None
+        if not self.state_store.mark_seen(event):
+            return TaskResult(True, f"duplicate event skipped: {event.event_id}", skipped=True)
+        if self._is_app_server_cancel_text(cleaned):
+            reason = f"用户取消 AI 自主分析：{cleaned}"
+            control.cancel(reason, source_message_id=event.message_id, actor_id=event.sender_id)
+            self.activity_store.cancel_session(
+                root_message_id,
+                reason=reason,
+                stage="app_server_investigation_cancel_requested",
+                executor="用户回复",
+                error_code="cancelled_by_user",
+            )
+            self._reply_app_server_control_ack(event, "已收到，正在停止当前 AI 自主分析。")
+            return TaskResult(
+                success=True,
+                message="app-server control cancel accepted",
+                skipped=True,
+                details={
+                    "mode": "app_server_control",
+                    "action": "cancel",
+                    "app_server_control_root_message_id": root_message_id,
+                },
+            )
+        if not control.steer(cleaned, source_message_id=event.message_id, actor_id=event.sender_id):
+            return TaskResult(
+                success=True,
+                message="app-server control steer ignored",
+                skipped=True,
+                details={
+                    "mode": "app_server_control",
+                    "action": "ignored",
+                    "reason": "cancelled",
+                    "app_server_control_root_message_id": root_message_id,
+                },
+            )
+        self._notify_progress(
+            "app_server_investigation_steer_received",
+            f"收到运行中补充指令：{cleaned}",
+            event=event,
+            session_id=root_message_id,
+            mode="app_server_investigation",
+            app_server_control_action="steer",
+            source_message_id=event.message_id,
+        )
+        self._reply_app_server_control_ack(event, "已收到补充指令，会并入当前 AI 自主分析。")
+        return TaskResult(
+            success=True,
+            message="app-server control steer accepted",
+            skipped=True,
+            details={
+                "mode": "app_server_control",
+                "action": "steer",
+                "app_server_control_root_message_id": root_message_id,
+            },
+        )
+
+    def _app_server_control_root_for_reply(self, reply_to: str) -> str:
+        candidate = str(reply_to or "").strip()
+        if not candidate:
+            return ""
+        with self._app_server_controls_lock:
+            if candidate in self._app_server_controls:
+                return candidate
+            active_roots = set(self._app_server_controls)
+        with self._progress_cards_lock:
+            for root, state in self._progress_cards.items():
+                if root not in active_roots:
+                    continue
+                if str(state.get("message_id") or "").strip() == candidate:
+                    return root
+        return ""
+
+    def _is_app_server_cancel_text(self, text: str) -> bool:
+        normalized = " ".join(str(text or "").split()).strip()
+        if not normalized:
+            return False
+        lowered = normalized.casefold()
+        if any(term in lowered for term in _APP_SERVER_CANCEL_NEGATION_TERMS):
+            return False
+        zh_text = re.sub(r"[\s。！？!,.，]+$", "", normalized)
+        if zh_text in _APP_SERVER_CANCEL_TERMS_ZH:
+            return True
+        if _APP_SERVER_CANCEL_ZH_RE.fullmatch(zh_text):
+            return True
+        return bool(_APP_SERVER_CANCEL_EN_RE.fullmatch(normalized))
+
+    def _reply_app_server_control_ack(self, event: LarkEvent, message: str) -> None:
+        if self.config.dry_run or event.chat_type not in {"group", "p2p"}:
+            _logger.debug(
+                "app-server control ack suppressed dry_run=%s chat_type=%s message=%s",
+                self.config.dry_run,
+                event.chat_type,
+                message,
+            )
+            return
+        if event.message_id:
+            self.lark_client.reply(event.message_id, self._reply_payload(event, message))
+        elif event.chat_id:
+            self.lark_client.send_response(event, message)
+
     def _run_rom_version_lookup_request(self, event: LarkEvent, rom_version_request) -> TaskResult:
         self._notify_progress(
             "rom_version_lookup_received",

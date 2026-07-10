@@ -8,8 +8,10 @@ from unittest import mock
 from lark_agent_bridge.agents.codex_app_server_runtime import (
     CodexAppServerResult,
     CodexAppServerRuntime,
+    CodexAppServerTurnController,
     CompletionState,
     _build_app_server_command,
+    app_server_event_progress,
     app_server_event_preview,
     check_codex_app_server_available,
 )
@@ -50,6 +52,8 @@ class _FakeClient:
                 raise self.turn_start_error
             return {"turn": {"id": "turn-1"}}
         if method == "turn/interrupt":
+            return {}
+        if method == "turn/steer":
             return {}
         raise AssertionError(f"unexpected request {method}")
 
@@ -105,6 +109,58 @@ def _runtime(client, **overrides):
 
 
 class CodexAppServerRuntimeTests(unittest.TestCase):
+    def test_turn_controller_rejects_steer_after_cancel(self):
+        control = CodexAppServerTurnController(session_id="om_root")
+
+        self.assertTrue(control.cancel("用户要求停止", source_message_id="om_cancel", actor_id="ou_1"))
+        self.assertFalse(control.steer("补充检查 XTheme", source_message_id="om_steer", actor_id="ou_1"))
+
+        self.assertEqual(control.take_action()["kind"], "cancel")
+        self.assertIsNone(control.take_action())
+
+    def test_run_turn_sends_queued_steer_to_active_turn(self):
+        client = _FakeClient(
+            notifications=[
+                {
+                    "method": "item/completed",
+                    "params": {
+                        "threadId": "thread-1",
+                        "turnId": "turn-1",
+                        "item": {"id": "msg-1", "type": "agentMessage", "phase": "final_answer", "text": "done"},
+                    },
+                },
+                {"method": "turn/completed", "params": {"threadId": "thread-1", "turn": {"id": "turn-1", "status": "completed"}}},
+            ]
+        )
+        control = CodexAppServerTurnController(session_id="om_root")
+        self.assertTrue(control.steer("补充：优先检查 XTheme 输入", source_message_id="om_reply", actor_id="ou_1"))
+
+        result = _runtime(client).run_turn("start", control=control)
+
+        self.assertTrue(result.ok)
+        steer_requests = [item for item in client.requests if item[0] == "turn/steer"]
+        self.assertEqual(len(steer_requests), 1)
+        _method, params, _timeout = steer_requests[0]
+        self.assertEqual(params["threadId"], "thread-1")
+        self.assertEqual(params["expectedTurnId"], "turn-1")
+        self.assertEqual(len(params["input"]), 1)
+        self.assertEqual(params["input"][0]["type"], "text")
+        self.assertEqual(params["input"][0]["text"], "补充：优先检查 XTheme 输入")
+        self.assertEqual(params["input"][0]["text_elements"], [])
+
+    def test_run_turn_interrupts_when_control_cancelled(self):
+        client = _FakeClient()
+        control = CodexAppServerTurnController(session_id="om_root")
+        self.assertTrue(control.cancel("用户要求停止", source_message_id="om_cancel", actor_id="ou_1"))
+
+        result = _runtime(client).run_turn("start", control=control)
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error_code, "codex_app_server_cancelled")
+        self.assertIn("用户要求停止", result.error)
+        interrupt_requests = [item for item in client.requests if item[0] == "turn/interrupt"]
+        self.assertEqual(len(interrupt_requests), 1)
+
     def test_event_preview_reports_command_and_token_usage(self):
         command_preview = app_server_event_preview(
             {
@@ -158,6 +214,80 @@ class CodexAppServerRuntimeTests(unittest.TestCase):
 
         self.assertIn("Reconnecting... 5/5", error_preview)
         self.assertIn("Falling back", warning_preview)
+
+    def test_event_progress_structures_codex_runtime_events(self):
+        command_progress = app_server_event_progress(
+            {
+                "method": "item/started",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "item": {
+                        "id": "cmd-1",
+                        "type": "commandExecution",
+                        "command": "/bin/zsh -lc \"rg --line-number scene mode\"",
+                        "status": "inProgress",
+                    },
+                },
+            }
+        )
+        usage_progress = app_server_event_progress(
+            {
+                "method": "thread/tokenUsage/updated",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "tokenUsage": {
+                        "total": {
+                            "totalTokens": 321,
+                            "inputTokens": 280,
+                            "cachedInputTokens": 200,
+                            "outputTokens": 41,
+                        }
+                    },
+                },
+            }
+        )
+        plan_progress = app_server_event_progress(
+            {
+                "method": "turn/plan/updated",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "explanation": "先完成协议接入。",
+                    "plan": [
+                        {"step": "接入结构化 plan 协议", "status": "completed"},
+                        {"step": "接入飞书卡片投影", "status": "pending"},
+                    ],
+                },
+            }
+        )
+        diff_progress = app_server_event_progress(
+            {
+                "method": "turn/diff/updated",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "diff": "@@ -1 +1 @@\n-old\n+new",
+                },
+            }
+        )
+
+        self.assertEqual(command_progress["app_server_event_kind"], "tool_call")
+        self.assertEqual(command_progress["app_server_item_type"], "commandExecution")
+        self.assertEqual(command_progress["app_server_tool_name"], "command")
+        self.assertEqual(command_progress["app_server_status"], "inProgress")
+        self.assertIn("rg --line-number scene mode", command_progress["app_server_summary"])
+        self.assertEqual(usage_progress["app_server_event_kind"], "token_usage")
+        self.assertEqual(usage_progress["app_server_total_tokens"], 321)
+        self.assertEqual(usage_progress["app_server_input_tokens"], 280)
+        self.assertEqual(usage_progress["app_server_cached_input_tokens"], 200)
+        self.assertEqual(usage_progress["app_server_output_tokens"], 41)
+        self.assertEqual(plan_progress["app_server_event_kind"], "plan_update")
+        self.assertEqual(plan_progress["app_server_plan_step_count"], 2)
+        self.assertIn("先完成协议接入", plan_progress["app_server_summary"])
+        self.assertEqual(diff_progress["app_server_event_kind"], "diff_update")
+        self.assertEqual(diff_progress["app_server_diff_lines"], 3)
 
     def test_runtime_returns_final_answer_and_usage(self):
         client = _FakeClient(

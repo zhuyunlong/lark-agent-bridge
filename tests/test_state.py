@@ -355,6 +355,56 @@ class AgentActivityStoreTests(unittest.TestCase):
         self.assertFalse(detail["can_terminate"])
         self.assertEqual(detail["progress"][-1]["stage"], "admin_task_terminate_requested")
 
+    def test_user_cancel_reason_survives_late_task_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "activity.json"
+            store = AgentActivityStore(path)
+            event = LarkEvent(
+                event_id="evt_1",
+                message_id="om_1",
+                chat_id="oc_1",
+                chat_type="group",
+                sender_id="ou_1",
+                message_type="text",
+                content="@bot auto 分析 bug",
+            )
+
+            store.record_event(event)
+            store.record_progress(
+                {
+                    "event_id": "evt_1",
+                    "message_id": "om_1",
+                    "chat_id": "oc_1",
+                    "chat_type": "group",
+                    "stage": "app_server_investigation_control_registered",
+                    "message": "AI 自主分析已支持运行中补充指令和取消",
+                }
+            )
+            store.cancel_session(
+                "om_1",
+                reason="用户取消 AI 自主分析：停止",
+                stage="app_server_investigation_cancel_requested",
+                executor="用户回复",
+                error_code="cancelled_by_user",
+            )
+            store.record_result(
+                event,
+                TaskResult(
+                    success=False,
+                    message="AI 自主分析已取消：用户取消 AI 自主分析：停止",
+                    error_code="app_server_investigation_cancelled",
+                    details={"mode": "app_server_investigation"},
+                ),
+            )
+            detail = store.get_session("om_1")
+
+        self.assertIsNotNone(detail)
+        assert detail is not None
+        self.assertEqual(detail["status"], "cancelled")
+        self.assertEqual(detail["error_code"], "cancelled_by_user")
+        self.assertEqual(detail["message"], "用户取消 AI 自主分析：停止")
+        self.assertEqual(detail["progress"][-1]["stage"], "app_server_investigation_cancel_requested")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -71,9 +71,15 @@ class _DirectApiMixin(_SummaryEvidenceMixin, _ApiPromptSnapshotMixin, _ContextEx
         self._emit_progress(
             progress_callback,
             stage="bug_agent_summary_pydantic_ai",
-            message="pydantic-ai Agent 整理最终结论（结构化输出 + 工具增强）",
+            message=(
+                f"pydantic-ai Agent 整理最终结论（结构化输出 + 工具增强，prompt {len(prompt)} 字）"
+            ),
             provider="pydantic_ai",
             model=ai_opts.primary_model,
+            base_url=getattr(ai_opts, "base_url", "") or "",
+            prompt_chars=len(prompt),
+            workspace=str(metadata_path.parent if metadata_path.exists() else Path.cwd()),
+            max_tokens=getattr(ai_opts, "summary_max_tokens", 0) or 0,
         )
 
         system_prompt = (
@@ -125,15 +131,32 @@ class _DirectApiMixin(_SummaryEvidenceMixin, _ApiPromptSnapshotMixin, _ContextEx
                 output_path.write_text(message, encoding="utf-8")
             except OSError:
                 pass
+            usage = result.usage if isinstance(result.usage, dict) else {}
+            usage_input = int(usage.get("request_tokens", 0) or 0)
+            usage_output = int(usage.get("response_tokens", 0) or 0)
+            usage_total = int(usage.get("total_tokens", 0) or (usage_input + usage_output))
+            usage_cache_read = int(usage.get("cache_read_tokens", 0) or 0)
+            usage_cache_write = int(usage.get("cache_write_tokens", 0) or 0)
             self._emit_progress(
                 progress_callback,
                 stage="bug_agent_summary_completed",
-                message=f"pydantic-ai Agent 已整理最终结论（{duration:.1f}s）",
+                message=(
+                    f"pydantic-ai Agent 已整理最终结论（{duration:.1f}s, "
+                    f"in {usage_input} / out {usage_output} / total {usage_total} tokens, "
+                    f"{result.tool_calls} 次工具调用）"
+                ),
                 provider="pydantic_ai",
                 model=result.model,
-                duration_seconds=round(duration, 1),
+                duration_seconds=round(duration, 2),
+                output_path=str(output_path),
+                output_chars=len(message),
                 tool_calls=result.tool_calls,
                 tool_trace=result.tool_trace[:20],
+                agent_summary_input_tokens=usage_input,
+                agent_summary_output_tokens=usage_output,
+                agent_summary_total_tokens=usage_total,
+                agent_summary_cached_input_tokens=usage_cache_read,
+                agent_summary_cache_write_tokens=usage_cache_write,
             )
             return {
                 "message": message,
@@ -339,12 +362,33 @@ class _DirectApiMixin(_SummaryEvidenceMixin, _ApiPromptSnapshotMixin, _ContextEx
             },
             output_path,
         )
+        embedded_titles = [
+            str(item.get("title") or "")
+            for item in embedded_files
+            if isinstance(item, dict) and item.get("title")
+        ][:10]
+        embedded_total_chars = sum(
+            int(item.get("embedded_chars") or 0)
+            for item in embedded_files
+            if isinstance(item, dict)
+        )
         self._emit_progress(
             progress_callback,
             stage="bug_agent_summary_direct_api",
-            message="直接调用 API 整理最终结论（快速通道）",
+            message=(
+                f"直接调用 API 整理最终结论（prompt {len(prompt)} 字 / "
+                f"内嵌 {len(embedded_files)} 个文件 共 {embedded_total_chars} 字）"
+            ),
             provider=provider_tag,
             model=ai_opts.primary_model,
+            base_url=getattr(ai_opts, "base_url", "") or "",
+            prompt_chars=len(prompt),
+            embedded_file_count=len(embedded_files),
+            embedded_file_titles=embedded_titles,
+            embedded_total_chars=embedded_total_chars,
+            prompt_file=str(prompt_file) if prompt_file is not None else "",
+            context_file=str(context_file) if context_file is not None else "",
+            max_tokens=getattr(ai_opts, "summary_max_tokens", 0) or 0,
         )
         system_prompt = (
             "你是一个通过飞书触发的 bug 分析总结 agent。"
@@ -359,14 +403,26 @@ class _DirectApiMixin(_SummaryEvidenceMixin, _ApiPromptSnapshotMixin, _ContextEx
             )
         except LLMClientError as exc:
             logger.warning("Direct API bug summary failed: %s", exc)
+            duration = time.monotonic() - started
+            self._emit_progress(
+                progress_callback,
+                stage="bug_agent_summary_failed",
+                message=f"直接 API 调用失败（{duration:.1f}s）",
+                provider=provider_tag,
+                model=ai_opts.primary_model,
+                duration_seconds=round(duration, 2),
+                error="direct_api_error",
+                error_category=str(getattr(exc, "error_code", "llm_api_error") or "llm_api_error"),
+                error_type=type(exc).__name__,
+            )
             return {
                 "message": "",
                 "command": None,
-                "error": f"direct_api_error: {exc}",
+                "error": "direct_api_error",
                 "provider": provider_tag,
                 "session_id": "",
                 "resumed": False,
-                "duration_seconds": time.monotonic() - started,
+                "duration_seconds": duration,
                 "usage": {},
                 "usage_scope": "",
                 "prompt_file": str(prompt_file) if prompt_file is not None else "",
@@ -374,14 +430,25 @@ class _DirectApiMixin(_SummaryEvidenceMixin, _ApiPromptSnapshotMixin, _ContextEx
             }
         except Exception as exc:  # noqa: BLE001
             logger.warning("Direct API bug summary unexpected error: %s", exc)
+            duration = time.monotonic() - started
+            self._emit_progress(
+                progress_callback,
+                stage="bug_agent_summary_failed",
+                message=f"直接 API 异常退出（{duration:.1f}s）",
+                provider=provider_tag,
+                model=ai_opts.primary_model,
+                duration_seconds=round(duration, 2),
+                error="direct_api_unexpected",
+                error_type=type(exc).__name__,
+            )
             return {
                 "message": "",
                 "command": None,
-                "error": f"direct_api_unexpected: {exc}",
+                "error": "direct_api_unexpected",
                 "provider": provider_tag,
                 "session_id": "",
                 "resumed": False,
-                "duration_seconds": time.monotonic() - started,
+                "duration_seconds": duration,
                 "usage": {},
                 "usage_scope": "",
                 "prompt_file": str(prompt_file) if prompt_file is not None else "",
@@ -389,6 +456,19 @@ class _DirectApiMixin(_SummaryEvidenceMixin, _ApiPromptSnapshotMixin, _ContextEx
             }
         message = (response.content or "").strip()
         if not message:
+            duration = time.monotonic() - started
+            self._emit_progress(
+                progress_callback,
+                stage="bug_agent_summary_failed",
+                message=f"直接 API 返回空响应（{duration:.1f}s）",
+                provider=provider_tag,
+                model=response.model or ai_opts.primary_model,
+                duration_seconds=round(duration, 2),
+                error="direct_api_empty_response",
+                agent_summary_input_tokens=int(response.usage.get("prompt_tokens", 0) or 0),
+                agent_summary_output_tokens=int(response.usage.get("completion_tokens", 0) or 0),
+                agent_summary_total_tokens=int(response.usage.get("total_tokens", 0) or 0),
+            )
             return {
                 "message": "",
                 "command": None,
@@ -396,7 +476,7 @@ class _DirectApiMixin(_SummaryEvidenceMixin, _ApiPromptSnapshotMixin, _ContextEx
                 "provider": provider_tag,
                 "session_id": "",
                 "resumed": False,
-                "duration_seconds": time.monotonic() - started,
+                "duration_seconds": duration,
                 "usage": {},
                 "usage_scope": "",
                 "prompt_file": str(prompt_file) if prompt_file is not None else "",
@@ -408,13 +488,26 @@ class _DirectApiMixin(_SummaryEvidenceMixin, _ApiPromptSnapshotMixin, _ContextEx
         except OSError:
             pass
         duration = time.monotonic() - started
+        usage_input = int(response.usage.get("prompt_tokens", 0) or 0)
+        usage_output = int(response.usage.get("completion_tokens", 0) or 0)
+        usage_total = int(response.usage.get("total_tokens", 0) or (usage_input + usage_output))
+        usage_cached = int(response.usage.get("cached_input_tokens", 0) or 0)
         self._emit_progress(
             progress_callback,
             stage="bug_agent_summary_completed",
-            message=f"直接 API 已整理最终结论（{duration:.1f}s）",
+            message=(
+                f"直接 API 已整理最终结论（{duration:.1f}s, "
+                f"in {usage_input} / out {usage_output} / total {usage_total} tokens）"
+            ),
             provider=provider_tag,
             model=response.model or ai_opts.primary_model,
             output_path=str(output_path),
+            output_chars=len(message),
+            duration_seconds=round(duration, 2),
+            agent_summary_input_tokens=usage_input,
+            agent_summary_output_tokens=usage_output,
+            agent_summary_total_tokens=usage_total,
+            agent_summary_cached_input_tokens=usage_cached,
         )
         return {
             "message": message,

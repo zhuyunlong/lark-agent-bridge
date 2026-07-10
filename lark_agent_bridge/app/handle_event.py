@@ -5,6 +5,7 @@ import html
 from pathlib import Path
 import re
 import threading
+import time
 from typing import Callable
 
 from ._shared import *  # noqa: F401,F403
@@ -14,6 +15,15 @@ from .routes import _RoutesMixin
 from .delivery import _DeliveryMixin
 from .mention import _MentionMixin
 from .progress_cards import _ProgressCardsMixin
+
+
+_INBOUND_INTERACTION_DEDUPE_TTL_SECONDS = 600.0
+_BOT_MENU_HELP_KEYS = {"menu", "help"}
+_REACTION_CREATED_EVENT_TYPE = "im.message.reaction.created_v1"
+_REACTION_DELETED_EVENT_TYPE = "im.message.reaction.deleted_v1"
+_MESSAGE_RECALLED_EVENT_TYPE = "im.message.recalled_v1"
+_APP_SERVER_CONTINUE_REACTION_TYPES = {"thumbsup", "like"}
+_APP_SERVER_REACTION_STEER_PROMPT = "用户通过飞书点赞表示认可当前方向，请继续深入。"
 
 
 class _HandleEventMixin(_RoutesMixin, _DeliveryMixin, _MentionMixin, _ProgressCardsMixin):
@@ -62,6 +72,10 @@ class _HandleEventMixin(_RoutesMixin, _DeliveryMixin, _MentionMixin, _ProgressCa
         # concurrent worker threads and the daemon cleanup loop. Held only around
         # dict access — never while sending cards over the network.
         self._progress_cards_lock = threading.Lock()
+        self._app_server_controls: dict[str, CodexAppServerTurnController] = {}
+        self._app_server_controls_lock = threading.Lock()
+        self._recent_inbound_interactions: dict[str, float] = {}
+        self._recent_inbound_interactions_lock = threading.Lock()
         self._progress_cards_max_age_seconds = config.state.progress_card_max_age_seconds
         self._progress_card_stream_update_interval_seconds = 5.0
         self.process_watchdog = ProcessWatchdog(
@@ -202,11 +216,47 @@ class _HandleEventMixin(_RoutesMixin, _DeliveryMixin, _MentionMixin, _ProgressCa
     def handle_payload(self, payload: dict[str, object]) -> TaskResult:
         if self._looks_like_card_action_payload(payload):
             return self.handle_card_action_payload(payload)
+        if self._looks_like_bot_menu_payload(payload):
+            return self.handle_bot_menu_payload(payload)
+        if self._looks_like_reaction_payload(payload):
+            return self.handle_reaction_payload(payload)
+        if self._looks_like_message_recalled_payload(payload):
+            return self.handle_message_recalled_payload(payload)
         return self.handle_event_payload(payload)
     def handle_event_payload(self, payload: dict[str, object]) -> TaskResult:
         return self.handle_event(LarkEvent.from_dict(payload))
     def handle_card_action_payload(self, payload: dict[str, object]) -> TaskResult:
         return self.handle_card_action(CardActionEvent.from_dict(payload))
+    def handle_reaction_payload(self, payload: dict[str, object]) -> TaskResult:
+        return self.handle_reaction(ReactionEvent.from_dict(payload))
+    def handle_message_recalled_payload(self, payload: dict[str, object]) -> TaskResult:
+        return self.handle_message_recalled(MessageRecalledEvent.from_dict(payload))
+    def handle_bot_menu_payload(self, payload: dict[str, object]) -> TaskResult:
+        menu_event = BotMenuEvent.from_dict(payload)
+        if not menu_event.is_valid:
+            return TaskResult(
+                success=False,
+                message="飞书菜单事件缺少有效的 menu key 或操作者。",
+                error_code="invalid_bot_menu_event",
+                details={"mode": "bot_menu"},
+            )
+        duplicate_key = self._mark_inbound_interaction_seen(
+            inbound_request_id=menu_event.inbound_request_id,
+            event_id=menu_event.event_id,
+        )
+        if duplicate_key:
+            return self._duplicate_inbound_result(duplicate_key)
+        menu_key = menu_event.menu_key.strip().casefold()
+        if menu_key in _BOT_MENU_HELP_KEYS:
+            return self.handle_event(menu_event.to_lark_event(content="help"))
+        if menu_key == "stop":
+            return self._handle_bot_menu_stop(menu_event)
+        return TaskResult(
+            success=False,
+            message=f"暂不支持的飞书菜单：{menu_event.menu_key}",
+            error_code="unsupported_bot_menu",
+            details={"mode": "bot_menu", "menu_key": menu_event.menu_key},
+        )
     def _looks_like_card_action_payload(self, payload: dict[str, object]) -> bool:
         event_body = payload.get("event") or payload
         if not isinstance(event_body, dict):
@@ -218,7 +268,78 @@ class _HandleEventMixin(_RoutesMixin, _DeliveryMixin, _MentionMixin, _ProgressCa
                 return True
         value = payload.get("value")
         return isinstance(value, dict) and bool(value.get("action"))
+    def _looks_like_bot_menu_payload(self, payload: dict[str, object]) -> bool:
+        event_body = payload.get("event") or payload
+        if not isinstance(event_body, dict):
+            return False
+        header = payload.get("header") or {}
+        event_type = ""
+        if isinstance(header, dict):
+            event_type = str(header.get("event_type") or "")
+        event_type = str(payload.get("event_type") or event_type or event_body.get("event_type") or "").strip()
+        if event_type == "application.bot.menu_v6":
+            return True
+        return bool(event_body.get("event_key") or event_body.get("menu_key")) and bool(event_body.get("operator") or event_body.get("operator_id"))
+    def _looks_like_reaction_payload(self, payload: dict[str, object]) -> bool:
+        return self._payload_event_type(payload) in {
+            _REACTION_CREATED_EVENT_TYPE,
+            _REACTION_DELETED_EVENT_TYPE,
+        }
+    def _looks_like_message_recalled_payload(self, payload: dict[str, object]) -> bool:
+        return self._payload_event_type(payload) == _MESSAGE_RECALLED_EVENT_TYPE
+    def _payload_event_type(self, payload: dict[str, object]) -> str:
+        event_body = payload.get("event") or payload
+        if not isinstance(event_body, dict):
+            event_body = {}
+        header = payload.get("header") or {}
+        if not isinstance(header, dict):
+            header = {}
+        return str(payload.get("event_type") or header.get("event_type") or event_body.get("event_type") or "").strip()
+    def _mark_inbound_interaction_seen(self, *, inbound_request_id: str = "", event_id: str = "") -> str:
+        key = self._inbound_interaction_dedupe_key(
+            inbound_request_id=inbound_request_id,
+            event_id=event_id,
+        )
+        if not key:
+            return ""
+        now = time.monotonic()
+        with self._recent_inbound_interactions_lock:
+            expired = [
+                existing_key
+                for existing_key, expires_at in self._recent_inbound_interactions.items()
+                if expires_at <= now
+            ]
+            for existing_key in expired:
+                self._recent_inbound_interactions.pop(existing_key, None)
+            if self._recent_inbound_interactions.get(key, 0.0) > now:
+                return key
+            self._recent_inbound_interactions[key] = now + _INBOUND_INTERACTION_DEDUPE_TTL_SECONDS
+        return ""
+    def _inbound_interaction_dedupe_key(self, *, inbound_request_id: str = "", event_id: str = "") -> str:
+        inbound_request_id = str(inbound_request_id or "").strip()
+        if inbound_request_id:
+            return f"request:{inbound_request_id}"
+        event_id = str(event_id or "").strip()
+        if event_id:
+            return f"event:{event_id}"
+        return ""
+    def _duplicate_inbound_result(self, dedupe_key: str) -> TaskResult:
+        return TaskResult(
+            success=True,
+            message=f"duplicate inbound interaction skipped: {dedupe_key}",
+            skipped=True,
+            details={"mode": "duplicate_inbound", "dedupe_key": dedupe_key},
+        )
     def handle_card_action(self, action_event: CardActionEvent) -> TaskResult:
+        duplicate_key = self._mark_inbound_interaction_seen(
+            inbound_request_id=action_event.inbound_request_id,
+            event_id=action_event.event_id,
+        )
+        if duplicate_key:
+            return self._duplicate_inbound_result(duplicate_key)
+        stale_result = self._stale_card_action_result(action_event)
+        if stale_result is not None:
+            return stale_result
         action = action_event.action.strip()
         if action in {"approve", "reject"}:
             return self._handle_approval_action(action_event, approved=(action == "approve"))
@@ -246,6 +367,337 @@ class _HandleEventMixin(_RoutesMixin, _DeliveryMixin, _MentionMixin, _ProgressCa
             error_code="unsupported_card_action",
             details={"mode": "card_action", "action": action},
         )
+    def _stale_card_action_result(self, action_event: CardActionEvent) -> TaskResult | None:
+        expected = self._expected_card_action_stamp(action_event)
+        if not expected:
+            return None
+        expected_lifecycle = str(expected.get("card_lifecycle_id") or "").strip()
+        expected_revision = self._int_card_action_stamp(expected.get("action_revision"))
+        received_lifecycle = action_event.card_lifecycle_id.strip()
+        received_revision = action_event.action_revision
+        if expected_lifecycle and received_lifecycle and expected_lifecycle != received_lifecycle:
+            return self._stale_card_action_skip(
+                action_event,
+                reason="card_lifecycle_mismatch",
+                expected_lifecycle=expected_lifecycle,
+                expected_revision=expected_revision,
+            )
+        if expected_revision > 0 and received_revision > 0 and expected_revision != received_revision:
+            return self._stale_card_action_skip(
+                action_event,
+                reason="action_revision_mismatch",
+                expected_lifecycle=expected_lifecycle,
+                expected_revision=expected_revision,
+            )
+        return None
+    def _expected_card_action_stamp(self, action_event: CardActionEvent) -> dict[str, object]:
+        candidates = [
+            action_event.root_message_id,
+            action_event.message_id,
+            action_event.open_message_id,
+        ]
+        with self._progress_cards_lock:
+            for candidate in candidates:
+                state = self._progress_cards.get(str(candidate or "").strip())
+                if isinstance(state, dict):
+                    stamp = self._card_action_stamp_from_mapping(state)
+                    if stamp:
+                        return stamp
+            wanted = {str(candidate or "").strip() for candidate in candidates if str(candidate or "").strip()}
+            for state in self._progress_cards.values():
+                if not isinstance(state, dict):
+                    continue
+                if str(state.get("message_id") or "").strip() in wanted:
+                    stamp = self._card_action_stamp_from_mapping(state)
+                    if stamp:
+                        return stamp
+        for candidate in candidates:
+            session = self.activity_store.get_session(str(candidate or "").strip())
+            if not isinstance(session, dict):
+                continue
+            stamp = self._card_action_stamp_from_mapping(session)
+            if stamp:
+                return stamp
+        return {}
+    def _card_action_stamp_from_mapping(self, payload: dict[str, object]) -> dict[str, object]:
+        details = payload.get("details")
+        if not isinstance(details, dict):
+            details = {}
+        lifecycle = str(
+            details.get("card_lifecycle_id")
+            or details.get("card_daemon_lifecycle_id")
+            or payload.get("card_lifecycle_id")
+            or payload.get("card_daemon_lifecycle_id")
+            or ""
+        ).strip()
+        revision = self._int_card_action_stamp(
+            details.get("action_revision")
+            or details.get("card_action_revision")
+            or payload.get("action_revision")
+            or payload.get("card_action_revision")
+        )
+        if not lifecycle and revision <= 0:
+            return {}
+        return {"card_lifecycle_id": lifecycle, "action_revision": revision}
+    def _int_card_action_stamp(self, value: object) -> int:
+        if isinstance(value, bool):
+            return 0
+        if isinstance(value, int):
+            return value if value > 0 else 0
+        text = str(value or "").strip()
+        if not text.isdigit():
+            return 0
+        return int(text)
+    def _stale_card_action_skip(
+        self,
+        action_event: CardActionEvent,
+        *,
+        reason: str,
+        expected_lifecycle: str,
+        expected_revision: int,
+    ) -> TaskResult:
+        return TaskResult(
+            success=True,
+            message="stale card action skipped",
+            error_code="stale_card_action",
+            skipped=True,
+            details={
+                "mode": "stale_card_action",
+                "action": action_event.action,
+                "reason": reason,
+                "expected_card_lifecycle_id": expected_lifecycle,
+                "received_card_lifecycle_id": action_event.card_lifecycle_id,
+                "expected_action_revision": expected_revision,
+                "received_action_revision": action_event.action_revision,
+            },
+        )
+    def handle_reaction(self, reaction_event: ReactionEvent) -> TaskResult:
+        self.health_monitor.record_event_processed()
+        if not reaction_event.is_valid:
+            return TaskResult(
+                success=False,
+                message="飞书 reaction 事件缺少有效的消息或 reaction 类型。",
+                error_code="invalid_reaction_event",
+                details={"mode": "reaction"},
+            )
+        duplicate_key = self._mark_inbound_interaction_seen(
+            inbound_request_id=reaction_event.inbound_request_id,
+            event_id=reaction_event.event_id,
+        )
+        if duplicate_key:
+            return self._duplicate_inbound_result(duplicate_key)
+        if reaction_event.is_deleted:
+            return TaskResult(
+                success=True,
+                message="reaction delete ignored",
+                skipped=True,
+                details={
+                    "mode": "reaction",
+                    "action": "ignored",
+                    "reason": "reaction_deleted",
+                    "message_id": reaction_event.message_id,
+                },
+            )
+        root_message_id = self._app_server_control_root_for_reply(reaction_event.message_id)
+        if not root_message_id:
+            return TaskResult(
+                success=True,
+                message="reaction ignored because no active app-server control matched",
+                skipped=True,
+                details={
+                    "mode": "reaction",
+                    "action": "ignored",
+                    "reason": "no_active_app_server_control",
+                    "message_id": reaction_event.message_id,
+                },
+            )
+        if reaction_event.reaction_type.casefold() not in _APP_SERVER_CONTINUE_REACTION_TYPES:
+            return TaskResult(
+                success=True,
+                message="reaction type ignored for app-server control",
+                skipped=True,
+                details={
+                    "mode": "app_server_reaction",
+                    "action": "ignored",
+                    "reason": "unsupported_reaction_type",
+                    "reaction_type": reaction_event.reaction_type,
+                    "app_server_control_root_message_id": root_message_id,
+                },
+            )
+        with self._app_server_controls_lock:
+            control = self._app_server_controls.get(root_message_id)
+        if control is None:
+            return TaskResult(
+                success=True,
+                message="reaction ignored because app-server control is no longer active",
+                skipped=True,
+                details={
+                    "mode": "app_server_reaction",
+                    "action": "ignored",
+                    "reason": "app_server_control_missing",
+                    "app_server_control_root_message_id": root_message_id,
+                },
+            )
+        if not control.steer(
+            _APP_SERVER_REACTION_STEER_PROMPT,
+            source_message_id=f"reaction:{reaction_event.event_id}",
+            actor_id=reaction_event.operator_id,
+        ):
+            return TaskResult(
+                success=False,
+                message="reaction steer was rejected by the running app-server control.",
+                error_code="app_server_control_rejected",
+                details={
+                    "mode": "app_server_reaction",
+                    "action": "steer",
+                    "app_server_control_root_message_id": root_message_id,
+                },
+            )
+        self.activity_store.record_progress(
+            {
+                "session_id": root_message_id,
+                "stage": "app_server_investigation_reaction_received",
+                "message": "收到飞书点赞 reaction，已作为运行中认可信号并入 AI 自主分析。",
+                "details": {
+                    "executor": "飞书 reaction",
+                    "reaction_type": reaction_event.reaction_type,
+                    "source_message_id": reaction_event.message_id,
+                    "operator_id": reaction_event.operator_id,
+                },
+            }
+        )
+        return TaskResult(
+            success=True,
+            message="app-server reaction steer accepted",
+            skipped=True,
+            details={
+                "mode": "app_server_reaction",
+                "action": "steer",
+                "app_server_control_root_message_id": root_message_id,
+                "reaction_type": reaction_event.reaction_type,
+            },
+        )
+    def handle_message_recalled(self, recalled_event: MessageRecalledEvent) -> TaskResult:
+        self.health_monitor.record_event_processed()
+        if not recalled_event.is_valid:
+            return TaskResult(
+                success=False,
+                message="飞书撤回事件缺少有效的消息 ID。",
+                error_code="invalid_message_recalled_event",
+                details={"mode": "message_recalled"},
+            )
+        duplicate_key = self._mark_inbound_interaction_seen(
+            inbound_request_id=recalled_event.inbound_request_id,
+            event_id=recalled_event.event_id,
+        )
+        if duplicate_key:
+            return self._duplicate_inbound_result(duplicate_key)
+        root_message_id = recalled_event.message_id
+        with self._app_server_controls_lock:
+            control = self._app_server_controls.get(root_message_id)
+        if control is None:
+            return TaskResult(
+                success=True,
+                message="message recall ignored because no active app-server root matched",
+                skipped=True,
+                details={
+                    "mode": "message_recalled",
+                    "action": "ignored",
+                    "reason": "no_active_app_server_root",
+                    "message_id": recalled_event.message_id,
+                },
+            )
+        reason = "用户撤回了触发 AI 自主分析的飞书消息。"
+        if not control.cancel(
+            reason,
+            source_message_id=f"recall:{recalled_event.event_id}",
+            actor_id=recalled_event.operator_id,
+        ):
+            return TaskResult(
+                success=False,
+                message="撤回停止请求未被当前 AI 自主分析接收。",
+                error_code="app_server_control_rejected",
+                details={
+                    "mode": "message_recalled",
+                    "action": "cancel",
+                    "app_server_control_root_message_id": root_message_id,
+                },
+            )
+        self.activity_store.cancel_session(
+            root_message_id,
+            reason=reason,
+            stage="app_server_investigation_cancel_requested",
+            executor="飞书撤回",
+            error_code="cancelled_by_user",
+        )
+        return TaskResult(
+            success=True,
+            message="message recall cancel accepted",
+            skipped=True,
+            details={
+                "mode": "message_recalled",
+                "action": "cancel",
+                "app_server_control_root_message_id": root_message_id,
+            },
+        )
+    def _handle_bot_menu_stop(self, menu_event: BotMenuEvent) -> TaskResult:
+        event = menu_event.to_lark_event(content="停止")
+        self.activity_store.record_event(event)
+        self.health_monitor.record_event_processed()
+        with self._app_server_controls_lock:
+            active_controls = list(self._app_server_controls.items())
+        if not active_controls:
+            result = TaskResult(
+                success=True,
+                message="当前没有正在运行的 AI 自主分析。",
+                skipped=True,
+                details={"mode": "bot_menu", "action": "stop", "status": "noop"},
+            )
+            self.activity_store.record_result(event, result)
+            if not self.config.dry_run:
+                self._send_result(event, result)
+            return result
+        if len(active_controls) > 1:
+            result = TaskResult(
+                success=False,
+                message="当前有多个 AI 自主分析正在运行，请回复对应进度卡片发送“停止”。",
+                error_code="ambiguous_app_server_control",
+                details={"mode": "bot_menu", "action": "stop", "active_count": len(active_controls)},
+            )
+            self.activity_store.record_result(event, result)
+            if not self.config.dry_run:
+                self._send_result(event, result)
+            return result
+        root_message_id, control = active_controls[0]
+        reason = "用户通过飞书菜单停止当前 AI 自主分析。"
+        if not control.cancel(reason, source_message_id=f"menu:{menu_event.event_id}", actor_id=menu_event.operator_id):
+            result = TaskResult(
+                success=False,
+                message="停止请求未被当前 AI 自主分析接收。",
+                error_code="app_server_control_rejected",
+                details={"mode": "bot_menu", "action": "stop", "app_server_control_root_message_id": root_message_id},
+            )
+            self.activity_store.record_result(event, result)
+            if not self.config.dry_run:
+                self._send_result(event, result)
+            return result
+        self.activity_store.cancel_session(
+            root_message_id,
+            reason=reason,
+            stage="app_server_investigation_cancel_requested",
+            executor="飞书菜单",
+            error_code="cancelled_by_user",
+        )
+        result = TaskResult(
+            success=True,
+            message="已收到，正在停止当前 AI 自主分析。",
+            skipped=True,
+            details={"mode": "bot_menu", "action": "stop", "app_server_control_root_message_id": root_message_id},
+        )
+        self.activity_store.record_result(event, result)
+        if not self.config.dry_run:
+            self._send_result(event, result)
+        return result
     def handle_event(self, event: LarkEvent) -> TaskResult:
         self.activity_store.record_event(event)
         self.health_monitor.record_event_processed()
@@ -268,6 +720,7 @@ class _HandleEventMixin(_RoutesMixin, _DeliveryMixin, _MentionMixin, _ProgressCa
         route_content = event.content
         followup_context = None
         phase1_new_chain = False
+        direct_reply_to = ""
         if event.chat_type == "group":
             stripped_at_bot = self._strip_group_chat_mention(event.content, event=event)
             direct_reply_to = self._direct_reply_to(event)
@@ -304,6 +757,19 @@ class _HandleEventMixin(_RoutesMixin, _DeliveryMixin, _MentionMixin, _ProgressCa
             and followup_context is None
         ):
             followup_context = self._resolve_followup_context(event)
+        control_direct_reply_to = (
+            direct_reply_to
+            if event.chat_type == "group"
+            else (event.reply_to or event.parent_id or event.root_id or "")
+        )
+        if decision.allowed:
+            control_result = self._maybe_handle_app_server_control_event(
+                event,
+                route_content=route_content,
+                direct_reply_to=control_direct_reply_to,
+            )
+            if control_result is not None:
+                return control_result
         referenced_resources = self._fetch_referenced_message_resources(
             event,
             route_content=route_content,
@@ -356,6 +822,14 @@ class _HandleEventMixin(_RoutesMixin, _DeliveryMixin, _MentionMixin, _ProgressCa
             if not self.config.dry_run and event.chat_type in {"group", "p2p"}:
                 self._send_result(event, result)
             return result
+
+        control_result = self._maybe_handle_app_server_control_event(
+            event,
+            route_content=route_content,
+            direct_reply_to=control_direct_reply_to,
+        )
+        if control_result is not None:
+            return control_result
 
         # Phase 3: Build route context and dispatch through ordered handlers
         if followup_context is None:

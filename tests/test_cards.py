@@ -444,6 +444,96 @@ class DynamicStatusCardTests(unittest.TestCase):
         self.assertIn("工具调用：执行命令 rg -n tool_call lark_agent_bridge", rendered)
         self.assertNotIn("item.started", rendered)
 
+    def test_status_card_uses_structured_app_server_stream_details(self):
+        card = build_status_card(
+            title="Bug 分析",
+            status="analyzing",
+            progress=[
+                {
+                    "timestamp": "2026-05-19T12:35:00",
+                    "stage": "source_stage_agent_analysis_stream",
+                    "message": "Codex app-server: raw fallback command",
+                    "details": {
+                        "stream_preview": "Codex command rg scene",
+                        "app_server_event_kind": "tool_call",
+                        "app_server_item_type": "commandExecution",
+                        "app_server_tool_name": "command",
+                        "app_server_summary": "Codex command rg scene",
+                    },
+                },
+                {
+                    "timestamp": "2026-05-19T12:35:01",
+                    "stage": "source_stage_agent_analysis_stream",
+                    "details": {
+                        "stream_preview": "Codex plan 先读 log_focus。",
+                        "app_server_event_kind": "plan_update",
+                        "app_server_plan_step_count": 1,
+                        "app_server_summary": "Codex plan 先读 log_focus。",
+                    },
+                },
+                {
+                    "timestamp": "2026-05-19T12:35:02",
+                    "stage": "source_stage_agent_analysis_stream",
+                    "details": {
+                        "stream_preview": "Codex token usage token≈321 input=280 cache=200 output=41",
+                        "app_server_event_kind": "token_usage",
+                        "app_server_total_tokens": 321,
+                        "app_server_input_tokens": 280,
+                        "app_server_cached_input_tokens": 200,
+                        "app_server_output_tokens": 41,
+                    },
+                },
+            ],
+        )
+
+        rendered = str(card)
+        self.assertIn("工具调用：执行命令 rg scene", rendered)
+        self.assertIn("计划更新：先读 log_focus。", rendered)
+        self.assertIn("Token：总 321，输入 280，缓存 200，输出 41", rendered)
+        self.assertNotIn("Codex app-server: raw fallback command", rendered)
+        self.assertNotIn("`source_stage_agent_analysis_stream`", rendered)
+
+    def test_status_card_handles_additional_app_server_stream_kinds(self):
+        card = build_status_card(
+            title="Bug 分析",
+            status="analyzing",
+            progress=[
+                {
+                    "timestamp": "2026-05-19T12:35:03",
+                    "stage": "source_stage_agent_analysis_stream",
+                    "message": "Codex app-server: raw fallback diff",
+                    "details": {
+                        "app_server_event_kind": "diff_update",
+                        "app_server_diff_lines": 12,
+                    },
+                },
+                {
+                    "timestamp": "2026-05-19T12:35:04",
+                    "stage": "source_stage_agent_analysis_stream",
+                    "message": "Codex app-server: raw fallback delta",
+                    "details": {
+                        "app_server_event_kind": "agent_delta",
+                        "app_server_summary": "Codex text delta 正在定位 XTheme",
+                    },
+                },
+                {
+                    "timestamp": "2026-05-19T12:35:05",
+                    "stage": "source_stage_agent_analysis_stream",
+                    "message": "Codex app-server: raw fallback unknown",
+                    "details": {
+                        "app_server_event_kind": "future_kind",
+                        "app_server_summary": "future raw summary",
+                    },
+                },
+            ],
+        )
+
+        rendered = str(card)
+        self.assertIn("代码变更：diff 12 行", rendered)
+        self.assertIn("正在定位 XTheme", rendered)
+        self.assertNotIn("future raw summary", rendered)
+        self.assertNotIn("`source_stage_agent_analysis_stream`", rendered)
+
     def test_status_card_does_not_show_empty_error_completed_stream_event(self):
         card = build_status_card(
             title="Bug 分析",

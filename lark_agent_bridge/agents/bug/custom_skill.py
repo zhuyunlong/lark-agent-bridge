@@ -385,6 +385,7 @@ class _CustomSkillMixin(_LogFocusMixin, _AgentCommandMixin, _AgentOutputMixin):
         bridge_session_id: str,
         model_override: str = "",
         reasoning_effort_override: str = "",
+        app_server_control: CodexAppServerTurnController | None = None,
     ) -> dict[str, object]:
         options = self.config.codex_app_server
         ok, version_or_error = check_codex_app_server_available(options.command, options.min_version)
@@ -452,6 +453,8 @@ class _CustomSkillMixin(_LogFocusMixin, _AgentCommandMixin, _AgentOutputMixin):
                 provider="codex",
                 stream_preview=preview,
                 stream_kind="delta_group",
+                app_server_event_kind="agent_delta",
+                app_server_summary=preview,
             )
 
         def _stream_event(event: dict[str, object]) -> None:
@@ -470,7 +473,8 @@ class _CustomSkillMixin(_LogFocusMixin, _AgentCommandMixin, _AgentOutputMixin):
                         _flush_delta()
                 return
             _flush_delta()
-            preview = app_server_event_preview(event)
+            progress_details = app_server_event_progress(event)
+            preview = app_server_event_preview(event) or str(progress_details.get("app_server_summary") or "")
             if not preview:
                 return
             self._emit_progress(
@@ -479,9 +483,15 @@ class _CustomSkillMixin(_LogFocusMixin, _AgentCommandMixin, _AgentOutputMixin):
                 message=f"Codex app-server: {preview}",
                 provider="codex",
                 stream_preview=preview,
+                **progress_details,
             )
 
-        result = runtime.run_turn(prompt_text, on_event=_stream_event if progress_callback is not None else None)
+        run_kwargs: dict[str, object] = {
+            "on_event": _stream_event if progress_callback is not None else None,
+        }
+        if app_server_control is not None:
+            run_kwargs["control"] = app_server_control
+        result = runtime.run_turn(prompt_text, **run_kwargs)
         _flush_delta()
         if policy.codex_home is not None and policy.codex_home.parent.name == "runs":
             shutil.rmtree(policy.codex_home, ignore_errors=True)
