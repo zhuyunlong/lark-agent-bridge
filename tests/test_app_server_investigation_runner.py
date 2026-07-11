@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from lark_agent_bridge.app_server_investigation import AppServerInvestigationRunner, PreparedAppServerInvestigation, _detect_selected_skill
-from lark_agent_bridge.models import AppServerInvestigationOptions, AppServerInvestigationRequest, BugAnalysisOptions, BridgeConfig, CodexAppServerOptions, create_job_context
+from lark_agent_bridge.models import AppServerInvestigationOptions, AppServerInvestigationRequest, BugAnalysisOptions, BridgeConfig, CodexAppServerOptions, DownloadResource, DownloadedResource, create_job_context
 from lark_agent_bridge.skill_manager import SkillManager
 from tests._app_base import event
 
@@ -73,6 +73,82 @@ class FakeBugRunnerForAppServer:
 
 
 class AppServerInvestigationRunnerTests(unittest.TestCase):
+    def test_bug_url_with_explicit_resource_prefers_replied_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            explicit_log = root / "BugLog.alog"
+            explicit_log.write_text("2026-07-03 15:11:00 explicit", encoding="utf-8")
+            bug_log = root / "BugAttachment.alog"
+            bug_log.write_text("2026-07-03 15:11:00 bug", encoding="utf-8")
+            resource = DownloadResource(
+                kind="file",
+                value="file_v3_bug_log",
+                source_message_id="om_group_log",
+                display_name="BugLog.alog",
+            )
+            config = BridgeConfig(dry_run=False, data_dir=root / "data")
+            bug_runner = SimpleNamespace()
+            bug_runner.signal_resolver = SimpleNamespace(_load_catalog=lambda: None)
+            bug_runner._request_text = lambda **kwargs: kwargs["raw_text"]
+            bug_runner._bridge_session_id = lambda event: ""
+            bug_runner._emit_progress = lambda callback, **payload: None
+            bug_runner._bug_fetcher_script = lambda: Path("bug-fetcher")
+            bug_runner._run_json_command = lambda command, **kwargs: (
+                {"meegle_installed": True, "auth_ok": True}
+                if "check-env" in command
+                else {"project_key": "xpfailuremgmt", "work_item_id": "1"}
+                if "resolve-url" in command
+                else {"title": "3D异常", "description": "问题时间 2026-07-03 15:11", "attachments": []}
+                if "fetch-data" in command
+                else {}
+            )
+            bug_runner._bug_cache_dir = lambda *args: root / "bug_cache"
+            bug_runner._is_bug_cache_fresh = lambda *args, **kwargs: True
+            bug_runner._remove_tree = lambda *args: None
+            bug_runner._bug_description = lambda fetched: str(fetched.get("description") or "")
+            bug_runner._bug_reference_time = lambda *args: None
+            bug_runner._resolve_bug_time_context = lambda **kwargs: SimpleNamespace(
+                has_full_datetime=True,
+                fault_time="2026-07-03 15:11:00",
+                source="request",
+                note="",
+            )
+            bug_runner._select_log_input = lambda *args: bug_log
+            bug_runner._has_bug_cache_content = lambda *args: False
+            bug_runner._download_bug_attachments = lambda *args, **kwargs: {"ok": True}
+            bug_runner._reuse_prepared_bug_input = lambda path: None
+            bug_runner._prepare_log_input = lambda path: path
+            bug_runner._scan_log_time_coverage = lambda *args, **kwargs: SimpleNamespace(
+                has_time_evidence=True,
+                covers_fault_time=True,
+            )
+            bug_runner._build_file_agent_focus_dir = lambda **kwargs: (kwargs["input_path"], None, None)
+            downloader = SimpleNamespace(
+                download_all=lambda resources, **kwargs: [DownloadedResource(resource=resource, path=explicit_log)]
+            )
+            runner = AppServerInvestigationRunner(
+                config,
+                bug_runner=bug_runner,
+                skill_manager=SkillManager(config),
+                downloader=downloader,
+            )
+
+            prepared = runner._prepare_bug_request(
+                AppServerInvestigationRequest(
+                    prompt="调查3D异常",
+                    bug_url="https://project.feishu.cn/xpfailuremgmt/buglo/detail/1",
+                    resources=[resource],
+                    raw_text="自主分析 2026-07-03 15:11 调查3D异常",
+                    triggered=True,
+                ),
+                event=event(message_id="om_bug_with_file"),
+                progress_callback=None,
+            )
+
+        self.assertIsInstance(prepared, PreparedAppServerInvestigation)
+        assert isinstance(prepared, PreparedAppServerInvestigation)
+        self.assertEqual(prepared.selected_input, explicit_log)
+
     def test_detect_selected_skill_ignores_business_log_words(self):
         markdown = (
             "## 结论摘要\n"

@@ -361,9 +361,36 @@ class _RunPrimaryMixin:
                     status="missing_fault_time",
                     progress_callback=progress_callback,
                 )
-            selected_input = self._select_log_input(bug_dir, fetched)
+            explicit_selected_input: Path | None = None
+            if request.resources:
+                try:
+                    explicit_selected_input = self._download_explicit_bug_resources(
+                        request.resources,
+                        context=context,
+                        event=event,
+                        progress_callback=progress_callback,
+                    )
+                except DownloadError as exc:
+                    return self._failure(
+                        context=context,
+                        command=command,
+                        started=started,
+                        message=f"Bug 分析群聊文件下载失败：{exc}",
+                        error_code="download_failed",
+                        progress_callback=progress_callback,
+                    )
+            selected_input = explicit_selected_input or self._select_log_input(bug_dir, fetched)
             cache_reused = False
-            if self._has_bug_cache_content(bug_dir) and (selected_input is not None or not requires_log_input):
+            if explicit_selected_input is not None:
+                download = {
+                    "ok": True,
+                    "downloaded": [str(explicit_selected_input)],
+                    "unzipped": [],
+                    "errors": [],
+                    "skipped": [],
+                    "explicit_resource": True,
+                }
+            elif self._has_bug_cache_content(bug_dir) and (selected_input is not None or not requires_log_input):
                 cache_reused = True
                 download = {"ok": True, "downloaded": [], "unzipped": [], "errors": [], "skipped": [], "reused": True}
                 self._emit_progress(
@@ -485,14 +512,15 @@ class _RunPrimaryMixin:
                 prepared_input=_prepared_input_path,
                 reused_prepared=_reused_prepared,
             )
-            self._write_bug_cache_metadata(
-                bug_dir,
-                bug_url=request.bug_url,
-                project_key=project_key,
-                work_item_id=work_item_id,
-                selected_input=selected_input,
-                prepared_input=prepared_input,
-            )
+            if explicit_selected_input is None:
+                self._write_bug_cache_metadata(
+                    bug_dir,
+                    bug_url=request.bug_url,
+                    project_key=project_key,
+                    work_item_id=work_item_id,
+                    selected_input=selected_input,
+                    prepared_input=prepared_input,
+                )
             fault_time, fault_time_note = time_context.fault_time, time_context.note
             log_coverage: LogCoverage | None = None
             if requires_log_input:
@@ -1116,6 +1144,7 @@ class _RunPrimaryMixin:
             "signal_code": plan.signal_code,
             "selected_log_input": str(selected_input) if selected_input else "",
             "prepared_log_input": str(prepared_input) if prepared_input else "",
+            "log_input_source": "replied_resource" if explicit_selected_input is not None else "bug_attachment",
             "fault_time": fault_time,
             "fault_time_source": time_context.source,
             "fault_time_note": fault_time_note,

@@ -475,6 +475,13 @@ class ParserTests(unittest.TestCase):
         request = parse_direct_analysis_request("@bot 这个是什么 file_abc123")
 
         self.assertFalse(request.triggered)
+    def test_parse_direct_analysis_request_accepts_timed_diagnostic_question(self):
+        request = parse_direct_analysis_request(
+            "@bot 时间点15:11左右 为啥退出有图进入了无图？ file_v3_diagnostic_log"
+        )
+
+        self.assertTrue(request.triggered)
+        self.assertEqual(request.resources[0].value, "file_v3_diagnostic_log")
         self.assertEqual(request.resources[0].kind, "file")
 
     def test_source_analysis_request_requires_source_intent_and_target(self):

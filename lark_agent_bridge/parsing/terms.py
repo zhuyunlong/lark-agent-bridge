@@ -199,6 +199,16 @@ DIRECT_ANALYSIS_ACTION_TERMS = (
 )
 
 
+DIRECT_ANALYSIS_DIAGNOSTIC_QUESTION_TERMS = (
+    "为什么",
+    "为啥",
+    "为何",
+    "原因",
+    "怎么回事",
+    "怎么会",
+)
+
+
 DIRECT_ANALYSIS_DOMAIN_TERMS = (
     "日志",
     "附件",

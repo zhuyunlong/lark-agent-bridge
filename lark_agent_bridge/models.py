@@ -957,6 +957,7 @@ class BugRequest:
     raw_text: str = ""
     triggered: bool = False
     error: str | None = None
+    resources: list[DownloadResource] = field(default_factory=list)
 
 
 @dataclass(slots=True)

@@ -3,6 +3,82 @@ from _app_base import _AppTestBase
 
 
 class AppBugFollowupTests(_AppTestBase):
+    def test_bug_time_clarification_keeps_replied_group_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = Path(tmp) / "bug_metadata.md"
+            html = Path(tmp) / "bug_report.html"
+            metadata.write_text("bug", encoding="utf-8")
+            html.write_text("<html></html>", encoding="utf-8")
+            fake_lark = FakeLarkClient()
+            fake_bug = FakeBugRunner(metadata, html)
+            fake_lark.fetched_messages["om_bug_time_root"] = json.dumps(
+                {
+                    "data": {
+                        "messages": [
+                            {
+                                "message_id": "om_bug_time_root",
+                                "reply_to": "om_group_file",
+                                "content": "@bot https://project.feishu.cn/xpfailuremgmt/buglo/detail/7010953353 调查3D生命周期",
+                            }
+                        ]
+                    }
+                }
+            )
+            fake_lark.fetched_messages["om_group_file"] = json.dumps(
+                {
+                    "data": {
+                        "messages": [
+                            {
+                                "message_id": "om_group_file",
+                                "msg_type": "file",
+                                "content": {"file_key": "file_v3_bug_time_log", "file_name": "BugLog.zip"},
+                            }
+                        ]
+                    }
+                }
+            )
+            app = BridgeApp(
+                BridgeConfig(dry_run=False, data_dir=Path(tmp), allowed_chats=["oc_denied"]),
+                lark_client=fake_lark,
+                bug_runner=fake_bug,
+            )
+            bug_url = "https://project.feishu.cn/xpfailuremgmt/buglo/detail/7010953353"
+            original_text = f"{bug_url} 调查3D生命周期"
+            clarification_event = event(
+                event_id="evt_bug_time_root",
+                message_id="om_bug_time_root",
+                reply_to="om_group_file",
+                content=f"@bot {original_text}",
+            )
+            app.activity_store.record_event(clarification_event)
+            app.activity_store.record_result(
+                clarification_event,
+                TaskResult(
+                    success=True,
+                    message="缺少明确问题时间",
+                    details={
+                        "mode": "bug_time_clarification",
+                        "bug_url": bug_url,
+                        "user_request_text": original_text,
+                        "time_gate_status": "missing_fault_time",
+                    },
+                ),
+            )
+
+            result = app.handle_event(
+                event(
+                    event_id="evt_bug_time_file_reply",
+                    message_id="om_bug_time_file_reply",
+                    root_id="om_bug_time_root",
+                    content="@bot 2026-07-03 15:11",
+                )
+            )
+
+        self.assertTrue(result.success)
+        request = fake_bug.analysis_calls[0]["request"]
+        self.assertEqual([(item.kind, item.value) for item in request.resources], [("file", "file_v3_bug_time_log")])
+        self.assertEqual(request.resources[0].source_message_id, "om_group_file")
+
     def test_bug_time_clarification_full_time_reply_runs_fresh_bug_analysis(self):
         with tempfile.TemporaryDirectory() as tmp:
             metadata = Path(tmp) / "bug_metadata.md"

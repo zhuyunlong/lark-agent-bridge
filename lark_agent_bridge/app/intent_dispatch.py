@@ -308,10 +308,25 @@ class _IntentDispatchMixin:
         if not self.state_store.mark_seen(event):
             return TaskResult(True, f"duplicate event skipped: {event.event_id}", skipped=True)
         return self._run_signal_request(event, request, route_content)
-    def _handle_bug_intent(self, event: LarkEvent, route_content: str) -> TaskResult:
+    def _handle_bug_intent(
+        self,
+        event: LarkEvent,
+        route_content: str,
+        *,
+        referenced_resources: list[DownloadResource] | None = None,
+    ) -> TaskResult:
         bug_request = parse_bug_request(route_content, bug_url_re=self.bug_url_re)
         if not bug_request.triggered:
             bug_request = bug_request.__class__(bug_url="", prompt=route_content.strip(), raw_text=route_content, triggered=True, error="missing_bug_url")
+        elif referenced_resources:
+            bug_request = bug_request.__class__(
+                bug_url=bug_request.bug_url,
+                prompt=bug_request.prompt,
+                raw_text=bug_request.raw_text,
+                triggered=bug_request.triggered,
+                error=bug_request.error,
+                resources=self._merge_resources(bug_request.resources, referenced_resources),
+            )
         if not self.state_store.mark_seen(event):
             return TaskResult(True, f"duplicate event skipped: {event.event_id}", skipped=True)
         pending = self._maybe_request_approval(

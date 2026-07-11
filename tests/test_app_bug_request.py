@@ -178,6 +178,13 @@ class AppBugRequestTests(_AppTestBase):
                         "conversation_root_message_id": "om_confirm_root",
                         "bug_url": "https://project.feishu.cn/xpfailuremgmt/buglo/detail/6995380113",
                         "user_request_text": "https://project.feishu.cn/xpfailuremgmt/buglo/detail/6995380113 3D生命周期",
+                        "resources": [
+                            {
+                                "kind": "file",
+                                "value": "file_v3_confirm_log",
+                                "source_message_id": "om_group_file",
+                            }
+                        ],
                         "needs_user_direction": True,
                         "intent_options": [
                             {
@@ -214,9 +221,11 @@ class AppBugRequestTests(_AppTestBase):
         call = fake_bug.analysis_calls[0]
         self.assertEqual(call["request"].bug_url, "https://project.feishu.cn/xpfailuremgmt/buglo/detail/6995380113")
         self.assertEqual(call["request"].prompt, "3D生命周期")
+        self.assertEqual(call["request"].resources[0].value, "file_v3_confirm_log")
         self.assertEqual([plan.kind for plan in call["plans_override"]], ["startup"])
         self.assertEqual(call["classification_skill"], "unity-startup-lifecycle-check")
         self.assertEqual(call["classification_source"], "user_selected_reply")
+        self.assertEqual(result.details["conversation_root_message_id"], "om_confirm_root")
 
     def test_bug_skill_confirmation_invalid_reply_is_sent_back_to_user(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -193,7 +193,10 @@ class _ReplayFlowMixin:
         return original_request.signal or ""
 
     def _normalized_replay_request_text(self, context: AnalysisReplayContext) -> str:
-        if parse_followup_action(context.current_text) == "retry":
+        if (
+            parse_followup_action(context.current_text) in {"retry", "continue"}
+            and self._is_pure_direct_followup_control(context.current_text)
+        ):
             return context.original_request_text
         if not context.current_text:
             return context.original_request_text
@@ -266,6 +269,7 @@ class _ReplayFlowMixin:
             request.raw_text,
             classification_source="analysis_replay",
             classification_reason=plan.decision.reason,
+            root_message_id=context.root_message_id,
         )
 
     def _execute_signal_replay_plan(self, plan: ReplayPlan, event: LarkEvent) -> TaskResult:

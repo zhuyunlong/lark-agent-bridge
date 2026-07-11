@@ -249,6 +249,7 @@ class _ContextFromMixin(_FollowupClarifyMixin, _ExistingAnswerMixin, _ContextLoo
                         event,
                         recovered_direct_request,
                         recovered_direct_request.raw_text,
+                        root_message_id=followup_context.root_message_id,
                     )
             pending = self._maybe_request_approval(
                 event,

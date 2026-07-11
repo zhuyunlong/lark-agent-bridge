@@ -175,6 +175,10 @@ class _RequestExecMixin:
         if classification_provider:
             runner_kwargs["classification_provider"] = classification_provider
         result = self.bug_runner.run_bug_analysis(bug_request, **runner_kwargs)
+        if bug_request.resources:
+            details = dict(result.details)
+            details.setdefault("resources", self._resource_descriptors(bug_request.resources))
+            result.details = details
         self._ensure_result_bug_url(result, bug_request.bug_url)
         return self._deliver_result(
             event,
@@ -219,11 +223,13 @@ class _RequestExecMixin:
         classification_skill: str = "",
         classification_source: str = "",
         classification_reason: str = "",
+        root_message_id: str | None = None,
     ) -> TaskResult:
         self._notify_progress(
             "direct_analysis_request_received",
             "收到直传文件分析请求",
             event=event,
+            session_id=root_message_id,
             prompt=direct_analysis_request.prompt,
             raw_text=direct_analysis_request.raw_text,
             resources=[item.value for item in direct_analysis_request.resources],
@@ -234,22 +240,30 @@ class _RequestExecMixin:
             status="analyzing",
             details={"文件数": str(len(direct_analysis_request.resources))},
             note="分析进行中，请稍候…",
+            session_id=root_message_id,
         )
         result = self.bug_runner.run_direct_analysis(
             direct_analysis_request,
             event=event,
-            progress_callback=self._event_progress_callback(event),
+            progress_callback=self._event_progress_callback(event, session_id=root_message_id),
             plans_override=plans_override,
             classification_skill=classification_skill,
             classification_source=classification_source,
             classification_reason=classification_reason,
         )
-        return self._deliver_result(event, result, request_text=direct_analysis_request.raw_text or route_content)
+        return self._deliver_result(
+            event,
+            result,
+            request_text=direct_analysis_request.raw_text or route_content,
+            root_message_id=root_message_id,
+        )
     def _run_app_server_investigation_request(
         self,
         event: LarkEvent,
         request,
         route_content: str,
+        *,
+        root_message_id: str | None = None,
     ) -> TaskResult:
         self._send_intent_preflight_card(
             event,
@@ -265,6 +279,7 @@ class _RequestExecMixin:
             "app_server_investigation_request_received",
             "收到 AI 自主分析请求",
             event=event,
+            session_id=root_message_id,
             bug_url=request.bug_url,
             prompt=request.prompt,
             raw_text=request.raw_text,
@@ -283,21 +298,31 @@ class _RequestExecMixin:
             status="analyzing",
             details=details,
             note="分析进行中，请稍候…",
+            session_id=root_message_id,
         )
-        root_message_id = event.root_id or event.message_id
-        control = CodexAppServerTurnController(session_id=root_message_id)
-        self._register_app_server_control(root_message_id, control)
+        conversation_root = root_message_id or event.root_id or event.message_id
+        control = CodexAppServerTurnController(session_id=conversation_root)
+        self._register_app_server_control(conversation_root, control)
         try:
             result = self.app_server_investigation_runner.run(
                 request,
                 event=event,
-                progress_callback=self._event_progress_callback(event),
+                progress_callback=self._event_progress_callback(event, session_id=conversation_root),
                 control=control,
             )
         finally:
-            self._unregister_app_server_control(root_message_id, control)
+            self._unregister_app_server_control(conversation_root, control)
+        if request.resources:
+            result_details = dict(result.details)
+            result_details.setdefault("resources", self._resource_descriptors(request.resources))
+            result.details = result_details
         self._ensure_result_bug_url(result, request.bug_url)
-        return self._deliver_result(event, result, request_text=request.raw_text or route_content)
+        return self._deliver_result(
+            event,
+            result,
+            request_text=request.raw_text or route_content,
+            root_message_id=conversation_root,
+        )
 
     def _register_app_server_control(self, root_message_id: str, control: CodexAppServerTurnController) -> None:
         root = str(root_message_id or "").strip()

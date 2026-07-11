@@ -10,6 +10,43 @@ from .cache_store import _BugCacheStoreMixin
 
 
 class _BugCacheMixin(_BugPlanCommandMixin, _ReanalysisPlanMixin, _BugCacheStoreMixin):
+    def _download_explicit_bug_resources(
+        self,
+        resources: list[DownloadResource],
+        *,
+        context: JobContext,
+        event: LarkEvent | None,
+        progress_callback: Callable[[dict[str, object]], None] | None,
+    ) -> Path | None:
+        if not resources:
+            return None
+        downloader = getattr(self, "_direct_downloader", None)
+        if downloader is None:
+            downloader = LogDownloader(self.config, getattr(self, "_lark_client", None))
+            self._direct_downloader = downloader
+        self._emit_progress(
+            progress_callback,
+            stage="bug_download_explicit_resources",
+            message="下载用户在群聊中明确回复的日志文件",
+            resources=[item.value for item in resources],
+        )
+        downloaded = downloader.download_all(
+            resources,
+            context=context,
+            message_id=event.message_id if event else "",
+        )
+        if not downloaded:
+            return None
+        selected_input = downloaded[0].path if len(downloaded) == 1 else context.input_dir
+        self._emit_progress(
+            progress_callback,
+            stage="bug_download_explicit_resources_completed",
+            message="群聊回复文件下载完成，将优先作为 Bug 分析输入",
+            selected_input=str(selected_input),
+            resource_count=len(downloaded),
+        )
+        return selected_input
+
     def run_direct_analysis(
         self,
         request: DirectAnalysisRequest,

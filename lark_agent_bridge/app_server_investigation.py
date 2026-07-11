@@ -209,8 +209,40 @@ class AppServerInvestigationRunner:
                     progress_callback=progress_callback,
                 )
 
-            selected_input = self.bug_runner._select_log_input(bug_dir, fetched)
-            if self.bug_runner._has_bug_cache_content(bug_dir) and selected_input is not None:
+            selected_input: Path | None = None
+            download: dict[str, object] = {"ok": True}
+            if request.resources:
+                try:
+                    self.bug_runner._emit_progress(
+                        progress_callback,
+                        stage="app_server_bug_download_explicit_resources",
+                        message="下载用户在群聊中明确回复的日志文件",
+                    )
+                    downloaded = self.downloader.download_all(
+                        request.resources,
+                        context=context,
+                        message_id=event.message_id if event else "",
+                    )
+                except DownloadError as exc:
+                    return TaskResult(
+                        success=False,
+                        message=f"自主分析群聊文件下载失败：{exc}",
+                        error_code="download_failed",
+                        duration_seconds=time.monotonic() - started,
+                        details={"mode": "app_server_investigation", "bug_url": request.bug_url},
+                    )
+                selected_input = downloaded[0].path if len(downloaded) == 1 else context.input_dir
+                download = {"ok": True, "explicit_resource": True}
+            else:
+                selected_input = self.bug_runner._select_log_input(bug_dir, fetched)
+            if request.resources:
+                self.bug_runner._emit_progress(
+                    progress_callback,
+                    stage="app_server_bug_use_explicit_resources",
+                    message="优先使用群聊回复文件作为自主分析输入",
+                    selected_input=str(selected_input or ""),
+                )
+            elif self.bug_runner._has_bug_cache_content(bug_dir) and selected_input is not None:
                 self.bug_runner._emit_progress(
                     progress_callback,
                     stage="app_server_bug_reuse_cache",

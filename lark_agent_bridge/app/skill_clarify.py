@@ -301,6 +301,10 @@ class _SkillClarifyMixin:
             prompt=prompt,
             raw_text=request_text,
             triggered=True,
+            resources=self._merge_resources(
+                self._log_resources_from_session(previous_session),
+                self._reference_chain_log_resources(event),
+            ),
         )
         return self._run_bug_request(
             event,
@@ -310,6 +314,7 @@ class _SkillClarifyMixin:
             classification_skill=classification_skill,
             classification_source=source,
             classification_reason=classification_reason,
+            root_message_id=followup_context.root_message_id,
         )
     def _direct_analysis_preflight(self, request: DirectAnalysisRequest) -> _IntentPreflightDecision:
         prompt = request.prompt.strip()

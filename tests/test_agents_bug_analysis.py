@@ -1,9 +1,36 @@
 from _agents_base import *  # noqa: F401,F403
 from _agents_base import _AgentTestBase
 from lark_agent_bridge.agents import BugAnalysisSelection
+from lark_agent_bridge.models import create_job_context
 
 
 class AgentsBugAnalysisTests(_AgentTestBase):
+    def test_explicit_bug_resources_download_into_current_job_input(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = BugAnalysisRunner(BridgeConfig(dry_run=False, data_dir=Path(tmp), workspace_root=Path(tmp)))
+            context = create_job_context(Path(tmp), event=None)
+            downloaded_path = context.input_dir / "BugLog.zip"
+            downloaded_path.write_text("zip", encoding="utf-8")
+            resource = DownloadResource(
+                kind="file",
+                value="file_v3_bug_log",
+                source_message_id="om_group_log",
+                display_name="BugLog.zip",
+            )
+            downloader = mock.Mock()
+            downloader.download_all.return_value = [DownloadedResource(resource=resource, path=downloaded_path)]
+            runner._direct_downloader = downloader
+
+            selected = runner._download_explicit_bug_resources(
+                [resource],
+                context=context,
+                event=None,
+                progress_callback=None,
+            )
+
+        self.assertEqual(selected, downloaded_path)
+        downloader.download_all.assert_called_once_with([resource], context=context, message_id="")
+
     def test_build_summary_from_report_scene_signal_prefers_target_focus(self):
         with tempfile.TemporaryDirectory() as tmp:
             runner = BugAnalysisRunner(

@@ -9,6 +9,7 @@ import shutil
 import stat
 import unicodedata
 
+from ..parsing.terms import FOLLOWUP_CONTINUE_TERMS, FOLLOWUP_RETRY_TERMS
 from ._shared import *  # noqa: F401,F403
 
 
@@ -25,7 +26,13 @@ class _FollowupClarifyMixin:
             if idx != -1:
                 return request_text[:idx].rstrip()
         return request_text
-    def _fresh_bug_request_from_followup_context(self, followup_context, *, followup_text: str):
+    def _fresh_bug_request_from_followup_context(
+        self,
+        followup_context,
+        *,
+        followup_text: str,
+        resources: list[DownloadResource] | None = None,
+    ):
         request_text = self._bug_request_text_for_followup_context(followup_context)
         if not request_text:
             return None
@@ -41,6 +48,7 @@ class _FollowupClarifyMixin:
             raw_text="\n\n".join(raw_parts),
             triggered=True,
             error=None,
+            resources=resources or [],
         )
     def _maybe_handle_bug_time_clarification_followup(self, event: LarkEvent, followup_context, route_content: str) -> TaskResult | None:
         if str(getattr(followup_context, "mode", "") or "") != "bug_time_clarification":
@@ -77,6 +85,10 @@ class _FollowupClarifyMixin:
         recovered_bug_request = self._fresh_bug_request_from_followup_context(
             followup_context,
             followup_text=normalized_followup,
+            resources=self._merge_resources(
+                self._log_resources_from_session(previous_session),
+                self._reference_chain_log_resources(event),
+            ),
         )
         if recovered_bug_request is None:
             return None
@@ -125,6 +137,10 @@ class _FollowupClarifyMixin:
         recovered_bug_request = self._fresh_bug_request_from_followup_context(
             followup_context,
             followup_text=route_content,
+            resources=self._merge_resources(
+                self._log_resources_from_session(previous_session),
+                self._reference_chain_log_resources(event),
+            ),
         )
         if recovered_bug_request is None:
             return None
@@ -249,8 +265,7 @@ class _FollowupClarifyMixin:
             return None
         route_content = request_text
         cleaned_followup = followup_text.strip()
-        followup_action = parse_followup_action(cleaned_followup)
-        if cleaned_followup and followup_action not in {"retry", "continue"}:
+        if cleaned_followup and not self._is_pure_direct_followup_control(cleaned_followup):
             route_content = f"{request_text}\n\n追问/修正：{cleaned_followup}"
         request = self._build_direct_analysis_request(route_content, resources, event=event)
         if request.triggered:
@@ -265,6 +280,33 @@ class _FollowupClarifyMixin:
             triggered=True,
             error=None,
         )
+    def _is_pure_direct_followup_control(self, text: str) -> bool:
+        cleaned = unicodedata.normalize("NFKC", text or "").strip()
+        compact = re.sub(r"[\s，。；;：:、!?！？]+", "", cleaned).casefold()
+        if not compact:
+            return False
+        action = parse_followup_action(cleaned)
+        terms = FOLLOWUP_RETRY_TERMS if action == "retry" else FOLLOWUP_CONTINUE_TERMS if action == "continue" else ()
+        normalized_terms = {
+            re.sub(r"[\s，。；;：:、!?！？]+", "", term).casefold()
+            for term in terms
+            if term
+        }
+        if compact in normalized_terms:
+            return True
+        if action == "retry":
+            return compact in {
+                "重新分析",
+                "重新分析下",
+                "重新分析一下",
+                "重新分析一次",
+                "重新分析一遍",
+                "再分析一次",
+                "再分析一遍",
+            }
+        if action == "continue":
+            return compact in {"继续自主分析", "继续自主分析下", "继续自主分析一下"}
+        return False
     def _execute_recovered_direct_analysis(
         self,
         event: LarkEvent,
@@ -302,6 +344,7 @@ class _FollowupClarifyMixin:
             classification_skill=classification_skill,
             classification_source=classification_source,
             classification_reason=classification_reason,
+            root_message_id=followup_context.root_message_id,
         )
     def _maybe_handle_direct_analysis_followup(self, event: LarkEvent, followup_context, route_content: str) -> TaskResult | None:
         request_text = str(getattr(followup_context, "request_text", "") or "").strip()
@@ -348,7 +391,7 @@ class _FollowupClarifyMixin:
             return self._execute_recovered_direct_analysis(
                 event,
                 followup_context,
-                followup_text="",
+                followup_text=route_content,
                 classification_source="reply_chain_retry",
                 classification_reason="用户在文件分析回复链中发起重跑。",
             )

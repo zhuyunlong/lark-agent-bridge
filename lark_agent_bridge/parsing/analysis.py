@@ -22,6 +22,7 @@ from .terms import (
     APP_SERVER_INVESTIGATION_AUTO_TERMS,
     APP_SERVER_INVESTIGATION_FREE_TERMS,
     DIRECT_ANALYSIS_ACTION_TERMS,
+    DIRECT_ANALYSIS_DIAGNOSTIC_QUESTION_TERMS,
     DIRECT_ANALYSIS_DOMAIN_TERMS,
     REPORT_FOLLOWUP_TERMS,
     REQUIREMENT_ANALYSIS_ACTION_TERMS,
@@ -226,7 +227,15 @@ def looks_like_direct_analysis_prompt(
     has_action = _contains_any(cleaned, lowered, DIRECT_ANALYSIS_ACTION_TERMS)
     has_domain = _contains_any(cleaned, lowered, DIRECT_ANALYSIS_DOMAIN_TERMS)
     if resources_present:
-        return has_action or bool(DIRECT_ANALYSIS_DEICTIC_RE.fullmatch(cleaned))
+        has_diagnostic_question = _contains_any(cleaned, lowered, DIRECT_ANALYSIS_DIAGNOSTIC_QUESTION_TERMS)
+        has_time_hint = bool(
+            re.search(r"(?:时间点|问题时间|故障时间|发生时间|(?<!\d)\d{1,2}:\d{2}(?!\d))", cleaned, re.I)
+        )
+        return (
+            has_action
+            or bool(DIRECT_ANALYSIS_DEICTIC_RE.fullmatch(cleaned))
+            or (has_diagnostic_question and (has_domain or has_time_hint))
+        )
     return has_action and has_domain
 
 

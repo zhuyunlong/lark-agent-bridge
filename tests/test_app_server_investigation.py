@@ -94,6 +94,44 @@ class AppServerInvestigationRouteTests(unittest.TestCase):
         self.assertEqual(request.prompt, "调查下 3D 生命周期")
         self.assertEqual(request.trigger_mode, "auto")
 
+    def test_app_server_followup_keeps_original_conversation_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_lark = FakeLarkClient()
+            fake_runner = FakeAppServerInvestigationRunner(Path(tmp) / "app_server.html")
+            app = BridgeApp(
+                self._config(tmp),
+                lark_client=fake_lark,
+                app_server_investigation_runner=fake_runner,
+            )
+            original_text = f"{self.BUG_URL} 自主分析 调查3D生命周期"
+            app.conversation_store.remember(
+                root_message_id="om_app_server_root",
+                chat_id="oc_denied",
+                mode="app_server_investigation",
+                request_text=original_text,
+                summary_text="首次分析完成",
+                report_url="",
+                report_excerpt="",
+            )
+            app.conversation_store.remember_alias(
+                alias_message_id="om_app_server_result",
+                root_message_id="om_app_server_root",
+            )
+
+            result = app.handle_event(
+                event(
+                    event_id="evt_app_server_followup",
+                    message_id="om_app_server_followup",
+                    reply_to="om_app_server_result",
+                    content="@bot 自主分析 继续查3D生命周期",
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.details["mode"], "app_server_investigation")
+        self.assertEqual(result.details["conversation_root_message_id"], "om_app_server_root")
+        self.assertIsNone(app.activity_store.get_session("om_app_server_followup"))
+
     def test_free_term_bug_route_uses_app_server_investigation_runner(self):
         with tempfile.TemporaryDirectory() as tmp:
             metadata = Path(tmp) / "analysis.md"

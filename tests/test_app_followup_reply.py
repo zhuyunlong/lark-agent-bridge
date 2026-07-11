@@ -702,6 +702,117 @@ class AppFollowupReplyTests(_AppTestBase):
         self.assertEqual(result.details["mode"], "omlx_chat")
         self.assertEqual(len(fake_bug.requests), 0)
         self.assertEqual(len(fake_chat.prompts), 1)
+    def test_reply_to_file_timed_diagnostic_question_routes_to_direct_analysis(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = Path(tmp) / "analysis.md"
+            html = Path(tmp) / "analysis.html"
+            metadata.write_text("analysis", encoding="utf-8")
+            html.write_text("<html></html>", encoding="utf-8")
+            fake_lark = FakeLarkClient()
+            fake_bug = FakeBugRunner(metadata, html)
+            fake_lark.fetched_messages["om_diagnostic_file"] = json.dumps(
+                {
+                    "data": {
+                        "messages": [
+                            {
+                                "message_id": "om_diagnostic_file",
+                                "msg_type": "file",
+                                "content": {"file_key": "file_v3_diagnostic_log", "file_name": "Log.alog"},
+                            }
+                        ]
+                    }
+                },
+                ensure_ascii=False,
+            )
+            app = BridgeApp(
+                BridgeConfig(dry_run=False, data_dir=Path(tmp), allowed_chats=["oc_denied"]),
+                lark_client=fake_lark,
+                bug_runner=fake_bug,
+                intent_runner=FakeIntentRunner(enabled=False),
+            )
+
+            result = app.handle_event(
+                event(
+                    event_id="evt_timed_diagnostic",
+                    message_id="om_timed_diagnostic",
+                    reply_to="om_diagnostic_file",
+                    content="@bot 时间点15:11左右 为啥退出有图进入了无图？",
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.details["mode"], "direct_analysis")
+        self.assertEqual(fake_bug.requests[0].resources[0].value, "file_v3_diagnostic_log")
+    def test_result_card_progress_labels_do_not_hide_original_replied_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_lark = FakeLarkClient()
+            fake_lark.fetched_messages["om_result_card"] = json.dumps(
+                {
+                    "data": {
+                        "messages": [
+                            {
+                                "message_id": "om_result_card",
+                                "msg_type": "interactive",
+                                "reply_to": "om_analysis_request",
+                                "content": json.dumps(
+                                    {
+                                        "elements": [
+                                            {"tag": "markdown", "content": "file_uploading"},
+                                            {"tag": "markdown", "content": "file_uploaded"},
+                                        ]
+                                    },
+                                    ensure_ascii=False,
+                                ),
+                            }
+                        ]
+                    }
+                },
+                ensure_ascii=False,
+            )
+            fake_lark.fetched_messages["om_analysis_request"] = json.dumps(
+                {
+                    "data": {
+                        "messages": [
+                            {
+                                "message_id": "om_analysis_request",
+                                "reply_to": "om_original_file",
+                                "content": "@bot 分析这个文件",
+                            }
+                        ]
+                    }
+                },
+                ensure_ascii=False,
+            )
+            fake_lark.fetched_messages["om_original_file"] = json.dumps(
+                {
+                    "data": {
+                        "messages": [
+                            {
+                                "message_id": "om_original_file",
+                                "msg_type": "file",
+                                "content": json.dumps(
+                                    {"file_key": "file_v3_original_log", "file_name": "Log.zip"},
+                                    ensure_ascii=False,
+                                ),
+                            }
+                        ]
+                    }
+                },
+                ensure_ascii=False,
+            )
+            app = BridgeApp(
+                BridgeConfig(dry_run=False, data_dir=Path(tmp)),
+                lark_client=fake_lark,
+            )
+
+            resources = app._fetch_referenced_message_resources(
+                event(message_id="om_followup", reply_to="om_result_card", content="@bot 继续分析"),
+                route_content="继续分析",
+            )
+
+        self.assertEqual([(item.kind, item.value) for item in resources], [("file", "file_v3_original_log")])
+        self.assertEqual(resources[0].source_message_id, "om_original_file")
+        self.assertEqual(resources[0].display_name, "Log.zip")
     def test_followup_reply_uses_saved_analysis_context(self):
         with tempfile.TemporaryDirectory() as tmp:
             metadata = Path(tmp) / "bug_metadata.md"

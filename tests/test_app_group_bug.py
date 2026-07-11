@@ -3,6 +3,51 @@ from _app_base import _AppTestBase
 
 
 class AppGroupBugTests(_AppTestBase):
+    def test_bug_url_reply_to_group_file_passes_file_into_bug_request(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = Path(tmp) / "bug_metadata.md"
+            html = Path(tmp) / "bug_report.html"
+            metadata.write_text("bug", encoding="utf-8")
+            html.write_text("<html></html>", encoding="utf-8")
+            fake_lark = FakeLarkClient()
+            fake_bug = FakeBugRunner(metadata, html)
+            fake_lark.fetched_messages["om_group_log"] = json.dumps(
+                {
+                    "data": {
+                        "messages": [
+                            {
+                                "message_id": "om_group_log",
+                                "msg_type": "file",
+                                "content": {"file_key": "file_v3_bug_log", "file_name": "BugLog.zip"},
+                            }
+                        ]
+                    }
+                },
+                ensure_ascii=False,
+            )
+            app = BridgeApp(
+                BridgeConfig(dry_run=False, data_dir=Path(tmp), allowed_chats=["oc_denied"]),
+                lark_client=fake_lark,
+                bug_runner=fake_bug,
+            )
+            bug_url = "https://project.feishu.cn/xpfailuremgmt/buglo/detail/7010953353"
+
+            result = app.handle_event(
+                event(
+                    event_id="evt_bug_with_group_file",
+                    message_id="om_bug_with_group_file",
+                    reply_to="om_group_log",
+                    content=f"@bot {bug_url} 2026-07-03 15:11 调查3D生命周期",
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.details["mode"], "bug_analysis")
+        request = fake_bug.analysis_calls[0]["request"]
+        self.assertEqual([(item.kind, item.value) for item in request.resources], [("file", "file_v3_bug_log")])
+        self.assertEqual(request.resources[0].source_message_id, "om_group_log")
+        self.assertEqual(request.resources[0].display_name, "BugLog.zip")
+
     def test_direct_analysis_failure_card_retry_reruns_direct_analysis_instead_of_omlx_followup(self):
         with tempfile.TemporaryDirectory() as tmp:
             metadata = Path(tmp) / "analysis.md"

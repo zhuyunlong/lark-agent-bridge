@@ -192,7 +192,12 @@ class _RoutesMixin:
                 )
         if not self.state_store.mark_seen(ctx.event):
             return TaskResult(True, f"duplicate event skipped: {ctx.event.event_id}", skipped=True)
-        return self._run_app_server_investigation_request(ctx.event, request, ctx.route_content)
+        return self._run_app_server_investigation_request(
+            ctx.event,
+            request,
+            ctx.route_content,
+            root_message_id=(ctx.followup_context.root_message_id if ctx.followup_context is not None else None),
+        )
     def _route_report_followup(self, ctx: _RouteContext) -> TaskResult | None:
         request = ctx.report_followup_request
         if ctx.followup_context is None or request is None or not request.triggered:
@@ -324,7 +329,11 @@ class _RoutesMixin:
         return self._maybe_handle_direct_analysis_followup(ctx.event, ctx.followup_context, ctx.route_content)
     def _route_bug_intent(self, ctx: _RouteContext) -> TaskResult | None:
         if ctx.bug_request is not None and getattr(ctx.bug_request, "triggered", False):
-            return self._handle_bug_intent(ctx.event, ctx.route_content)
+            return self._handle_bug_intent(
+                ctx.event,
+                ctx.route_content,
+                referenced_resources=ctx.referenced_resources,
+            )
         return None
     def _route_addr2line_resolve(self, ctx: _RouteContext) -> TaskResult | None:
         request = ctx.addr2line_request

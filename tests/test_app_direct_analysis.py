@@ -1133,6 +1133,133 @@ class AppDirectAnalysisTests(_AppTestBase):
         self.assertEqual(resources[0].value, "file_direct_zip")
         self.assertEqual(resources[0].source_message_id, "om_file_msg")
         self.assertEqual(resources[0].display_name, "L1NSPGHB3SB010669log0.zip")
+    def test_direct_analysis_mixed_continue_preserves_followup_payload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = BridgeApp(
+                BridgeConfig(dry_run=False, data_dir=Path(tmp)),
+                lark_client=FakeLarkClient(),
+            )
+            app._reference_chain_log_resources = lambda _event: [
+                DownloadResource(kind="file", value="file_v3_followup_log", source_message_id="om_file")
+            ]
+            context = SimpleNamespace(
+                root_message_id="om_direct_root",
+                request_text="调查3D生命周期",
+            )
+
+            request = app._recovered_direct_analysis_request_from_followup_context(
+                event(message_id="om_followup", content="@bot 时间点2026-07-03 15:11分 继续自主分析"),
+                context,
+                followup_text="时间点2026-07-03 15:11分 继续自主分析",
+            )
+
+        self.assertIsNotNone(request)
+        assert request is not None
+        self.assertIn("追问/修正：时间点2026-07-03 15:11分 继续自主分析", request.raw_text)
+
+    def test_direct_analysis_pure_continue_reuses_original_request(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = BridgeApp(
+                BridgeConfig(dry_run=False, data_dir=Path(tmp)),
+                lark_client=FakeLarkClient(),
+            )
+            app._reference_chain_log_resources = lambda _event: [
+                DownloadResource(kind="file", value="file_v3_followup_log", source_message_id="om_file")
+            ]
+            context = SimpleNamespace(
+                root_message_id="om_direct_root",
+                request_text="调查3D生命周期",
+            )
+
+            request = app._recovered_direct_analysis_request_from_followup_context(
+                event(message_id="om_followup", content="@bot 继续自主分析"),
+                context,
+                followup_text="继续自主分析",
+            )
+
+        self.assertIsNotNone(request)
+        assert request is not None
+        self.assertEqual(request.raw_text, "调查3D生命周期")
+
+    def test_recovered_direct_analysis_keeps_original_conversation_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata = Path(tmp) / "analysis.md"
+            html = Path(tmp) / "analysis.html"
+            metadata.write_text("analysis", encoding="utf-8")
+            html.write_text("<html></html>", encoding="utf-8")
+            fake_lark = FakeLarkClient()
+            fake_bug = FakeBugRunner(metadata, html)
+            fake_lark.fetched_messages["om_bot_result"] = json.dumps(
+                {
+                    "data": {
+                        "messages": [
+                            {
+                                "message_id": "om_bot_result",
+                                "reply_to": "om_direct_root",
+                            }
+                        ]
+                    }
+                }
+            )
+            fake_lark.fetched_messages["om_direct_root"] = json.dumps(
+                {
+                    "data": {
+                        "messages": [
+                            {
+                                "message_id": "om_direct_root",
+                                "reply_to": "om_file_msg",
+                                "content": "@bot 调查3D生命周期",
+                            }
+                        ]
+                    }
+                }
+            )
+            fake_lark.fetched_messages["om_file_msg"] = json.dumps(
+                {
+                    "data": {
+                        "messages": [
+                            {
+                                "message_id": "om_file_msg",
+                                "msg_type": "file",
+                                "content": {"file_key": "file_v3_followup_log", "file_name": "Log.alog"},
+                            }
+                        ]
+                    }
+                }
+            )
+            app = BridgeApp(
+                BridgeConfig(dry_run=False, data_dir=Path(tmp), allowed_chats=["oc_denied"]),
+                lark_client=fake_lark,
+                bug_runner=fake_bug,
+            )
+            app.conversation_store.remember(
+                root_message_id="om_direct_root",
+                chat_id="oc_denied",
+                mode="direct_analysis",
+                request_text="调查3D生命周期",
+                summary_text="第一次分析失败",
+                report_url="",
+                report_excerpt="",
+            )
+            app.conversation_store.remember_alias(
+                alias_message_id="om_bot_result",
+                root_message_id="om_direct_root",
+            )
+
+            result = app.handle_event(
+                event(
+                    event_id="evt_direct_followup_root",
+                    message_id="om_direct_followup",
+                    reply_to="om_bot_result",
+                    content="@bot 时间点2026-07-03 15:11分 继续自主分析",
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.details["mode"], "direct_analysis")
+        self.assertEqual(result.details["conversation_root_message_id"], "om_direct_root")
+        self.assertIsNone(app.activity_store.get_session("om_direct_followup"))
+        self.assertIn("时间点2026-07-03 15:11分", fake_bug.requests[0].raw_text)
     def test_bug_clarification_reply_direct_source_analysis_recovers_direct_analysis(self):
         with tempfile.TemporaryDirectory() as tmp:
             metadata = Path(tmp) / "analysis.md"

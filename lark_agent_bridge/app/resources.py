@@ -349,10 +349,21 @@ class _ResourcesMixin:
             if not isinstance(message, dict):
                 continue
             message_id = str(message.get("message_id") or fallback_message_id).strip()
-            extracted = self._extract_resources_from_message_value(message, source_message_id=message_id)
+            message_type = str(message.get("msg_type") or message.get("message_type") or "").strip().casefold()
+            extracted = self._extract_resources_from_message_value(
+                message,
+                source_message_id=message_id,
+                allow_bare_resource_tokens=message_type in {"file", "folder", "image"},
+            )
             resources = self._merge_resources(resources, extracted)
         return resources
-    def _extract_resources_from_message_value(self, value: object, *, source_message_id: str) -> list[DownloadResource]:
+    def _extract_resources_from_message_value(
+        self,
+        value: object,
+        *,
+        source_message_id: str,
+        allow_bare_resource_tokens: bool = False,
+    ) -> list[DownloadResource]:
         resources: list[DownloadResource] = []
         if isinstance(value, str):
             try:
@@ -360,12 +371,29 @@ class _ResourcesMixin:
             except json.JSONDecodeError:
                 parsed = None
             if parsed is not None and parsed is not value:
-                return self._extract_resources_from_message_value(parsed, source_message_id=source_message_id)
-            return [
+                return self._extract_resources_from_message_value(
+                    parsed,
+                    source_message_id=source_message_id,
+                    allow_bare_resource_tokens=allow_bare_resource_tokens,
+                )
+            candidates = [
                 item
                 for item in find_resources(value, source_message_id=source_message_id)
                 if item.kind in {"file", "folder", "image"}
             ]
+            if allow_bare_resource_tokens:
+                return candidates
+            structured: list[DownloadResource] = [item for item in candidates if item.kind == "folder"]
+            for match in re.finditer(r"<file\b[^>]*>", value, re.I):
+                structured = self._merge_resources(
+                    structured,
+                    [
+                        item
+                        for item in find_resources(match.group(0), source_message_id=source_message_id)
+                        if item.kind == "file"
+                    ],
+                )
+            return structured
         if isinstance(value, dict):
             file_display_name = self._extract_resource_display_name(value)
             for key, nested in value.items():
@@ -396,13 +424,21 @@ class _ResourcesMixin:
                     continue
                 resources = self._merge_resources(
                     resources,
-                    self._extract_resources_from_message_value(nested, source_message_id=source_message_id),
+                    self._extract_resources_from_message_value(
+                        nested,
+                        source_message_id=source_message_id,
+                        allow_bare_resource_tokens=allow_bare_resource_tokens and key == "content",
+                    ),
                 )
             return resources
         if isinstance(value, list):
             for item in value:
                 resources = self._merge_resources(
                     resources,
-                    self._extract_resources_from_message_value(item, source_message_id=source_message_id),
+                    self._extract_resources_from_message_value(
+                        item,
+                        source_message_id=source_message_id,
+                        allow_bare_resource_tokens=allow_bare_resource_tokens,
+                    ),
                 )
         return resources
