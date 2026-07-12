@@ -13,6 +13,61 @@ from .parsing.terms import FOLLOWUP_CONTINUE_TERMS, FOLLOWUP_RETRY_TERMS
 
 
 ConversationAction = Literal["new", "retry", "continue", "ask", "unknown"]
+ResourceSelection = Literal[
+    "current_message",
+    "reply_chain",
+    "session",
+    "bug_attachment",
+    "none",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedConversationResources:
+    current_message: tuple[DownloadResource, ...]
+    reply_chain: tuple[DownloadResource, ...]
+    session: tuple[DownloadResource, ...]
+    bug_attachments: tuple[DownloadResource, ...]
+    preferred_resources: tuple[DownloadResource, ...]
+    selected_source: ResourceSelection
+    source_message_ids: tuple[str, ...]
+
+
+def resolve_conversation_resources(
+    *,
+    current_message: list[DownloadResource],
+    reply_chain: list[DownloadResource],
+    session: list[DownloadResource],
+    bug_attachments: list[DownloadResource],
+) -> ResolvedConversationResources:
+    groups = (
+        ("current_message", current_message),
+        ("reply_chain", reply_chain),
+        ("session", session),
+        ("bug_attachment", bug_attachments),
+    )
+    selected_source: ResourceSelection = "none"
+    preferred: tuple[DownloadResource, ...] = ()
+    for source, resources in groups:
+        if resources:
+            selected_source = source
+            preferred = tuple(resources)
+            break
+    source_message_ids: list[str] = []
+    for _, resources in groups:
+        for resource in resources:
+            message_id = resource.source_message_id.strip()
+            if message_id and message_id not in source_message_ids:
+                source_message_ids.append(message_id)
+    return ResolvedConversationResources(
+        current_message=tuple(current_message),
+        reply_chain=tuple(reply_chain),
+        session=tuple(session),
+        bug_attachments=tuple(bug_attachments),
+        preferred_resources=preferred,
+        selected_source=selected_source,
+        source_message_ids=tuple(source_message_ids),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,6 +79,7 @@ class ResolvedConversationInput:
     conversation_root_message_id: str
     followup_context: object | None
     referenced_resources: tuple[DownloadResource, ...]
+    resources: ResolvedConversationResources
     followup_action: ConversationAction
     followup_payload: str
     is_new_chain: bool
@@ -43,6 +99,7 @@ def build_resolved_conversation_input(
     route_text_source: str,
     context_source: str,
     conversation_root_message_id: str = "",
+    resource_view: ResolvedConversationResources | None = None,
 ) -> ResolvedConversationInput:
     normalized_route_text = (route_text or "").strip()
     if followup_context is None:
@@ -60,11 +117,12 @@ def build_resolved_conversation_input(
         or event.message_id
         or ""
     ).strip()
-    source_message_ids: list[str] = []
-    for resource in referenced_resources:
-        source_message_id = resource.source_message_id.strip()
-        if source_message_id and source_message_id not in source_message_ids:
-            source_message_ids.append(source_message_id)
+    resolved_resources = resource_view or resolve_conversation_resources(
+        current_message=[],
+        reply_chain=referenced_resources,
+        session=[],
+        bug_attachments=[],
+    )
     return ResolvedConversationInput(
         event=event,
         raw_text=event.content,
@@ -73,12 +131,13 @@ def build_resolved_conversation_input(
         conversation_root_message_id=root_message_id,
         followup_context=followup_context,
         referenced_resources=tuple(referenced_resources),
+        resources=resolved_resources,
         followup_action=action,
         followup_payload=payload,
         is_new_chain=is_new_chain,
         route_text_source=route_text_source,
         context_source=context_source,
-        resource_source_message_ids=tuple(source_message_ids),
+        resource_source_message_ids=resolved_resources.source_message_ids,
     )
 
 

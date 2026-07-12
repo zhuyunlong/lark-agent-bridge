@@ -6,6 +6,7 @@ import re
 from typing import TYPE_CHECKING
 
 from ._shared import *  # noqa: F401,F403
+from ..conversation_input import ResolvedConversationResources, resolve_conversation_resources
 
 if TYPE_CHECKING:
     from .conversation_resolver import MessageFetchCache
@@ -287,6 +288,39 @@ class _ResourcesMixin:
                 self._extract_resources_from_message_payload(payload, fallback_message_id=message_id),
             )
         return resources
+    def _resolve_conversation_resource_view(
+        self,
+        event: LarkEvent,
+        *,
+        route_content: str,
+        followup_context,
+        message_cache: MessageFetchCache,
+    ) -> ResolvedConversationResources:
+        current_resources: list[DownloadResource] = []
+        current_payload = message_cache.payload(event.message_id)
+        if current_payload is not None:
+            current_resources = self._extract_resources_from_message_payload(
+                current_payload,
+                fallback_message_id=event.message_id,
+            )
+        fetched_resources = self._fetch_referenced_message_resources(
+            event,
+            route_content=route_content,
+            force_current_lookup=True,
+            message_cache=message_cache,
+        )
+        reply_resources = [
+            resource
+            for resource in fetched_resources
+            if resource.source_message_id.strip() != event.message_id
+        ]
+        session_resources = self._log_resources_from_context(followup_context)
+        return resolve_conversation_resources(
+            current_message=current_resources,
+            reply_chain=reply_resources,
+            session=session_resources,
+            bug_attachments=[],
+        )
     def _candidate_reference_message_ids(
         self,
         event: LarkEvent,

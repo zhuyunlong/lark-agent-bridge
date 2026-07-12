@@ -67,11 +67,11 @@
 **Interfaces:**
 - Produces: current-message, reply-chain, session, and Bug-attachment resource groups plus an ordered `preferred_resources` view.
 
-- [ ] Add RED matrix tests for interactive cards, ZIP, single files, folders, local prepared inputs, and Bug attachments.
-- [ ] Resolve structured resources once and record every candidate's provenance.
-- [ ] Apply the precedence `explicit replied file -> existing local prepared input -> Bug attachment` centrally.
-- [ ] Migrate Bug, direct analysis, app-server, signal, and perception request builders to consume the normalized resource view.
-- [ ] Commit after downloader and archive preparation regressions pass.
+- [x] Add RED matrix tests for interactive cards, ZIP, single files, folders, local prepared inputs, and Bug attachments.
+- [x] Resolve structured resources once and record every candidate's provenance.
+- [x] Apply the precedence `explicit replied file -> existing local prepared input -> Bug attachment` centrally.
+- [x] Migrate Bug, direct analysis, app-server, signal, and perception request builders to consume the normalized resource view.
+- [x] Commit after downloader and archive preparation regressions pass.
 
 ### Task 4: Control Action and Payload Migration
 

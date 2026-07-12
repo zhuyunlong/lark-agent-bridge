@@ -742,12 +742,13 @@ class _HandleEventMixin(_RoutesMixin, _DeliveryMixin, _MentionMixin, _ProgressCa
             )
             if control_result is not None:
                 return control_result
-        referenced_resources = self._fetch_referenced_message_resources(
+        resource_view = self._resolve_conversation_resource_view(
             event,
             route_content=route_content,
-            force_current_lookup=True,
+            followup_context=followup_context,
             message_cache=resolution.message_cache,
         )
+        referenced_resources = list(resource_view.preferred_resources)
         signal_request = self._build_signal_request(route_content, referenced_resources)
         rom_version_request = parse_rom_version_lookup_request(route_content)
         addr2line_request = self._build_addr2line_request(route_content, event, referenced_resources)
@@ -819,6 +820,7 @@ class _HandleEventMixin(_RoutesMixin, _DeliveryMixin, _MentionMixin, _ProgressCa
             route_text_source=resolution.route_text_source,
             context_source=resolution.context_source,
             conversation_root_message_id=resolution.conversation_root_message_id,
+            resource_view=resource_view,
         )
         ctx = _RouteContext(
             event=event,
