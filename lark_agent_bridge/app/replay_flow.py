@@ -15,6 +15,8 @@ class _ReplayFlowMixin:
             ctx.route_content,
             ctx.followup_context,
             referenced_resources=ctx.referenced_resources,
+            followup_action=ctx.conversation_input.followup_action,
+            followup_payload=ctx.conversation_input.followup_payload,
         )
         # Keep bug/addr2line/rom on their existing paths until their adapters are
         # migrated. Direct/signal/perception are handled here because their old
@@ -25,7 +27,13 @@ class _ReplayFlowMixin:
         if decision.action in {"new_request", "unsupported"}:
             return None
         if decision.action == "answer_from_existing":
-            return self._handle_followup(ctx.event, ctx.route_content, ctx.followup_context)
+            return self._handle_followup(
+                ctx.event,
+                ctx.route_content,
+                ctx.followup_context,
+                conversation_action=ctx.conversation_input.followup_action,
+                conversation_payload=ctx.conversation_input.followup_payload,
+            )
         if decision.action == "reanalyze":
             return self._execute_analysis_replay_plan(ReplayPlan(decision=decision, context=replay_context), ctx.event)
         if decision.action == "clarify":
@@ -50,6 +58,8 @@ class _ReplayFlowMixin:
         followup_context,
         *,
         referenced_resources: list[DownloadResource] | None = None,
+        followup_action: str = "unknown",
+        followup_payload: str | None = None,
     ) -> AnalysisReplayContext:
         previous_session = self.activity_store.get_session(followup_context.root_message_id) or {}
         details = previous_session.get("details") if isinstance(previous_session.get("details"), dict) else {}
@@ -76,6 +86,8 @@ class _ReplayFlowMixin:
             original_request_text=original_request_text,
             current_text=route_content.strip(),
             history=list(getattr(followup_context, "history", []) or []),
+            followup_action=followup_action,
+            followup_payload=(route_content.strip() if followup_payload is None else followup_payload),
             summary_text=str(getattr(followup_context, "summary_text", "") or ""),
             report_excerpt=str(getattr(followup_context, "report_excerpt", "") or ""),
             report_url=str(getattr(followup_context, "report_url", "") or ""),
@@ -153,7 +165,7 @@ class _ReplayFlowMixin:
         )
 
     def _replay_text_requests_reanalysis(self, current_text: str, context: AnalysisReplayContext) -> bool:
-        action = parse_followup_action(current_text)
+        action = context.followup_action
         if action == "retry":
             return True
         if action == "continue" and context.mode == "direct_analysis":
@@ -193,10 +205,7 @@ class _ReplayFlowMixin:
         return original_request.signal or ""
 
     def _normalized_replay_request_text(self, context: AnalysisReplayContext) -> str:
-        if (
-            parse_followup_action(context.current_text) in {"retry", "continue"}
-            and self._is_pure_direct_followup_control(context.current_text)
-        ):
+        if context.followup_action in {"retry", "continue"} and not context.followup_payload:
             return context.original_request_text
         if not context.current_text:
             return context.original_request_text
@@ -325,7 +334,7 @@ class _ReplayFlowMixin:
 
     def _execute_perception_replay_plan(self, plan: ReplayPlan, event: LarkEvent) -> TaskResult:
         context = plan.context
-        if parse_followup_action(context.current_text) == "retry":
+        if context.followup_action == "retry" and not context.followup_payload:
             request_text = context.original_request_text
         else:
             request_text = plan.decision.normalized_request_text or self._normalized_replay_request_text(context)

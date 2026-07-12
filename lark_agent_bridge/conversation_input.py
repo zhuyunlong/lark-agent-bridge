@@ -102,14 +102,10 @@ def build_resolved_conversation_input(
     resource_view: ResolvedConversationResources | None = None,
 ) -> ResolvedConversationInput:
     normalized_route_text = (route_text or "").strip()
-    if followup_context is None:
-        action: ConversationAction = "new"
-    else:
-        parsed_action = parse_followup_action(normalized_route_text)
-        action = parsed_action if parsed_action in {"retry", "continue", "ask", "unknown"} else "unknown"
-    payload = normalized_route_text
-    if action in {"retry", "continue"} and is_pure_followup_control(normalized_route_text):
-        payload = ""
+    action, payload = resolve_followup_action_payload(
+        normalized_route_text,
+        has_followup_context=followup_context is not None,
+    )
     root_message_id = str(
         conversation_root_message_id
         or getattr(followup_context, "root_message_id", "")
@@ -139,6 +135,25 @@ def build_resolved_conversation_input(
         context_source=context_source,
         resource_source_message_ids=resolved_resources.source_message_ids,
     )
+
+
+def resolve_followup_action_payload(
+    text: str,
+    *,
+    has_followup_context: bool,
+) -> tuple[ConversationAction, str]:
+    normalized = (text or "").strip()
+    if not has_followup_context:
+        return "new", normalized
+    parsed_action = parse_followup_action(normalized)
+    if parsed_action == "ask" and re.search(r"(?:重新|再)分析", normalized):
+        parsed_action = "retry"
+    action: ConversationAction = (
+        parsed_action if parsed_action in {"retry", "continue", "ask", "unknown"} else "unknown"
+    )
+    if action in {"retry", "continue"} and is_pure_followup_control(normalized):
+        return action, ""
+    return action, normalized
 
 
 def is_pure_followup_control(text: str) -> bool:

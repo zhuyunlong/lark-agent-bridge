@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import re
 
+from ..conversation_input import resolve_followup_action_payload
 from ._shared import *  # noqa: F401,F403
 
 
@@ -14,7 +15,12 @@ class _VersionLookupMixin:
         followup_context = ctx.followup_context
         if followup_context is None or str(getattr(followup_context, "mode", "") or "") != "rom_version_lookup":
             return None
-        if parse_followup_action(ctx.route_content) != "retry":
+        action = (
+            ctx.conversation_input.followup_action
+            if ctx.conversation_input is not None
+            else resolve_followup_action_payload(ctx.route_content, has_followup_context=True)[0]
+        )
+        if action != "retry":
             return None
         previous_request = parse_rom_version_lookup_request(str(getattr(followup_context, "request_text", "") or ""))
         rom_version = previous_request.rom_version or self._recent_rom_version_for_chat(ctx.event)

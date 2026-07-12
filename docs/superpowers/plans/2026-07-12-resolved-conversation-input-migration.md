@@ -85,10 +85,10 @@
 **Interfaces:**
 - Produces: one `followup_action` and one lossless `followup_payload` for every migrated follow-up path.
 
-- [ ] Add RED tests for pure retry/continue and mixed time, symptom, source-direction, and control text.
-- [ ] Replace route-local `parse_followup_action()` calls with normalized input fields.
-- [ ] Remove the compatibility-only direct-analysis control predicate after all consumers migrate.
-- [ ] Commit after Bug/direct/app-server replay matrices pass.
+- [x] Add RED tests for pure retry/continue and mixed time, symptom, source-direction, and control text.
+- [x] Replace route-local `parse_followup_action()` calls with normalized input fields.
+- [x] Remove the compatibility-only direct-analysis control predicate after all consumers migrate.
+- [x] Commit after Bug/direct/app-server replay matrices pass.
 
 ### Task 5: Executor and Persistence Migration
 

@@ -8,6 +8,7 @@ import threading
 from typing import Callable
 
 from ._shared import *  # noqa: F401,F403
+from ..conversation_input import resolve_followup_action_payload
 
 
 class _RoutesMixin:
@@ -202,7 +203,12 @@ class _RoutesMixin:
         request = ctx.report_followup_request
         if ctx.followup_context is None or request is None or not request.triggered:
             return None
-        if parse_followup_action(request.prompt) in {"retry", "continue"}:
+        action = (
+            ctx.conversation_input.followup_action
+            if ctx.conversation_input is not None
+            else resolve_followup_action_payload(request.prompt, has_followup_context=True)[0]
+        )
+        if action in {"retry", "continue"}:
             return None
         if not self.state_store.mark_seen(ctx.event):
             return TaskResult(True, f"duplicate event skipped: {ctx.event.event_id}", skipped=True)
@@ -326,7 +332,13 @@ class _RoutesMixin:
     def _route_direct_analysis_followup(self, ctx: _RouteContext) -> TaskResult | None:
         if ctx.followup_context is None:
             return None
-        return self._maybe_handle_direct_analysis_followup(ctx.event, ctx.followup_context, ctx.route_content)
+        return self._maybe_handle_direct_analysis_followup(
+            ctx.event,
+            ctx.followup_context,
+            ctx.route_content,
+            followup_action=(ctx.conversation_input.followup_action if ctx.conversation_input else None),
+            followup_payload=(ctx.conversation_input.followup_payload if ctx.conversation_input else None),
+        )
     def _route_bug_intent(self, ctx: _RouteContext) -> TaskResult | None:
         if ctx.bug_request is not None and getattr(ctx.bug_request, "triggered", False):
             return self._handle_bug_intent(
@@ -369,7 +381,13 @@ class _RoutesMixin:
         )
     def _route_general_followup(self, ctx: _RouteContext) -> TaskResult | None:
         if ctx.followup_context is not None:
-            return self._handle_followup(ctx.event, ctx.route_content, ctx.followup_context)
+            return self._handle_followup(
+                ctx.event,
+                ctx.route_content,
+                ctx.followup_context,
+                conversation_action=(ctx.conversation_input.followup_action if ctx.conversation_input else None),
+                conversation_payload=(ctx.conversation_input.followup_payload if ctx.conversation_input else None),
+            )
         return None
     def _route_stale_light_interaction(self, ctx: _RouteContext) -> TaskResult | None:
         stale = self._stale_light_interaction_details(ctx)

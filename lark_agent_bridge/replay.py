@@ -134,6 +134,8 @@ class AnalysisReplayContext:
     original_request_text: str
     current_text: str
     history: list[dict[str, str]]
+    followup_action: str = "unknown"
+    followup_payload: str = ""
     summary_text: str = ""
     report_excerpt: str = ""
     report_url: str = ""

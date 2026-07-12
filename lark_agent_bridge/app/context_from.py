@@ -9,6 +9,7 @@ import shutil
 import stat
 import unicodedata
 
+from ..conversation_input import resolve_followup_action_payload
 from ._shared import *  # noqa: F401,F403
 
 
@@ -114,6 +115,8 @@ class _ContextFromMixin(_FollowupClarifyMixin, _ExistingAnswerMixin, _ContextLoo
         followup_context,
         *,
         followup_action: str | None = None,
+        conversation_action: str | None = None,
+        conversation_payload: str | None = None,
     ) -> TaskResult:
         if not self.state_store.mark_seen(event):
             return TaskResult(True, f"duplicate event skipped: {event.event_id}", skipped=True)
@@ -137,7 +140,13 @@ class _ContextFromMixin(_FollowupClarifyMixin, _ExistingAnswerMixin, _ContextLoo
                     route_content,
                 )
             return bug_skill_confirmation_result
-        direct_followup_result = self._maybe_handle_direct_analysis_followup(event, followup_context, route_content)
+        direct_followup_result = self._maybe_handle_direct_analysis_followup(
+            event,
+            followup_context,
+            route_content,
+            followup_action=conversation_action,
+            followup_payload=conversation_payload,
+        )
         if direct_followup_result is not None:
             return direct_followup_result
         bug_time_clarification_result = self._maybe_handle_bug_time_clarification_followup(
@@ -382,7 +391,7 @@ class _ContextFromMixin(_FollowupClarifyMixin, _ExistingAnswerMixin, _ContextLoo
             return f'<at user_id="{event.sender_id}"></at> {text}'
         return text
     def _is_followup_intent(self, route_content: str) -> bool:
-        action = parse_followup_action(route_content)
+        action, _ = resolve_followup_action_payload(route_content, has_followup_context=True)
         if action in {"retry", "continue"}:
             return True
         lowered = route_content.casefold()
