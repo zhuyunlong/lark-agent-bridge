@@ -49,11 +49,11 @@
 - Consumes: `LarkEvent` and existing conversation/activity stores.
 - Produces: addressed route text, direct reply ID, follow-up context, root ID, and provenance without repeated message fetches.
 
-- [ ] Add RED tests that count `fetch_message` calls for events lacking `reply_to`.
-- [ ] Move mention filtering and reply identity recovery behind one resolver.
-- [ ] Cache fetched message records for the lifetime of the resolved input.
-- [ ] Keep not-addressed and external-group policy results byte-for-byte compatible.
-- [ ] Commit after group, p2p, restart, and bot-alias tests pass.
+- [x] Add RED tests that count `fetch_message` calls for events lacking `reply_to`.
+- [x] Move mention filtering and reply identity recovery behind one resolver.
+- [x] Cache fetched message records for the lifetime of the resolved input.
+- [x] Keep not-addressed and external-group policy results byte-for-byte compatible.
+- [x] Commit after group, p2p, restart, and bot-alias tests pass.
 
 ### Task 3: Single Resource Resolution and Precedence
 

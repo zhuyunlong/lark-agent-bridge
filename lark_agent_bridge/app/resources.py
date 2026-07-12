@@ -3,8 +3,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import re
+from typing import TYPE_CHECKING
 
 from ._shared import *  # noqa: F401,F403
+
+if TYPE_CHECKING:
+    from .conversation_resolver import MessageFetchCache
 
 
 class _ResourcesMixin:
@@ -242,35 +246,45 @@ class _ResourcesMixin:
         *,
         route_content: str,
         force_current_lookup: bool = False,
+        message_cache: MessageFetchCache | None = None,
     ) -> list[DownloadResource]:
         resources: list[DownloadResource] = []
         candidate_ids = self._candidate_reference_message_ids(
             event,
             route_content=route_content,
             force_current_lookup=force_current_lookup,
+            message_cache=message_cache,
         )
         for message_id in candidate_ids:
-            fetched = self.lark_client.fetch_message(message_id)
-            if fetched.returncode != 0:
+            if message_cache is not None:
+                payload = message_cache.payload(message_id)
+            else:
+                fetched = self.lark_client.fetch_message(message_id)
+                payload = fetched.stdout if fetched.returncode == 0 else None
+            if payload is None:
                 continue
             resources = self._merge_resources(
                 resources,
-                self._extract_resources_from_message_payload(fetched.stdout, fallback_message_id=message_id),
+                self._extract_resources_from_message_payload(payload, fallback_message_id=message_id),
             )
         if resources:
             return resources
         seen = set(candidate_ids)
-        reference_ids = self._fetch_followup_reference_ids(event)
+        reference_ids = self._fetch_followup_reference_ids(event, message_cache=message_cache)
         for message_id in self._followup_context_candidate_ids(event, reference_ids):
             if message_id in seen:
                 continue
             seen.add(message_id)
-            fetched = self.lark_client.fetch_message(message_id)
-            if fetched.returncode != 0:
+            if message_cache is not None:
+                payload = message_cache.payload(message_id)
+            else:
+                fetched = self.lark_client.fetch_message(message_id)
+                payload = fetched.stdout if fetched.returncode == 0 else None
+            if payload is None:
                 continue
             resources = self._merge_resources(
                 resources,
-                self._extract_resources_from_message_payload(fetched.stdout, fallback_message_id=message_id),
+                self._extract_resources_from_message_payload(payload, fallback_message_id=message_id),
             )
         return resources
     def _candidate_reference_message_ids(
@@ -279,15 +293,20 @@ class _ResourcesMixin:
         *,
         route_content: str,
         force_current_lookup: bool = False,
+        message_cache: MessageFetchCache | None = None,
     ) -> list[str]:
         candidates = [value for value in [event.reply_to, event.parent_id, event.root_id] if value]
         should_lookup_current = force_current_lookup or self._should_lookup_current_message_for_resources(event, route_content)
         if not candidates and should_lookup_current and event.message_id:
-            fetched_current = self.lark_client.fetch_message(event.message_id)
-            if fetched_current.returncode == 0:
+            if message_cache is not None:
+                current_payload = message_cache.payload(event.message_id)
+            else:
+                fetched_current = self.lark_client.fetch_message(event.message_id)
+                current_payload = fetched_current.stdout if fetched_current.returncode == 0 else None
+            if current_payload is not None:
                 candidates.extend(
                     candidate
-                    for candidate in self._extract_message_reference_ids(fetched_current.stdout)
+                    for candidate in self._extract_message_reference_ids(current_payload)
                     if candidate and candidate != event.message_id
                 )
         unique: list[str] = []

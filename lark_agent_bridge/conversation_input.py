@@ -42,6 +42,7 @@ def build_resolved_conversation_input(
     is_new_chain: bool,
     route_text_source: str,
     context_source: str,
+    conversation_root_message_id: str = "",
 ) -> ResolvedConversationInput:
     normalized_route_text = (route_text or "").strip()
     if followup_context is None:
@@ -53,7 +54,8 @@ def build_resolved_conversation_input(
     if action in {"retry", "continue"} and is_pure_followup_control(normalized_route_text):
         payload = ""
     root_message_id = str(
-        getattr(followup_context, "root_message_id", "")
+        conversation_root_message_id
+        or getattr(followup_context, "root_message_id", "")
         or event.root_id
         or event.message_id
         or ""

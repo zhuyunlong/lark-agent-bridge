@@ -5,9 +5,12 @@ import html
 from pathlib import Path
 import re
 import threading
-from typing import Callable
+from typing import Callable, TYPE_CHECKING
 
 from ._shared import *  # noqa: F401,F403
+
+if TYPE_CHECKING:
+    from .conversation_resolver import MessageFetchCache
 
 
 class _MentionMixin:
@@ -18,7 +21,13 @@ class _MentionMixin:
         normalized = re.sub(r"(?i)<br\s*/?>", " ", normalized)
         normalized = re.sub(r"(?i)</?(?:p|div|span)[^>]*>", " ", normalized)
         return normalized.strip()
-    def _strip_group_chat_mention(self, text: str, *, event: LarkEvent | None = None) -> str | None:
+    def _strip_group_chat_mention(
+        self,
+        text: str,
+        *,
+        event: LarkEvent | None = None,
+        message_cache: MessageFetchCache | None = None,
+    ) -> str | None:
         content = self._normalize_mention_source_text(text)
         configured_bot = self.config.lark.bot_open_id.strip()
         if configured_bot:
@@ -43,7 +52,11 @@ class _MentionMixin:
                 return None
             return None
         if event is not None:
-            cleaned = self._strip_runtime_bot_mention(content, event)
+            cleaned = self._strip_runtime_bot_mention(
+                content,
+                event,
+                message_cache=message_cache,
+            )
             if cleaned is not None:
                 return cleaned
             return None
@@ -90,20 +103,35 @@ class _MentionMixin:
         if not mention_pattern.search(content):
             return None
         return self._normalize_mention_text(mention_pattern.sub(" ", content))
-    def _strip_runtime_bot_mention(self, content: str, event: LarkEvent) -> str | None:
-        for name in self._runtime_bot_mention_names(event):
+    def _strip_runtime_bot_mention(
+        self,
+        content: str,
+        event: LarkEvent,
+        *,
+        message_cache: MessageFetchCache | None = None,
+    ) -> str | None:
+        for name in self._runtime_bot_mention_names(event, message_cache=message_cache):
             cleaned = self._strip_configured_bot_name_mention(content, name)
             if cleaned is not None:
                 return cleaned
         return None
-    def _runtime_bot_mention_names(self, event: LarkEvent) -> list[str]:
+    def _runtime_bot_mention_names(
+        self,
+        event: LarkEvent,
+        *,
+        message_cache: MessageFetchCache | None = None,
+    ) -> list[str]:
         names = self._bot_mention_names_from_payload(event.raw)
         if names or not event.message_id:
             return names
-        fetched = self.lark_client.fetch_message(event.message_id)
-        if fetched.returncode != 0:
+        if message_cache is not None:
+            payload = message_cache.payload(event.message_id)
+        else:
+            fetched = self.lark_client.fetch_message(event.message_id)
+            payload = fetched.stdout if fetched.returncode == 0 else None
+        if payload is None:
             return []
-        return self._bot_mention_names_from_payload_text(fetched.stdout, message_id=event.message_id)
+        return self._bot_mention_names_from_payload_text(payload, message_id=event.message_id)
     def _bot_mention_names_from_payload(self, payload: object) -> list[str]:
         if not isinstance(payload, dict):
             return []

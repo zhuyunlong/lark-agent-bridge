@@ -9,6 +9,7 @@ import time
 from typing import Callable
 
 from ._shared import *  # noqa: F401,F403
+from .conversation_resolver import ConversationResolver
 from ..conversation_input import build_resolved_conversation_input
 
 
@@ -712,60 +713,22 @@ class _HandleEventMixin(_RoutesMixin, _DeliveryMixin, _MentionMixin, _ProgressCa
     def _handle_event(self, event: LarkEvent) -> TaskResult:
         self.cleanup_expired_jobs()
 
-        # Phase 1: Group mention filtering.
-        # Strict rule:
-        #   - New chain root: event.reply_to is empty AND the message @-mentions the bot.
-        #   - Continuation:  event.reply_to points at a known bot alias (an entry in
-        #                    conversation_store whose context_key != root_message_id).
-        #   - Anything else: ignored.
-        route_content = event.content
-        followup_context = None
-        followup_context_source = "none"
-        route_text_source = "event_content"
-        phase1_new_chain = False
-        direct_reply_to = ""
-        if event.chat_type == "group":
-            stripped_at_bot = self._strip_group_chat_mention(event.content, event=event)
-            direct_reply_to = self._direct_reply_to(event)
-            addressed_content: str | None = None
-            if direct_reply_to:
-                followup_context = self._lookup_bot_alias_context(direct_reply_to)
-                if followup_context is not None:
-                    followup_context_source = "bot_alias"
-                    addressed_content = (
-                        stripped_at_bot if stripped_at_bot is not None else event.content.strip()
-                    )
-                    route_text_source = "group_mention" if stripped_at_bot is not None else "bot_alias_reply"
-                elif stripped_at_bot is not None:
-                    addressed_content = stripped_at_bot
-                    route_text_source = "group_mention"
-                    phase1_new_chain = True
-            else:
-                if stripped_at_bot is not None:
-                    addressed_content = stripped_at_bot
-                    route_text_source = "group_mention"
-                    phase1_new_chain = True
-            if addressed_content is None:
-                if not self.state_store.mark_seen(event):
-                    return TaskResult(True, f"duplicate event skipped: {event.event_id}", skipped=True)
-                return TaskResult(
-                    success=True,
-                    message="group message not addressed to this bot",
-                    skipped=True,
-                    details={"mode": "not_addressed"},
-                )
-            route_content = addressed_content
+        resolution = ConversationResolver(self).resolve(event)
+        if not resolution.addressed:
+            if not self.state_store.mark_seen(event):
+                return TaskResult(True, f"duplicate event skipped: {event.event_id}", skipped=True)
+            return TaskResult(
+                success=True,
+                message="group message not addressed to this bot",
+                skipped=True,
+                details={"mode": "not_addressed"},
+            )
+        route_content = resolution.route_text
+        followup_context = resolution.followup_context
+        direct_reply_to = resolution.direct_reply_to
 
         # Phase 2: Policy gate
         decision = evaluate_event_policy(self.config, event)
-        if (
-            not decision.allowed
-            and decision.reason == "chat_not_allowed"
-            and followup_context is None
-        ):
-            followup_context = self._resolve_followup_context(event)
-            if followup_context is not None:
-                followup_context_source = "reply_chain"
         control_direct_reply_to = (
             direct_reply_to
             if event.chat_type == "group"
@@ -783,6 +746,7 @@ class _HandleEventMixin(_RoutesMixin, _DeliveryMixin, _MentionMixin, _ProgressCa
             event,
             route_content=route_content,
             force_current_lookup=True,
+            message_cache=resolution.message_cache,
         )
         signal_request = self._build_signal_request(route_content, referenced_resources)
         rom_version_request = parse_rom_version_lookup_request(route_content)
@@ -841,10 +805,6 @@ class _HandleEventMixin(_RoutesMixin, _DeliveryMixin, _MentionMixin, _ProgressCa
             return control_result
 
         # Phase 3: Build route context and dispatch through ordered handlers
-        if followup_context is None:
-            followup_context = self._resolve_followup_context(event)
-            if followup_context is not None:
-                followup_context_source = "reply_chain"
         latest_chat_context = self._latest_analysis_context(
             event.chat_id,
             explicit_followup_context=followup_context,
@@ -855,9 +815,10 @@ class _HandleEventMixin(_RoutesMixin, _DeliveryMixin, _MentionMixin, _ProgressCa
             direct_reply_to=direct_reply_to,
             followup_context=followup_context,
             referenced_resources=referenced_resources,
-            is_new_chain=followup_context is None,
-            route_text_source=route_text_source,
-            context_source=followup_context_source,
+            is_new_chain=resolution.is_new_chain,
+            route_text_source=resolution.route_text_source,
+            context_source=resolution.context_source,
+            conversation_root_message_id=resolution.conversation_root_message_id,
         )
         ctx = _RouteContext(
             event=event,
