@@ -294,8 +294,7 @@ class _RouteContext:
     """Pre-computed state shared across route handlers during event dispatch."""
 
     event: LarkEvent
-    route_content: str
-    followup_context: ConversationContext | None = None
+    conversation_input: ResolvedConversationInput
     signal_request: SignalRequest | None = None
     bug_request: object = None
     direct_analysis_request: object = None
@@ -306,9 +305,19 @@ class _RouteContext:
     perception_request: object = None
     rom_version_request: object = None
     addr2line_request: Addr2LineRequest | None = None
-    referenced_resources: list[DownloadResource] = field(default_factory=list)
     latest_chat_context: ConversationContext | None = None
-    conversation_input: ResolvedConversationInput | None = None
+
+    @property
+    def route_content(self) -> str:
+        return self.conversation_input.route_text
+
+    @property
+    def followup_context(self):
+        return self.conversation_input.followup_context
+
+    @property
+    def referenced_resources(self) -> list[DownloadResource]:
+        return list(self.conversation_input.referenced_resources)
 
 
 @dataclass

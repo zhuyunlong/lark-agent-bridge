@@ -829,8 +829,7 @@ class _HandleEventMixin(_RoutesMixin, _DeliveryMixin, _MentionMixin, _ProgressCa
         )
         ctx = _RouteContext(
             event=event,
-            route_content=route_content,
-            followup_context=followup_context,
+            conversation_input=conversation_input,
             signal_request=signal_request,
             bug_request=bug_request,
             direct_analysis_request=direct_analysis_request,
@@ -841,9 +840,7 @@ class _HandleEventMixin(_RoutesMixin, _DeliveryMixin, _MentionMixin, _ProgressCa
             perception_request=perception_request,
             rom_version_request=rom_version_request,
             addr2line_request=addr2line_request,
-            referenced_resources=referenced_resources,
             latest_chat_context=latest_chat_context,
-            conversation_input=conversation_input,
         )
         return self._dispatch_route(ctx)
     def _dispatch_route(self, ctx: _RouteContext) -> TaskResult:

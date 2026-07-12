@@ -101,3 +101,34 @@ def test_handle_event_attaches_compatible_resolved_input_to_route_context(tmp_pa
     assert list(ctx.conversation_input.referenced_resources) == ctx.referenced_resources
     assert ctx.conversation_input.conversation_root_message_id == "om_resolved_input"
     assert ctx.conversation_input.followup_action == "new"
+
+
+def test_route_context_has_no_duplicated_conversation_fields(tmp_path):
+    app = BridgeApp(
+        BridgeConfig(dry_run=False, data_dir=tmp_path),
+        lark_client=FakeLarkClient(),
+    )
+    captured = {}
+
+    def capture(ctx):
+        captured["ctx"] = ctx
+        return TaskResult(success=True, message="captured", details={"mode": "captured"})
+
+    app._dispatch_route = capture
+    app.handle_event(
+        event(
+            event_id="evt_no_legacy_fields",
+            message_id="om_no_legacy_fields",
+            chat_id="ou_p2p",
+            chat_type="p2p",
+            content="普通问题",
+        )
+    )
+
+    ctx = captured["ctx"]
+    assert "route_content" not in ctx.__dict__
+    assert "followup_context" not in ctx.__dict__
+    assert "referenced_resources" not in ctx.__dict__
+    assert ctx.route_content == ctx.conversation_input.route_text
+    assert ctx.followup_context is ctx.conversation_input.followup_context
+    assert ctx.referenced_resources == list(ctx.conversation_input.referenced_resources)

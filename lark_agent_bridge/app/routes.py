@@ -8,7 +8,6 @@ import threading
 from typing import Callable
 
 from ._shared import *  # noqa: F401,F403
-from ..conversation_input import resolve_followup_action_payload
 
 
 class _RoutesMixin:
@@ -197,17 +196,13 @@ class _RoutesMixin:
             ctx.event,
             request,
             ctx.route_content,
-            root_message_id=(ctx.conversation_input.conversation_root_message_id if ctx.conversation_input else None),
+            root_message_id=ctx.conversation_input.conversation_root_message_id,
         )
     def _route_report_followup(self, ctx: _RouteContext) -> TaskResult | None:
         request = ctx.report_followup_request
         if ctx.followup_context is None or request is None or not request.triggered:
             return None
-        action = (
-            ctx.conversation_input.followup_action
-            if ctx.conversation_input is not None
-            else resolve_followup_action_payload(request.prompt, has_followup_context=True)[0]
-        )
+        action = ctx.conversation_input.followup_action
         if action in {"retry", "continue"}:
             return None
         if not self.state_store.mark_seen(ctx.event):
@@ -336,8 +331,8 @@ class _RoutesMixin:
             ctx.event,
             ctx.followup_context,
             ctx.route_content,
-            followup_action=(ctx.conversation_input.followup_action if ctx.conversation_input else None),
-            followup_payload=(ctx.conversation_input.followup_payload if ctx.conversation_input else None),
+            followup_action=ctx.conversation_input.followup_action,
+            followup_payload=ctx.conversation_input.followup_payload,
         )
     def _route_bug_intent(self, ctx: _RouteContext) -> TaskResult | None:
         if ctx.bug_request is not None and getattr(ctx.bug_request, "triggered", False):
@@ -345,7 +340,7 @@ class _RoutesMixin:
                 ctx.event,
                 ctx.route_content,
                 referenced_resources=ctx.referenced_resources,
-                root_message_id=(ctx.conversation_input.conversation_root_message_id if ctx.conversation_input else None),
+                root_message_id=ctx.conversation_input.conversation_root_message_id,
             )
         return None
     def _route_addr2line_resolve(self, ctx: _RouteContext) -> TaskResult | None:
@@ -386,8 +381,8 @@ class _RoutesMixin:
                 ctx.event,
                 ctx.route_content,
                 ctx.followup_context,
-                conversation_action=(ctx.conversation_input.followup_action if ctx.conversation_input else None),
-                conversation_payload=(ctx.conversation_input.followup_payload if ctx.conversation_input else None),
+                conversation_action=ctx.conversation_input.followup_action,
+                conversation_payload=ctx.conversation_input.followup_payload,
             )
         return None
     def _route_stale_light_interaction(self, ctx: _RouteContext) -> TaskResult | None:
@@ -416,7 +411,7 @@ class _RoutesMixin:
                 ctx.event,
                 ctx.route_content,
                 referenced_resources=ctx.referenced_resources,
-                root_message_id=(ctx.conversation_input.conversation_root_message_id if ctx.conversation_input else None),
+                root_message_id=ctx.conversation_input.conversation_root_message_id,
             )
         return None
     def _route_signal_request(self, ctx: _RouteContext) -> TaskResult | None:
@@ -452,7 +447,7 @@ class _RoutesMixin:
             ctx.event,
             request,
             ctx.route_content,
-            root_message_id=(ctx.conversation_input.conversation_root_message_id if ctx.conversation_input else None),
+            root_message_id=ctx.conversation_input.conversation_root_message_id,
         )
     def _has_explicit_knowledge_trigger(self, text: str) -> bool:
         cleaned = (text or "").strip()
@@ -554,7 +549,7 @@ class _RoutesMixin:
             ctx.event,
             ctx.bug_request,
             ctx.route_content,
-            root_message_id=(ctx.conversation_input.conversation_root_message_id if ctx.conversation_input else None),
+            root_message_id=ctx.conversation_input.conversation_root_message_id,
         )
     def _route_direct_analysis(self, ctx: _RouteContext) -> TaskResult | None:
         if ctx.direct_analysis_request is None or not getattr(ctx.direct_analysis_request, "triggered", False):
@@ -565,7 +560,7 @@ class _RoutesMixin:
             ctx.event,
             ctx.route_content,
             referenced_resources=ctx.referenced_resources,
-            root_message_id=(ctx.conversation_input.conversation_root_message_id if ctx.conversation_input else None),
+            root_message_id=ctx.conversation_input.conversation_root_message_id,
         )
     def _should_defer_direct_analysis_to_intent(self, ctx: _RouteContext) -> bool:
         if not self.intent_runner.is_enabled():
@@ -587,7 +582,7 @@ class _RoutesMixin:
             ctx.event,
             ctx.perception_request,
             ctx.route_content,
-            root_message_id=(ctx.conversation_input.conversation_root_message_id if ctx.conversation_input else None),
+            root_message_id=ctx.conversation_input.conversation_root_message_id,
         )
     def _route_followup_intent(self, ctx: _RouteContext) -> TaskResult | None:
         if not self._is_followup_intent(ctx.route_content):

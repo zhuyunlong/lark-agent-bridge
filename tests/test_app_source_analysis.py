@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from lark_agent_bridge.models import TaskResult
 
@@ -75,7 +76,11 @@ class AppSourceAnalysisTests(unittest.TestCase):
             route_content = "基于源码 告诉我UnityReady信号如何使用和定义"
             ctx = _RouteContext(
                 event=event(content=f"@bot {route_content}"),
-                route_content=route_content,
+                conversation_input=SimpleNamespace(
+                    route_text=route_content,
+                    followup_context=None,
+                    referenced_resources=(),
+                ),
                 bug_request=parse_bug_request(route_content),
                 direct_analysis_request=parse_direct_analysis_request(route_content),
                 source_analysis_request=parse_source_analysis_request(route_content),

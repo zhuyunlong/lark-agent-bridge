@@ -119,8 +119,8 @@
 **Interfaces:**
 - Makes `ResolvedConversationInput` the only source for route text, follow-up context/root, and referenced resources.
 
-- [ ] Add a temporary assertion proving legacy fields equal normalized values at every dispatch.
-- [ ] Migrate remaining route handlers and remove duplicated context fields.
-- [ ] Remove duplicate fetch/recovery helpers only after call-site search reaches zero.
-- [ ] Run the affected suite, full suite where practical, `compileall`, and `git diff --check`.
-- [ ] Restart the listener and run the real group combination matrix before closing the migration.
+- [x] Add a temporary assertion proving legacy fields equal normalized values at every dispatch.
+- [x] Migrate remaining route handlers and remove duplicated context fields.
+- [x] Remove duplicate fetch/recovery helpers only after call-site search reaches zero.
+- [x] Run the affected suite, full suite where practical, `compileall`, and `git diff --check`.
+- [x] Restart the listener and run the real group combination matrix before closing the migration.
