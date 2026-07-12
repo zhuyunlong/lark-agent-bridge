@@ -25,6 +25,7 @@ class _ContextFromMixin(_FollowupClarifyMixin, _ExistingAnswerMixin, _ContextLoo
         route_content: str,
         *,
         referenced_resources: list[DownloadResource] | None = None,
+        root_message_id: str | None = None,
     ) -> TaskResult:
         referenced_resources = referenced_resources or []
         direct_analysis_request = self._build_direct_analysis_request(route_content, referenced_resources, event=event)
@@ -71,6 +72,7 @@ class _ContextFromMixin(_FollowupClarifyMixin, _ExistingAnswerMixin, _ContextLoo
             classification_skill=preflight.classification_skill,
             classification_source=preflight.classification_source,
             classification_reason=preflight.classification_reason or preflight.reason,
+            root_message_id=root_message_id,
         )
     def _handle_perception_intent(
         self,

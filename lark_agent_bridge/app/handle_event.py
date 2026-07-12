@@ -10,7 +10,7 @@ from typing import Callable
 
 from ._shared import *  # noqa: F401,F403
 from .conversation_resolver import ConversationResolver
-from ..conversation_input import build_resolved_conversation_input
+from ..conversation_input import build_resolved_conversation_input, conversation_input_snapshot
 
 
 from .routes import _RoutesMixin
@@ -821,6 +821,11 @@ class _HandleEventMixin(_RoutesMixin, _DeliveryMixin, _MentionMixin, _ProgressCa
             context_source=resolution.context_source,
             conversation_root_message_id=resolution.conversation_root_message_id,
             resource_view=resource_view,
+        )
+        self.activity_store.record_conversation_input(
+            conversation_input.conversation_root_message_id,
+            event,
+            conversation_input_snapshot(conversation_input),
         )
         ctx = _RouteContext(
             event=event,

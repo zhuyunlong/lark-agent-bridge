@@ -197,7 +197,7 @@ class _RoutesMixin:
             ctx.event,
             request,
             ctx.route_content,
-            root_message_id=(ctx.followup_context.root_message_id if ctx.followup_context is not None else None),
+            root_message_id=(ctx.conversation_input.conversation_root_message_id if ctx.conversation_input else None),
         )
     def _route_report_followup(self, ctx: _RouteContext) -> TaskResult | None:
         request = ctx.report_followup_request
@@ -345,6 +345,7 @@ class _RoutesMixin:
                 ctx.event,
                 ctx.route_content,
                 referenced_resources=ctx.referenced_resources,
+                root_message_id=(ctx.conversation_input.conversation_root_message_id if ctx.conversation_input else None),
             )
         return None
     def _route_addr2line_resolve(self, ctx: _RouteContext) -> TaskResult | None:
@@ -411,7 +412,12 @@ class _RoutesMixin:
             and not ctx.signal_request.signal
             and looks_like_scene_signal_request(ctx.route_content)
         ):
-            return self._handle_direct_analysis_intent(ctx.event, ctx.route_content, referenced_resources=ctx.referenced_resources)
+            return self._handle_direct_analysis_intent(
+                ctx.event,
+                ctx.route_content,
+                referenced_resources=ctx.referenced_resources,
+                root_message_id=(ctx.conversation_input.conversation_root_message_id if ctx.conversation_input else None),
+            )
         return None
     def _route_signal_request(self, ctx: _RouteContext) -> TaskResult | None:
         request = ctx.signal_request
@@ -442,7 +448,12 @@ class _RoutesMixin:
                 )
         if not self.state_store.mark_seen(ctx.event):
             return TaskResult(True, f"duplicate event skipped: {ctx.event.event_id}", skipped=True)
-        return self._run_signal_request(ctx.event, request, ctx.route_content)
+        return self._run_signal_request(
+            ctx.event,
+            request,
+            ctx.route_content,
+            root_message_id=(ctx.conversation_input.conversation_root_message_id if ctx.conversation_input else None),
+        )
     def _has_explicit_knowledge_trigger(self, text: str) -> bool:
         cleaned = (text or "").strip()
         for prefix in self.config.knowledge.trigger_prefixes:
@@ -539,7 +550,12 @@ class _RoutesMixin:
         )
         if pending is not None:
             return pending
-        return self._run_bug_request(ctx.event, ctx.bug_request, ctx.route_content)
+        return self._run_bug_request(
+            ctx.event,
+            ctx.bug_request,
+            ctx.route_content,
+            root_message_id=(ctx.conversation_input.conversation_root_message_id if ctx.conversation_input else None),
+        )
     def _route_direct_analysis(self, ctx: _RouteContext) -> TaskResult | None:
         if ctx.direct_analysis_request is None or not getattr(ctx.direct_analysis_request, "triggered", False):
             return None
@@ -549,6 +565,7 @@ class _RoutesMixin:
             ctx.event,
             ctx.route_content,
             referenced_resources=ctx.referenced_resources,
+            root_message_id=(ctx.conversation_input.conversation_root_message_id if ctx.conversation_input else None),
         )
     def _should_defer_direct_analysis_to_intent(self, ctx: _RouteContext) -> bool:
         if not self.intent_runner.is_enabled():
@@ -566,7 +583,12 @@ class _RoutesMixin:
             return None
         if not self.state_store.mark_seen(ctx.event):
             return TaskResult(True, f"duplicate event skipped: {ctx.event.event_id}", skipped=True)
-        return self._run_perception_request(ctx.event, ctx.perception_request, ctx.route_content)
+        return self._run_perception_request(
+            ctx.event,
+            ctx.perception_request,
+            ctx.route_content,
+            root_message_id=(ctx.conversation_input.conversation_root_message_id if ctx.conversation_input else None),
+        )
     def _route_followup_intent(self, ctx: _RouteContext) -> TaskResult | None:
         if not self._is_followup_intent(ctx.route_content):
             return None

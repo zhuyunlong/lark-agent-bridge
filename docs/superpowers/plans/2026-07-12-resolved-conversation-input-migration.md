@@ -102,11 +102,11 @@
 **Interfaces:**
 - Persists: normalized request text, root ID, action/payload, resource provenance, and selected input source.
 
-- [ ] Add RED restart tests where live events omit `root_id` and `reply_to` must be reconstructed.
-- [ ] Make all executors consume the normalized root and request snapshot.
-- [ ] Persist a versioned, desensitized conversation-input snapshot in activity/session state.
-- [ ] Restore replay input from the snapshot first and retain legacy fallback for old sessions.
-- [ ] Commit after restart and historical-session compatibility tests pass.
+- [x] Add RED restart tests where live events omit `root_id` and `reply_to` must be reconstructed.
+- [x] Make all executors consume the normalized root and request snapshot.
+- [x] Persist a versioned, desensitized conversation-input snapshot in activity/session state.
+- [x] Restore replay input from the snapshot first and retain legacy fallback for old sessions.
+- [x] Commit after restart and historical-session compatibility tests pass.
 
 ### Task 6: Remove Compatibility Fields
 

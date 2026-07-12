@@ -91,7 +91,14 @@ class _RequestExecMixin:
         """Resolve a pending approval. Returns whether it was approved."""
         decision = self.approval_store.resolve(request_id, approved=approved)
         return decision.can_proceed
-    def _run_signal_request(self, event: LarkEvent, request: SignalRequest, route_content: str) -> TaskResult:
+    def _run_signal_request(
+        self,
+        event: LarkEvent,
+        request: SignalRequest,
+        route_content: str,
+        *,
+        root_message_id: str | None = None,
+    ) -> TaskResult:
         self._send_intent_preflight_card(
             event,
             _IntentPreflightDecision(
@@ -106,6 +113,7 @@ class _RequestExecMixin:
             "signal_request_received",
             "收到信号生命周期分析请求",
             event=event,
+            session_id=root_message_id,
             signal=request.signal or "",
             raw_text=request.raw_text,
             resource_count=len(request.resources),
@@ -117,9 +125,15 @@ class _RequestExecMixin:
             status="analyzing",
             details={"信号": request.signal or "未指定", "资源数": str(len(request.resources))},
             note="分析进行中，请稍候…",
+            session_id=root_message_id,
         )
         result = self.handler.handle(request, event=event)
-        return self._deliver_result(event, result, request_text=request.raw_text or route_content)
+        return self._deliver_result(
+            event,
+            result,
+            request_text=request.raw_text or route_content,
+            root_message_id=root_message_id,
+        )
     def _run_bug_request(
         self,
         event: LarkEvent,
@@ -186,7 +200,14 @@ class _RequestExecMixin:
             request_text=bug_request.raw_text or route_content,
             root_message_id=root_message_id,
         )
-    def _run_perception_request(self, event: LarkEvent, perception_request, route_content: str) -> TaskResult:
+    def _run_perception_request(
+        self,
+        event: LarkEvent,
+        perception_request,
+        route_content: str,
+        *,
+        root_message_id: str | None = None,
+    ) -> TaskResult:
         self._send_intent_preflight_card(
             event,
             _IntentPreflightDecision(
@@ -201,6 +222,7 @@ class _RequestExecMixin:
             "perception_summary_request_received",
             "收到感知数据总结请求",
             event=event,
+            session_id=root_message_id,
             prompt=perception_request.prompt,
             raw_text=perception_request.raw_text,
         )
@@ -210,9 +232,15 @@ class _RequestExecMixin:
             status="analyzing",
             details={"提示": perception_request.prompt or "默认"},
             note="分析进行中，请稍候…",
+            session_id=root_message_id,
         )
         result = self.perception_runner.run_summary(perception_request, event=event)
-        return self._deliver_result(event, result, request_text=perception_request.raw_text or route_content)
+        return self._deliver_result(
+            event,
+            result,
+            request_text=perception_request.raw_text or route_content,
+            root_message_id=root_message_id,
+        )
     def _run_direct_analysis_request(
         self,
         event: LarkEvent,

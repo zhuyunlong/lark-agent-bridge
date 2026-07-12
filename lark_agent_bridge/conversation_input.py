@@ -156,6 +156,78 @@ def resolve_followup_action_payload(
     return action, normalized
 
 
+def conversation_input_snapshot(resolved: ResolvedConversationInput) -> dict[str, object]:
+    def descriptors(resources: tuple[DownloadResource, ...]) -> list[dict[str, str]]:
+        return [
+            {
+                "kind": item.kind,
+                "value": item.value,
+                "source_message_id": item.source_message_id,
+                "display_name": item.display_name,
+            }
+            for item in resources
+        ]
+
+    resource_view = resolved.resources
+    return {
+        "version": 1,
+        "route_text": resolved.route_text,
+        "direct_reply_to": resolved.direct_reply_to,
+        "conversation_root_message_id": resolved.conversation_root_message_id,
+        "followup_action": resolved.followup_action,
+        "followup_payload": resolved.followup_payload,
+        "is_new_chain": resolved.is_new_chain,
+        "route_text_source": resolved.route_text_source,
+        "context_source": resolved.context_source,
+        "resources": {
+            "selected_source": resource_view.selected_source,
+            "current_message": descriptors(resource_view.current_message),
+            "reply_chain": descriptors(resource_view.reply_chain),
+            "session": descriptors(resource_view.session),
+            "bug_attachments": descriptors(resource_view.bug_attachments),
+            "preferred": descriptors(resource_view.preferred_resources),
+        },
+    }
+
+
+def resource_view_from_snapshot(snapshot: dict[str, object]) -> ResolvedConversationResources | None:
+    payload: object = snapshot.get("conversation_input") or snapshot
+    if not isinstance(payload, dict) or payload.get("version") != 1:
+        return None
+    resources = payload.get("resources")
+    if not isinstance(resources, dict):
+        return None
+
+    def load_group(name: str) -> list[DownloadResource]:
+        raw_group = resources.get(name)
+        if not isinstance(raw_group, list):
+            return []
+        loaded: list[DownloadResource] = []
+        for item in raw_group:
+            if not isinstance(item, dict):
+                continue
+            kind = str(item.get("kind") or "").strip()
+            value = str(item.get("value") or "").strip()
+            if not kind or not value:
+                continue
+            loaded.append(
+                DownloadResource(
+                    kind=kind,
+                    value=value,
+                    source_message_id=str(item.get("source_message_id") or "").strip(),
+                    display_name=str(item.get("display_name") or "").strip(),
+                )
+            )
+        return loaded
+
+    return resolve_conversation_resources(
+        current_message=load_group("current_message"),
+        reply_chain=load_group("reply_chain"),
+        session=load_group("session"),
+        bug_attachments=load_group("bug_attachments"),
+    )
+
+
 def is_pure_followup_control(text: str) -> bool:
     cleaned = unicodedata.normalize("NFKC", text or "").strip()
     compact = re.sub(r"[\s，。；;：:、!?！？]+", "", cleaned).casefold()

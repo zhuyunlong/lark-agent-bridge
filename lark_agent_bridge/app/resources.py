@@ -6,7 +6,11 @@ import re
 from typing import TYPE_CHECKING
 
 from ._shared import *  # noqa: F401,F403
-from ..conversation_input import ResolvedConversationResources, resolve_conversation_resources
+from ..conversation_input import (
+    ResolvedConversationResources,
+    resolve_conversation_resources,
+    resource_view_from_snapshot,
+)
 
 if TYPE_CHECKING:
     from .conversation_resolver import MessageFetchCache
@@ -31,6 +35,9 @@ class _ResourcesMixin:
         details = session.get("details")
         if not isinstance(details, dict):
             details = {}
+        snapshot_resources = resource_view_from_snapshot(details)
+        if snapshot_resources is not None:
+            resources.extend(snapshot_resources.preferred_resources)
         for key in ("prepared_log_input", "selected_log_input"):
             value = str(details.get(key) or "").strip()
             if not value:

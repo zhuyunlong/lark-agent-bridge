@@ -314,6 +314,7 @@ class _IntentDispatchMixin:
         route_content: str,
         *,
         referenced_resources: list[DownloadResource] | None = None,
+        root_message_id: str | None = None,
     ) -> TaskResult:
         bug_request = parse_bug_request(route_content, bug_url_re=self.bug_url_re)
         if not bug_request.triggered:
@@ -340,4 +341,9 @@ class _IntentDispatchMixin:
         )
         if pending is not None:
             return pending
-        return self._run_bug_request(event, bug_request, route_content)
+        return self._run_bug_request(
+            event,
+            bug_request,
+            route_content,
+            root_message_id=root_message_id,
+        )

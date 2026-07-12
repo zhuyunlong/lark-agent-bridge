@@ -462,6 +462,38 @@ class AgentActivityStore:
             self._sessions[key] = session
             self._save()
 
+    def record_conversation_input(
+        self,
+        session_id: str,
+        event: LarkEvent,
+        snapshot: dict[str, object],
+    ) -> None:
+        _ = session_id
+        key = self._session_key(event)
+        if not key:
+            return
+        with self._lock:
+            now = _now_iso()
+            session = self._sessions.get(key, {"session_id": key, "progress": [], "started_at": now})
+            details = session.get("details")
+            if not isinstance(details, dict):
+                details = {}
+            else:
+                details = dict(details)
+            details["conversation_input"] = _jsonable_limited(snapshot)
+            session.update(
+                {
+                    "event_id": event.event_id,
+                    "message_id": event.message_id,
+                    "chat_id": event.chat_id,
+                    "chat_type": event.chat_type,
+                    "details": details,
+                    "updated_at": now,
+                }
+            )
+            self._sessions[key] = session
+            self._save()
+
     def record_result(self, event: LarkEvent, result: TaskResult) -> None:
         root_key = ""
         if isinstance(result.details, dict):
@@ -471,11 +503,23 @@ class AgentActivityStore:
             return
         with self._lock:
             now = _now_iso()
+            event_key = self._session_key(event)
+            event_session = self._sessions.get(event_key, {}) if event_key else {}
             session = self._sessions.get(key, {"session_id": key, "progress": [], "started_at": now})
             was_cancelled = str(session.get("status") or "") == "cancelled"
             cancelled_message = str(session.get("message") or "")
             cancelled_error_code = str(session.get("error_code") or "cancelled")
             details = _jsonable_limited(result.details)
+            existing_details = session.get("details")
+            event_details = event_session.get("details") if isinstance(event_session, dict) else None
+            if (
+                isinstance(details, dict)
+                and "conversation_input" not in details
+            ):
+                if isinstance(event_details, dict) and "conversation_input" in event_details:
+                    details["conversation_input"] = event_details["conversation_input"]
+                elif isinstance(existing_details, dict) and "conversation_input" in existing_details:
+                    details["conversation_input"] = existing_details["conversation_input"]
             report_url = ""
             if isinstance(details, dict):
                 report_url = str(details.get("published_report_url") or "")
@@ -507,7 +551,6 @@ class AgentActivityStore:
             session.setdefault("started_at", now)
             session.setdefault("progress", [])
             self._sessions[key] = session
-            event_key = self._session_key(event)
             if root_key and event_key and event_key != key:
                 self._sessions.pop(event_key, None)
             self._save()

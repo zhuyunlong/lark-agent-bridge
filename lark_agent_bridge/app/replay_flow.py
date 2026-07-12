@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import re
 
+from ..conversation_input import resource_view_from_snapshot
 from ._shared import *  # noqa: F401,F403
 
 
@@ -63,8 +64,11 @@ class _ReplayFlowMixin:
     ) -> AnalysisReplayContext:
         previous_session = self.activity_store.get_session(followup_context.root_message_id) or {}
         details = previous_session.get("details") if isinstance(previous_session.get("details"), dict) else {}
+        snapshot = details.get("conversation_input") if isinstance(details, dict) else None
+        snapshot_route_text = str(snapshot.get("route_text") or "").strip() if isinstance(snapshot, dict) else ""
         original_request_text = str(
             details.get("user_request_text")
+            or snapshot_route_text
             or getattr(followup_context, "request_text", "")
             or previous_session.get("content")
             or ""
@@ -73,6 +77,16 @@ class _ReplayFlowMixin:
         bug_title, bug_description = self._bug_metadata_from_replay_session(previous_session)
         reply_chain_resources = self._reference_chain_log_resources(event)
         session_resources = self._log_resources_from_session(previous_session)
+        snapshot_resources = resource_view_from_snapshot(details)
+        if snapshot_resources is not None:
+            reply_chain_resources = self._merge_resources(
+                list(snapshot_resources.reply_chain),
+                reply_chain_resources,
+            )
+            session_resources = self._merge_resources(
+                list(snapshot_resources.session),
+                session_resources,
+            )
         resources = ReplayResourceBundle.from_candidates(
             current=referenced_resources or [],
             reply_chain=reply_chain_resources,
