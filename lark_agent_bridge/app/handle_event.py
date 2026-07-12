@@ -9,6 +9,7 @@ import time
 from typing import Callable
 
 from ._shared import *  # noqa: F401,F403
+from ..conversation_input import build_resolved_conversation_input
 
 
 from .routes import _RoutesMixin
@@ -719,6 +720,8 @@ class _HandleEventMixin(_RoutesMixin, _DeliveryMixin, _MentionMixin, _ProgressCa
         #   - Anything else: ignored.
         route_content = event.content
         followup_context = None
+        followup_context_source = "none"
+        route_text_source = "event_content"
         phase1_new_chain = False
         direct_reply_to = ""
         if event.chat_type == "group":
@@ -728,15 +731,19 @@ class _HandleEventMixin(_RoutesMixin, _DeliveryMixin, _MentionMixin, _ProgressCa
             if direct_reply_to:
                 followup_context = self._lookup_bot_alias_context(direct_reply_to)
                 if followup_context is not None:
+                    followup_context_source = "bot_alias"
                     addressed_content = (
                         stripped_at_bot if stripped_at_bot is not None else event.content.strip()
                     )
+                    route_text_source = "group_mention" if stripped_at_bot is not None else "bot_alias_reply"
                 elif stripped_at_bot is not None:
                     addressed_content = stripped_at_bot
+                    route_text_source = "group_mention"
                     phase1_new_chain = True
             else:
                 if stripped_at_bot is not None:
                     addressed_content = stripped_at_bot
+                    route_text_source = "group_mention"
                     phase1_new_chain = True
             if addressed_content is None:
                 if not self.state_store.mark_seen(event):
@@ -757,6 +764,8 @@ class _HandleEventMixin(_RoutesMixin, _DeliveryMixin, _MentionMixin, _ProgressCa
             and followup_context is None
         ):
             followup_context = self._resolve_followup_context(event)
+            if followup_context is not None:
+                followup_context_source = "reply_chain"
         control_direct_reply_to = (
             direct_reply_to
             if event.chat_type == "group"
@@ -834,9 +843,21 @@ class _HandleEventMixin(_RoutesMixin, _DeliveryMixin, _MentionMixin, _ProgressCa
         # Phase 3: Build route context and dispatch through ordered handlers
         if followup_context is None:
             followup_context = self._resolve_followup_context(event)
+            if followup_context is not None:
+                followup_context_source = "reply_chain"
         latest_chat_context = self._latest_analysis_context(
             event.chat_id,
             explicit_followup_context=followup_context,
+        )
+        conversation_input = build_resolved_conversation_input(
+            event=event,
+            route_text=route_content,
+            direct_reply_to=direct_reply_to,
+            followup_context=followup_context,
+            referenced_resources=referenced_resources,
+            is_new_chain=followup_context is None,
+            route_text_source=route_text_source,
+            context_source=followup_context_source,
         )
         ctx = _RouteContext(
             event=event,
@@ -854,6 +875,7 @@ class _HandleEventMixin(_RoutesMixin, _DeliveryMixin, _MentionMixin, _ProgressCa
             addr2line_request=addr2line_request,
             referenced_resources=referenced_resources,
             latest_chat_context=latest_chat_context,
+            conversation_input=conversation_input,
         )
         return self._dispatch_route(ctx)
     def _dispatch_route(self, ctx: _RouteContext) -> TaskResult:

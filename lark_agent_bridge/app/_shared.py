@@ -44,6 +44,7 @@ from ..cards import (
     card_to_json,
 )
 from ..case_store import CaseStore
+from ..conversation_input import ResolvedConversationInput
 from ..downloader import LogDownloader
 from ..escalation import (
     EscalationChecker,
@@ -307,6 +308,7 @@ class _RouteContext:
     addr2line_request: Addr2LineRequest | None = None
     referenced_resources: list[DownloadResource] = field(default_factory=list)
     latest_chat_context: ConversationContext | None = None
+    conversation_input: ResolvedConversationInput | None = None
 
 
 @dataclass
@@ -354,6 +356,7 @@ __all__ = [
     'build_status_card',
     'card_to_json',
     'CaseStore',
+    'ResolvedConversationInput',
     'LogDownloader',
     'EscalationChecker',
     'NotificationHistory',
